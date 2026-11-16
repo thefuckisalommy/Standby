@@ -41,23 +41,11 @@
     return d.toLocaleDateString() + ', ' + d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
   }
 
-  // Whole days from now until an ISO timestamp, rounded up, never
-  // below zero — the countdown on the "Next check-in due" row.
-  function daysUntil(iso) {
-    if (!iso) return 0;
-    return Math.max(0, Math.ceil((new Date(iso) - Date.now()) / 86400000));
-  }
-
-  function fmtDays(n) {
-    if (n === null || n === undefined) return '—';
-    return n + (n === 1 ? ' day' : ' days');
-  }
-
   // The danger zone (0.7.22): the last 25% of the check-in window —
   // the time remaining until the due date is a quarter of the
   // threshold or less (already past due is inside the zone).
-  // thresholdDays is the threshold to measure against (the entered
-  // value for a settings save, the current one for arming/adding).
+  // thresholdDays is the threshold to measure against (the
+  // entered value for the tx being armed/added/edited).
   // Returns null outside the zone (or with no check-in yet), else
   // { overdue, daysLeft, daysSince } for the confirm wording.
   function dangerZone(thresholdDays) {
@@ -100,10 +88,11 @@
 
   // The fee verdict (0.7.20, extended 0.7.21 with Critical Risk):
   // is this tx's FIXED fee good enough for a long-term hold?
-  // Ryan's ladder, against the 90-day peak (the 90th percentile
+  // The ladder, against the 90-day peak (the 90th percentile
   // of block medians over 3 months, served as S.bitcoin.feePeak):
-  // Low Risk at 2x the peak, Medium Risk at 1x–2x, High Risk
-  // below the peak. 0.7.21 adds the CURRENT check first: a fee
+  // Low Risk at `lowMult`x the peak, Medium Risk at `medMult`x–
+  // `lowMult`x, High Risk below the peak (Settings: Fee verdict;
+  // defaults 2 and 1). 0.7.21 adds the CURRENT check first: a fee
   // below the current economy fee (served as
   // S.bitcoin.currentFees.economyFee) would not confirm within a
   // day right now, so it is Critical Risk whatever the history
@@ -112,12 +101,14 @@
   // lib/bitcoin.js feeVerdict exactly (the frontend cannot import
   // that module). Returns null when there is no peak or no fee
   // rate, so the caller shows no verdict instead of a wrong one.
-  function feeVerdict(rate, peak, economyFee) {
+  function feeVerdict(rate, peak, economyFee, lowMult, medMult) {
     if (typeof rate !== 'number' || !isFinite(rate) || rate < 0) return null;
     if (typeof peak !== 'number' || !isFinite(peak) || peak <= 0) return null;
+    var low = (typeof lowMult === 'number' && isFinite(lowMult) && lowMult > 0) ? lowMult : 2;
+    var med = (typeof medMult === 'number' && isFinite(medMult) && medMult > 0) ? medMult : 1;
     if (typeof economyFee === 'number' && isFinite(economyFee) && economyFee >= 0 && rate < economyFee) return 'Critical Risk';
-    if (rate >= 2 * peak) return 'Low Risk';
-    if (rate >= peak) return 'Medium Risk';
+    if (rate >= low * peak) return 'Low Risk';
+    if (rate >= med * peak) return 'Medium Risk';
     return 'High Risk';
   }
 
@@ -131,6 +122,20 @@
     return 'bad';
   }
 
+  // The readiness pill text for a fee verdict: the dashboard
+  // names the fee explicitly ("Low Fee Risk") — on the dashboard
+  // the pill sits next to the status pill, so a bare "Low Risk"
+  // is ambiguous. The tx card's Fee line and the Settings card
+  // already name the fee, so they keep the short verdict.
+  // "Med" (not "Medium") keeps the pill short.
+  function feePillText(v) {
+    if (v === 'Low Risk') return 'Low Fee Risk';
+    if (v === 'Medium Risk') return 'Med Fee Risk';
+    if (v === 'High Risk') return 'High Fee Risk';
+    if (v === 'Critical Risk') return 'Critical Fee Risk';
+    return v;
+  }
+
   // The fee-risk pop-out (0.7.21): the Fee line is clickable and
   // opens the shared showDetails pop-out with HOW the verdict was
   // calculated — the 90-day peak, your fee, the current economy
@@ -141,15 +146,20 @@
     var peak = S.bitcoin.feePeak;
     var econ = S.bitcoin.currentFees && S.bitcoin.currentFees.economyFee;
     var rate = tx.feeRateSatVb;
+    // The ladder's thresholds (Settings: Fee verdict) — the
+    // pop-out explains the verdict in the owner's own terms,
+    // not the defaults.
+    var low = (S.settings && typeof S.settings.feeLowMultiplier === 'number') ? S.settings.feeLowMultiplier : 2;
+    var med = (S.settings && typeof S.settings.feeMediumMultiplier === 'number') ? S.settings.feeMediumMultiplier : 1;
     var body;
     if (verdict === 'Critical Risk') {
       body = 'Your fee is ' + fmtRate(rate) + ' sat/vB, but the current economy fee is ' + fmtRate(econ) + ' sat/vB — it would not confirm within a day right now. Because it is below the current market fee, it is ranked Critical Risk.';
     } else if (verdict === 'Low Risk') {
-      body = 'The 90-day peak is ' + fmtRate(peak) + ' sat/vB. Your fee is ' + fmtRate(rate) + ' sat/vB. Because it is at least 2× the peak (' + fmtRate(2 * peak) + ' sat/vB), it is ranked Low Risk.';
+      body = 'The 90-day peak is ' + fmtRate(peak) + ' sat/vB. Your fee is ' + fmtRate(rate) + ' sat/vB. Because it is at least ' + low + '× the peak (' + fmtRate(low * peak) + ' sat/vB), it is ranked Low Risk.';
     } else if (verdict === 'Medium Risk') {
-      body = 'The 90-day peak is ' + fmtRate(peak) + ' sat/vB. Your fee is ' + fmtRate(rate) + ' sat/vB. Low Risk needs ' + fmtRate(2 * peak) + ' sat/vB (2× the peak). Your fee meets the peak but is below 2× the peak, so it is ranked Medium Risk.';
+      body = 'The 90-day peak is ' + fmtRate(peak) + ' sat/vB. Your fee is ' + fmtRate(rate) + ' sat/vB. Low Risk needs ' + fmtRate(low * peak) + ' sat/vB (' + low + '× the peak). Your fee is at least ' + fmtRate(med * peak) + ' sat/vB (' + med + '× the peak) but below ' + low + '× the peak, so it is ranked Medium Risk.';
     } else { // High Risk
-      body = 'The 90-day peak is ' + fmtRate(peak) + ' sat/vB. Your fee is ' + fmtRate(rate) + ' sat/vB. Because it is below the peak (' + fmtRate(peak) + ' sat/vB), it is ranked High Risk.';
+      body = 'The 90-day peak is ' + fmtRate(peak) + ' sat/vB. Your fee is ' + fmtRate(rate) + ' sat/vB. Because it is below ' + fmtRate(med * peak) + ' sat/vB (' + med + '× the peak), it is ranked High Risk.';
     }
     var html = '<dl class="kv">'
       + '<dt>90-day peak</dt><dd>' + escapeHtml(fmtRate(peak) + ' sat/vB') + '</dd>'
@@ -180,6 +190,11 @@
     currentTab = name;
     document.querySelectorAll('#tabs button').forEach(function (b) { b.classList.toggle('active', b.dataset.tab === name); });
     document.querySelectorAll('section.tab').forEach(function (s) { s.classList.toggle('active', s.id === 'tab-' + name); });
+    // The Settings filter defaults to All each time the Settings
+    // tab is shown (no persistence). Guarded: at startup this
+    // runs before the SETTINGS_HELP registry is assigned, and
+    // the default is All anyway (every card visible in the HTML).
+    if (name === 'settings' && typeof SETTINGS_HELP !== 'undefined') applySettingsFilter('all');
     if (updateHash !== false) {
       try {
         var want = '#' + TAB_HASH[name];
@@ -244,77 +259,287 @@
 
   var PILL_CLASS = {
     'on-track': 'ok', 'release-due': 'bad', 'broadcasted': 'bad',
-    'paused': 'warn', 'vacation': 'warn', 'not-started': 'muted',
-    'held': 'warn',
+    'vacation': 'warn', 'not-started': 'muted',
   };
 
+  // Triggers (0.8.0): the rule that fires a transaction. The tx's
+  // trigger, normalized — a missing or unusable trigger defaults
+  // to the check-in trigger at 35 days, so a legacy tx (written
+  // before triggers existed) reads as a check-in rule. There is
+  // no global threshold any more: 35 is the per-tx default.
+  // Mirrors lib/store.js triggerOf — the frontend cannot import
+  // that module, so the normalization is duplicated here (same
+  // pattern as the feeVerdict mirror).
+  function triggerOf(tx) {
+    var t = tx && tx.trigger;
+    if (!t || typeof t !== 'object') return { type: 'checkin', params: { thresholdDays: 35 } };
+    var p = (t.params && typeof t.params === 'object') ? t.params : {};
+    if (t.type === 'checkin') {
+      var th = (typeof p.thresholdDays === 'number' && isFinite(p.thresholdDays)) ? Math.max(1, Math.min(3650, Math.floor(p.thresholdDays))) : 35;
+      return { type: 'checkin', params: { thresholdDays: th } };
+    }
+    if (t.type === 'price' && (p.op === '>=' || p.op === '<=') && typeof p.value === 'number' && isFinite(p.value)) {
+      return { type: 'price', params: { asset: 'BTC', op: p.op, value: p.value } };
+    }
+    if (t.type === 'utxo' && typeof p.outpoint === 'string' && /^[0-9a-fA-F]{64}:[0-9]+$/.test(p.outpoint.trim())) {
+      var cf = (p.confirmations === 0) ? 0 : ((typeof p.confirmations === 'number' && isFinite(p.confirmations)) ? Math.max(0, Math.min(100, Math.floor(p.confirmations))) : 1);
+      return { type: 'utxo', params: { outpoint: p.outpoint.trim().toLowerCase(), condition: 'spent', confirmations: cf } };
+    }
+    if (t.type === 'manual') return { type: 'manual', params: {} };
+    return { type: 'checkin', params: { thresholdDays: 35 } };
+  }
+  // The pill text for a trigger type ("Check-in", "BTC Price",
+  // "UTXO", "Manual") — the readiness rows and the trigger
+  // subcards both use it. (The subcard uppercases it.)
+  function triggerLabel(trigger) {
+    return trigger.type === 'checkin' ? 'Check-in'
+      : trigger.type === 'price' ? 'BTC Price'
+      : trigger.type === 'utxo' ? 'UTXO'
+      : 'Manual';
+  }
+  // The trigger's condition in plain words ("Fires when BTC ≥
+  // $150,000") — the subcard and the readiness state line use it.
+  // The UTXO mode rides on the condition: the default (1
+  // confirmation) reads as before — "is spent" already meant
+  // confirmed — while unconfirmed and N > 1 say so explicitly.
+  function triggerCondition(trigger) {
+    if (trigger.type === 'checkin') return 'Fired when you don\u2019t check in for ' + trigger.params.thresholdDays + ' days';
+    if (trigger.type === 'price') return 'Fired when BTC price ' + (trigger.params.op === '>=' ? '≥' : '≤') + ' $' + Number(trigger.params.value).toLocaleString('en-US');
+    if (trigger.type === 'utxo') {
+      var ucf = (trigger.params.confirmations === 0) ? 0 : (trigger.params.confirmations || 1);
+      var usuffix = ucf === 0 ? ' (unconfirmed)' : (ucf === 1 ? '' : ' (' + ucf + ' confirmations)');
+      return 'Fired when UTXO ' + trigger.params.outpoint.slice(0, 6) + '…' + trigger.params.outpoint.slice(-2) + ' is spent' + usuffix;
+    }
+    return 'Never fires — manual only';
+  }
+  // Row 3 of the trigger subcard: the current state/value for
+  // this trigger type, in plain language — no extra detail.
+  // (owner: every subcard is exactly 3 rows, one line each.)
+  function triggerStateLine(trigger, ts) {
+    if (trigger.type === 'price') {
+      var lp = (ts && typeof ts.lastPrice === 'number' && Number.isFinite(ts.lastPrice)) ? ts.lastPrice : null;
+      return lp !== null ? 'BTC price currently $' + lp.toLocaleString('en-US') : 'BTC price currently unknown';
+    }
+    if (trigger.type === 'checkin') {
+      // On track: the days since the last check-in, out of the
+      // window. Other states (not started, vacation,
+      // grace period, release due) already name themselves in
+      // the reason — use it as-is.
+      if (ts && ts.status === 'on-track' && typeof ts.daysSince === 'number' && typeof ts.windowDays === 'number') {
+        return ts.daysSince + ' of ' + ts.windowDays + ' days since last check-in';
+      }
+      return (ts && ts.reason) ? ts.reason : 'No check-in recorded yet';
+    }
+    // UTXO and manual: the reason already states the state
+    // (unspent / spent + confirmations; waiting for a manual
+    // broadcast).
+    return (ts && ts.reason) ? ts.reason : 'Not evaluated yet';
+  }
+  // The readiness row's state line (0.8.0): one row of text naming
+  // the trigger AND its current value — "[Type] Trigger: <level>,
+  // <current>". The trigger type is text here, not a pill (the
+  // mode pill is gone). The check-in reason already carries its
+  // threshold ("0 of 35 days elapsed"), so it needs no level
+  // prefix; the price and UTXO reasons do not name their level, so
+  // the level is added. The price reason is trigger-only (the
+  // server returns the generic "price feed unknown" when the
+  // sources disagree or are down), so no source names ever appear
+  // here.
+  function readinessLine(trigger, ts) {
+    var label = triggerLabel(trigger); // 'Check-in' / 'BTC Price' / 'UTXO' / 'Manual'
+    var reason = (ts && ts.reason) ? ts.reason : 'Not evaluated yet';
+    if (trigger.type === 'checkin') return label + ' Trigger: ' + reason;
+    if (trigger.type === 'price') {
+      var dir = trigger.params.op === '>=' ? '≥' : '≤';
+      return label + ' Trigger: fires at ' + dir + ' $' + Number(trigger.params.value).toLocaleString('en-US') + ', ' + reason;
+    }
+    if (trigger.type === 'utxo') {
+      // The condition without its "Fired when" lead-in, so the
+      // line reads "UTXO Trigger: fires when ... is spent, <current>".
+      var level = triggerCondition(trigger).replace(/^Fired when /, 'fires when ');
+      return label + ' Trigger: ' + level + ', ' + reason;
+    }
+    return label + ' Trigger: never fires automatically — ' + reason;
+  }
+  // The UTXO guard note for a confirmation mode — the Add and Edit
+  // pickers both use it. Unconfirmed warns the spend can be
+  // evicted or replaced; N confirmations names the threshold.
+  function utxoGuardNote(mode, confs) {
+    if (mode === 'unconfirmed') return 'Guard: fires on any spend, even unconfirmed — a mempool spend can still be evicted or replaced, so it may fire on a spend that never confirms.';
+    if (confs === 1) return 'Guard: only a confirmed spend fires — an unconfirmed (mempool) spend only watches until it confirms.';
+    return 'Guard: fires once the spend has ' + confs + ' confirmations — an unconfirmed (mempool) spend only watches until it confirms.';
+  }
+  // Read the confirmation mode from a trigger picker ('btc' for
+  // the Add form, 'edit' for the Edit popup). Returns 0 for
+  // unconfirmed, N (1..100) for confirmed, or null when the
+  // confirmations field is not a usable number.
+  function utxoConfsFromForm(prefix) {
+    if ($(prefix + '-trigger-utxo-mode').value === 'unconfirmed') return 0;
+    var n = parseInt($(prefix + '-trigger-utxo-confs').value, 10);
+    if (!isFinite(n) || n < 1 || n > 100) return null;
+    return n;
+  }
+
   function renderDashboard(status) {
+    // Grace period (0.8.0): the card at the top of the dashboard,
+    // shown only while a grace is active for an armed price or
+    // UTXO tx. The text names how long the app was offline and
+    // when the pause ends (or "until you resume" for an
+    // indefinite grace); Resume now ends it immediately. The
+    // wording and bolding follow the approved mockup exactly:
+    // "Standby was offline for 12 days. Price and UTXO triggers
+    // are paused until Dec 22, 2026 (7 days) so they don't fire
+    // on conditions that changed while the app was away.
+    // Check-in triggers are not affected."
+    var graceCard = $('grace-card');
+    var graceApplies = graceActive() && (S.bitcoin.txs || []).some(function (t) { return graceHoldsTx(t); });
+    if (graceCard) {
+      graceCard.style.display = graceApplies ? '' : 'none';
+      if (graceApplies) {
+        var g = S.grace;
+        var gapDays = (typeof g.offlineGapDays === 'number') ? g.offlineGapDays : 0;
+        var gapText = gapDays === 1 ? '1 day' : gapDays + ' days';
+        var endsText;
+        if (g.indefinite) {
+          endsText = 'until you resume';
+        } else {
+          var durDays = (g.graceUntil && g.triggeredAt)
+            ? Math.max(1, Math.round((new Date(g.graceUntil).getTime() - new Date(g.triggeredAt).getTime()) / 86400000))
+            : 0;
+          endsText = 'until ' + fmtDateShort(g.graceUntil) + ' (' + (durDays === 1 ? '1 day' : durDays + ' days') + ')';
+        }
+        // Built from spans and <b> elements (not innerHTML) so
+        // the dynamic values are text, never markup.
+        var gt = $('grace-text');
+        gt.innerHTML = '';
+        var ts = function (t) { var s = document.createElement('span'); s.textContent = t; return s; };
+        gt.appendChild(ts('Standby was offline for '));
+        var b1 = document.createElement('b'); b1.textContent = gapText; gt.appendChild(b1);
+        gt.appendChild(ts('. Price and UTXO triggers are paused '));
+        var b2 = document.createElement('b'); b2.textContent = endsText; gt.appendChild(b2);
+        gt.appendChild(ts(' so they don\u2019t fire on conditions that changed while the app was away. Check-in triggers are not affected.'));
+      }
+    }
+    // Getting Started card (0.8.0): the empty-state card at the
+    // top of the Dashboard, shown only when no transactions are
+    // STAGED (active). Archived (settled) and pending
+    // transactions do not count — the card returns when the last
+    // staged tx is archived, goes pending, or is removed, so an
+    // owner with only archived txs still gets the prompt to add
+    // one. The first thing a fresh install sees; it disappears
+    // as soon as the first transaction is staged. Independent of
+    // the grace card (which needs armed price/UTXO txs to show).
+    var anyStaged = (S.bitcoin.txs || []).some(function (t) { return !txStatus(t).settled && !txStatus(t).pending; });
+    var gsCard = $('getting-started-card');
+    if (gsCard) gsCard.style.display = anyStaged ? 'none' : '';
+    // (0.8.0) The check-in card renders when any rule uses the
+    // check-in trigger — check-in is one trigger among
+    // several now, not the whole app, so a price- or UTXO-only
+    // setup has no countdown to show. Only ACTIVE check-in
+    // txs count: a settled (archived) or pending one has nothing
+    // to count down to, so it neither shows a bar nor keeps the
+    // card visible. Armed OR disarmed both count — a disarmed
+    // tx keeps a FROZEN bar (its countdown is held, not gone).
+    // The one exception is a fresh install with no
+    // transactions at all: the card stays visible so the clock
+    // can be started before the first rule exists.
+    var anyCheckinActive = (S.bitcoin.txs || []).some(function (t) { return triggerOf(t).type === 'checkin' && !txStatus(t).settled && !txStatus(t).pending; });
+    var showCheckin = anyCheckinActive || !(S.bitcoin.txs || []).length;
+    $('checkin-card').style.display = showCheckin ? '' : 'none';
     var pill = $('status-pill');
     pill.textContent = status.label;
     pill.className = 'pill ' + (PILL_CLASS[status.state] || 'muted');
     // On track, there is nothing to say below the pill — the line
     // only appears when the state needs explaining (release due,
-    // paused, vacation, broadcasted, not started).
+    // vacation, broadcasted, not started).
     var line = $('status-line');
     line.textContent =
       status.checkinReadError ? 'Warning: the check-in receiver state could not be read — releases are held until it can be read again.'
       : status.state === 'not-started' ? 'No check-in recorded yet. Tap “Check in” to start the clock.'
-      : status.state === 'vacation' ? 'Vacation mode is on' + (status.vacationUntil ? ' until ' + status.vacationUntil : '') + '. Releases are held.'
-      : status.state === 'paused' ? 'Releases are paused. Check in to resume automatically.'
+      : status.state === 'vacation' ? 'Vacation mode is on' + (status.vacationUntil ? ' until ' + status.vacationUntil : ' until you say you\u2019re back') + '. The check-in countdown is frozen — the days away never count.'
       : status.state === 'broadcasted' ? 'A broadcast went out. Check in to start a new cycle.'
       : status.state === 'release-due' ? 'Release is due — the stored transaction will be broadcast unless you check in.'
-      : status.state === 'held' ? 'The broadcast is held until ' + fmtDateShort(status.nextDue) + ' — check in to cancel it.'
       : '';
     line.style.display = line.textContent ? '' : 'none';
-    // The countdown + progress bar (0.7.19): how much of the
-    // check-in window is used. The window is the configured
-    // threshold (S.settings.thresholdDays) — never a hardcoded
-    // number. The bar fills as days elapse; its colour is by how
-    // much time is LEFT: green while more than 3/4 of the window
-    // remains, amber past that, red in the last quarter. Overdue
-    // is a full red bar. With no check-in yet there is no window
-    // to measure, so the whole block hides and the status line
-    // above the dates explains instead.
-    // (0.7.22) The window is the EFFECTIVE one: the server sends
-    // it as status.windowDays — the threshold on-track, the longer
-    // held window while an offline-gap grace is active. The bar
-    // and the caption measure against it, so a held card counts to
-    // the held date, not the original due. An older server that
-    // sends no windowDays falls back to the threshold.
-    var threshold = S.settings.thresholdDays;
-    var showCountdown = !!status.lastCheckinAt && typeof threshold === 'number' && threshold > 0;
-    [$('checkin-countdown'), $('checkin-countdown-sub'), $('checkin-progress'), $('checkin-progress-label')].forEach(function (el) {
-      el.style.display = showCountdown ? '' : 'none';
-    });
-    if (showCountdown) {
-      var daysSince = status.daysSince || 0;
-      var windowDays = (typeof status.windowDays === 'number' && status.windowDays > 0) ? status.windowDays : threshold;
-      var overdue = status.state === 'release-due' || (status.nextDue && new Date(status.nextDue) <= Date.now());
-      $('checkin-countdown').textContent = overdue
-        ? 'Overdue'
-        : fmtDays(daysUntil(status.nextDue)) + ' left';
-      var fill = $('checkin-progress-fill');
+    // The per-tx check-in bars (0.8.0): one block per ACTIVE
+    // check-in tx — the label above, the bar, and "X of N
+    // days elapsed" below. Each bar measures its OWN window: the
+    // server sends it per tx as status.checkinTxs[].windowDays —
+    // the tx's own threshold on-track, the longer held window
+    // while an offline-gap grace is active — so a held bar just
+    // counts to the held date, with no special grace display.
+    // A DISARMED check-in tx keeps its bar, frozen at the day
+    // count it was left at: muted grey, marked disarmed, its
+    // count never advancing while it is disarmed or on vacation.
+    // Settled (archived) and pending check-in txs get no bar.
+    // With no check-in yet every bar reads 0 of its threshold. The bar fills as days
+    // elapse; its colour is by how much time is LEFT: green
+    // while more than 3/4 of the window remains, amber past
+    // that, red in the last quarter. Overdue is a full red bar.
+    // A frozen bar is grey instead — it is held, not live.
+    var barsEl = $('checkin-tx-bars');
+    barsEl.innerHTML = '';
+    var bars = status.checkinTxs || [];
+    if (!bars.length) {
+      // An older server sends no checkinTxs: derive the bars
+      // from the txs' own trigger statuses (same numbers).
+      // Settled / pending txs get no bar here either — same
+      // rule as the server (txStatus is the authority). A
+      // disarmed tx keeps a frozen bar here too.
+      bars = (S.bitcoin.txs || []).filter(function (t) { return triggerOf(t).type === 'checkin' && !txStatus(t).settled && !txStatus(t).pending; })
+        .map(function (t) {
+          var ts = t.triggerStatus || {};
+          var th = triggerOf(t).params.thresholdDays;
+          return {
+            id: t.id, label: t.label || '',
+            thresholdDays: th,
+            daysSince: (typeof ts.daysSince === 'number') ? ts.daysSince : 0,
+            windowDays: (typeof ts.windowDays === 'number' && ts.windowDays > 0) ? ts.windowDays : th,
+            nextDue: ts.nextDue || null, state: ts.status || 'not-started',
+            enabled: !!t.enabled,
+          };
+        });
+    }
+    bars.forEach(function (b) {
+      var daysSince = b.daysSince || 0;
+      var windowDays = (typeof b.windowDays === 'number' && b.windowDays > 0) ? b.windowDays : (b.thresholdDays || 35);
+      var frozen = b.enabled === false;
+      var block = document.createElement('div');
+      block.className = 'ck-tx' + (frozen ? ' frozen' : '');
+      var label = document.createElement('div');
+      label.className = 'ck-tx-label';
+      label.textContent = b.label || 'Untitled transaction';
+      block.appendChild(label);
+      var bar = document.createElement('div');
+      bar.className = 'progress';
+      var fill = document.createElement('div');
       fill.style.width = (Math.min(1, Math.max(0, daysSince / windowDays)) * 100) + '%';
       var remaining = (windowDays - daysSince) / windowDays;
-      fill.style.background = remaining > 0.75 ? 'var(--ok)' : remaining > 0.25 ? 'var(--warn)' : 'var(--bad)';
-      $('checkin-progress-label').textContent = daysSince + ' of ' + windowDays + ' days elapsed';
-    }
+      fill.style.background = frozen ? 'var(--muted)' : remaining > 0.75 ? 'var(--ok)' : remaining > 0.25 ? 'var(--warn)' : 'var(--bad)';
+      bar.appendChild(fill);
+      block.appendChild(bar);
+      var cap = document.createElement('p');
+      cap.className = 'progress-label';
+      cap.textContent = daysSince + ' of ' + windowDays + ' days elapsed' + (frozen ? ' — disarmed, frozen' : '');
+      block.appendChild(cap);
+      barsEl.appendChild(block);
+    });
     // Last check-in: the absolute date only. The relative elapsed
-    // time is already in the progress-bar caption, so no "Checked
-    // in X days ago" line. Next due is the absolute date only —
-    // the countdown above carries the day count now.
+    // time is already in each bar's caption, so no "Checked in X
+    // days ago" line — and no single "Next check-in due": with
+    // per-tx thresholds there is no one due date (each bar
+    // carries its own window).
     var lastEl = $('last-checkin');
     lastEl.textContent = status.lastCheckinAt ? fmtDateShort(status.lastCheckinAt) : '—';
-    $('next-due').textContent = status.nextDue ? fmtDateShort(status.nextDue) : '—';
     // The transactions, one row each (0.7.19): the label with its
     // status pill — the same pill the transaction's own card shows
-    // ("Ready + armed", "Timelocked + unarmed", ...), via
+    // ("armed", "Timelocked + armed", ...), via
     // txPillText(tx, txStatus(tx)). Only the active ones: pending
     // and archived transactions live in their own cards and will
     // never broadcast at release, so they are not listed here.
     // (No shared-input pill tweak here — that stays on the tx cards.)
     // (0.7.20) Each row also carries the fee verdict as a second
-    // pill next to the status pill ("Ready + armed" + "Medium Risk"),
+    // pill next to the status pill ("armed" + "Med Fee Risk"),
     // colour-coded like the status pill. No verdict when the fee
     // rate is unknown or the 90-day peak has not been fetched — the
     // row then shows only the status pill.
@@ -324,23 +549,43 @@
     if (activeTxs.length) {
       activeTxs.forEach(function (t) {
         var st = txStatus(t);
+        // (0.8.0) One block per armed rule: the label + the status
+        // pill on the first line (and the fee pill, unchanged), the
+        // trigger's level and current value on the second line —
+        // so the dashboard reads as a list of RULES, not just
+        // transactions. The trigger type is part of the second
+        // line's text ("[Type] Trigger: ..."), not a pill of its own.
+        var item = document.createElement('div');
+        item.className = 'readiness-tx';
         var row = document.createElement('div');
-        row.className = 'tx-row';
+        row.className = 'readiness-tx-row';
         var label = document.createElement('b');
         label.textContent = t.label || 'Untitled transaction';
+        row.appendChild(label);
         var pill = document.createElement('span');
         pill.className = 'pill ' + st.cls;
         pill.textContent = txPillText(t, st);
-        row.appendChild(label);
         row.appendChild(pill);
-        var fv = feeVerdict(t.feeRateSatVb, S.bitcoin.feePeak, S.bitcoin.currentFees && S.bitcoin.currentFees.economyFee);
+        var fv = feeVerdict(t.feeRateSatVb, S.bitcoin.feePeak, S.bitcoin.currentFees && S.bitcoin.currentFees.economyFee, S.settings && S.settings.feeLowMultiplier, S.settings && S.settings.feeMediumMultiplier);
         if (fv) {
           var fpill = document.createElement('span');
           fpill.className = 'pill fee-pill ' + feeVerdictCls(fv);
-          fpill.textContent = fv;
+          fpill.textContent = feePillText(fv);
           row.appendChild(fpill);
         }
-        txsEl.appendChild(row);
+        item.appendChild(row);
+        var stateLine = document.createElement('div');
+        stateLine.className = 'readiness-tx-state';
+        var ts = t.triggerStatus || null;
+        // (0.8.0) The line names the trigger AND its current value
+        // ("[Type] Trigger: <level>, <current>") — see
+        // readinessLine. The reason is trigger-only — a price tx's
+        // line shows the effective price, never the source detail
+        // (that lives in the Exchange Status section below, and in
+        // the dry-run notes).
+        stateLine.textContent = readinessLine(triggerOf(t), ts);
+        item.appendChild(stateLine);
+        txsEl.appendChild(item);
       });
     } else {
       txsEl.textContent = (S.bitcoin.txs || []).length
@@ -356,6 +601,31 @@
     var conn = S.bitcoin.connection || {};
     renderNodeStatus('readiness-', 'primary', status.primaryApiUrl, conn);
     renderNodeStatus('readiness-', 'secondary', status.secondaryApiUrl, conn);
+    // Exchange Status (0.8.0): one row per configured price
+    // source, each with its own status pill and last price —
+    // mirroring Node Status. There is NO overall agreement pill
+    // next to the header: the status (OK / Failed) lives only
+    // on each exchange row. The per-price-tx lines stay
+    // trigger-only. A row shows only the label and its price
+    // (when it has one) — never the error reason; that detail
+    // lives in the Settings card only.
+    var hasPriceTx = (S.bitcoin.txs || []).some(function (t) { return triggerOf(t).type === 'price'; });
+    var exItem = $('readiness-exchange-item');
+    if (exItem) exItem.style.display = hasPriceTx ? '' : 'none';
+    if (hasPriceTx) {
+      var ex = (S.bitcoin && S.bitcoin.exchangeStatus) || { status: 'not-tested', detail: '', sources: [] };
+      (ex.sources || []).forEach(function (src, i) {
+        var host = $('readiness-exchange-' + (i + 1));
+        var pill = $('readiness-exchange-' + (i + 1) + '-status');
+        if (!host || !pill) return;
+        var txt = src.label || src.provider || '';
+        if (src.price != null) txt += ' $' + Number(src.price).toLocaleString('en-US');
+        host.textContent = txt;
+        if (src.status === 'ok') { pill.textContent = 'OK'; pill.className = 'pill ok'; }
+        else if (src.status === 'error') { pill.textContent = 'Failed'; pill.className = 'pill bad'; }
+        else { pill.textContent = 'Not tested'; pill.className = 'pill muted'; }
+      });
+    }
     $('readiness-checked').textContent = conn.checkedAt
       ? 'Nodes last checked ' + fmtDate(conn.checkedAt) + '.'
       : '';
@@ -400,8 +670,8 @@
   }
 
   // A check-in (0.7.20): no success message below the button — the
-  // refreshed countdown, progress bar and last-check-in date ARE the
-  // confirmation, so the "Checked in just now." line was redundant.
+  // refreshed bars and last-check-in date ARE the confirmation,
+  // so the "Checked in just now." line was redundant.
   // A FAILED check-in still reports its error here.
   $('btn-checkin').addEventListener('click', async function () {
     try {
@@ -413,6 +683,32 @@
       try { await api('POST', '/api/bitcoin/connection/test', {}); } catch (e) { /* node test failed; check-in stands */ }
       await load();
     } catch (e) { setMsg($('checkin-msg'), e.message, false); }
+  });
+
+  // Grace period (0.8.0): "Resume now" on the dashboard card
+  // ends the grace immediately. The card hiding is the
+  // confirmation — load() re-renders with no grace active, so
+  // the card disappears and the pills read "armed" again.
+  // A check-in does NOT clear the grace; this is the only way
+  // (besides expiry).
+  $('btn-resume-grace').addEventListener('click', async function () {
+    try {
+      await api('POST', '/api/grace/resume', {});
+      await load();
+    } catch (e) { setMsg($('grace-msg'), e.message, false); }
+  });
+
+  // Getting Started card (0.8.0): "+ Add a pre-signed
+  // transaction" switches to the Transaction(s) tab and scrolls
+  // to the "Add a transaction" form, with the hex field focused
+  // so a paste lands straight in it. It only navigates — it
+  // never submits anything.
+  $('btn-getting-started-add').addEventListener('click', function () {
+    showTab('bitcoin');
+    var formTitle = $('btc-form-title');
+    if (formTitle && formTitle.scrollIntoView) formTitle.scrollIntoView();
+    var hex = $('btc-hex');
+    if (hex && hex.focus) hex.focus();
   });
 
   // ---------- bitcoin ----------
@@ -603,9 +899,33 @@
   // Slipstream-pending card carries a "Broadcast publicly" escape
   // hatch. The route toggle is locked once broadcast: it appears
   // only on Active cards.
-  // The status pill carries the armed state as text ("Ready +
-  // armed") on an Active card — the toggle next to it is the
-  // control, green when armed. An unarmed card's pill reads just
+  // The status pill carries the armed state as text on an Active
+  // card — a healthy armed tx reads just "armed" (the "Ready" is
+  // redundant: if it were not ready, the pill would already name
+  // the problem, e.g. "Timelocked + armed"), and a problem state
+  // reads "Label + armed". An unarmed card's pill reads just
+  // Grace period (0.8.0): whether the price/UTXO grace is
+  // active right now. S.grace is the computed view the server
+  // serves on /api/state and /api/status ({ active, indefinite,
+  // graceUntil, triggeredAt, offlineGapDays }) — null when no
+  // grace was ever set (or it was resumed / expired). The pill
+  // and the dashboard card both read this, so a grace that
+  // expired on the server hides everywhere at once.
+  function graceActive() {
+    return !!(S && S.grace && S.grace.active);
+  }
+  // Whether THIS tx is held by the grace: armed, price or UTXO,
+  // and still active (not settled or pending). The dashboard
+  // card only shows when at least one tx is held — a grace with
+  // nothing to pause is not worth a card.
+  function graceHoldsTx(tx) {
+    if (!graceActive() || !tx || !tx.enabled) return false;
+    var type = triggerOf(tx).type;
+    if (type !== 'price' && type !== 'utxo') return false;
+    var st = txStatus(tx);
+    return !st.settled && !st.pending;
+  }
+
   // "unarmed" (0.7.20 — "Disabled + unarmed" was silly: the arm
   // state is the whole status, not a prefix on another one). A
   // settled or pending card has no arm state, so it keeps its
@@ -613,6 +933,11 @@
   function txPillText(tx, st) {
     if (st.settled || st.pending) return st.label;
     if (!tx.enabled) return 'unarmed';
+    // Grace (0.8.0): an armed price/UTXO tx held by the grace
+    // reads just "Grace" — the pill's text is the status, and
+    // the arm state is already in the amber colour.
+    if (st.label === 'Grace') return 'Grace';
+    if (st.label === 'Ready') return 'armed';
     return st.label + ' + armed';
   }
 
@@ -750,6 +1075,19 @@
     // here is the pill's text, and txPillText returns it plainly
     // for an unarmed tx instead of appending " + unarmed" to it.
     if (!tx.enabled) return { label: 'unarmed', cls: 'muted', settled: false, pending: false };
+    // Grace (0.8.0): while the price/UTXO grace is active, an
+    // armed price or UTXO tx reads "Grace" on an amber pill —
+    // the rule is paused, not ready. Settled/pending txs return
+    // above, so only an active tx can show this; check-in and
+    // manual txs are not held by the grace and fall through to
+    // Ready. (The readiness rows use the same txStatus /
+    // txPillText, so their pill reads "Grace" too — the row's
+    // state line, the trigger condition + current value, is
+    // unchanged, because the grace does not change the rule.)
+    if (graceActive()) {
+      var gt = triggerOf(tx).type;
+      if (gt === 'price' || gt === 'utxo') return { label: 'Grace', cls: 'warn', settled: false, pending: false };
+    }
     return { label: 'Ready', cls: 'ok', settled: false, pending: false };
   }
 
@@ -792,7 +1130,7 @@
       });
     });
     // The three lists: the ones still waiting live inside the
-    // Pre-signed Bitcoin transactions card, below the Dry-run All /
+    // Staged Transactions card, below the Dry-run All /
     // Broadcast All buttons; the ones broadcast or submitted but not
     // yet confirmed live in the Pending Transactions card; the
     // settled ones (broadcasted-and-confirmed, or stale) live in the
@@ -822,10 +1160,10 @@
       var pending = st.pending;
       // Header: label (bold) + status pill, and on an Active card
       // the arm/disarm toggle immediately to the right of the pill.
-      // The pill carries the armed state as text ("Ready + armed" /
-      // "Ready + unarmed") — the toggle is the control, green when
-      // armed. Pending and settled cards have no toggle (the tx is
-      // already out the door).
+      // The pill carries the armed state as text ("armed" when
+      // healthy, "Label + armed" for a problem state) — the toggle
+      // is the control, green when armed. Pending and settled cards
+      // have no toggle (the tx is already out the door).
       var head = document.createElement('div');
       head.className = 'tx-head';
       var title = document.createElement('b');
@@ -869,6 +1207,35 @@
       satsAmt.textContent = fmtSats(tx.totalOutSats) + ' sats';
       amount.appendChild(btcAmt); amount.appendChild(satsAmt);
       row.appendChild(amount);
+      // The trigger subcard (0.8.0): the rule that fires this
+      // transaction — an amber-edged box with the trigger type, the
+      // condition, and the current state — so the condition is
+      // visible without opening Details, on every card (active,
+      // pending, archived): the rule is the transaction's identity
+      // even after it has gone out. The state comes from
+      // tx.triggerStatus, computed server-side on every state
+      // load (no network at render time).
+      // Every subcard is exactly 3 rows (owner), one line each:
+      // the header ("TRIGGER - <TYPE>"), the condition, and the
+      // current state/value for that trigger. No extra detail and
+      // no source breakdown here — the source detail lives in
+      // the Exchange Status section and the dry-run notes.
+      var trig = triggerOf(tx);
+      var trigBox = document.createElement('div');
+      trigBox.className = 'tx-trigger';
+      var trigK = document.createElement('span');
+      trigK.className = 'tx-trigger-k';
+      trigK.textContent = 'TRIGGER - ' + triggerLabel(trig).toUpperCase();
+      trigBox.appendChild(trigK);
+      var trigCond = document.createElement('span');
+      trigCond.textContent = triggerCondition(trig);
+      trigBox.appendChild(trigCond);
+      var ts = tx.triggerStatus || null;
+      var trigNow = document.createElement('span');
+      trigNow.className = 'now';
+      trigNow.textContent = triggerStateLine(trig, ts);
+      trigBox.appendChild(trigNow);
+      row.appendChild(trigBox);
       // The Details — collapsed by default on every card (round 12:
       // Ryan decided all cards start collapsed). Everything but the
       // title, status, amount, and actions lives here, one
@@ -972,7 +1339,7 @@
       // as it was, rather than showing a wrong one.
       if (tx.feeSats !== null && tx.feeSats !== undefined) {
         var feeRow = kvRow('tx-fee', 'Fee', fmtSats(tx.feeSats) + ' · ' + fmtRate(tx.feeRateSatVb) + ' sat/vB');
-        var fv = (!settled && !pending) ? feeVerdict(tx.feeRateSatVb, S.bitcoin.feePeak, S.bitcoin.currentFees && S.bitcoin.currentFees.economyFee) : null;
+        var fv = (!settled && !pending) ? feeVerdict(tx.feeRateSatVb, S.bitcoin.feePeak, S.bitcoin.currentFees && S.bitcoin.currentFees.economyFee, S.settings && S.settings.feeLowMultiplier, S.settings && S.settings.feeMediumMultiplier) : null;
         if (fv) {
           var fvs = document.createElement('span');
           fvs.className = 'fee-verdict ' + feeVerdictCls(fv);
@@ -1213,13 +1580,18 @@
         } catch (e) { setMsg($('btc-msg'), e.message, false); await load(); }
       })();
     }
-    // (0.7.22) Arming while the clock is in the danger zone (the
-    // last 25% of the window, including already past due) would
-    // let the release fire soon after — warn first and only arm on
-    // confirm. The server resets the check-in in that case anyway
-    // (a direct API call cannot bypass it); this is the UI telling
-    // the owner what arming will do, before they commit to it.
-    var dz = enabled ? dangerZone(S.settings.thresholdDays) : null;
+    // (0.7.22, scoped 0.8.0) Arming a CHECK-IN rule while the
+    // clock is in the danger zone (the last 25% of the window,
+    // including already past due) would let the release fire soon
+    // after — warn first and only arm on confirm. The server
+    // resets the check-in in that case anyway (a direct API call
+    // cannot bypass it); this is the UI telling the owner what
+    // arming will do, before they commit to it. Arming a price,
+    // UTXO, or manual rule touches no check-in clock at all, so
+    // it never warns — and the zone is measured against the
+    // rule's OWN threshold, not the global one.
+    var armTx = (S.bitcoin.txs || []).find(function (t) { return t.id === id; });
+    var dz = (enabled && armTx && triggerOf(armTx).type === 'checkin') ? dangerZone(triggerOf(armTx).params.thresholdDays) : null;
     if (dz) {
       showConfirm('Reset your check-in?',
         dz.overdue
@@ -1353,6 +1725,23 @@
     // the transaction. An Active tx has no deadline yet, and a
     // settled tx has no fallback at all, so neither shows it.
     $('edit-fallback-note').style.display = (stEdit.pending && tx.broadcastVia === 'slipstream') ? '' : 'none';
+    // The trigger picker (0.8.0) follows the transaction being
+    // edited — its type, and its fields. A locked tx keeps its
+    // rule: the picker is disabled with the hex and route, since
+    // the rule has already fired (the server enforces the same).
+    var trig = triggerOf(tx);
+    $('edit-trigger').value = trig.type;
+    $('edit-trigger-threshold').value = trig.type === 'checkin' ? String(trig.params.thresholdDays) : '35';
+    $('edit-trigger-op').value = trig.type === 'price' ? trig.params.op : '>=';
+    $('edit-trigger-value').value = trig.type === 'price' ? String(trig.params.value) : '';
+    $('edit-trigger-outpoint').value = trig.type === 'utxo' ? trig.params.outpoint : '';
+    // The UTXO confirmation mode follows the rule being edited:
+    // unconfirmed (0) or N confirmations. A non-UTXO rule (or a
+    // legacy one with no confirmations) resets to confirmed / 1.
+    var uconfs = trig.type === 'utxo' ? ((trig.params.confirmations === 0) ? 0 : (trig.params.confirmations || 1)) : 1;
+    $('edit-trigger-utxo-mode').value = (trig.type === 'utxo' && uconfs === 0) ? 'unconfirmed' : 'confirmed';
+    $('edit-trigger-utxo-confs').value = String(uconfs === 0 ? 1 : uconfs);
+    syncEditTriggerRow();
     // A locked tx (Pending or Archived) may change only its label
     // and notes: the hex box, the route selector and the Import
     // button are disabled (import would only populate a hex that
@@ -1364,6 +1753,17 @@
     $('edit-route').disabled = locked;
     $('edit-route').title = locked ? 'The broadcast route is locked once the transaction is out the door' : '';
     $('btn-edit-import-file').disabled = locked;
+    // The trigger is locked with the hex and route: the rule has
+    // already fired, so the picker and its fields are disabled
+    // with them.
+    $('edit-trigger').disabled = locked;
+    $('edit-trigger').title = locked ? 'The trigger cannot be changed once the transaction has been broadcast' : '';
+    $('edit-trigger-threshold').disabled = locked;
+    $('edit-trigger-op').disabled = locked;
+    $('edit-trigger-value').disabled = locked;
+    $('edit-trigger-outpoint').disabled = locked;
+    $('edit-trigger-utxo-mode').disabled = locked;
+    $('edit-trigger-utxo-confs').disabled = locked;
     $('edit-locked-note').style.display = locked ? '' : 'none';
     $('edit-form-title').textContent = !locked ? 'Edit transaction'
       : stEdit.settled ? 'Edit transaction — label and notes only'
@@ -1382,12 +1782,29 @@
     $('edit-fallback').value = '';
     $('edit-fallback-row').style.display = 'none';
     $('edit-fallback-note').style.display = 'none';
+    // (0.8.0) Reset the trigger picker to the check-in default.
+    $('edit-trigger').value = 'checkin';
+    $('edit-trigger-threshold').value = '35';
+    $('edit-trigger-op').value = '>=';
+    $('edit-trigger-value').value = '';
+    $('edit-trigger-outpoint').value = '';
+    $('edit-trigger-utxo-mode').value = 'confirmed';
+    $('edit-trigger-utxo-confs').value = '1';
+    syncEditTriggerRow();
     // Re-enable the fields a locked edit disabled.
     $('edit-hex').disabled = false;
     $('edit-hex').title = '';
     $('edit-route').disabled = false;
     $('edit-route').title = '';
     $('btn-edit-import-file').disabled = false;
+    $('edit-trigger').disabled = false;
+    $('edit-trigger').title = '';
+    $('edit-trigger-threshold').disabled = false;
+    $('edit-trigger-op').disabled = false;
+    $('edit-trigger-value').disabled = false;
+    $('edit-trigger-outpoint').disabled = false;
+    $('edit-trigger-utxo-mode').disabled = false;
+    $('edit-trigger-utxo-confs').disabled = false;
     $('edit-locked-note').style.display = 'none';
     $('edit-form-title').textContent = 'Edit transaction';
     $('edit-msg').textContent = '';
@@ -1405,6 +1822,58 @@
   $('edit-route').addEventListener('change', function () {
     $('edit-fallback-row').style.display = $('edit-route').value === 'slipstream' ? '' : 'none';
   });
+  // The trigger picker in the Edit popup (0.8.0): the fields
+  // follow the type, exactly like the Add form's picker — the
+  // check-in days input, the price op + value, the UTXO outpoint,
+  // nothing for manual. The guard note under the price row names
+  // the two-source agreement guard (above or below, per the op).
+  // The UTXO guard note follows the confirmation mode, and the
+  // confirmations row shows only in confirmed mode.
+  function syncEditTriggerRow() {
+    var v = $('edit-trigger').value;
+    $('edit-trigger-checkin-row').style.display = v === 'checkin' ? '' : 'none';
+    $('edit-trigger-price-row').style.display = v === 'price' ? '' : 'none';
+    $('edit-trigger-utxo-row').style.display = v === 'utxo' ? '' : 'none';
+    if (v === 'price') {
+      $('edit-trigger-price-note').textContent = 'Guard: both price sources must agree the price is ' + ($('edit-trigger-op').value === '>=' ? 'above' : 'below') + ' the threshold — a single bad source can’t fire it.';
+    }
+    if (v === 'utxo') syncEditUtxoNote();
+  }
+  function syncEditUtxoNote() {
+    var mode = $('edit-trigger-utxo-mode').value;
+    $('edit-trigger-utxo-confs-row').style.display = mode === 'confirmed' ? '' : 'none';
+    var n = parseInt($('edit-trigger-utxo-confs').value, 10);
+    if (!isFinite(n) || n < 1) n = 1;
+    $('edit-trigger-utxo-note').textContent = utxoGuardNote(mode, n);
+  }
+  $('edit-trigger').addEventListener('change', syncEditTriggerRow);
+  $('edit-trigger-op').addEventListener('change', syncEditTriggerRow);
+  $('edit-trigger-utxo-mode').addEventListener('change', syncEditUtxoNote);
+  $('edit-trigger-utxo-confs').addEventListener('input', syncEditUtxoNote);
+  // Read the trigger the Edit popup describes, or null when the
+  // fields are incomplete (the caller shows the error). An empty
+  // price value or outpoint is "not filled in yet", not a trigger.
+  function editTriggerFromForm() {
+    var v = $('edit-trigger').value;
+    if (v === 'checkin') {
+      var th = parseInt($('edit-trigger-threshold').value, 10);
+      if (!isFinite(th) || th < 1) return null;
+      return { type: 'checkin', params: { thresholdDays: th } };
+    }
+    if (v === 'price') {
+      var val = parseFloat($('edit-trigger-value').value);
+      if (!isFinite(val) || val <= 0) return null;
+      return { type: 'price', params: { asset: 'BTC', op: $('edit-trigger-op').value, value: val } };
+    }
+    if (v === 'utxo') {
+      var out = $('edit-trigger-outpoint').value.trim();
+      if (!/^[0-9a-fA-F]{64}:[0-9]+$/.test(out)) return null;
+      var ecf = utxoConfsFromForm('edit');
+      if (ecf === null) return null;
+      return { type: 'utxo', params: { outpoint: out.toLowerCase(), condition: 'spent', confirmations: ecf } };
+    }
+    return { type: 'manual', params: {} };
+  }
   var editModalX = $('edit-modal-x');
   if (editModalX) editModalX.addEventListener('click', function () { cancelEdit(); });
   $('edit-modal').addEventListener('click', function (e) {
@@ -1419,20 +1888,57 @@
     if (!editingId) return;
     var hex = $('edit-hex').value.trim();
     if (!hex) { setMsg($('edit-msg'), 'Paste the signed transaction hex first.', false); return; }
-    try {
-      await saveBitcoinSettings();
-      var oldTx = (S.bitcoin.txs || []).find(function (t) { return t.id === editingId; });
-      var editFbVal = $('edit-fallback').value;
-      var body = { txHex: hex, label: $('edit-label').value, notes: $('edit-notes').value, broadcastVia: $('edit-route').value, publicFallbackDays: editFbVal === '' ? null : parseInt(editFbVal, 10) };
-      var r = await api('PUT', '/api/bitcoin/txs/' + encodeURIComponent(editingId), body);
-      // A replaced hex makes the old dry-run result stale (the
-      // shared-input warning clears on its own — the server
-      // recomputes it from the new hexes on the next load).
-      if (oldTx && oldTx.hex !== hex) { delete dryRunResults[editingId]; }
-      setMsg($('btc-msg'), 'Transaction updated. TXID ' + r.tx.txid + '.', true);
-      cancelEdit();
-      await load();
-    } catch (e) { setMsg($('edit-msg'), e.message, false); }
+    var trig = editTriggerFromForm();
+    if (!trig) { setMsg($('edit-msg'), 'Fill in the trigger: ' + ($('edit-trigger').value === 'price' ? 'a BTC price above $0.' : $('edit-trigger').value === 'utxo' ? 'an outpoint like txid:vout.' : 'a number of days.'), false); return; }
+    var oldTx0 = (S.bitcoin.txs || []).find(function (t) { return t.id === editingId; });
+    // (0.8.0) A price or UTXO trigger whose condition is already
+    // satisfied warns first (same guard as the Add form) — but
+    // only when the trigger CHANGED: editing a label on a rule
+    // that has already fired must not re-warn. A check-in rule
+    // needs no warn on edit — the danger-zone reset only attaches
+    // to ARMING, not to editing.
+    var triggerChanged = oldTx0 && (JSON.stringify(triggerOf(oldTx0)) !== JSON.stringify(trig));
+    function doSave(triggerConfirmed) {
+      return (async function () {
+        try {
+          await saveBitcoinSettings();
+          var oldTx = (S.bitcoin.txs || []).find(function (t) { return t.id === editingId; });
+          var editFbVal = $('edit-fallback').value;
+          var body = { txHex: hex, label: $('edit-label').value, notes: $('edit-notes').value, broadcastVia: $('edit-route').value, publicFallbackDays: editFbVal === '' ? null : parseInt(editFbVal, 10), trigger: trig };
+          if (triggerConfirmed) body.triggerConfirmed = true;
+          var r = await api('PUT', '/api/bitcoin/txs/' + encodeURIComponent(editingId), body);
+          // A replaced hex makes the old dry-run result stale (the
+          // shared-input warning clears on its own — the server
+          // recomputes it from the new hexes on the next load).
+          if (oldTx && oldTx.hex !== hex) { delete dryRunResults[editingId]; }
+          setMsg($('btc-msg'), 'Transaction updated. TXID ' + r.tx.txid + '.' + (r && r.triggerWarning ? ' ' + r.triggerWarning : ''), true);
+          cancelEdit();
+          await load();
+        } catch (e) {
+          // (0.8.0) The server's already-satisfied gate (price or
+          // UTXO) is the backstop for the pre-check above — a
+          // label-only edit on a rule that is already satisfied
+          // hits it too, since the save always sends the trigger.
+          // A gate 400 offers the same confirm instead of a dead
+          // error.
+          if (e.message && e.message.indexOf('would fire on the next evaluation') !== -1) {
+            showConfirm('Save a rule that is already satisfied?', 'This rule is already satisfied — it would fire on the next evaluation. Save it anyway?', function () { doSave(true); }, 'Save anyway');
+            return;
+          }
+          setMsg($('edit-msg'), e.message, false);
+        }
+      })();
+    }
+    if (triggerChanged && (trig.type === 'price' || trig.type === 'utxo')) {
+      try {
+        var chk = await api('POST', '/api/triggers/check', { trigger: trig });
+        if (chk && chk.warning) {
+          showConfirm('Save a rule that is already satisfied?', chk.warning + ' Save it anyway?', function () { doSave(true); }, 'Save anyway');
+          return;
+        }
+      } catch (e) { /* the save proceeds — the server gates the price and UTXO cases */ }
+    }
+    doSave();
   });
 
   async function deleteTx(id) {
@@ -1484,6 +1990,58 @@
   }
   $('btc-route').addEventListener('change', syncAddFallbackRow);
   $('btc-fallback').addEventListener('change', syncAddFallbackRow);
+  // The trigger picker in the Add form (0.8.0): the fields follow
+  // the type — the check-in days input, the price op + value, the
+  // UTXO outpoint, nothing for manual. The guard note under the
+  // price row names the two-source agreement guard (above or
+  // below, per the op). The UTXO guard note follows the
+  // confirmation mode, and the confirmations row shows only in
+  // confirmed mode.
+  function syncAddTriggerRow() {
+    var v = $('btc-trigger').value;
+    $('btc-trigger-checkin-row').style.display = v === 'checkin' ? '' : 'none';
+    $('btc-trigger-price-row').style.display = v === 'price' ? '' : 'none';
+    $('btc-trigger-utxo-row').style.display = v === 'utxo' ? '' : 'none';
+    if (v === 'price') {
+      $('btc-trigger-price-note').textContent = 'Guard: both price sources must agree the price is ' + ($('btc-trigger-op').value === '>=' ? 'above' : 'below') + ' the threshold — a single bad source can’t fire it.';
+    }
+    if (v === 'utxo') syncAddUtxoNote();
+  }
+  function syncAddUtxoNote() {
+    var mode = $('btc-trigger-utxo-mode').value;
+    $('btc-trigger-utxo-confs-row').style.display = mode === 'confirmed' ? '' : 'none';
+    var n = parseInt($('btc-trigger-utxo-confs').value, 10);
+    if (!isFinite(n) || n < 1) n = 1;
+    $('btc-trigger-utxo-note').textContent = utxoGuardNote(mode, n);
+  }
+  $('btc-trigger').addEventListener('change', syncAddTriggerRow);
+  $('btc-trigger-op').addEventListener('change', syncAddTriggerRow);
+  $('btc-trigger-utxo-mode').addEventListener('change', syncAddUtxoNote);
+  $('btc-trigger-utxo-confs').addEventListener('input', syncAddUtxoNote);
+  // Read the trigger the Add form describes, or null when the
+  // fields are incomplete (the caller shows the error). An empty
+  // price value or outpoint is "not filled in yet", not a trigger.
+  function addTriggerFromForm() {
+    var v = $('btc-trigger').value;
+    if (v === 'checkin') {
+      var th = parseInt($('btc-trigger-threshold').value, 10);
+      if (!isFinite(th) || th < 1) return null;
+      return { type: 'checkin', params: { thresholdDays: th } };
+    }
+    if (v === 'price') {
+      var val = parseFloat($('btc-trigger-value').value);
+      if (!isFinite(val) || val <= 0) return null;
+      return { type: 'price', params: { asset: 'BTC', op: $('btc-trigger-op').value, value: val } };
+    }
+    if (v === 'utxo') {
+      var out = $('btc-trigger-outpoint').value.trim();
+      if (!/^[0-9a-fA-F]{64}:[0-9]+$/.test(out)) return null;
+      var cf = utxoConfsFromForm('btc');
+      if (cf === null) return null;
+      return { type: 'utxo', params: { outpoint: out.toLowerCase(), condition: 'spent', confirmations: cf } };
+    }
+    return { type: 'manual', params: {} };
+  }
 
   // The Add card is add-only now (0.7.16 amendment): editing lives
   // in the popup, so this button always POSTs a new transaction.
@@ -1491,39 +2049,81 @@
   $('btn-btc-add').addEventListener('click', async function () {
     var hex = $('btc-hex').value.trim();
     if (!hex) { setMsg($('btc-msg'), 'Paste the signed transaction hex first.', false); return; }
-    function doAdd() {
+    var trig = addTriggerFromForm();
+    if (!trig) { setMsg($('btc-msg'), 'Fill in the trigger: ' + ($('btc-trigger').value === 'price' ? 'a BTC price above $0.' : $('btc-trigger').value === 'utxo' ? 'an outpoint like txid:vout.' : 'a number of days.'), false); return; }
+    function doAdd(triggerConfirmed) {
       return (async function () {
         try {
           await saveBitcoinSettings();
           var fbVal = $('btc-fallback').value;
-          var body = { txHex: hex, label: $('btc-label').value, notes: $('btc-notes').value, broadcastVia: $('btc-route').value, publicFallbackDays: fbVal === '' ? null : parseInt(fbVal, 10) };
+          var body = { txHex: hex, label: $('btc-label').value, notes: $('btc-notes').value, broadcastVia: $('btc-route').value, publicFallbackDays: fbVal === '' ? null : parseInt(fbVal, 10), trigger: trig };
+          if (triggerConfirmed) body.triggerConfirmed = true;
           var r = await api('POST', '/api/bitcoin/txs', body);
-          setMsg($('btc-msg'), 'Transaction added and armed. TXID ' + r.tx.txid + ' — use the toggle to unarm it.' + (r && r.checkinReset ? ' Your check-in was reset to today.' : ''), true);
+          setMsg($('btc-msg'), 'Transaction added and armed. TXID ' + r.tx.txid + ' — use the toggle to unarm it.' + (r && r.checkinReset ? ' Your check-in was reset to today.' : '') + (r && r.triggerWarning ? ' ' + r.triggerWarning : ''), true);
           $('btc-label').value = '';
           $('btc-notes').value = '';
           $('btc-hex').value = '';
           $('btc-route').value = 'public';
           $('btc-fallback').value = '';
+          $('btc-trigger').value = 'checkin';
+          $('btc-trigger-threshold').value = '35';
+          $('btc-trigger-value').value = '';
+          $('btc-trigger-outpoint').value = '';
+          $('btc-trigger-utxo-mode').value = 'confirmed';
+          $('btc-trigger-utxo-confs').value = '1';
+          syncAddTriggerRow();
           syncAddFallbackRow();
           await load();
-        } catch (e) { setMsg($('btc-msg'), e.message, false); }
+        } catch (e) {
+          // (0.8.0) The server's already-satisfied gate (price or
+          // UTXO) is the backstop for the pre-check above — the
+          // price can cross, or the pre-check can fail, between
+          // the check and the add. A gate 400 offers the same
+          // confirm instead of a dead error.
+          if (e.message && e.message.indexOf('would fire on the next evaluation') !== -1) {
+            showConfirm('Add a rule that is already satisfied?', 'This rule is already satisfied — it would fire on the next evaluation. Add it anyway?', function () { doAdd(true); }, 'Add anyway');
+            return;
+          }
+          setMsg($('btc-msg'), e.message, false);
+        }
       })();
     }
-    // (0.7.22) A new tx is armed by default — adding one while the
-    // clock is in the danger zone (the last 25% of the window,
-    // including already past due) would let the release fire soon
-    // after. Warn first; the server resets the check-in in that
-    // case anyway (a direct API call cannot bypass it).
-    var dz = dangerZone(S.settings.thresholdDays);
-    if (dz) {
-      showConfirm('Reset your check-in?',
-        dz.overdue
-          ? 'The release is due — your last check-in was ' + dz.daysSince + ' day' + (dz.daysSince === 1 ? '' : 's') + ' ago. A new transaction is armed by default, so it would broadcast on the next check. Adding it will reset your check-in to today and restart the countdown.'
-          : 'Only ' + dz.daysLeft + ' day' + (dz.daysLeft === 1 ? '' : 's') + ' left until the release is due. Adding it will reset your check-in to today and restart the countdown.',
-        doAdd, 'Add and reset');
-    } else {
-      await doAdd();
+    // (0.7.22, scoped 0.8.0) A new CHECK-IN tx is armed by
+    // default — adding one while the clock is in the danger zone
+    // (the last 25% of ITS window, including already past due)
+    // would let the release fire soon after. Warn first; the
+    // server resets the check-in in that case anyway (a direct API
+    // call cannot bypass it). A price, UTXO, or manual rule never
+    // touches the clock, so it never warns about a reset.
+    if (trig.type === 'checkin') {
+      var dz = dangerZone(trig.params.thresholdDays);
+      if (dz) {
+        showConfirm('Reset your check-in?',
+          dz.overdue
+            ? 'The release is due — your last check-in was ' + dz.daysSince + ' day' + (dz.daysSince === 1 ? '' : 's') + ' ago. A new transaction is armed by default, so it would broadcast on the next check. Adding it will reset your check-in to today and restart the countdown.'
+            : 'Only ' + dz.daysLeft + ' day' + (dz.daysLeft === 1 ? '' : 's') + ' left until the release is due. Adding it will reset your check-in to today and restart the countdown.',
+          doAdd, 'Add and reset');
+        return;
+      }
+      doAdd();
+      return;
     }
+    // (0.8.0) A price or UTXO rule whose condition is ALREADY
+    // satisfied would fire on the next evaluation — ask the
+    // server once (live, no state change) and warn first, so an
+    // already-spent outpoint or an already-crossed price is never
+    // a surprise. Confirming adds it with triggerConfirmed, so
+    // the server's already-satisfied gate lets the rule through.
+    if (trig.type === 'price' || trig.type === 'utxo') {
+      try {
+        var chk = await api('POST', '/api/triggers/check', { trigger: trig });
+        if (chk && chk.warning) {
+          showConfirm('Add a rule that is already satisfied?', chk.warning + ' Add it anyway?', function () { doAdd(true); }, 'Add anyway');
+          return;
+        }
+      } catch (e) { /* the add proceeds without the check — the server gates the price and UTXO cases */ }
+    }
+    doAdd();
   });
 
   // Import a signed transaction from a file: the file's hex is put
@@ -1938,54 +2538,460 @@
 
   // ---------- settings ----------
   function renderSettings() {
-    $('set-threshold').value = S.settings.thresholdDays;
     $('set-vacation').checked = !!S.settings.vacationMode;
     $('set-vacation-until').value = S.settings.vacationUntil || '';
-    var ps = $('pause-state');
-    if (S.settings.paused) { ps.textContent = 'Paused'; ps.className = 'pill warn'; }
-    else if (S.settings.vacationMode) { ps.textContent = 'Vacation mode'; ps.className = 'pill muted'; }
-    else { ps.textContent = 'Active'; ps.className = 'pill ok'; }
+    // No end date means indefinite (until the owner says they're
+    // back) — the checkbox mirrors that, and the date input is
+    // disabled while it is checked.
+    $('set-vacation-indefinite').checked = !S.settings.vacationUntil;
+    $('set-vacation-until').disabled = !S.settings.vacationUntil;
+    // (0.8.0) A new check-in rule defaults to 35 days — but
+    // only while the Add form is untouched (no hex pasted yet),
+    // so a re-render never clobbers a value the owner is
+    // mid-typing.
+    if (!$('btc-hex').value.trim()) {
+      $('btc-trigger-threshold').value = '35';
+    }
+    // BTC price sources (0.8.0): two provider selects, populated
+    // from the provider list the server serves (with a fallback
+    // copy so the selects still work against an older server),
+    // plus the last fetched price per source, from the cache.
+    var providers = (S.bitcoin && Array.isArray(S.bitcoin.priceProviders) && S.bitcoin.priceProviders.length)
+      ? S.bitcoin.priceProviders
+      : [
+        { id: 'coingecko', label: 'CoinGecko' },
+        { id: 'coinbase', label: 'Coinbase' },
+        { id: 'binance', label: 'Binance US (USDT)' },
+        { id: 'kraken', label: 'Kraken' },
+        { id: 'bitstamp', label: 'Bitstamp' },
+      ];
+    var psrc = (S.settings && S.settings.priceSources) || { source1: 'coingecko', source2: 'coinbase' };
+    function providerLabel(id) {
+      for (var i = 0; i < providers.length; i++) if (providers[i].id === id) return providers[i].label;
+      return id;
+    }
+    function fillPriceSelect(sel, val) {
+      sel.innerHTML = '';
+      providers.forEach(function (p) {
+        var o = document.createElement('option');
+        o.value = p.id; o.textContent = p.label;
+        sel.appendChild(o);
+      });
+      sel.value = val;
+    }
+    fillPriceSelect($('set-price-source1'), psrc.source1 || 'coingecko');
+    fillPriceSelect($('set-price-source2'), psrc.source2 || 'coinbase');
+    // The row label names the provider the dropdown currently
+    // holds — just the name, no price inline (the prices the
+    // test retrieves are shown below the Test button, and the
+    // readiness card's per-exchange rows show the last price).
+    // The status pill next to it reads OK / Failed / Not
+    // Tested — never '—'. refreshPriceSourceRow (module level)
+    // re-renders both, and the dropdowns' change listeners
+    // (attached once, next to the Save listener) call it on
+    // every change — so the label and the Test connection
+    // button always agree on which provider they mean. A changed
+    // dropdown never leaves the old name showing.
+    refreshPriceSourceRow(1);
+    refreshPriceSourceRow(2);
+    // Grace period (0.8.0): the two dropdowns reflect the saved
+    // settings — the offline gap that triggers a grace and how
+    // long it lasts (null = indefinite, until resumed). The
+    // options are static in index.html; renderSettings only sets
+    // the value, so a re-render never clobbers a choice the
+    // owner is mid-changing (the Save handler reads the
+    // dropdowns, not S.settings).
+    var go = (S.settings && typeof S.settings.graceOfflineDays === 'number') ? S.settings.graceOfflineDays : 7;
+    $('set-grace-offline').value = String(go);
+    var gd = (S.settings && S.settings.graceDurationDays !== undefined) ? S.settings.graceDurationDays : 7;
+    $('set-grace-duration').value = (gd === null) ? 'indefinite' : String(gd);
+    // User controls (0.8.0): the three number inputs reflect the
+    // saved settings — price agreement (%), check cadence
+    // (seconds), fee verdict multipliers (× peak). The inputs
+    // are set from S.settings, so a re-render never clobbers a
+    // choice the owner is mid-changing (the Save handlers read
+    // the inputs, not S.settings). The price-sources note names
+    // the agreement — its span stays in sync with the setting.
+    var pa = (S.settings && typeof S.settings.priceAgreementPct === 'number') ? S.settings.priceAgreementPct : 5;
+    $('set-price-agreement').value = String(pa);
+    var agreeSpan = $('price-sources-agreement');
+    if (agreeSpan) agreeSpan.textContent = pa + '%';
+    var cc = (S.settings && typeof S.settings.checkCadenceSeconds === 'number') ? S.settings.checkCadenceSeconds : 60;
+    $('set-check-cadence').value = String(cc);
+    var fl = (S.settings && typeof S.settings.feeLowMultiplier === 'number') ? S.settings.feeLowMultiplier : 2;
+    $('set-fee-low').value = String(fl);
+    var fm = (S.settings && typeof S.settings.feeMediumMultiplier === 'number') ? S.settings.feeMediumMultiplier : 1;
+    $('set-fee-medium').value = String(fm);
+    updateFeeZoneBar();
     renderApiKeys();
   }
 
-  $('btn-save-settings').addEventListener('click', async function () {
-    var newThreshold = parseInt($('set-threshold').value, 10);
-    // (0.7.22) Saving a threshold that puts the clock in the
-    // danger zone (the last 25% of the new window, including
-    // already past due) resets the check-in — warn first and only
-    // save on confirm. The server resets in that case anyway (a
-    // direct API call cannot bypass it); this confirm is the UI
-    // telling the owner what saving will do, before they commit.
-    var dz = dangerZone(newThreshold);
-    function saveSettings() {
-      return (async function () {
-        try {
-          var s = await api('PUT', '/api/settings', { thresholdDays: newThreshold });
-          var wasReset = !!s.checkinReset;
-          delete s.checkinReset;
-          S.settings = s;
-          setMsg($('settings-msg'),
-            wasReset ? 'Settings saved. Your check-in was reset to today — the countdown restarts from now.' : 'Settings saved.', true);
-          await load();
-        } catch (e) { setMsg($('settings-msg'), e.message, false); }
-      })();
-    }
-    if (dz) {
-      showConfirm('Reset your check-in?',
-        dz.overdue
-          ? 'This would make the release due immediately — your last check-in was ' + dz.daysSince + ' day' + (dz.daysSince === 1 ? '' : 's') + ' ago. Saving will reset your check-in to today and restart the countdown from now.'
-          : 'This would leave only ' + dz.daysLeft + ' day' + (dz.daysLeft === 1 ? '' : 's') + ' until the release is due. Saving will reset your check-in to today and restart the countdown from now.',
-        saveSettings, 'Save and reset', function () { load(); });
+  // BTC price sources (0.8.0): save the two provider choices. The
+  // server rejects an unknown provider or two identical sources
+  // (400) — the error shows in the message line.
+  // BTC price sources (0.8.0): re-render one source row from
+  // the provider its dropdown currently holds. The row shows
+  // ONLY the provider name — no price inline (the prices the
+  // test retrieves are shown below the Test button, and the
+  // readiness card's per-exchange rows show the last price).
+  // The status pill next to it reads OK / Failed / Not Tested
+  // — never '—'. It is test-driven: the last Test connection
+  // verdict for that provider (kept in priceSourceStatus, in
+  // this session, keyed by provider id) wins; with no verdict
+  // yet it reflects the last cached reading for that provider
+  // (a price means OK, an error means Failed, no reading means
+  // Not Tested). Changing the dropdown resets it to Not Tested
+  // until the test runs again — pass resetStatus for that.
+  // Keying by provider (not by row) means a test verdict
+  // survives a save for a provider that is unchanged — a
+  // source tested OK stays OK after saving. The change
+  // listeners are attached once, here, like the rest of the
+  // app's select listeners (renderSettings runs on every load,
+  // so attaching them there would stack a duplicate each time).
+  var priceSourceStatus = {}; // provider id -> 'ok' | 'failed' | 'not-tested': the last Test verdict (or change reset) for that provider, in this session
+  function setPriceSourceStatus(n, state) {
+    var pill = $('price-source' + n + '-status');
+    if (!pill) return;
+    if (state === 'ok') { pill.textContent = 'OK'; pill.className = 'pill ok'; }
+    else if (state === 'failed') { pill.textContent = 'Failed'; pill.className = 'pill bad'; }
+    else { pill.textContent = 'Not Tested'; pill.className = 'pill muted'; }
+  }
+  function refreshPriceSourceRow(n, resetStatus) {
+    var sel = $('set-price-source' + n);
+    var host = $('price-source' + n);
+    if (!sel || !host) return;
+    var id = sel.value;
+    var providers = (S.bitcoin && Array.isArray(S.bitcoin.priceProviders) && S.bitcoin.priceProviders.length)
+      ? S.bitcoin.priceProviders
+      : [
+        { id: 'coingecko', label: 'CoinGecko' },
+        { id: 'coinbase', label: 'Coinbase' },
+        { id: 'binance', label: 'Binance US (USDT)' },
+        { id: 'kraken', label: 'Kraken' },
+        { id: 'bitstamp', label: 'Bitstamp' },
+      ];
+    var label = id;
+    for (var i = 0; i < providers.length; i++) if (providers[i].id === id) { label = providers[i].label; break; }
+    host.textContent = label;
+    if (resetStatus) {
+      priceSourceStatus[id] = 'not-tested';
+      setPriceSourceStatus(n, 'not-tested');
+    } else if (priceSourceStatus[id]) {
+      setPriceSourceStatus(n, priceSourceStatus[id]);
     } else {
-      saveSettings();
+      var cp = (S.bitcoin && S.bitcoin.currentPrices) || {};
+      var r = cp[id];
+      if (r && typeof r.price === 'number' && Number.isFinite(r.price)) setPriceSourceStatus(n, 'ok');
+      else if (r && r.error) setPriceSourceStatus(n, 'failed');
+      else setPriceSourceStatus(n, 'not-tested');
     }
+  }
+  $('set-price-source1').addEventListener('change', function () { refreshPriceSourceRow(1, true); });
+  $('set-price-source2').addEventListener('change', function () { refreshPriceSourceRow(2, true); });
+
+  $('btn-save-price-sources').addEventListener('click', async function () {
+    var s1 = $('set-price-source1').value;
+    var s2 = $('set-price-source2').value;
+    try {
+      var s = await api('PUT', '/api/settings', { priceSources: { source1: s1, source2: s2 } });
+      S.settings = s;
+      setMsg($('price-sources-msg'), 'Price sources saved.', true);
+      // The test verdicts are keyed by provider, so they are
+      // NOT cleared here — a source that was tested and
+      // returned a price stays OK after saving. A provider
+      // that was just changed (and not yet tested) was reset
+      // to Not Tested by its change listener, so the re-render
+      // after load() shows that. (Clearing the map used to
+      // flip a tested source back to Not Tested on save,
+      // because the re-render found no cached reading for the
+      // newly-saved source yet.)
+      await load();
+    } catch (e) { setMsg($('price-sources-msg'), e.message, false); }
   });
+
+  // Grace period (0.8.0): save the two grace settings. The
+  // server rejects any value the dropdowns do not offer (400)
+  // — the error shows in the message line. Saving new values
+  // does NOT change an already-active grace (it keeps the
+  // duration it was created with).
+  $('btn-save-grace').addEventListener('click', async function () {
+    var offline = parseInt($('set-grace-offline').value, 10);
+    var durRaw = $('set-grace-duration').value;
+    var duration = durRaw === 'indefinite' ? null : parseInt(durRaw, 10);
+    try {
+      var s = await api('PUT', '/api/settings', { graceOfflineDays: offline, graceDurationDays: duration });
+      S.settings = s;
+      setMsg($('grace-settings-msg'), 'Grace period saved.', true);
+      await load();
+    } catch (e) { setMsg($('grace-settings-msg'), e.message, false); }
+  });
+
+  // User controls (0.8.0): each card saves only its own
+  // field(s). The server rejects an out-of-range value or a
+  // fee pair that breaks Low-above-Medium (400) — the error
+  // shows in the message line. parseFloat (not parseInt) so a
+  // decimal the owner typed (e.g. 2.5%) reaches the server
+  // instead of being silently truncated; a blank field parses
+  // to NaN, which JSON sends as null and the server rejects.
+  $('btn-save-price-agreement').addEventListener('click', async function () {
+    var v = parseFloat($('set-price-agreement').value);
+    try {
+      var s = await api('PUT', '/api/settings', { priceAgreementPct: v });
+      S.settings = s;
+      setMsg($('price-agreement-msg'), 'Price agreement saved.', true);
+      await load();
+    } catch (e) { setMsg($('price-agreement-msg'), e.message, false); }
+  });
+
+  $('btn-save-check-cadence').addEventListener('click', async function () {
+    var v = parseFloat($('set-check-cadence').value);
+    try {
+      var s = await api('PUT', '/api/settings', { checkCadenceSeconds: v });
+      S.settings = s;
+      setMsg($('check-cadence-msg'), 'Check cadence saved.', true);
+      await load();
+    } catch (e) { setMsg($('check-cadence-msg'), e.message, false); }
+  });
+
+  // Fee verdict zone bar (0.8.0): always visible under the numbers,
+  // showing the three zones as a bar that moves live as you type.
+  // The boundaries are the two input values; the scale grows past
+  // 3× when Low is set above it so the green zone always has
+  // headroom. Critical Risk is separate and hard-coded, so it is
+  // not a zone here. The bar reflects whatever is in the inputs,
+  // so it is there whether or not you are editing — no show/hide.
+  function updateFeeZoneBar() {
+    var bar = $('zone-bar');
+    if (!bar) return;
+    var low = parseFloat($('set-fee-low').value);
+    var med = parseFloat($('set-fee-medium').value);
+    if (!isFinite(low) || low <= 0) low = 2;
+    if (!isFinite(med) || med < 0) med = 1;
+    med = Math.min(med, low);
+    var max = Math.max(3, Math.ceil(low) + 1);
+    var fmt = function (v) { return String(Math.round(v * 10) / 10); };
+    var segHigh = $('seg-high'), segMed = $('seg-med'), segLow = $('seg-low');
+    if (segHigh) segHigh.style.flexBasis = Math.max(0, med / max * 100) + '%';
+    if (segMed) segMed.style.flexBasis = Math.max(0, (low - med) / max * 100) + '%';
+    if (segLow) segLow.style.flexBasis = Math.max(0, (max - low) / max * 100) + '%';
+    var rH = $('range-high'), rM = $('range-med'), rL = $('range-low');
+    if (rH) rH.textContent = fmt(med) + '× and below';
+    if (rM) rM.textContent = fmt(med) + '× – ' + fmt(low) + '×';
+    if (rL) rL.textContent = fmt(low) + '× and up';
+  }
+  // The bar updates live as either number is typed; it is always
+  // visible, so there is no focus/blur show/hide.
+  ['set-fee-low', 'set-fee-medium'].forEach(function (id) {
+    var el = $(id);
+    if (!el) return;
+    el.addEventListener('input', updateFeeZoneBar);
+  });
+  $('btn-save-fee-verdict').addEventListener('click', async function () {
+    var low = parseFloat($('set-fee-low').value);
+    var med = parseFloat($('set-fee-medium').value);
+    try {
+      var s = await api('PUT', '/api/settings', { feeLowMultiplier: low, feeMediumMultiplier: med });
+      S.settings = s;
+      setMsg($('fee-verdict-msg'), 'Fee verdict saved.', true);
+      await load();
+    } catch (e) { setMsg($('fee-verdict-msg'), e.message, false); }
+  });
+
+  // BTC price sources (0.8.0): ONE "Test connection" button
+  // tests BOTH sources at once — like the Node Status "Test
+  // connection" button tests all nodes. It tests the providers
+  // currently selected in the two dropdowns (any of the five,
+  // not only the two configured ones) with fresh fetches (the
+  // server bypasses the price cache), and shows both results
+  // inline. The configured sources and the cache are untouched.
+  async function testPriceSources() {
+    var out = $('price-sources-test');
+    var btn = $('btn-test-price-sources');
+    if (!out || !btn) return;
+    var ids = [$('set-price-source1').value, $('set-price-source2').value];
+    // The display label for a provider, from the provider list
+    // the server serves (the same list that filled the select) —
+    // not read off select.options, so it works wherever the select
+    // itself is not modelled.
+    var providers = (S.bitcoin && Array.isArray(S.bitcoin.priceProviders) && S.bitcoin.priceProviders.length)
+      ? S.bitcoin.priceProviders
+      : [
+        { id: 'coingecko', label: 'CoinGecko' },
+        { id: 'coinbase', label: 'Coinbase' },
+        { id: 'binance', label: 'Binance US (USDT)' },
+        { id: 'kraken', label: 'Kraken' },
+        { id: 'bitstamp', label: 'Bitstamp' },
+      ];
+    function labelFor(id) {
+      for (var i = 0; i < providers.length; i++) if (providers[i].id === id) return providers[i].label;
+      return id;
+    }
+    btn.disabled = true;
+    out.textContent = 'Testing…';
+    try {
+      var r = await api('POST', '/api/settings/price-sources/test-all', { providers: ids });
+      out.textContent = (r.results || []).map(function (x) {
+        var l = labelFor(x.provider);
+        return (typeof x.price === 'number' && Number.isFinite(x.price))
+          ? l + ': $' + x.price.toLocaleString('en-US')
+          : l + ': failed — ' + (x.error || 'no price');
+      }).join(', ');
+      // The per-source status pills follow the test verdicts —
+      // OK when a price came back, Failed when it did not — so
+      // the rows never sit on '—' after a test. The results come
+      // back in the order requested, so result i is row i + 1;
+      // the verdict is keyed by provider id, so it survives a
+      // save for that provider.
+      (r.results || []).forEach(function (x, i) {
+        var n = i + 1;
+        priceSourceStatus[x.provider] = (typeof x.price === 'number' && Number.isFinite(x.price)) ? 'ok' : 'failed';
+        setPriceSourceStatus(n, priceSourceStatus[x.provider]);
+      });
+    } catch (e) {
+      out.textContent = 'Test failed — ' + e.message;
+    }
+    btn.disabled = false;
+  }
+  $('btn-test-price-sources').addEventListener('click', testPriceSources);
+
+  // Settings "?" help (0.8.0): every Settings card has a "?"
+  // button in its header that opens the shared showDetails
+  // pop-out with what the setting is, what it does, and which
+  // trigger types it applies to ("Applies to:"). The pop-out
+  // closes the same way the other pop-outs do (X / Close /
+  // backdrop) — showDetails owns that behaviour.
+  //
+  // SINGLE SOURCE OF TRUTH (0.8.0): this registry is the ONE
+  // declaration of which trigger types each card applies to.
+  // The "?" pop-out renders its "Applies to" line FROM the
+  // triggers array (helpAppliesLabel, below), and the Settings
+  // filter at the top of the tab decides visibility FROM the
+  // same array. There is no second copy of the mapping
+  // anywhere: update the array here and both stay in
+  // alignment. The nuanced prose (e.g. the nodes broadcast
+  // note, the grace check-in-hold note) lives in the BODY,
+  // not in the "Applies to" line.
+  var SETTINGS_HELP = {
+    vacation: {
+      title: 'Vacation mode',
+      body: 'Freezes the check-in countdown while you\u2019re away. Leave at 13 of 25 days and you come back to 13 of 25 \u2014 the days do not count while you\u2019re gone. Check-in transactions do not fire while you\u2019re away. Price and UTXO triggers keep firing while you\u2019re away. Set an end date, or leave it indefinite and it holds until you say you\u2019re back.',
+      triggers: ['checkin'],
+    },
+    arm: {
+      title: 'Global Arm/Disarm',
+      body: 'Arms or disarms every staged transaction at once \u2014 check-in, BTC price, UTXO, and manual. Disarming stops automatic firing for all triggers \u2014 nothing broadcasts on its own. A manual broadcast still works while disarmed (it is you explicitly sending it). Disarmed check-in transactions freeze their countdown and resume from the same spot when re-armed. \u2018Arm all\u2019 arms everything, including transactions you had individually disarmed before.',
+      triggers: ['general'],
+    },
+    nodes: {
+      title: 'Bitcoin nodes',
+      body: 'The Bitcoin nodes Standby talks to. Standby reads the chain through these nodes \u2014 it checks whether a UTXO is spent, confirms a broadcast landed, and submits your transactions. The primary is tried first; if it fails, the secondary is used. Leave the secondary blank to use the primary alone. The address is a mempool instance \u2014 mempool.space by default, another public instance, or your own mempool on the LAN. UTXO triggers ask the node whether the watched UTXO is spent, and every transaction\u2019s broadcast goes through a node. Check-in and price triggers do not read the node to decide whether to fire.',
+      triggers: ['general'],
+    },
+    'price-sources': {
+      title: 'BTC price sources',
+      body: 'The two exchanges Standby reads the BTC price from. Every check, Standby fetches the price from both sources. A price trigger only fires when both agree within your price-agreement setting; if one is down, the other is used alone. When they agree, a rule that fires above a price uses the higher of the two, and a rule that fires below uses the lower.',
+      triggers: ['price'],
+    },
+    grace: {
+      title: 'Grace period',
+      body: 'A pause for price and UTXO triggers after the app has been offline. If Standby was offline longer than the \u2018offline\u2019 days, price and UTXO triggers are paused for the \u2018lasts\u2019 days (or until you resume) so they don\u2019t fire on conditions that changed while the app was away. Checking in does not clear a grace. Check-in triggers are not affected \u2014 they have their own offline-gap hold.',
+      triggers: ['price', 'utxo'],
+    },
+    agreement: {
+      title: 'Price agreement',
+      body: 'How closely the two price sources must agree. A price reading only counts if the two sources are within this % of each other. Tighter means safer but more \u2018unknown\u2019 readings during fast moves; looser fires more readily.',
+      triggers: ['price'],
+    },
+    cadence: {
+      title: 'Check cadence',
+      body: 'How often price and UTXO triggers are checked. Standby evaluates price and UTXO triggers every X seconds. Faster catches an unconfirmed spend and a brief price spike sooner; slower means fewer API calls. The price cache matches this interval so a faster cadence fetches fresher prices. Check-in triggers are evaluated once an hour, not by this tick.',
+      triggers: ['price', 'utxo'],
+    },
+    fee: {
+      title: 'Fee verdict',
+      body: 'Where the Low / Medium / High fee pill flips. Each transaction\u2019s fee rate is compared to the 90-day peak (the 90th percentile of block medians). Low Risk is at or above the Low multiplier, Medium Risk at or above the Medium multiplier, High Risk below it. A fee below the current economy fee is Critical Risk. The pill is informational \u2014 it never blocks a broadcast. The pill shows on every staged transaction. The Low multiplier must stay above the Medium one.',
+      triggers: ['general'],
+    },
+    keys: {
+      title: 'Check-in API keys',
+      body: 'The keys that can check in through the API. Your gadget uses one of these keys to tell Standby you\u2019re still here. A check-in resets the countdown on every check-in transaction. A key can only record a check-in: it cannot read your transactions, broadcast anything, or change settings. Give each service its own key so you can revoke one without touching the others. Keep a key private \u2014 anyone with it can check in as you. The key is shown once, when it is created \u2014 copy it then. To add it as a custom integration: Name \u2018Standby Check-in\u2019, Base URL the connection IP above, Auth: Bearer token (Authorization: Bearer), Test path /health, API key / token the key you generate below. The check-in connection is plain HTTP \u2014 keep port 3101 on your trusted LAN and Tailscale network only; never expose it to the internet.',
+      triggers: ['checkin'],
+    },
+    backup: {
+      title: 'Data backup',
+      body: 'Back up or restore everything Standby knows. A backup is a file holding all your staged transactions, triggers, and settings. Restoring replaces the current state with the backup\u2019s \u2014 a restore counts as a check-in and clears any active grace period. It is a plain JSON file \u2014 keep it somewhere safe. It contains the signed hexes, which reveal the destination addresses and amounts, so treat it like the transactions themselves. The backup is not encrypted.',
+      triggers: ['general'],
+    },
+    version: {
+      title: 'App version',
+      body: 'The version of Standby installed on this device. It only changes when you update the app — in Umbrel, or by pulling a new image on Docker. If a feature in the release notes is missing here, the installed version is older than the notes describe.',
+      triggers: ['general'],
+    },
+  };
+  // The "Applies to" label, derived from the triggers array —
+  // never a second hardcoded per-card string. Trigger codes
+  // alone: one code reads "<Name> triggers only", two read
+  // "<Name> and <Name> triggers", all four read "All trigger
+  // types". 'general' alone reads "General — not tied to a
+  // specific trigger"; 'general' WITH trigger codes reads
+  // "<Trigger label>, and general infrastructure" (the 'only'
+  // drops, because the card's scope is wider than that one
+  // trigger — e.g. Bitcoin nodes: "UTXO triggers, and general
+  // infrastructure").
+  var TRIGGER_NAMES = { checkin: 'Check-in', price: 'BTC price', utxo: 'UTXO', manual: 'Manual' };
+  function helpAppliesLabel(triggers) {
+    var general = triggers.indexOf('general') !== -1;
+    var codes = triggers.filter(function (t) { return t !== 'general'; });
+    var label;
+    if (codes.length === 0) {
+      label = 'General — not tied to a specific trigger';
+    } else if (codes.length === 4) {
+      label = 'All trigger types';
+    } else {
+      label = codes.map(function (c) { return TRIGGER_NAMES[c] || c; }).join(' and ') + ' triggers';
+      if (codes.length === 1 && !general) label += ' only';
+    }
+    if (general && codes.length > 0) label += ', and general infrastructure';
+    return label;
+  }
+  Object.keys(SETTINGS_HELP).forEach(function (key) {
+    var btn = $('help-' + key);
+    if (!btn) return;
+    btn.addEventListener('click', function () {
+      var h = SETTINGS_HELP[key];
+      showDetails(h.title, h.body, '<p><strong>Applies to:</strong> ' + escapeHtml(helpAppliesLabel(h.triggers)) + '</p>');
+    });
+  });
+
+  // Settings filter (0.8.0): a dropdown at the top of the
+  // Settings tab, so it takes one row instead of two. It reads
+  // the SAME triggers array the "?" pop-out renders its
+  // "Applies to" line from — no second mapping. "All settings"
+  // shows every card; a trigger filter shows the cards whose
+  // array includes that trigger. No persistence: the default is
+  // All, and showing the Settings tab resets to All (see showTab).
+  var settingsFilter = 'all';
+  function applySettingsFilter(name) {
+    if (!SETTINGS_HELP) return;
+    settingsFilter = name;
+    var sel = $('filter-select');
+    if (sel) sel.value = name;
+    Object.keys(SETTINGS_HELP).forEach(function (key) {
+      var card = $('card-' + key);
+      if (!card) return;
+      var show = name === 'all' || SETTINGS_HELP[key].triggers.indexOf(name) !== -1;
+      card.style.display = show ? '' : 'none';
+    });
+  }
+  var filterSel = $('filter-select');
+  if (filterSel) filterSel.addEventListener('change', function () { applySettingsFilter(filterSel.value); });
 
   $('btn-save-vacation').addEventListener('click', async function () {
     try {
+      var indefinite = $('set-vacation-indefinite').checked;
       var s = await api('PUT', '/api/settings', {
         vacationMode: $('set-vacation').checked,
-        vacationUntil: $('set-vacation-until').value,
+        vacationUntil: indefinite ? null : ($('set-vacation-until').value || null),
       });
       S.settings = s;
       setMsg($('vacation-msg'), 'Vacation settings saved.', true);
@@ -1993,21 +2999,23 @@
     } catch (e) { setMsg($('vacation-msg'), e.message, false); }
   });
 
-  $('btn-pause').addEventListener('click', async function () {
-    try {
-      await api('POST', '/api/pause', {});
-      setMsg($('pause-msg'), 'Releases paused.', true);
-      await load();
-    } catch (e) { setMsg($('pause-msg'), e.message, false); }
+  $('set-vacation-indefinite').addEventListener('change', function () {
+    $('set-vacation-until').disabled = $('set-vacation-indefinite').checked;
   });
 
-  $('btn-resume').addEventListener('click', async function () {
+  // Global Arm/Disarm (0.8.0): one call arms or disarms every
+  // staged transaction. The server answers with the updated list.
+  async function armAll(enabled) {
     try {
-      await api('POST', '/api/resume', {});
-      setMsg($('pause-msg'), 'Resumed.', true);
+      await api('POST', '/api/bitcoin/txs/arm-all', { enabled: enabled });
+      setMsg($('arm-all-msg'), enabled ? 'All transactions armed.' : 'All transactions disarmed.', true);
       await load();
-    } catch (e) { setMsg($('pause-msg'), e.message, false); }
-  });
+    } catch (e) { setMsg($('arm-all-msg'), e.message, false); }
+  }
+
+  $('btn-arm-all').addEventListener('click', function () { armAll(true); });
+
+  $('btn-disarm-all').addEventListener('click', function () { armAll(false); });
 
   // ---------- check-in API keys ----------
   // One labelled key per service that may check in for the owner. The
@@ -2152,6 +3160,14 @@
       await load();
     } catch (e) { setMsg($('backup-msg'), e.message, false); }
   });
+
+  // App version card (0.8.0): the installed version, from /api/health,
+  // shown in the version card at the bottom of General settings.
+  // Fetched once at startup — it only changes on an update.
+  api('GET', '/api/health').then(function (h) {
+    var v = $('app-version');
+    if (v && h && h.version) v.textContent = h.version;
+  }).catch(function () { /* leave the placeholder */ });
 
   load().catch(function (e) {
     document.querySelector('main').insertAdjacentHTML('afterbegin',
