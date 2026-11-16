@@ -65,7 +65,7 @@ header .spacer { flex: 1; }
   text-decoration: none; font-size: 15px;
 }
 .burger nav a:hover { background: #2f3540; }
-main { max-width: 880px; margin: 0 auto; padding: 14px 20px 20px; }
+main { max-width: 880px; margin: 0 auto; padding: 0 20px 20px; }
 nav.tabs {
   display: flex; gap: 4px; flex-wrap: wrap;
   margin-bottom: 20px;
@@ -152,8 +152,28 @@ button:disabled { opacity: 0.5; cursor: default; }
    padding than the default buttons, so they fit without wrapping
    to a second row. The labels stay readable and the buttons stay
    tappable (full height, ~100px wide each). */
-.btc-actions { display: flex; gap: 6px; flex-wrap: nowrap; }
+.card p.btc-actions { display: flex; gap: 6px; flex-wrap: nowrap; margin-top: 14px; }
 .btc-actions button { flex: 0 1 auto; min-width: 0; padding: 9px 8px; font-size: 14px; white-space: nowrap; }
+/* The "+ Add Tx" oval in the Staged Transactions header (0.8.0):
+   an accent-outlined pill, small enough to sit beside the 18px
+   heading without crowding it. It opens the Add-transaction popup
+   (same form as the Getting Started button). The button lives inside
+   the <summary>, so its click must not toggle the card — app.js
+   stops the event. The summary itself is the flex row (title + pill);
+   the native disclosure marker is replaced by a CSS triangle that
+   rotates when the card is closed, so the header stays one line. */
+#tab-bitcoin details.staged > summary { display: flex; align-items: center; gap: 8px; list-style: none; }
+#tab-bitcoin details.staged > summary::-webkit-details-marker { display: none; }
+#tab-bitcoin details.staged > summary::before { content: '\25bc'; font-size: 14px; flex: 0 0 auto; transition: transform 0.15s ease; }
+#tab-bitcoin details.staged:not([open]) > summary::before { transform: rotate(-90deg); }
+#tab-bitcoin details.staged > summary .sum-text { flex: 1; min-width: 0; }
+.add-tx-pill { flex: 0 0 auto; padding: 5px 12px; font-size: 14px; font-weight: 600; line-height: 1.4; border-radius: 999px; border-color: var(--accent); color: var(--accent); background: transparent; white-space: nowrap; }
+.add-tx-pill:hover { background: var(--accent-bg); }
+/* The "+ Add a pre-signed transaction" button at the bottom of the
+   Transactions tab (0.8.0): it replaces the inline Add form card,
+   and reads exactly like the Getting Started button (full width,
+   17px, 600 weight) — the same button, opening the same popup. */
+.add-open-full { width: 100%; padding: 14px 20px; font-size: 17px; font-weight: 600; }
 .pill {
   display: inline-block; padding: 3px 10px; border-radius: 999px;
   font-size: 13px; font-weight: 600;

@@ -720,17 +720,46 @@
     } catch (e) { setMsg($('grace-msg'), e.message, false); }
   });
 
-  // Getting Started card (0.8.0): "+ Add a pre-signed
-  // transaction" switches to the Transaction(s) tab and scrolls
-  // to the "Add a transaction" form, with the hex field focused
-  // so a paste lands straight in it. It only navigates — it
-  // never submits anything.
-  $('btn-getting-started-add').addEventListener('click', function () {
-    showTab('bitcoin');
-    var formTitle = $('btc-form-title');
-    if (formTitle && formTitle.scrollIntoView) formTitle.scrollIntoView();
+  // Add-transaction popup (0.8.0): the Add form is a modal now,
+  // not a card at the bottom of the Transactions tab. Three buttons
+  // open it — the Getting Started button, the "+ Add a pre-signed
+  // transaction" button at the bottom of the Transactions tab, and
+  // the oval "+ Add Tx" in the Staged Transactions header. Opening
+  // it never switches tabs or scrolls the page; the hex field is
+  // focused so a paste lands straight in it. It never submits
+  // anything on its own.
+  function openAddModal() {
+    var m = $('add-modal');
+    if (!m) return;
+    setMsg($('btc-msg'), '', true);
+    syncAddTriggerRow();
+    syncAddFallbackRow();
+    m.classList.add('open');
     var hex = $('btc-hex');
     if (hex && hex.focus) hex.focus();
+  }
+  function closeAddModal() {
+    var m = $('add-modal');
+    if (m) m.classList.remove('open');
+  }
+  $('btn-getting-started-add').addEventListener('click', function () { openAddModal(); });
+  $('btn-btc-add-open').addEventListener('click', function () { openAddModal(); });
+  // The pill lives inside the Staged Transactions <summary>: a click
+  // on it must NOT toggle the card, so the event is stopped before
+  // it reaches the summary.
+  $('btn-btc-add-pill').addEventListener('click', function (e) {
+    if (e && e.preventDefault) e.preventDefault();
+    if (e && e.stopPropagation) e.stopPropagation();
+    openAddModal();
+  });
+  // The popup closes like the edit modal: Cancel, the X, or a click
+  // on the backdrop. Guarded like modal-x: a mixed tree (new script,
+  // old page) must degrade to a missing X, not a dead page.
+  $('btn-btc-add-cancel').addEventListener('click', function () { closeAddModal(); });
+  var addModalX = $('add-modal-x');
+  if (addModalX) addModalX.addEventListener('click', function () { closeAddModal(); });
+  $('add-modal').addEventListener('click', function (e) {
+    if (e.target === $('add-modal')) closeAddModal();
   });
 
   // ---------- bitcoin ----------
@@ -1569,13 +1598,9 @@
       txCardEls[tx.id] = { row: row, sentLine: sentLine, pill: pill };
       (settled ? archivedList : (pending ? pendingList : activeList)).appendChild(row);
     });
-    // A list with nothing in it yet says so, instead of sitting empty.
-    if (!activeList.children.length) {
-      var noneActive = document.createElement('p');
-      noneActive.className = 'muted';
-      noneActive.textContent = 'No active transactions — add one below.';
-      activeList.appendChild(noneActive);
-    }
+    // A list with nothing in it yet says so, instead of sitting empty
+    // — except the active (staged) list, which stays bare: the
+    // "+ Add a pre-signed transaction" button below it is the prompt.
     if (!pendingList.children.length) {
       var nonePending = document.createElement('p');
       nonePending.className = 'muted';
@@ -2081,7 +2106,12 @@
           var body = { txHex: hex, label: $('btc-label').value, notes: $('btc-notes').value, broadcastVia: $('btc-route').value, publicFallbackDays: fbVal === '' ? null : parseInt(fbVal, 10), trigger: trig };
           if (triggerConfirmed) body.triggerConfirmed = true;
           var r = await api('POST', '/api/bitcoin/txs', body);
-          setMsg($('btc-msg'), 'Transaction added and armed. TXID ' + r.tx.txid + ' — use the toggle to unarm it.' + (r && r.checkinReset ? ' Your check-in was reset to today.' : '') + (r && r.triggerWarning ? ' ' + r.triggerWarning : ''), true);
+          // The popup closes on success; the confirmation lands in
+          // the Staged Transactions card (visible after the popup
+          // closes). Errors stay in the popup (btc-msg) so the
+          // owner can fix them without losing the form.
+          closeAddModal();
+          setMsg($('btc-all-msg'), 'Transaction added and armed. TXID ' + r.tx.txid + ' — use the toggle to unarm it.' + (r && r.checkinReset ? ' Your check-in was reset to today.' : '') + (r && r.triggerWarning ? ' ' + r.triggerWarning : ''), true);
           $('btc-label').value = '';
           $('btc-notes').value = '';
           $('btc-hex').value = '';
@@ -2217,7 +2247,7 @@
   });
 
   // The modal does double duty: a confirmation dialog (Broadcast Now,
-  // Broadcast All, Delete — Proceed + Cancel) and a details pop-out
+  // Broadcast Armed, Delete — Proceed + Cancel) and a details pop-out
   // (a broadcast log entry — no Proceed, Cancel reads "Close").
   function escapeHtml(s) {
     return String(s == null ? '' : s)
@@ -2378,43 +2408,26 @@
       'Broadcast publicly — I understand');
   }
 
-  // Broadcast All (round 12, revised): two separate buttons on the
-  // main card — "Broadcast all" and "Broadcast armed" — each with
-  // its own confirmation dialog. "Broadcast all" sends every
-  // unbroadcasted transaction including unarmed ones; "Broadcast
-  // armed" sends only the armed ones; Cancel sends nothing. Each
-  // dialog names the count, and once the owner proceeds, a status
-  // pop-out says what is being attempted and then what completed,
-  // one line per transaction, so a mixed result (one broadcast, one
-  // stale) is legible instead of a single aggregate line. The
-  // pop-out stays open until the owner closes it; closing it
-  // mid-run leaves it closed and lets the aggregate line below the
-  // buttons speak. The archived and pending ones are never
-  // attempted or counted: their ids are not sent, and the server
-  // skips them too. A Slipstream-pending tx is never broadcast
-  // publicly by Broadcast All — the public escape hatch is a
-  // separate manual button on its card.
-  async function broadcastAll() {
-    var pending = (S.bitcoin.txs || []).filter(function (t) { return !txStatus(t).settled && !txStatus(t).pending; });
-    if (!pending.length) {
-      setMsg($('btc-all-msg'),
-        (S.bitcoin.txs || []).length
-          ? 'Nothing to broadcast — every transaction is already archived or pending.'
-          : 'Nothing to broadcast — no transactions stored.',
-        true);
-      return;
-    }
-    showConfirm('Broadcast all transactions?',
-      'This will broadcast for real — the funds move and it cannot be undone. This sends all ' + pending.length + ' unbroadcasted transaction(s), including unarmed ones. Each one is checked first (a stale one is skipped, not sent) and broadcasts via the primary node, falling back to the secondary if the primary does not answer.',
-      function () { runBroadcastAll(pending, false, 'Broadcast all'); },
-      'Broadcast — I understand');
-  }
-
-  // Broadcast Armed: the same path as Broadcast All, but only the
-  // armed unbroadcasted transactions — the unarmed ones are left
-  // alone. The armed-only filter is applied client-side (which ids
-  // are sent) AND server-side (the armedOnly flag), so a stale or
-  // disarmed id in the request is still never broadcast.
+  // Broadcast Armed (round 12, revised; Broadcast All removed
+  // 0.8.0): one button on the main card — "Broadcast armed" — with
+  // its own confirmation dialog. It sends only the armed
+  // unbroadcasted transactions; the unarmed ones are left alone.
+  // Cancel sends nothing. The dialog names the count, and once the
+  // owner proceeds, a status pop-out says what is being attempted
+  // and then what completed, one line per transaction, so a mixed
+  // result (one broadcast, one stale) is legible instead of a single
+  // aggregate line. The pop-out stays open until the owner closes
+  // it; closing it mid-run leaves it closed and lets the aggregate
+  // line below the buttons speak. The archived and pending ones are
+  // never attempted or counted: their ids are not sent, and the
+  // server skips them too. A Slipstream-pending tx is never
+  // broadcast publicly by Broadcast Armed — the public escape hatch
+  // is a separate manual button on its card.
+  // Broadcast Armed: only the armed unbroadcasted transactions —
+  // the unarmed ones are left alone. The armed-only filter is applied
+  // client-side (which ids are sent) AND server-side (the armedOnly
+  // flag), so a stale or disarmed id in the request is still never
+  // broadcast.
   async function broadcastArmed() {
     var pending = (S.bitcoin.txs || []).filter(function (t) { return !txStatus(t).settled && !txStatus(t).pending; });
     if (!pending.length) {
@@ -2436,10 +2449,9 @@
       'Broadcast — I understand');
   }
 
-  // The actual Broadcast All run, shared by both buttons: the same
-  // progress pop-out, the same POST (armedOnly only for the armed
-  // button), the same per-transaction results. Nothing is broadcast
-  // until the owner confirms in the dialog.
+  // The actual Broadcast Armed run: the progress pop-out, the POST
+  // (armedOnly: true), the per-transaction results. Nothing is
+  // broadcast until the owner confirms in the dialog.
   async function runBroadcastAll(targets, armedOnly, label) {
     if (!targets.length) {
       setMsg($('btc-all-msg'), 'Nothing to broadcast — no armed transactions to broadcast.', true);
@@ -2475,7 +2487,6 @@
     }
   }
 
-  $('btn-btc-broadcast-all').addEventListener('click', broadcastAll);
   $('btn-btc-broadcast-armed').addEventListener('click', broadcastArmed);
 
   $('btn-btc-test-all').addEventListener('click', async function () {
