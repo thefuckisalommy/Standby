@@ -59,7 +59,7 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 // (last.json). Absent on a plain `node server.js` run — the key
 // feature is dormant then; every file access is guarded.
 const CHECKIN_DIR = process.env.CHECKIN_DIR || '/checkin';
-const VERSION = '0.7.22';
+const VERSION = '0.8.0';
 const MAX_BODY = 1024 * 1024; // 1 MB
 
 const MIME = {
@@ -139,6 +139,88 @@ function validPublicFallbackDays(v) {
   return (typeof v === 'number' && PUBLIC_FALLBACK_DAYS.includes(v)) ? v : null;
 }
 
+// Grace period (0.8.0): when the app comes back after being
+// offline, price and UTXO triggers are paused for a grace
+// period so they do not fire on conditions that changed while
+// the app was away. graceOfflineDays is the offline gap that
+// triggers it; graceDurationDays is how long it lasts, or null
+// = indefinite (until the owner resumes from the dashboard
+// card). The allowed values are exactly the ones the Settings
+// dropdowns offer; anything else is a 400 at PUT /api/settings
+// — a bad grace setting must not silently become a different
+// one (unlike the lenient per-tx fallback above, where a
+// missing value becomes Never at serve time).
+const GRACE_OFFLINE_DAYS = [1, 3, 7, 14, 30];
+const GRACE_DURATION_DAYS = [1, 3, 7, 14, 30];
+
+// User controls (0.8.0): the Settings cards for price agreement,
+// check cadence, and fee verdict. Each is a number input with a
+// min/max bound — anything outside is a 400 at PUT /api/settings
+// and at restore, never a silent clamp (a bad value must not
+// silently become a different one).
+const PRICE_AGREEMENT_PCT_MIN = 1, PRICE_AGREEMENT_PCT_MAX = 20, PRICE_AGREEMENT_PCT_DEFAULT = 5;
+const CHECK_CADENCE_SECONDS_MIN = 10, CHECK_CADENCE_SECONDS_MAX = 3600, CHECK_CADENCE_SECONDS_DEFAULT = 60;
+const FEE_LOW_MULT_MIN = 1, FEE_LOW_MULT_MAX = 10, FEE_LOW_MULT_DEFAULT = 2;
+const FEE_MED_MULT_MIN = 0.5, FEE_MED_MULT_MAX = 5, FEE_MED_MULT_DEFAULT = 1;
+
+// ---------------------------------------------------------------------------
+// Triggers (0.8.0). Each transaction carries its own trigger — see
+// lib/store.js for the shapes and normalizeTrigger/triggerOf. These
+// are the server-side presentation helpers; the evaluator lives
+// below, next to evaluateRelease.
+// ---------------------------------------------------------------------------
+
+// The short label for a trigger type, as shown in the readiness
+// pills and the trigger subcard ("TRIGGER · BTC price").
+function triggerLabel(trigger) {
+  if (!trigger || typeof trigger !== 'object') return 'Check-in';
+  switch (trigger.type) {
+    case 'checkin': return 'Check-in';
+    case 'price': return 'BTC price';
+    case 'utxo': return 'UTXO';
+    case 'manual': return 'Manual';
+    default: return 'Check-in';
+  }
+}
+
+// The condition in plain words, as shown in the trigger subcard:
+// "Fired when you don't check in for 35 days",
+// "Fired when BTC price ≥ $150,000", "Fired when UTXO 4a74…:0 is spent",
+// "Never fires — manual only". `trigger` is normalized (see
+// triggerOf) — the callers pass the normalized one; a missing one
+// falls back to the check-in default.
+function triggerConditionText(trigger) {
+  const t = (trigger && trigger.type) ? trigger : store.defaultTrigger(35);
+  switch (t.type) {
+    case 'checkin':
+      return "Fired when you don't check in for " + t.params.thresholdDays + (t.params.thresholdDays === 1 ? ' day' : ' days');
+    case 'price':
+      return 'Fired when BTC price ' + (t.params.op === '>=' ? '≥' : '≤') + ' $' + t.params.value.toLocaleString('en-US');
+    case 'utxo': {
+      const parts = String(t.params.outpoint || '').split(':');
+      // (0.8.0) The confirmation mode rides on the condition:
+      // the default (1 confirmation) reads as before — "is spent"
+      // already meant confirmed — while unconfirmed and N > 1 say
+      // so explicitly, so the subcard names the rule.
+      const confs = (t.params.confirmations === 0) ? 0 : (t.params.confirmations || 1);
+      const suffix = confs === 0 ? ' (unconfirmed)' : (confs === 1 ? '' : ' (' + confs + ' confirmations)');
+      return 'Fired when UTXO ' + (parts[0] || '').slice(0, 4) + '…:' + (parts[1] || '') + ' is spent' + suffix;
+    }
+    case 'manual':
+      return 'Never fires — manual only';
+    default:
+      return '';
+  }
+}
+
+// The trigger type to stamp on a release record (0.8.0): the type
+// that fired this broadcast, so a release record says which rule
+// it came from. For a manual broadcast it is the tx's current
+// trigger type (informational — the owner fired it by hand).
+function releaseTriggerFor(state, tx) {
+  return store.triggerOf(tx).type;
+}
+
 // The deadline a Slipstream transaction's public fallback fires at —
 // or null when there is none. Two anchors, by the transaction's
 // state (the owner's rule):
@@ -202,7 +284,7 @@ function sanitizeState(state) {
 //     ({ lastCheckinAt, keyId, label, sourceIp }); mergeExternalCheckin()
 //     below folds a newer timestamp into the check-in clock, the same
 //     way POST /api/checkin does (clears the cycle-scoped release
-//     records, never a stale one; auto-resumes a pause; logs which key
+//     records, never a stale one; logs which key
 //     checked in). Idempotent: the same file merged twice changes
 //     nothing the second time, because its timestamp is no longer
 //     newer than the clock.
@@ -293,23 +375,34 @@ function mergeExternalCheckin(state, now) {
   if (ext.at.getTime() > now.getTime() + 5 * 60 * 1000) return false;
   const last = state.checkin.lastCheckinAt ? new Date(state.checkin.lastCheckinAt) : null;
   if (last && ext.at.getTime() <= last.getTime()) return false;
-  const wasPaused = state.settings.paused;
   state.checkin.lastCheckinAt = ext.raw;
   state.checkin.totalCheckins += 1;
   // A check-in clears an offline-gap hold (0.7.22): the owner is
   // alive, the clock resets, and there is nothing to hold back.
   state.checkin.heldUntil = null;
+  // (0.8.0) A check-in clears the cycle-scoped release records of
+  // the CHECK-IN rules only — a price or UTXO rule's record belongs
+  // to its own trigger's cycle, not the check-in clock, so a
+  // check-in must not clear it (and must not reset its trigger).
+  // A stale record survives either way, as before.
   for (const t of (state.bitcoin.txs || [])) {
+    if (store.triggerOf(t).type !== 'checkin') continue;
     if (t.release && t.release.status === 'stale') continue;
     t.release = null;
+    // The clock restarts at this check-in: any frozen time is
+    // wiped, then a tx that is still inactive (disarmed, or on
+    // vacation) is re-marked inactive from now — it stays frozen
+    // at 0 instead of counting while inactive.
+    t.checkinOffsetMs = 0;
+    t.checkinInactiveSince = null;
   }
-  if (wasPaused) state.settings.paused = false;
+  for (const t of (state.bitcoin.txs || [])) syncCheckinFreeze(t, state, now);
   if (ext.keyId) {
     const k = (state.checkinKeys || []).find((x) => x.id === ext.keyId);
     if (k) k.lastUsedAt = ext.raw;
   }
   store.saveState(DATA_DIR, state);
-  store.appendCheckin(DATA_DIR, { ts: ext.raw, method: 'api-key', keyId: ext.keyId, keyLabel: ext.keyLabel, sourceIp: ext.sourceIp || null, autoResumed: wasPaused });
+  store.appendCheckin(DATA_DIR, { ts: ext.raw, method: 'api-key', keyId: ext.keyId, keyLabel: ext.keyLabel, sourceIp: ext.sourceIp || null });
   return true;
 }
 
@@ -336,14 +429,25 @@ function mergeExternalCheckin(state, now) {
 // gap check would miss it — the persisted heldUntil is what
 // carries it). Returns true when it set a new hold (caller
 // saves); a check-in clears it (see both check-in paths).
-// Uses thresholdDays from settings, never a hardcoded number, so
-// it scales if the owner changes the threshold.
+// There is no global threshold any more: the fallback is the
+// 35-day default, used only when no check-in rule is armed.
 function applyOfflineHold(state, now) {
   const s = state.settings;
   const last = state.checkin.lastCheckinAt ? new Date(state.checkin.lastCheckinAt) : null;
   const online = state.checkin.lastOnlineAt ? new Date(state.checkin.lastOnlineAt) : null;
   if (!last || !online) return false;
-  const thresholdMs = s.thresholdDays * 86400000;
+  // (0.8.0) The hold protects the EARLIEST-firing check-in rule:
+  // the threshold that measures both conditions is the smallest
+  // thresholdDays among the ARMED check-in rules — a tx with a
+  // 7-day rule must not fire the moment the device comes back
+  // just because the 35-day fallback is longer. With no armed
+  // check-in rule the fallback is the threshold (the hold is
+  // inert then anyway — nothing fires on the check-in clock).
+  const ckThresholds = (state.bitcoin.txs || [])
+    .filter((t) => t.enabled && store.triggerOf(t).type === 'checkin')
+    .map((t) => store.triggerOf(t).params.thresholdDays);
+  const thresholdDays = ckThresholds.length ? Math.min.apply(null, ckThresholds) : store.FALLBACK_THRESHOLD_DAYS;
+  const thresholdMs = thresholdDays * 86400000;
   if (now.getTime() - online.getTime() <= thresholdMs / 4) return false;
   if (now.getTime() - last.getTime() <= thresholdMs / 2) return false;
   const heldRaw = state.checkin.heldUntil;
@@ -353,10 +457,69 @@ function applyOfflineHold(state, now) {
   return true;
 }
 
-// Derived check-in status from state + now. One number: the broadcast
-// threshold. Check in before it runs out and the clock resets; past it,
-// the release is due. There are no warning levels and no grace period.
-// Once a release has actually broadcast (the threshold was exceeded
+// --- Grace period for price/UTXO triggers (0.8.0) ---
+// state.grace = { graceUntil, triggeredAt, offlineGapDays }.
+// graceUntil is an ISO timestamp, or null for an indefinite
+// grace (until the owner resumes). triggeredAt is when the
+// grace was set; offlineGapDays is how many days the app had
+// been offline when it was set (the dashboard card explains
+// the pause with that number). The grace is app-level state:
+// it is set when the app notices an offline gap longer than
+// settings.graceOfflineDays, whatever txs exist at the time.
+// It is NOT set while one is already active (an active grace
+// never re-extends itself), and it is NOT cleared by a
+// check-in — only by expiry (now past graceUntil) or by
+// POST /api/grace/resume. Check-in triggers are not affected
+// by it at all: they keep their own heldUntil hold above,
+// which is a separate mechanism with its own thresholds.
+function graceStatus(state, now) {
+  const g = (state && state.grace && typeof state.grace === 'object') ? state.grace : null;
+  if (!g || !g.triggeredAt) return null;
+  if (g.graceUntil && now.getTime() > new Date(g.graceUntil).getTime()) return null;
+  return {
+    active: true,
+    indefinite: !g.graceUntil,
+    graceUntil: g.graceUntil || null,
+    triggeredAt: g.triggeredAt,
+    offlineGapDays: (typeof g.offlineGapDays === 'number') ? g.offlineGapDays : null,
+  };
+}
+function isGraceActive(state, now) {
+  return graceStatus(state, now) !== null;
+}
+// Notice an offline gap and start a grace period for the
+// price/UTXO triggers, if the gap is longer than the
+// configured threshold. Runs next to applyOfflineHold in
+// evaluateRelease and on the GET /api/state and /api/status
+// reads, and on the hourly tick — so a returning app notices
+// the gap promptly, before any price/UTXO rule can fire.
+// Returns true when it set a grace. (The hourly tick refreshes
+// lastOnlineAt right after this runs, so an expired grace is
+// not re-set on the same stale stamp — a fresh gap after the
+// app returns is what sets the next one.)
+function applyGrace(state, now) {
+  if (isGraceActive(state, now)) return false;
+  const online = state.checkin && state.checkin.lastOnlineAt ? new Date(state.checkin.lastOnlineAt) : null;
+  if (!online || Number.isNaN(online.getTime())) return false;
+  const s = state.settings || {};
+  const offlineDays = (typeof s.graceOfflineDays === 'number' && GRACE_OFFLINE_DAYS.includes(s.graceOfflineDays)) ? s.graceOfflineDays : 7;
+  const gapMs = now.getTime() - online.getTime();
+  if (gapMs <= offlineDays * 86400000) return false;
+  const durationDays = (s.graceDurationDays === null) ? null
+    : ((typeof s.graceDurationDays === 'number' && GRACE_DURATION_DAYS.includes(s.graceDurationDays)) ? s.graceDurationDays : 7);
+  state.grace = {
+    graceUntil: durationDays === null ? null : new Date(now.getTime() + durationDays * 86400000).toISOString(),
+    triggeredAt: now.toISOString(),
+    offlineGapDays: Math.floor(gapMs / 86400000),
+  };
+  return true;
+}
+
+// Derived check-in status from state + now. Each armed check-in
+// tx has its own threshold: check in before the soonest runs out
+// and the clock resets; past it, the release is due. There are no
+// warning levels and no grace period shown.
+// Once a release has actually broadcast (a threshold was exceeded
 // and a release went out), the status is 'broadcasted' — a manual
 // broadcast does not count, only a release does (the release record
 // carries kind 'release'). But 'broadcasted' means the release is
@@ -371,12 +534,16 @@ function applyOfflineHold(state, now) {
 // Actions that would arm a transaction or shorten the window
 // while the clock is here reset the check-in instead of letting
 // a due release fire. thresholdDays is the threshold to measure
-// against (the NEW threshold for a settings save, the current one
-// for arming/adding) — never hardcoded.
-function inDangerZone(state, now, thresholdDays) {
+// against (the check-in tx's own threshold for arming/adding/
+// editing) — never hardcoded. liveOffsetMs is the tx's frozen
+// time (0.8.0): the due is measured from the EFFECTIVE last
+// check-in (last + frozen), so a frozen clock is never in the
+// danger zone for time that never counted.
+function inDangerZone(state, now, thresholdDays, liveOffsetMs) {
   if (!state.checkin.lastCheckinAt || !thresholdDays || thresholdDays <= 0) return false;
   const thresholdMs = thresholdDays * 86400000;
-  const dueMs = new Date(state.checkin.lastCheckinAt).getTime() + thresholdMs;
+  const off = (typeof liveOffsetMs === 'number' && Number.isFinite(liveOffsetMs) && liveOffsetMs >= 0) ? liveOffsetMs : 0;
+  const dueMs = new Date(state.checkin.lastCheckinAt).getTime() + off + thresholdMs;
   return (dueMs - now.getTime()) <= 0.25 * thresholdMs;
 }
 
@@ -394,36 +561,125 @@ function resetCheckin(state, now, method) {
   state.checkin.totalCheckins += 1;
   state.checkin.heldUntil = null;
   state.checkin.lastOnlineAt = now.toISOString();
-  store.appendCheckin(DATA_DIR, { ts: now.toISOString(), method, autoResumed: false });
+  // The clock restarts at now: any frozen time is wiped (the
+  // effective last check-in is now, so a carried offset would
+  // push it into the future). A tx that is still inactive is
+  // re-marked inactive from now, so it stays frozen at 0.
+  for (const t of (state.bitcoin.txs || [])) {
+    if (store.triggerOf(t).type !== 'checkin') continue;
+    t.checkinOffsetMs = 0;
+    t.checkinInactiveSince = null;
+  }
+  for (const t of (state.bitcoin.txs || [])) syncCheckinFreeze(t, state, now);
+  store.appendCheckin(DATA_DIR, { ts: now.toISOString(), method });
 }
 
-// carries a 'failed' release record, the status stays 'release-due'
-// and the release keeps running. A stale transaction does not keep
-// it due (stale is terminal: skip it), and a transaction that has
-// never been attempted does not either — one added after a release
-// still waits for the next cycle. A check-in clears the
-// cycle-scoped release records — a stale record survives, it is a
-// fact about the inputs — so checking in after a broadcast resets
-// the status to 'on-track'.
-function checkinStatus(state, now) {
+// The check-in freeze (0.8.0): inactive time does not count
+// toward the check-in countdown. A check-in tx is INACTIVE when
+// it is disarmed (enabled=false) or vacation mode is on —
+// Global Arm/Disarm sets enabled=false on every tx, so it is
+// covered by the disarmed cause, and there is no separate
+// global-disarm flag. ONE per-tx offset carries all three causes
+// (vacation, global disarm, per-tx disarm): lastCheckinAt is
+// never shifted, so a period where a tx was BOTH disarmed and on
+// vacation is counted once, never twice.
+//   checkinOffsetMs — accumulated inactive milliseconds, frozen
+//     into the clock when an inactive period ends.
+//   checkinInactiveSince — ISO timestamp of when the current
+//     inactive period started, or null while the tx is active.
+// checkinLiveOffsetMs(tx, now) is the total frozen time RIGHT
+// NOW: the banked offset plus the open inactive period, if any.
+// syncCheckinFreeze(tx, state, now) is called on every transition
+// that can change a tx's active/inactive state (arm/disarm,
+// vacation on/off, check-in, vacation expiry, arm-all, reset).
+// The `if (!tx.checkinInactiveSince)` guard is what prevents
+// double-counting: a second cause starting while the tx is
+// already inactive does not restart the period, it just extends
+// the same one.
+function checkinLiveOffsetMs(tx, now) {
+  const base = (typeof tx.checkinOffsetMs === 'number' && Number.isFinite(tx.checkinOffsetMs) && tx.checkinOffsetMs >= 0) ? tx.checkinOffsetMs : 0;
+  if (typeof tx.checkinInactiveSince === 'string' && tx.checkinInactiveSince) {
+    const since = new Date(tx.checkinInactiveSince).getTime();
+    if (Number.isFinite(since)) return base + Math.max(0, now.getTime() - since);
+  }
+  return base;
+}
+function syncCheckinFreeze(tx, state, now) {
+  if (store.triggerOf(tx).type !== 'checkin') return;
+  const inactive = !tx.enabled || !!state.settings.vacationMode;
+  if (inactive) {
+    if (!tx.checkinInactiveSince) tx.checkinInactiveSince = now.toISOString();
+  } else if (tx.checkinInactiveSince) {
+    const since = new Date(tx.checkinInactiveSince).getTime();
+    if (Number.isFinite(since)) {
+      tx.checkinOffsetMs = checkinLiveOffsetMs(tx, now);
+    }
+    tx.checkinInactiveSince = null;
+  }
+}
+
+// Vacation expiry (0.8.0): a dated vacation ends at the END of
+// vacationUntil — the owner is away THROUGH that date, so the
+// clock resumes at the start of the next day, local time. An
+// indefinite vacation (vacationUntil null) never expires on its
+// own. On expiry the freeze is locked in (syncCheckinFreeze) so
+// the days away never count, and the clock resumes from the
+// frozen count. Returns true when it ended a vacation (caller
+// saves). Called from the hourly tick and from evaluateRelease,
+// so a lapsed vacation ends on the next evaluation of any kind,
+// not only on the next hourly tick.
+function vacationEndMs(vacationUntil) {
+  if (typeof vacationUntil !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(vacationUntil)) return null;
+  const y = Number(vacationUntil.slice(0, 4));
+  const m = Number(vacationUntil.slice(5, 7));
+  const d = Number(vacationUntil.slice(8, 10));
+  const end = new Date(y, m - 1, d + 1); // local midnight starting the day after the last away day
+  return Number.isNaN(end.getTime()) ? null : end.getTime();
+}
+function expireVacation(state, now) {
   const s = state.settings;
+  if (!s.vacationMode) return false;
+  const endMs = vacationEndMs(s.vacationUntil);
+  if (endMs === null) return false; // indefinite — holds until the owner says they're back
+  if (now.getTime() < endMs) return false;
+  s.vacationMode = false;
+  s.vacationUntil = null;
+  for (const t of (state.bitcoin.txs || [])) syncCheckinFreeze(t, state, now);
+  return true;
+}
+
+// The check-in clock, pure (0.8.0): the due instant for a given
+// threshold, the offline-gap hold's effect on it, and the clock
+// state — ignoring vacation / broadcast records (those
+// are checkinStatus's layer, below). Extracted from checkinStatus
+// so the per-transaction check-in trigger evaluates the same clock
+// at its own threshold instead of duplicating the math.
+//   state: 'not-started' (no check-in yet), 'on-track',
+//     'held' (an offline-gap grace is active and is the thing
+//     pushing the due out), 'release-due'.
+//   windowDays: the effective window in whole days (the threshold
+//     on-track, the longer held window while a grace is active) —
+//     the countdown bar and caption measure against it.
+//   daysSince: whole days since the last check-in (display only).
+// The release decision compares real timestamps (now vs. the due
+// instant), not the floored day count — otherwise the release
+// lands up to a whole day after the displayed bar
+// (0.7.5 and earlier only released once the floored day count
+// passed the threshold).
+function checkinClock(state, now, thresholdDays, liveOffsetMs) {
   const last = state.checkin.lastCheckinAt ? new Date(state.checkin.lastCheckinAt) : null;
-  if (s.vacationMode) {
-    return { state: 'vacation', label: 'Vacation mode', daysSince: last ? days(last, now) : null, vacationUntil: s.vacationUntil || null };
+  if (!last || !thresholdDays || thresholdDays <= 0) {
+    return { dueMs: null, heldMs: null, heldActive: false, effectiveDueMs: null, nextDue: null, windowDays: null, daysSince: null, state: 'not-started' };
   }
-  if (s.paused) {
-    return { state: 'paused', label: 'Paused', daysSince: last ? days(last, now) : null };
-  }
-  if (!last) {
-    return { state: 'not-started', label: 'Not started', daysSince: null, nextDue: null };
-  }
-  const d = days(last, now); // display only — the release decision below is exact
-  // Exact due instant. The release decision compares real timestamps
-  // (now vs. the due instant), not the floored day count — otherwise
-  // the release lands up to a whole day after the displayed next-due
-  // time (0.7.5 and earlier only released once the floored day count
-  // passed the threshold).
-  const dueMs = last.getTime() + s.thresholdDays * 86400000;
+  // The freeze (0.8.0): inactive time does not count, so the
+  // clock is measured from the EFFECTIVE last check-in — the
+  // real one plus the frozen time. The due and the window shift
+  // together by the same offset, so the window stays the
+  // threshold on-track and daysSince reads the frozen count.
+  const off = (typeof liveOffsetMs === 'number' && Number.isFinite(liveOffsetMs) && liveOffsetMs >= 0) ? liveOffsetMs : 0;
+  const effLast = new Date(last.getTime() + off);
+  const d = Math.max(0, days(effLast, now));
+  const dueMs = effLast.getTime() + thresholdDays * 86400000;
   // Offline-gap grace (0.7.22): a hold pushes the effective due
   // out. heldUntil is a persisted "broadcast no earlier than"
   // instant; the effective due is the later of the original due and
@@ -439,8 +695,96 @@ function checkinStatus(state, now) {
   const nextDue = new Date(effectiveDueMs).toISOString();
   // Effective window, whole days, for the countdown bar + caption:
   // last check-in to the effective due. On-track it is the
-  // threshold; while held it is the longer held window.
-  const windowDays = Math.max(1, Math.round((effectiveDueMs - last.getTime()) / 86400000));
+  // threshold; while held it is the longer held window. Measured
+  // from the EFFECTIVE last check-in (see the freeze above), so
+  // a frozen bar's window stays its threshold.
+  const windowDays = Math.max(1, Math.round((effectiveDueMs - effLast.getTime()) / 86400000));
+  // A hold is in force only when it is active AND it is the thing
+  // pushing the due out (heldUntil past the original due). A hold
+  // left over from before a threshold increase does not hold
+  // anything back — the original due is later, so on-track.
+  const st = now.getTime() < effectiveDueMs
+    ? ((heldActive && heldMs >= dueMs) ? 'held' : 'on-track')
+    : 'release-due';
+  return { dueMs, heldMs, heldActive, effectiveDueMs, nextDue, windowDays, daysSince: d, state: st };
+}
+
+// carries a 'failed' release record, the status stays 'release-due'
+// and the release keeps running. A stale transaction does not keep
+// it due (stale is terminal: skip it), and a transaction that has
+// never been attempted does not either — one added after a release
+// still waits for the next cycle. A check-in clears the
+// cycle-scoped release records — a stale record survives, it is a
+// fact about the inputs — so checking in after a broadcast resets
+// the status to 'on-track'.
+// Derived check-in status (0.8.0, per-tx bars): there is no
+// global broadcast threshold any more — each check-in tx
+// has its own countdown, measured at ITS OWN threshold with
+// checkinClock, and served as checkinTxs (one entry per ACTIVE
+// check-in tx: { id, label, thresholdDays, daysSince,
+// windowDays, nextDue, state, enabled }). A settled or pending tx gets no
+// bar — its fate is decided, so there is nothing to count down
+// to (see txSettledOrPending below, which mirrors the frontend
+// txStatus settled / pending split for the stored-state cases).
+// The bar's window is the EFFECTIVE one — the
+// tx's threshold on-track, the longer held window while an
+// offline-gap grace is active — so a held bar just counts to the
+// held date. A tx with no check-in yet reads 0 of its threshold.
+// A DISARMED check-in tx keeps its bar, frozen at the day count
+// it was left at (enabled: false, muted in the UI) — inactive
+// time does not count, so its count never advances while it is
+// disarmed or on vacation, and re-arming resumes from the frozen
+// count. The top-level state, nextDue and windowDays come from
+// the ARMED entries only: a disarmed tx cannot fire, so its due
+// date must not drive the overall due and a frozen past-due
+// disarmed tx must not read as 'release-due'. The top-level
+// daysSince is the soonest armed entry's count (or the first
+// disarmed entry's frozen count when nothing is armed).
+// A tx whose fate is decided — broadcasted (settled or pending)
+// or recorded stale / slipstream-pending / broadcast — is done
+// counting down: it gets no check-in bar. This mirrors the
+// frontend txStatus settled / pending split for the stored-state
+// cases (the dry-run-only signals are not visible here).
+// 'failed' and 'conflict' are NOT settled: the tx is still owed
+// a broadcast, so it keeps its bar.
+function txSettledOrPending(t) {
+  if (t.broadcasted) return true;
+  const rs = t.release && t.release.status;
+  return rs === 'stale' || rs === 'submitted-slipstream' || rs === 'broadcast';
+}
+function checkinStatus(state, now) {
+  const s = state.settings;
+  const last = state.checkin.lastCheckinAt ? new Date(state.checkin.lastCheckinAt) : null;
+  const txs = state.bitcoin.txs || [];
+  const isCheckinTx = (t) => store.triggerOf(t).type === 'checkin';
+  const checkinTxs = txs
+    .filter((t) => isCheckinTx(t) && !txSettledOrPending(t))
+    .map((t) => {
+      const th = store.triggerOf(t).params.thresholdDays;
+      const off = checkinLiveOffsetMs(t, now);
+      if (!last) return { id: t.id, label: t.label || '', thresholdDays: th, daysSince: 0, windowDays: th, nextDue: null, state: 'not-started', enabled: !!t.enabled };
+      const clock = checkinClock(state, now, th, off);
+      return { id: t.id, label: t.label || '', thresholdDays: th, daysSince: clock.daysSince, windowDays: clock.windowDays, nextDue: clock.nextDue, state: clock.state, enabled: !!t.enabled };
+    });
+  // The top level is driven by the ARMED entries only — a
+  // disarmed tx cannot fire (see the comment above). When
+  // nothing is armed the soonest due is null, and daysSince
+  // falls back to the first disarmed entry's frozen count.
+  const armedEntries = checkinTxs.filter((c) => c.enabled);
+  const nextDue = armedEntries.reduce((acc, c) => (!c.nextDue ? acc : (!acc || c.nextDue < acc ? c.nextDue : acc)), null);
+  const soonest = armedEntries.find((c) => c.nextDue === nextDue);
+  const base = {
+    daysSince: soonest ? soonest.daysSince : (checkinTxs.length ? checkinTxs[0].daysSince : (last ? days(last, now) : null)),
+    nextDue,
+    windowDays: soonest ? soonest.windowDays : null,
+    checkinTxs,
+  };
+  if (s.vacationMode) {
+    return { ...base, state: 'vacation', label: 'Vacation mode', vacationUntil: s.vacationUntil || null };
+  }
+  if (!last) {
+    return { ...base, state: 'not-started', label: 'Not started' };
+  }
   // A 'failed' record on an ARMED transaction means the release is
   // not done: that transaction is still owed a broadcast, and the
   // next hourly tick retries it (0.7.14). Only armed transactions
@@ -449,27 +793,574 @@ function checkinStatus(state, now) {
   // is terminal, so neither keeps the status 'release-due'. A
   // transaction that has never been attempted does not keep it due
   // either — one added after a release still waits for the next cycle.
-  const txs = state.bitcoin.txs || [];
-  const anyFailed = txs.some((t) => t.enabled && t.release && t.release.status === 'failed');
+  // (0.8.0) These checks are about the CHECK-IN trigger only: a
+  // price or UTXO broadcast (or failure) must not move the
+  // check-in card — that rule has its own trigger and its own
+  // state. A tx with no trigger field is a legacy check-in tx
+  // (see triggerOf), so it counts.
+  const anyFailed = txs.some((t) => t.enabled && isCheckinTx(t) && t.release && t.release.status === 'failed');
   // A transaction waiting on MARA (0.7.16) means the release is not
   // done: it still needs to become visible publicly or be declared
   // failed, so the status is not 'broadcasted' while one is waiting
   // — even if another transaction already broadcast. Only armed
   // transactions count (a disabled one's record is inert, like its
   // 'failed' record).
-  const anyWaitingMara = txs.some((t) => t.enabled && t.release && t.release.status === 'submitted-slipstream');
-  if (!anyFailed && !anyWaitingMara && txs.some((t) => t.release && t.release.status === 'broadcast' && t.release.kind === 'release')) {
-    return { state: 'broadcasted', label: 'Broadcasted', daysSince: d, nextDue, windowDays };
+  const anyWaitingMara = txs.some((t) => t.enabled && isCheckinTx(t) && t.release && t.release.status === 'submitted-slipstream');
+  if (!anyFailed && !anyWaitingMara && txs.some((t) => isCheckinTx(t) && t.release && t.release.status === 'broadcast' && t.release.kind === 'release')) {
+    return { ...base, state: 'broadcasted', label: 'Broadcasted' };
   }
-  if (now.getTime() < effectiveDueMs) {
-    // A hold is in force only when it is active AND it is the thing
-    // pushing the due out (heldUntil past the original due). A hold
-    // left over from before a threshold increase does not hold
-    // anything back — the original due is later, so on-track.
-    if (heldActive && heldMs >= dueMs) return { state: 'held', label: 'Grace period', daysSince: d, nextDue, windowDays };
-    return { state: 'on-track', label: 'On track', daysSince: d, nextDue, windowDays };
+  // (0.8.0) Only ARMED check-in txs can make the card
+  // 'release-due' — a disarmed tx frozen past its due cannot fire,
+  // so it must not drive the overall state either.
+  if (armedEntries.some((c) => c.state === 'release-due')) return { ...base, state: 'release-due', label: 'Release due' };
+  return { ...base, state: 'on-track', label: 'On track' };
+}
+
+// ---------------------------------------------------------------------------
+// Trigger evaluation (0.8.0). One function per trigger type, plus the
+// shared price cache. evaluateTrigger(state, tx, now) returns
+// { fire, status, reason } and writes the tx's triggerState (the
+// caller saves). triggerStatusFor(state, tx, now) is the UI-facing
+// status, computed from the STORED triggerState (no network) —
+// except the check-in trigger, whose state is live clock math so
+// the card's "3 of 35 days elapsed" line is current on every page
+// load. checkTriggerNow(trg, state, now) evaluates a trigger ONCE,
+// live, without changing any state (the /api/triggers/check
+// endpoint and the add-time warning).
+// ---------------------------------------------------------------------------
+const PRICE_JUMP_WINDOW_MS = 60 * 60 * 1000; // the 10x-jump guard (below) only applies when the last good reading is recent — over a longer gap a real 10x move is possible
+
+// The configured price sources (Settings: priceSources
+// {source1, source2}), defaulting to CoinGecko + Coinbase. An
+// unknown id or identical sources fall back to the defaults —
+// the settings validator (PUT /api/settings) rejects those, but
+// a hand-edited or restored state must never break the fetch.
+function priceSourcesOf(settings) {
+  const s = (settings && settings.priceSources && typeof settings.priceSources === 'object') ? settings.priceSources : {};
+  const s1 = (typeof s.source1 === 'string' && bitcoin.priceProviderById(s.source1)) ? s.source1 : 'coingecko';
+  const s2 = (typeof s.source2 === 'string' && bitcoin.priceProviderById(s.source2)) ? s.source2 : 'coinbase';
+  if (s1 === s2) return { source1: 'coingecko', source2: 'coinbase' };
+  return { source1: s1, source2: s2 };
+}
+
+// The user controls (0.8.0), read defensively like
+// priceSourcesOf above: the settings validator (PUT
+// /api/settings, restore) rejects out-of-range values, but a
+// hand-edited or restored state must never break an evaluation
+// — an unusable value falls back to its default.
+function priceAgreementPctOf(settings) {
+  const v = settings && settings.priceAgreementPct;
+  return (typeof v === 'number' && Number.isFinite(v) && v >= PRICE_AGREEMENT_PCT_MIN && v <= PRICE_AGREEMENT_PCT_MAX) ? v : PRICE_AGREEMENT_PCT_DEFAULT;
+}
+function checkCadenceSecondsOf(settings) {
+  const v = settings && settings.checkCadenceSeconds;
+  return (typeof v === 'number' && Number.isFinite(v) && v >= CHECK_CADENCE_SECONDS_MIN && v <= CHECK_CADENCE_SECONDS_MAX) ? v : CHECK_CADENCE_SECONDS_DEFAULT;
+}
+
+// The price cache holds BOTH readings (per source, TTL = the
+// check cadence — Settings: Check cadence, default 60 seconds)
+// plus which sources they were fetched for — a settings change
+// makes the cache stale, so the next read fetches the new
+// sources instead of serving the old ones. readings is
+// { [sourceId]: { provider, price|null, error|null } }.
+let priceCache = { readings: {}, fetchedAt: null, source1: null, source2: null };
+
+// The current BTC price readings (per source), from the cache
+// when fresh, else a live fetch of both sources in parallel.
+// Returns the readings map — the caller combines them (the
+// configured agreement rule + the directional extreme) via
+// bitcoin.combinePriceReadings. `cadenceSeconds` is the cache
+// TTL (Settings: Check cadence): the cache is fresh for exactly
+// one tick, so a faster cadence fetches fresher prices and a
+// slower cadence does not refetch on every read. A fetched
+// reading is cached even when the evaluator later judges it
+// implausible (the evaluator keeps lastPrice separately — see
+// evaluatePriceTrigger — so a bad reading never becomes the
+// baseline for the next one).
+async function fetchPriceCached(sources, cadenceSeconds) {
+  const src = (sources && sources.source1 && sources.source2) ? sources : { source1: 'coingecko', source2: 'coinbase' };
+  const ttlMs = ((typeof cadenceSeconds === 'number' && Number.isFinite(cadenceSeconds) && cadenceSeconds > 0) ? cadenceSeconds : CHECK_CADENCE_SECONDS_DEFAULT) * 1000;
+  const nowMs = Date.now();
+  if (priceCache.fetchedAt && priceCache.source1 === src.source1 && priceCache.source2 === src.source2
+      && priceCache.readings && Object.keys(priceCache.readings).length
+      && (nowMs - new Date(priceCache.fetchedAt).getTime()) < ttlMs) {
+    return priceCache.readings;
   }
-  return { state: 'release-due', label: 'Release due', daysSince: d, nextDue, windowDays };
+  const readings = await bitcoin.fetchPriceReadings(src.source1, src.source2);
+  priceCache = { readings, fetchedAt: new Date(nowMs).toISOString(), source1: src.source1, source2: src.source2 };
+  return readings;
+}
+
+// The cached prices as served to the UI (GET /api/state) — the
+// per-source readings, the consensus price (a single display
+// number: the average of two agreeing readings, the single valid
+// one, or null), and the fetched-at timestamp. `agreementPct`
+// is the configured agreement (Settings: Price agreement), so
+// the displayed consensus uses the same rule as the trigger.
+function priceCacheForState(agreementPct) {
+  return {
+    price: bitcoin.priceConsensus(priceCache.readings || {}, agreementPct),
+    prices: priceCache.readings || {},
+    fetchedAt: priceCache.fetchedAt,
+    source1: priceCache.source1, source2: priceCache.source2,
+  };
+}
+
+// The consolidated exchange status for the readiness card
+// (0.8.0): one status for the configured price sources, so the
+// readiness card shows it once instead of repeating it per
+// price tx. OK = both responding and agreeing within the
+// configured agreement; degraded = one source down
+// (single-source mode); error = they disagree by more than the
+// configured agreement or neither responds; not-tested = no
+// readings yet (cache cold, or for different sources). Returns
+// {status, detail, sources} — the detail is generic (no
+// per-source prices); `sources` is one row per configured
+// source, in configured order, each with its own status and
+// last price (or error), so the readiness card can list them
+// like the node rows. `pc` is the priceCacheForState() shape.
+function exchangeStatusFor(pc, sources, agreementPct) {
+  const ok = pc && pc.prices && Object.keys(pc.prices).length
+    && pc.source1 === sources.source1 && pc.source2 === sources.source2;
+  // One row per configured price source (in configured order).
+  // A row is 'ok' when it has a price, 'error' when it has an
+  // error (or no reading at all), and 'not-tested' while the
+  // cache is cold or for different sources.
+  const rows = [sources.source1, sources.source2].map((pid) => {
+    const prov = bitcoin.PRICE_PROVIDERS.find((p) => p.id === pid);
+    const label = prov ? prov.label : pid;
+    if (!ok) return { provider: pid, label, price: null, error: null, status: 'not-tested' };
+    const r = pc.prices[pid] || null;
+    if (!r) return { provider: pid, label, price: null, error: 'No reading', status: 'error' };
+    const price = typeof r.price === 'number' ? r.price : null;
+    const error = r.error ? String(r.error) : null;
+    return { provider: pid, label, price, error, status: price != null ? 'ok' : 'error' };
+  });
+  if (!ok) return { status: 'not-tested', detail: 'No price readings yet', sources: rows };
+  const agree = (typeof agreementPct === 'number' && Number.isFinite(agreementPct) && agreementPct > 0) ? agreementPct : PRICE_AGREEMENT_PCT_DEFAULT;
+  const comb = bitcoin.combinePriceReadings(pc.prices, '>=', agree);
+  if (comb.mode === 'dual') return { status: 'ok', detail: 'Both price sources agree', sources: rows };
+  if (comb.mode === 'single') return { status: 'degraded', detail: 'One price source down — running on a single source', sources: rows };
+  if (comb.mode === 'disagree') return { status: 'error', detail: 'Price sources disagree by more than ' + agree + '%', sources: rows };
+  return { status: 'error', detail: 'No price source responding', sources: rows };
+}
+
+// Refresh the price cache when it is stale and a price rule is
+// armed (0.8.0): the 1-minute fast tick and the startup refresh
+// call this, so a price rule's "currently $X" line stays fresh.
+// Best-effort — a failed refresh never throws here; the cache just
+// stays cold until the next tick, and the evaluator reports the
+// trigger 'unknown' in the meantime.
+async function refreshPriceIfStale() {
+  try {
+    const st = store.loadState(DATA_DIR);
+    const hasPrice = (st.bitcoin.txs || []).some((t) => t.enabled && store.triggerOf(t).type === 'price');
+    if (!hasPrice) return;
+    await fetchPriceCached(priceSourcesOf(st.settings), checkCadenceSecondsOf(st.settings));
+  } catch (e) { console.error('price refresh failed:', e); }
+}
+
+// The triggerState shape (0.8.0): every evaluation writes all of
+// these, null when a field does not apply to the type — so the
+// shape is stable across types and the UI can read it blind.
+//   lastEvalAt — when the trigger was last evaluated (ISO)
+//   status / reason — the status word + the human-readable state
+//   lastPrice / lastPriceAt — the last GOOD price reading (price only)
+//   lastOutspend — { spent, confirmed, txid, checkedAt } (UTXO only)
+//   lastError — the last fetch failure, if any (else null)
+function freshTriggerState(now, status, reason) {
+  return {
+    lastEvalAt: now.toISOString(), status, reason,
+    lastPrice: null, lastPriceAt: null, lastOutspend: null, lastError: null,
+  };
+}
+
+// The check-in trigger: the same clock as checkinStatus, at this
+// tx's own threshold (a rule with a 7-day threshold fires on its
+// own 7-day window, not the global 35). Vacation never fires it
+// — evaluateReleaseInner returns early for those anyway,
+// but the evaluator is explicit so a direct call is safe too.
+// The clock is measured with the tx's live freeze offset, so a
+// frozen clock is never release-due while inactive.
+function evaluateCheckinTrigger(state, tx, now) {
+  const trg = store.triggerOf(tx);
+  const clock = checkinClock(state, now, trg.params.thresholdDays, checkinLiveOffsetMs(tx, now));
+  if (state.settings.vacationMode) {
+    tx.triggerState = freshTriggerState(now, 'vacation', 'Vacation mode is on');
+    return { fire: false, status: 'vacation', reason: 'Vacation mode is on' };
+  }
+  if (clock.state === 'not-started') {
+    tx.triggerState = freshTriggerState(now, 'not-started', 'No check-in recorded yet');
+    return { fire: false, status: 'not-started', reason: 'No check-in recorded yet' };
+  }
+  if (clock.state === 'held') {
+    // No special grace display: the bar just shows the longer
+    // held window ("40 of 52 days elapsed"), and the reason
+    // reads the same — the hold still gates the release (no fire
+    // while held), it just is not named on the card.
+    tx.triggerState = freshTriggerState(now, 'held', clock.daysSince + ' of ' + clock.windowDays + ' days elapsed');
+    return { fire: false, status: 'held', reason: clock.daysSince + ' of ' + clock.windowDays + ' days elapsed' };
+  }
+  if (clock.state === 'release-due') {
+    tx.triggerState = freshTriggerState(now, 'release-due', 'Release due');
+    return { fire: true, status: 'release-due', reason: 'Release due' };
+  }
+  tx.triggerState = freshTriggerState(now, 'on-track', clock.daysSince + ' of ' + clock.windowDays + ' days elapsed');
+  return { fire: false, status: 'on-track', reason: clock.daysSince + ' of ' + clock.windowDays + ' days elapsed' };
+}
+
+// The price trigger (0.8.0, two-source 0.8.0). The price is read
+// from TWO providers (Settings: priceSources) and combined by
+// bitcoin.combinePriceReadings: the reading is only trusted when
+// the two agree within the configured agreement (Settings: Price
+// agreement); a rule that fires above a price uses the HIGHER of
+// the two, below uses the LOWER; when only one source answers,
+// that price is used alone (no agreement check).
+// Guards, in order:
+//   (a) Immediate fire: the EFFECTIVE price crossing the
+//       threshold (at/above, or at/below) fires at once — no
+//       sustained wait. The protection against a bad reading is
+//       the two-source agreement (below), not a time delay.
+//   (b) Fail-safe: a reading that is not valid — the sources
+//       disagree by more than the configured agreement, or
+//       neither answers — does not fire, marks 'unknown', and
+//       keeps the last good state (so a bad reading cannot
+//       become the baseline for the jump
+//       guard).
+//   (c) Sanity bounds on the READING: a price outside
+//       $1–$100,000,000 is bad data, not a market move — do not
+//       fire on it, and do not let it become the baseline for the
+//       jump guard (lastPrice keeps the last GOOD reading). The
+//       provider fetch already refuses out-of-bounds prices; this
+//       is the safety net on the effective price.
+//   (d) The 10x-jump guard: a price that moved 10x since the last
+//       GOOD reading is a bad feed, not a market move — but only
+//       when the last reading is recent (within an hour). Over a
+//       longer gap a real 10x move is possible (the app was off
+//       for months), so an old baseline does not veto a new price.
+async function evaluatePriceTrigger(state, tx, now) {
+  const trg = store.triggerOf(tx);
+  const p = trg.params;
+  const prev = (tx.triggerState && typeof tx.triggerState === 'object') ? tx.triggerState : {};
+  // The last GOOD state, kept across unknown readings (fail-safe):
+  // a disagreement or outage never fires the rule.
+  const keepGood = {
+    lastPrice: (typeof prev.lastPrice === 'number' && Number.isFinite(prev.lastPrice)) ? prev.lastPrice : null,
+    lastPriceAt: (typeof prev.lastPriceAt === 'string' && prev.lastPriceAt) ? prev.lastPriceAt : null,
+  };
+  let readings;
+  try { readings = await fetchPriceCached(priceSourcesOf(state.settings), checkCadenceSecondsOf(state.settings)); }
+  catch (e) {
+    tx.triggerState = {
+      ...freshTriggerState(now, 'unknown', 'price unavailable — will retry'),
+      ...keepGood, lastError: e.message, priceMode: 'none', priceNote: '',
+    };
+    return { fire: false, status: 'unknown', reason: 'price unavailable — will retry' };
+  }
+  const comb = bitcoin.combinePriceReadings(readings, p.op, priceAgreementPctOf(state.settings));
+  if (!comb.valid) {
+    tx.triggerState = {
+      ...freshTriggerState(now, 'unknown', comb.reason),
+      ...keepGood, lastError: comb.reason, priceMode: comb.mode, priceNote: '',
+    };
+    return { fire: false, status: 'unknown', reason: comb.reason };
+  }
+  const price = comb.price;
+  if (price < store.PRICE_MIN_USD || price > store.PRICE_MAX_USD) {
+    tx.triggerState = {
+      ...freshTriggerState(now, 'unknown', 'implausible price reading ($' + price.toLocaleString('en-US') + ') — ignored'),
+      ...keepGood, lastError: 'price out of bounds: $' + price.toLocaleString('en-US'), priceMode: comb.mode, priceNote: comb.note,
+    };
+    return { fire: false, status: 'unknown', reason: 'implausible price reading ($' + price.toLocaleString('en-US') + ') — ignored' };
+  }
+  const lastPrice = keepGood.lastPrice;
+  const lastAt = (typeof keepGood.lastPriceAt === 'string' && keepGood.lastPriceAt) ? new Date(keepGood.lastPriceAt).getTime() : NaN;
+  if (lastPrice !== null && Number.isFinite(lastAt) && (now.getTime() - lastAt) <= PRICE_JUMP_WINDOW_MS
+      && (price > lastPrice * 10 || price < lastPrice / 10)) {
+    tx.triggerState = {
+      ...freshTriggerState(now, 'unknown', 'implausible price jump ($' + lastPrice.toLocaleString('en-US') + ' → $' + price.toLocaleString('en-US') + ') — ignored'),
+      ...keepGood, lastError: 'price jumped 10x since the last reading: $' + lastPrice.toLocaleString('en-US') + ' → $' + price.toLocaleString('en-US'), priceMode: comb.mode, priceNote: comb.note,
+    };
+    return { fire: false, status: 'unknown', reason: 'implausible price jump ($' + lastPrice.toLocaleString('en-US') + ' → $' + price.toLocaleString('en-US') + ') — ignored' };
+  }
+  // The reading is good: it becomes the new baseline.
+  const holding = p.op === '>=' ? price >= p.value : price <= p.value;
+  // The stored reason is trigger-only — the effective price, no
+  // per-source note (that lives in priceNote as data, and in the
+  // Exchange Status section and dry-run notes for display).
+  const shown = '$' + price.toLocaleString('en-US');
+  if (!holding) {
+    tx.triggerState = {
+      ...freshTriggerState(now, 'watching', 'currently ' + shown),
+      lastPrice: price, lastPriceAt: now.toISOString(), lastError: null, priceMode: comb.mode, priceNote: comb.note,
+    };
+    return { fire: false, status: 'watching', reason: 'currently ' + shown };
+  }
+  // Holding: the effective price is past the threshold and both
+  // sources agree — fire at once, no sustained wait.
+  tx.triggerState = {
+    ...freshTriggerState(now, 'due', 'past threshold — firing'),
+    lastPrice: price, lastPriceAt: now.toISOString(), lastError: null, priceMode: comb.mode, priceNote: comb.note,
+  };
+  return { fire: true, status: 'due', reason: 'past threshold — firing' };
+}
+
+// The UTXO trigger (0.8.0). The confirmation mode is per-rule
+// (params.confirmations): 0 = fire on an unconfirmed (mempool)
+// spend; N >= 1 = fire once the spending tx has N confirmations
+// (default 1 — confirmed-only, the original behaviour). Guards:
+//   (a) Unconfirmed mode fires on ANY spend — confirmed or not.
+//       N-confirmation mode only watches an unconfirmed spend
+//       (it may still be evicted or replaced).
+//   (b) Confirmations are counted from the tip (tip - spend
+//       block height + 1). If the tip cannot be fetched, or the
+//       spend's block height is unknown, the trigger is 'unknown'
+//       — it never fires on data it cannot count.
+//   (c) Fail-safe on fetch failure: an outpoint no endpoint can
+//       say about (unknown parent, or no endpoint answering) does
+//       not fire, and is marked 'unknown'.
+//   (d) The already-spent guard at creation is the add-time gate
+//       (see POST /api/bitcoin/txs) and the /api/triggers/check
+//       endpoint — not this evaluator.
+async function evaluateUtxoTrigger(state, tx, now) {
+  const trg = store.triggerOf(tx);
+  const needConfs = (trg.params.confirmations === 0) ? 0 : (trg.params.confirmations || 1);
+  const endpoints = bitcoin.endpointsFor(state.settings);
+  let res;
+  try { res = await bitcoin.checkOutspend(trg.params.outpoint, endpoints); }
+  catch (e) { res = { unknown: true, error: e.message }; }
+  const prev = (tx.triggerState && typeof tx.triggerState === 'object') ? tx.triggerState : {};
+  if (res.unknown) {
+    tx.triggerState = {
+      ...freshTriggerState(now, 'unknown', 'could not check the outpoint — will retry'),
+      lastOutspend: (prev.lastOutspend && typeof prev.lastOutspend === 'object') ? prev.lastOutspend : null,
+      lastError: res.error || 'outpoint could not be checked',
+    };
+    return { fire: false, status: 'unknown', reason: 'could not check the outpoint — will retry' };
+  }
+  const lastOutspend = { spent: res.spent, confirmed: res.confirmed, txid: res.txid || null, blockHeight: (res.blockHeight === undefined ? null : res.blockHeight), confirmations: null, checkedAt: now.toISOString() };
+  if (!res.spent) {
+    tx.triggerState = { ...freshTriggerState(now, 'watching', 'still unspent'), lastOutspend, lastError: null };
+    return { fire: false, status: 'watching', reason: 'still unspent' };
+  }
+  // Spent. Unconfirmed mode (0) fires on any spend, confirmed or
+  // not — the owner chose the mempool as the trigger.
+  if (needConfs === 0) {
+    tx.triggerState = { ...freshTriggerState(now, 'due', 'spent — firing'), lastOutspend, lastError: null };
+    return { fire: true, status: 'due', reason: 'spent — firing' };
+  }
+  // N-confirmation mode: an unconfirmed spend only watches.
+  if (!res.confirmed) {
+    lastOutspend.confirmations = 0;
+    const noun = needConfs === 1 ? ' confirmation' : ' confirmations';
+    tx.triggerState = { ...freshTriggerState(now, 'watching', 'spend unconfirmed — waiting for ' + needConfs + noun), lastOutspend, lastError: null };
+    return { fire: false, status: 'watching', reason: 'spend unconfirmed — waiting for ' + needConfs + noun };
+  }
+  // A confirmed spend: count its confirmations from the tip.
+  if (res.blockHeight === null || res.blockHeight === undefined || !Number.isFinite(res.blockHeight)) {
+    tx.triggerState = { ...freshTriggerState(now, 'unknown', 'spend confirmed but its block height is unknown — will retry'), lastOutspend, lastError: 'spend block height unknown' };
+    return { fire: false, status: 'unknown', reason: 'spend confirmed but its block height is unknown — will retry' };
+  }
+  let tip;
+  try { tip = await bitcoin.getTipHeight(endpoints); }
+  catch (e) {
+    tx.triggerState = { ...freshTriggerState(now, 'unknown', 'could not fetch the tip height — will retry'), lastOutspend, lastError: e.message };
+    return { fire: false, status: 'unknown', reason: 'could not fetch the tip height — will retry' };
+  }
+  const confs = Math.max(0, tip - res.blockHeight + 1);
+  lastOutspend.confirmations = confs;
+  if (confs >= needConfs) {
+    tx.triggerState = { ...freshTriggerState(now, 'due', 'spent — ' + confs + (confs === 1 ? ' confirmation' : ' confirmations') + ' — firing'), lastOutspend, lastError: null };
+    return { fire: true, status: 'due', reason: 'spent — ' + confs + (confs === 1 ? ' confirmation' : ' confirmations') + ' — firing' };
+  }
+  tx.triggerState = { ...freshTriggerState(now, 'watching', 'spent — ' + confs + ' of ' + needConfs + ' confirmations'), lastOutspend, lastError: null };
+  return { fire: false, status: 'watching', reason: 'spent — ' + confs + ' of ' + needConfs + ' confirmations' };
+}
+
+// Dispatch by trigger type. Returns { fire, status, reason } and
+// writes the tx's triggerState (the caller saves). The manual
+// trigger never fires — the owner broadcasts it by hand.
+async function evaluateTrigger(state, tx, now) {
+  const trg = store.triggerOf(tx);
+  // Grace period (0.8.0): while it is active, a price or UTXO
+  // trigger is not evaluated at all — it cannot fire, and its
+  // stored triggerState keeps the last real evaluation (so the
+  // subcard's current-state line still shows the live
+  // condition; only the pill says Grace). No network calls
+  // happen for it during the grace. Check-in and manual
+  // triggers are not affected (check-in keeps its own
+  // heldUntil hold). The release-check result carries status
+  // 'grace' so the hold is named there.
+  if ((trg.type === 'price' || trg.type === 'utxo') && isGraceActive(state, now)) {
+    return { fire: false, status: 'grace', reason: 'grace period active — will evaluate when it ends' };
+  }
+  switch (trg.type) {
+    case 'checkin': return evaluateCheckinTrigger(state, tx, now);
+    case 'price': return await evaluatePriceTrigger(state, tx, now);
+    case 'utxo': return await evaluateUtxoTrigger(state, tx, now);
+    case 'manual': {
+      tx.triggerState = freshTriggerState(now, 'manual', 'Waiting for manual broadcast');
+      return { fire: false, status: 'manual', reason: 'Waiting for manual broadcast' };
+    }
+    default: return evaluateCheckinTrigger(state, tx, now);
+  }
+}
+
+// The UI-facing trigger status, computed from the STORED
+// triggerState (no network) — except the check-in trigger, whose
+// state is live clock math. Returns { type, label, condition,
+// status, reason, ...type-specific fields }. The price's
+// "currently $X" line uses the cached price when one is available
+// (it is fresher than the stored reading).
+function triggerStatusFor(state, tx, now) {
+  const trg = store.triggerOf(tx);
+  const base = { type: trg.type, label: triggerLabel(trg), condition: triggerConditionText(trg) };
+  const st = (tx.triggerState && typeof tx.triggerState === 'object') ? tx.triggerState : null;
+  if (trg.type === 'checkin') {
+    const clock = checkinClock(state, now, trg.params.thresholdDays, checkinLiveOffsetMs(tx, now));
+    if (clock.state === 'not-started') return { ...base, status: 'not-started', reason: 'No check-in recorded yet' };
+    // Vacation is check-in-only (0.8.0): it freezes this tx's
+    // clock and holds its release, and nothing else's.
+    if (state.settings.vacationMode) return { ...base, status: 'vacation', reason: 'Vacation mode is on — the countdown is frozen' };
+    if (clock.state === 'held') return { ...base, status: 'held', reason: clock.daysSince + ' of ' + clock.windowDays + ' days elapsed', daysSince: clock.daysSince, windowDays: clock.windowDays, nextDue: clock.nextDue };
+    if (clock.state === 'release-due') return { ...base, status: 'release-due', reason: 'Release due', daysSince: clock.daysSince, windowDays: clock.windowDays, nextDue: clock.nextDue };
+    return { ...base, status: 'on-track', reason: clock.daysSince + ' of ' + clock.windowDays + ' days elapsed', daysSince: clock.daysSince, windowDays: clock.windowDays, nextDue: clock.nextDue };
+  }
+  if (trg.type === 'manual') {
+    return { ...base, status: 'manual', reason: 'Waiting for manual broadcast' };
+  }
+  if (trg.type === 'price') {
+    // The cached readings (when they are for the currently
+    // configured sources) give the live effective price + source
+    // note; otherwise the stored last evaluation carries the
+    // price and its note.
+    const src = priceSourcesOf(state.settings);
+    const cacheOk = priceCache.readings && Object.keys(priceCache.readings).length
+      && priceCache.source1 === src.source1 && priceCache.source2 === src.source2;
+    let price = null, note = '', mode = null;
+    if (cacheOk) {
+      const comb = bitcoin.combinePriceReadings(priceCache.readings, trg.params.op, priceAgreementPctOf(state.settings));
+      if (comb.valid) { price = comb.price; note = comb.note; mode = comb.mode; }
+      else {
+        // The latest fetch says the reading is not valid (the
+        // sources disagree, or neither answers) — the card shows
+        // unknown, whatever the last evaluation said. The reason
+        // stays generic ('price feed unknown'): the source detail
+        // lives in the Exchange Status section and the dry-run
+        // notes, not on a per-tx line.
+        return { ...base, status: 'unknown', reason: 'price feed unknown', lastPrice: null, priceMode: comb.mode, priceNote: '' };
+      }
+    }
+    const stored = (st && typeof st.lastPrice === 'number' && Number.isFinite(st.lastPrice)) ? st.lastPrice : null;
+    const storedNote = (st && typeof st.priceNote === 'string' && st.priceNote) ? st.priceNote : '';
+    if (price === null) {
+      if (stored === null) {
+        if (st && st.status === 'unknown') return { ...base, status: 'unknown', reason: 'price feed unknown', lastPrice: null, priceMode: (st && st.priceMode) || null, priceNote: storedNote };
+        return { ...base, status: 'not-evaluated', reason: 'Not evaluated yet', lastPrice: null };
+      }
+      price = stored; note = storedNote; mode = (st && st.priceMode) || null;
+    }
+    // The reason is trigger-only — the effective price, no
+    // per-source note. The source detail lives in the Exchange
+    // Status section (readiness card) and the dry-run notes, not
+    // on a per-tx line. The subcard reads lastPrice directly.
+    // A holding price is due at once — no sustained wait (the
+    // two-source agreement is the guard, not a time delay).
+    const shown = '$' + price.toLocaleString('en-US');
+    const holding = trg.params.op === '>=' ? price >= trg.params.value : price <= trg.params.value;
+    if (!holding) return { ...base, status: 'watching', reason: 'currently ' + shown, lastPrice: price, priceMode: mode, priceNote: note };
+    return { ...base, status: 'due', reason: 'past threshold — firing', lastPrice: price, priceMode: mode, priceNote: note };
+  }
+  if (trg.type === 'utxo') {
+    if (!st) return { ...base, status: 'not-evaluated', reason: 'Not evaluated yet', lastOutspend: null };
+    return { ...base, status: st.status || 'watching', reason: st.reason || 'still unspent', lastOutspend: st.lastOutspend || null };
+  }
+  return { ...base, status: 'not-evaluated', reason: 'Not evaluated yet' };
+}
+
+// Evaluate a trigger ONCE, live, without changing any state
+// (0.8.0): the POST /api/triggers/check endpoint (the UI's
+// already-true guard) and the add-time warning use this. `trg` is
+// a NORMALIZED trigger (the caller validates first).
+// Returns { valid, fire, status, reason, warning, detail } —
+// `warning` is a human-readable string when the condition is
+// already satisfied (it would fire on the next evaluation), else
+// null. A price trigger reports fire=true when both sources
+// agree the price is already past the threshold — there is no
+// sustained wait, so a single live sample that both sources
+// agree on proves the condition. The 10x-jump guard does not
+// apply here (it needs a stored baseline — the evaluator owns
+// it); only the absolute bounds are checked.
+async function checkTriggerNow(trg, state, now, liveOffsetMs) {
+  if (trg.type === 'checkin') {
+    // (0.8.0) liveOffsetMs is the tx's frozen time (disarmed /
+    // vacation) — the same effective clock the evaluator uses.
+    // A caller that knows the tx passes it (POST
+    // /api/triggers/check takes an optional txId); a new tx has
+    // none, so the clock is measured from the raw last check-in.
+    const clock = checkinClock(state, now, trg.params.thresholdDays, liveOffsetMs);
+    if (clock.state === 'release-due') {
+      return { valid: true, fire: true, status: 'release-due', reason: 'Release due', warning: 'This condition is already satisfied — it would fire on the next evaluation.', detail: { daysSince: clock.daysSince, nextDue: clock.nextDue } };
+    }
+    return {
+      valid: true, fire: false, status: clock.state,
+      reason: clock.state === 'not-started' ? 'No check-in recorded yet' : clock.daysSince + ' of ' + clock.windowDays + ' days elapsed',
+      warning: null, detail: { daysSince: clock.daysSince, nextDue: clock.nextDue },
+    };
+  }
+  if (trg.type === 'price') {
+    let readings;
+    try { readings = await fetchPriceCached(priceSourcesOf(state.settings), checkCadenceSecondsOf(state.settings)); }
+    catch (e) { return { valid: true, fire: false, status: 'unknown', reason: 'price unavailable — will retry', warning: null, detail: { error: e.message } }; }
+    const comb = bitcoin.combinePriceReadings(readings, trg.params.op, priceAgreementPctOf(state.settings));
+    if (!comb.valid) {
+      return { valid: true, fire: false, status: 'unknown', reason: comb.reason, warning: null, detail: { mode: comb.mode, readings: comb.readings } };
+    }
+    const price = comb.price;
+    if (price < store.PRICE_MIN_USD || price > store.PRICE_MAX_USD) {
+      return { valid: true, fire: false, status: 'unknown', reason: 'implausible price reading ($' + price.toLocaleString('en-US') + ') — ignored', warning: null, detail: { price, mode: comb.mode } };
+    }
+    const shown = 'currently $' + price.toLocaleString('en-US') + ' (' + comb.note + ')';
+    const holding = trg.params.op === '>=' ? price >= trg.params.value : price <= trg.params.value;
+    if (holding) {
+      return { valid: true, fire: true, status: 'due', reason: shown, warning: 'This condition is already satisfied — it would fire on the next evaluation.', detail: { price, mode: comb.mode, note: comb.note } };
+    }
+    return { valid: true, fire: false, status: 'watching', reason: shown, warning: null, detail: { price, mode: comb.mode, note: comb.note } };
+  }
+  if (trg.type === 'utxo') {
+    const endpoints = bitcoin.endpointsFor(state.settings);
+    const needConfs = (trg.params.confirmations === 0) ? 0 : (trg.params.confirmations || 1);
+    let res;
+    try { res = await bitcoin.checkOutspend(trg.params.outpoint, endpoints); }
+    catch (e) { res = { unknown: true, error: e.message }; }
+    if (res.unknown) return { valid: true, fire: false, status: 'unknown', reason: 'could not check the outpoint — will retry', warning: null, detail: { error: res.error || null } };
+    if (!res.spent) return { valid: true, fire: false, status: 'watching', reason: 'still unspent', warning: null, detail: { spent: false, confirmed: false } };
+    // Spent. Unconfirmed mode (0) fires on any spend — the
+    // condition is already satisfied, so this is a fire.
+    if (needConfs === 0) return { valid: true, fire: true, status: 'due', reason: 'spent — firing', warning: 'This UTXO is already spent — it would fire on the next evaluation.', detail: { spent: true, confirmed: res.confirmed, txid: res.txid, confirmations: 0 } };
+    // N-confirmation mode: an unconfirmed spend is a warning,
+    // not a fire — it may still be evicted.
+    if (!res.confirmed) {
+      const noun = needConfs === 1 ? ' confirmation' : ' confirmations';
+      return { valid: true, fire: false, status: 'unconfirmed', reason: 'spend unconfirmed — waiting for ' + needConfs + noun, warning: 'This UTXO is already spent (unconfirmed) — it would fire once the spend reaches ' + needConfs + noun + '.', detail: { spent: true, confirmed: false, txid: res.txid, confirmations: 0 } };
+    }
+    // A confirmed spend: count its confirmations from the tip.
+    if (res.blockHeight === null || res.blockHeight === undefined || !Number.isFinite(res.blockHeight)) {
+      return { valid: true, fire: false, status: 'unknown', reason: 'spend confirmed but its block height is unknown — will retry', warning: null, detail: { spent: true, confirmed: true, txid: res.txid } };
+    }
+    let tip;
+    try { tip = await bitcoin.getTipHeight(endpoints); }
+    catch (e) { return { valid: true, fire: false, status: 'unknown', reason: 'could not fetch the tip height — will retry', warning: null, detail: { spent: true, confirmed: true, txid: res.txid, error: e.message } }; }
+    const confs = Math.max(0, tip - res.blockHeight + 1);
+    if (confs >= needConfs) {
+      return { valid: true, fire: true, status: 'due', reason: 'spent — ' + confs + (confs === 1 ? ' confirmation' : ' confirmations') + ' — firing', warning: 'This UTXO is already spent (' + confs + ' confirmations) — it would fire on the next evaluation.', detail: { spent: true, confirmed: true, txid: res.txid, confirmations: confs, blockHeight: res.blockHeight } };
+    }
+    // Already spent but below the threshold — not yet firing, so
+    // no warning and no block: the rule will fire on its own once
+    // the spend reaches N confirmations.
+    return { valid: true, fire: false, status: 'watching', reason: 'spent — ' + confs + ' of ' + needConfs + ' confirmations', warning: null, detail: { spent: true, confirmed: true, txid: res.txid, confirmations: confs, blockHeight: res.blockHeight } };
+  }
+  return { valid: true, fire: false, status: 'manual', reason: 'Waiting for manual broadcast', warning: null, detail: {} };
 }
 
 function days(from, to) {
@@ -478,16 +1369,16 @@ function days(from, to) {
 
 // Re-verify, against freshly loaded state, that a broadcast is still
 // wanted — right before the real broadcast. This closes the race where
-// a check-in, a pause, a disable, or a replacement lands while the
+// a check-in, a disable, or a replacement lands while the
 // input check is waiting on the network, and the original evaluation
 // would otherwise broadcast anyway using its stale state. For the
-// automatic release it re-checks the armed toggle, pause / vacation,
-// and that the clock is still release-due; a manual broadcast (the
-// owner's explicit say-so) ignores the clock, the armed toggle, and
-// pause / vacation, exactly as the endpoints do. Both kinds re-check
-// that the transaction still exists, is still the same hex, and is
-// neither broadcast nor stale. Returns { ok, reason, state, tx } —
-// the fresh state and tx to broadcast from. The broadcast record
+// automatic release it re-checks the armed toggle, vacation
+// (check-in txs only), and that the clock is still release-due; a
+// manual broadcast (the owner's explicit say-so) ignores the clock,
+// the armed toggle, and vacation, exactly as the endpoints do. Both
+// kinds re-check that the transaction still exists, is still the same
+// hex, and is neither broadcast nor stale. Returns { ok, reason, state,
+// tx } — the fresh state and tx to broadcast from. The broadcast record
 // itself is NOT written to this snapshot: broadcastOne reloads fresh
 // state again after the network call and merges only the record in
 // (see below), so a check-in that lands mid-broadcast survives.
@@ -512,15 +1403,20 @@ function preBroadcastCheck(tx, logKind, now, opts) {
   if (ftx.release && ftx.release.status === 'submitted-slipstream' && !(opts && opts.forcePublic)) return { ok: false, reason: 'already submitted to Slipstream — waiting on MARA' };
   if (logKind === 'release') {
     if (!ftx.enabled) return { ok: false, reason: 'transaction was disabled' };
-    if (fresh.settings.paused || fresh.settings.vacationMode) return { ok: false, reason: 'paused or vacation mode' };
+    // Vacation is check-in-only (0.8.0): it holds a check-in
+    // tx's automatic release, and nothing else's — a price or
+    // UTXO tx broadcasts on schedule while the owner is away.
+    // Manual broadcasts never enter this branch (logKind
+    // 'broadcast'), so they bypass disarm and vacation entirely.
+    if (fresh.settings.vacationMode && store.triggerOf(ftx).type === 'checkin') return { ok: false, reason: 'vacation mode' };
     // All-or-none release (0.7.10): once a release evaluation has
     // decided the clock is due, the whole armed set broadcasts even
     // if a check-in lands mid-run. A check-in is still recorded —
     // the merge-only broadcast write preserves it — and resets the
     // clock for the next cycle; it just does not stop a release that
     // already started. So inside a decided release run the clock is
-    // NOT re-checked here; the guards above (disabled, paused) still
-    // apply, because those are explicit owner actions on the
+    // NOT re-checked here; the guards above (disabled, vacation)
+    // still apply, because those are explicit owner actions on the
     // transaction or the switch, not the clock.
     // Outside a decided run, the clock must still be due, and
     // 'broadcasted' counts as still due: it only means a release
@@ -598,6 +1494,10 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
   const failNote = logKind === 'release'
     ? 'Release check failed before broadcast: '
     : 'Broadcast check failed before broadcast: ';
+  // (0.8.0) The trigger type stamped on every release record this
+  // broadcast writes — the rule that fired it (or the tx's current
+  // trigger, for a manual broadcast).
+  const trigType = releaseTriggerFor(state, tx);
   let check;
   try {
     check = await bitcoin.checkInputsUnspent(bitcoin.parseTx(tx.hex), endpoints);
@@ -608,7 +1508,7 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
     // its inputs — the failure is surfaced to the owner, and MARA
     // is still holding the tx.
     if (!(opts && opts.forcePublic)) {
-      const record = { status: 'failed', kind: logKind, txid: tx.txid, method: 'primary', lastAttemptAt: now.toISOString(), error: 'input check failed: ' + e.message };
+      const record = { status: 'failed', kind: logKind, trigger: trigType, txid: tx.txid, method: 'primary', lastAttemptAt: now.toISOString(), error: 'input check failed: ' + e.message };
       const fresh = store.loadState(DATA_DIR);
       const ftx = (fresh.bitcoin.txs || []).find((t) => t.id === tx.id);
       if (ftx && ftx.hex === tx.hex) {
@@ -630,7 +1530,7 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
   // confirmation count from the block height the outspend reported.
   if (check.own && check.own.length) {
     const own = check.own[0];
-    const record = { status: 'broadcast', kind: logKind, txid: tx.txid, method: check.checkedVia, broadcastedAt: now.toISOString() };
+    const record = { status: 'broadcast', kind: logKind, trigger: trigType, txid: tx.txid, method: check.checkedVia, broadcastedAt: now.toISOString() };
     const fresh = store.loadState(DATA_DIR);
     const ftx = (fresh.bitcoin.txs || []).find((t) => t.id === tx.id);
     if (ftx && ftx.hex === tx.hex && !ftx.broadcasted) {
@@ -650,7 +1550,7 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
     // The record survives check-ins: spent inputs are a fact about
     // the transaction, not the cycle (only replacing the hex clears
     // it — a stale transaction can never broadcast).
-    const record = { status: 'stale', kind: logKind, txid: tx.txid, method: check.checkedVia, lastAttemptAt: now.toISOString(), error: 'inputs spent: ' + spentDesc };
+    const record = { status: 'stale', kind: logKind, trigger: trigType, txid: tx.txid, method: check.checkedVia, lastAttemptAt: now.toISOString(), error: 'inputs spent: ' + spentDesc };
     // Record the stale verdict on the CURRENT transaction only if it
     // is still the same hex; a replacement in the meantime means the
     // old tx is gone and there is nothing to mark stale.
@@ -666,7 +1566,7 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
   }
 
   // Broadcast for real — but only after re-verifying against fresh
-  // state (see preBroadcastCheck above): a check-in, pause, disable,
+  // state (see preBroadcastCheck above): a check-in, disable,
   // or replacement that landed while the input check was on the
   // network must stop the broadcast. The route is the transaction's
   // own broadcastVia (0.7.16): 'public' broadcasts via the mempool
@@ -713,7 +1613,7 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
       // the public nodes see it, by refreshMaraWaiting). The release
       // is not complete while any transaction is in this state.
       const out = await bitcoin.broadcastViaSlipstream(pre.tx.hex, pre.tx.txid);
-      const record = { status: 'submitted-slipstream', kind: logKind, txid: out.txid, method: 'slipstream', submittedAt: now.toISOString() };
+      const record = { status: 'submitted-slipstream', kind: logKind, trigger: trigType, txid: out.txid, method: 'slipstream', submittedAt: now.toISOString() };
       const fresh = store.loadState(DATA_DIR);
       const ftx = (fresh.bitcoin.txs || []).find((t) => t.id === tx.id);
       if (ftx && ftx.hex === tx.hex) {
@@ -739,7 +1639,7 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
     // mark — the broadcast already went out on-chain and is in the
     // broadcast log — and the deleted/replaced record must NOT be
     // resurrected by saving the old snapshot.
-    const record = { status: 'broadcast', kind: logKind, txid: out.txid, method: out.method, broadcastedAt: now.toISOString() };
+    const record = { status: 'broadcast', kind: logKind, trigger: trigType, txid: out.txid, method: out.method, broadcastedAt: now.toISOString() };
     const fresh = store.loadState(DATA_DIR);
     const ftx = (fresh.bitcoin.txs || []).find((t) => t.id === tx.id);
     if (ftx && ftx.hex === tx.hex) {
@@ -767,7 +1667,7 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
     // (forcePublic): a failed public attempt does NOT write a
     // 'failed' record — the tx stays Slipstream-pending, still in
     // MARA's queue, and the error is surfaced to the owner instead.
-    const record = { status: 'failed', kind: logKind, txid: tx.txid, method: via === 'slipstream' ? 'slipstream' : 'primary', lastAttemptAt: now.toISOString(), error: e.message };
+    const record = { status: 'failed', kind: logKind, trigger: trigType, txid: tx.txid, method: via === 'slipstream' ? 'slipstream' : 'primary', lastAttemptAt: now.toISOString(), error: e.message };
     if (!(opts && opts.forcePublic)) {
       const fresh = store.loadState(DATA_DIR);
       const ftx = (fresh.bitcoin.txs || []).find((t) => t.id === tx.id);
@@ -783,29 +1683,42 @@ function recordRelease(state, tx, record, logEntry) {
   if (logEntry) store.appendBroadcastLog(DATA_DIR, logEntry);
 }
 
-// Release evaluation — the heart of the app. When the check-in clock has
-// run past the broadcast threshold ("release-due"), every ARMED transaction is
-// evaluated in list order, each on its own, via broadcastOne() above.
-//   1. Skip if paused / vacation / nothing armed.
-//   2. Skip a tx already broadcast (this cycle, or any cycle — the
-//      broadcasted fact survives check-ins) or stale (a stale verdict
-//      survives check-ins too — it is a fact about the inputs, not
-//      the cycle).
-//   3. Freshness gate + broadcast per tx (see broadcastOne).
+// Release evaluation — the heart of the app. Each ARMED transaction
+// carries its own trigger (0.8.0: check-in, price, UTXO, manual),
+// and the evaluation runs every trigger in list order: the ones
+// whose condition holds fire, via broadcastOne() above. The
+// check-in clock is one trigger type now — a check-in tx fires
+// when its own threshold is release-due; a price tx fires when the
+// price has held past its threshold for an hour; a UTXO tx fires
+// when its outpoint is spent by a confirmed transaction.
+//   1. Skip if nothing armed. There is NO global skip any more
+//      (0.8.0): pause is gone, and vacation is check-in-only —
+//      the check-in evaluator holds a check-in tx while on
+//      vacation, while price and UTXO evaluators never look at
+//      it. A disarmed tx is skipped per-tx (the `enabled` filter
+//      below), never by a global flag.
+//   2. Evaluate each armed tx's trigger (once, in list order);
+//      a trigger that cannot be read is 'unknown' and does not fire.
+//   3. Skip a firing tx already broadcast (this cycle, or any cycle
+//      — the broadcasted fact survives check-ins) or stale (a stale
+//      verdict survives check-ins too — it is a fact about the
+//      inputs, not the cycle).
+//   4. Freshness gate + broadcast per firing tx (see broadcastOne).
 //      One tx failing does not stop the others.
-// All-or-none (0.7.10): the release decision is made once, when the
-// clock is found due above. A check-in that lands while the release
-// is running is still recorded and resets the clock for the NEXT
+// All-or-none (0.7.10): the firing set is decided once, before any
+// broadcast starts. A check-in that lands while the release is
+// running is still recorded and resets the clock for the NEXT
 // cycle, but it does not stop the txs still to broadcast — a release
 // that started finishes. (The audit's finding 1 recommended
 // re-evaluating the clock before each tx; the owner chose all-or-none
 // instead.) What still stops a tx mid-run: it was deleted, replaced,
-// disabled, or the switch was paused — explicit owner actions.
-// A check-in clears every tx's cycle-scoped release record and starts
-// a new cycle — a stale record is not cycle-scoped and survives; but
-// if a broadcast already went out, the funds have already moved; the
-// broadcast log keeps the record, and the broadcasted fact keeps the
-// card showing it.
+// or disabled — explicit owner actions.
+// A check-in clears the CHECK-IN rules' cycle-scoped release records
+// and starts a new cycle for them (0.8.0: a price or UTXO rule's
+// record belongs to its own trigger, not the clock) — a stale record
+// is not cycle-scoped and survives; but if a broadcast already went
+// out, the funds have already moved; the broadcast log keeps the
+// record, and the broadcasted fact keeps the card showing it.
 // ---------------------------------------------------------------------------
 // Single-flight: only one release evaluation runs at a time. The
 // hourly tick and the manual release-check API both call
@@ -815,7 +1728,15 @@ function recordRelease(state, tx, record, logEntry) {
 // synchronously around the awaited work, in a finally, so it can never
 // stick — and Node's single thread makes the check-and-set atomic.
 let releaseEvaluationInFlight = false;
-async function evaluateRelease() {
+// `options.onlyTypes` (optional) restricts which trigger types this
+// evaluation covers — the fast tick passes ['price', 'utxo'], the
+// hourly tick ['checkin'], the manual release check passes nothing
+// (all types). The check-in merge below is only a gate when the
+// evaluation includes check-in triggers: a price/UTXO-only fast
+// tick must not be blocked by a check-in receiver problem.
+async function evaluateRelease(options) {
+  const onlyTypes = (options && Array.isArray(options.onlyTypes)) ? options.onlyTypes : null;
+  const includeCheckin = !onlyTypes || onlyTypes.includes('checkin');
   if (releaseEvaluationInFlight) {
     return { action: 'skipped', reason: 'release evaluation already in progress', results: [] };
   }
@@ -843,8 +1764,15 @@ async function evaluateRelease() {
     try { merged = mergeExternalCheckin(store.loadState(DATA_DIR), new Date()); }
     catch (e) { console.error('external check-in merge failed:', e); merged = 'error'; }
     if (merged === 'error') {
-      console.error('release withheld: external check-in state is unreadable — not broadcasting until it can be read (see GET /api/status checkinReadError)');
-      return { action: 'skipped', reason: 'check-in state unreadable', results: [] };
+      if (!includeCheckin) {
+        // Price/UTXO-only evaluation: the check-in clock is
+        // irrelevant here, so an unreadable receiver state must
+        // not block it — continue without the merge.
+        console.error('check-in state unreadable — continuing price/UTXO-only evaluation without the check-in merge');
+      } else {
+        console.error('release withheld: external check-in state is unreadable — not broadcasting until it can be read (see GET /api/status checkinReadError)');
+        return { action: 'skipped', reason: 'check-in state unreadable', results: [] };
+      }
     }
     // Offline-gap grace (0.7.22): judged on the stored "I was
     // online" stamp (the tick refreshes it; a manual release check
@@ -854,23 +1782,30 @@ async function evaluateRelease() {
     // (the hold is a grace, not a gate).
     try {
       const stH = store.loadState(DATA_DIR);
-      if (applyOfflineHold(stH, new Date())) store.saveState(DATA_DIR, stH);
+      let changed = false;
+      if (applyOfflineHold(stH, new Date())) changed = true;
+      if (applyGrace(stH, new Date())) changed = true;
+      if (expireVacation(stH, new Date())) changed = true;
+      if (changed) store.saveState(DATA_DIR, stH);
     } catch (e) { console.error('offline-hold apply failed:', e); }
-    return await evaluateReleaseInner();
+    return await evaluateReleaseInner(onlyTypes);
   } finally {
     releaseEvaluationInFlight = false;
   }
 }
 
-async function evaluateReleaseInner() {
+async function evaluateReleaseInner(onlyTypes) {
   const state = store.loadState(DATA_DIR);
   const now = new Date();
   const s = state.settings;
-  if (s.paused || s.vacationMode) return { action: 'skipped', reason: 'paused or vacation mode', results: [] };
-  const armed = (state.bitcoin.txs || []).filter((t) => t.enabled);
+  // `onlyTypes` (optional) restricts the evaluation to those trigger
+  // types — the fast tick passes ['price', 'utxo'], the hourly tick
+  // ['checkin'], the manual check passes nothing (all types). A
+  // filtered run that finds no armed tx of its types is a skip, and
+  // it must not touch the other types' triggerState.
+  let armed = (state.bitcoin.txs || []).filter((t) => t.enabled);
+  if (onlyTypes) armed = armed.filter((t) => onlyTypes.includes(store.triggerOf(t).type));
   if (!armed.length) return { action: 'skipped', reason: 'no armed transactions', results: [] };
-  const st = checkinStatus(state, now);
-  if (st.state !== 'release-due') return { action: 'skipped', reason: 'not release-due (' + st.state + ')', results: [] };
 
   // Endpoints: the primary node first, the secondary if the primary
   // does not answer. (The MEMPOOL_* env vars can override the primary
@@ -878,7 +1813,51 @@ async function evaluateReleaseInner() {
   const endpoints = bitcoin.endpointsFor(s);
   const results = [];
 
+  // (0.8.0) Each armed tx's own trigger decides whether it fires —
+  // the release is no longer one global clock. The triggers are
+  // evaluated ONCE, in list order, and the firing set is decided
+  // before any broadcast starts (all-or-none, 0.7.10: a check-in
+  // landing mid-run is recorded but does not stop the txs still to
+  // broadcast). A trigger that cannot be read (a feed outage, an
+  // outpoint no node can say about) is 'unknown' and does not fire.
+  // The evaluations are persisted even when nothing fires — the
+  // price trigger's last price and the UTXO trigger's
+  // last outspend live in triggerState, and the next evaluation
+  // builds on them.
+  const firing = [];
   for (const tx of armed) {
+    let ev;
+    try { ev = await evaluateTrigger(state, tx, now); }
+    catch (e) {
+      // An evaluator must never take the whole run down with it:
+      // a throw is the same as 'unknown' — do not fire, and say so.
+      console.error('trigger evaluation failed for ' + (tx.label || tx.id) + ':', e);
+      tx.triggerState = { ...freshTriggerState(now, 'unknown', 'evaluation failed — will retry'), lastError: e.message };
+      ev = { fire: false, status: 'unknown', reason: 'evaluation failed — will retry' };
+    }
+    if (!ev.fire) {
+      results.push({ id: tx.id, txid: tx.txid, label: tx.label || '', action: 'skipped', reason: ev.reason, trigger: store.triggerOf(tx).type, triggerStatus: ev.status });
+      continue;
+    }
+    firing.push(tx);
+  }
+  // Persist the triggerState updates by merging them into FRESH
+  // state (see refreshConfirmations): the evaluations waited on the
+  // network, so a user edit landing mid-loop — disable, delete, or
+  // change a transaction — must not be clobbered by saving the stale
+  // snapshot. The broadcast path below reloads fresh state per tx
+  // and merges only its own record, so these evaluations survive
+  // the broadcasts.
+  try {
+    const fresh = store.loadState(DATA_DIR);
+    for (const tx of armed) {
+      const ftx = (fresh.bitcoin.txs || []).find((t) => t.id === tx.id);
+      if (ftx && tx.triggerState) ftx.triggerState = tx.triggerState;
+    }
+    store.saveState(DATA_DIR, fresh);
+  } catch (e) { console.error('trigger state save failed:', e); }
+
+  for (const tx of firing) {
     if (tx.broadcasted) {
       results.push({ id: tx.id, txid: tx.txid, label: tx.label || '', action: 'skipped', reason: 'already broadcast' });
       continue;
@@ -909,7 +1888,9 @@ async function evaluateReleaseInner() {
   const action = results.some((r) => r.action === 'broadcast') ? 'broadcast'
     : results.some((r) => r.action === 'failed') ? 'failed'
     : results.some((r) => r.action === 'stale') ? 'stale' : 'skipped';
-  return { action, results };
+  const out = { action, results };
+  if (action === 'skipped') out.reason = 'no trigger fired';
+  return out;
 }
 
 // Refresh the confirmation count for every broadcast transaction.
@@ -1046,7 +2027,7 @@ async function refreshMaraWaiting(state) {
         // check-in status turns 'broadcasted' only for a release
         // kind, exactly as for a public broadcast.
         const kind = tx.release.kind || 'release';
-        tx.release = { status: 'broadcast', kind, txid: u.txid, method: 'slipstream', broadcastedAt: now.toISOString() };
+        tx.release = { status: 'broadcast', kind, trigger: releaseTriggerFor(fresh, tx), txid: u.txid, method: 'slipstream', broadcastedAt: now.toISOString() };
         tx.broadcasted = {
           txid: u.txid, broadcastedAt: now.toISOString(), method: 'slipstream',
           confirmations: u.confirmations, blockHeight: u.blockHeight, found: true, checkedAt: u.checkedAt,
@@ -1058,7 +2039,7 @@ async function refreshMaraWaiting(state) {
         });
         changed = true;
       } else if (u.kind === 'failed') {
-        tx.release = { status: 'failed', kind: tx.release.kind || 'release', txid: u.txid, method: 'slipstream', lastAttemptAt: now.toISOString(), error: u.error };
+        tx.release = { status: 'failed', kind: tx.release.kind || 'release', trigger: releaseTriggerFor(fresh, tx), txid: u.txid, method: 'slipstream', lastAttemptAt: now.toISOString(), error: u.error };
         store.appendBroadcastLog(DATA_DIR, {
           ts: now.toISOString(), kind: 'release', status: 'failed', method: 'slipstream', txid: u.txid,
           hexPreview: tx.hex.slice(0, 64),
@@ -1092,12 +2073,16 @@ async function refreshMaraWaiting(state) {
 // escape hatch's reasoning.
 // Guards — the fallback does NOT fire when: the duration is Never
 // (null); the route is not slipstream; the tx is disarmed (the owner
-// said don't broadcast it); the switch is paused or in vacation mode
-// (pause means don't broadcast anything); the tx is already
+// said don't broadcast it); the tx is already
 // broadcasted or carries a 'broadcast' release record (settled — a
 // restore can carry the record without the fact); the tx is stale
 // (the freshness gate inside broadcastOne marks it stale and never
-// broadcasts it). Public visibility is checked FIRST: if the public
+// broadcasts it). There is deliberately NO pause or vacation guard
+// here (0.8.0): the fallback is post-broadcast bookkeeping — a tx
+// already broadcast via Slipstream waiting to go public — not a
+// trigger firing, and vacation is check-in-only. Pause is gone
+// entirely (Global Arm/Disarm replaces it, and a disarmed tx is
+// already excluded above). Public visibility is checked FIRST: if the public
 // nodes already see the tx, it is marked broadcast (the normal
 // recognition path — method is the node that reported it) and no
 // fallback broadcast happens.
@@ -1116,7 +2101,6 @@ async function refreshMaraWaiting(state) {
 // ... }] — 'broadcast', 'failed', or 'stale' per tx.
 async function refreshPublicFallbacks(state) {
   const out = [];
-  if (state.settings.paused || state.settings.vacationMode) return out;
   const endpoints = bitcoin.endpointsFor(state.settings);
   const now = new Date();
   for (const tx of (state.bitcoin.txs || [])) {
@@ -1140,7 +2124,7 @@ async function refreshPublicFallbacks(state) {
       const ftx = (fresh.bitcoin.txs || []).find((t) => t.id === tx.id && t.hex === tx.hex && !t.broadcasted);
       if (ftx) {
         const kind = (ftx.release && ftx.release.kind) || 'release';
-        ftx.release = { status: 'broadcast', kind, txid: tx.txid, method: conf.checkedVia || 'slipstream', broadcastedAt: now.toISOString() };
+        ftx.release = { status: 'broadcast', kind, trigger: releaseTriggerFor(fresh, ftx), txid: tx.txid, method: conf.checkedVia || 'slipstream', broadcastedAt: now.toISOString() };
         ftx.broadcasted = {
           txid: tx.txid, broadcastedAt: now.toISOString(), method: conf.checkedVia || 'slipstream',
           confirmations: conf.confirmations, blockHeight: conf.blockHeight, found: true, checkedAt: new Date().toISOString(),
@@ -1256,14 +2240,23 @@ async function runReleaseTick() {
     const st0 = store.loadState(DATA_DIR);
     mergeExternalCheckin(st0, now);
     if (applyOfflineHold(st0, now)) store.saveState(DATA_DIR, st0);
+    applyGrace(st0, now); // the grace for price/UTXO triggers (0.8.0) — judged on the same stale stamp, before it is refreshed; the unconditional save below persists it
+    // Vacation expiry (0.8.0): a dated vacation ends at the end
+    // of its last day — the clock resumes from its frozen count.
+    // Judged here on the hourly tick (and on every release
+    // evaluation, see evaluateRelease), so a lapsed vacation
+    // never lingers past the next tick.
+    expireVacation(st0, now);
     st0.checkin.lastOnlineAt = now.toISOString();
     store.saveState(DATA_DIR, st0);
   } catch (e) { console.error('offline-hold / lastOnlineAt update failed:', e); }
   // A receiver check-in lands in the clock before the release is
   // evaluated, so a check-in that arrived between ticks is honoured
   // even if nobody opened the app.
+  // The hourly tick handles the check-in trigger (plus the
+  // housekeeping below) — price/UTXO rules are the fast tick's job.
   try {
-    const r = await evaluateRelease();
+    const r = await evaluateRelease({ onlyTypes: ['checkin'] });
     if (r.action !== 'skipped') {
       const sum = (r.results || []).map((x) => x.action + ':' + (x.txid || '').slice(0, 8)).join(', ');
       console.log('release tick:', r.action, sum || r.reason || '');
@@ -1304,6 +2297,39 @@ async function runReleaseTick() {
   // refresh never breaks the tick (the Critical check is skipped
   // until the fees come back).
   try { await refreshCurrentFeesIfStale(); } catch (e) { console.error('current-fees refresh failed:', e); }
+}
+
+// The fast tick (0.8.0): every minute, while a price or UTXO rule
+// is armed, run a release evaluation for those trigger types only.
+// The hourly tick samples them once an hour — too coarse: an
+// unconfirmed UTXO trigger must be caught well within one block
+// time (~10 min), and a price that holds for an hour should fire
+// within a minute of the hour being up, not up to an hour later.
+// The 1-minute cadence is a price/UTXO cadence: a setup with no
+// armed price or UTXO rule never runs this tick, so a check-in-only
+// setup keeps the pure hourly cadence and makes no extra API calls.
+// The evaluation is the same single-flight evaluateRelease() the
+// hourly tick and the manual check use, restricted to ['price',
+// 'utxo'] — so a check-in rule is never evaluated (and never
+// broadcast) by this tick; the hourly tick owns check-in. The
+// cache refresh runs first, so the price rule's "currently $X"
+// line stays fresh even while its trigger is held by a grace.
+async function runFastTick() {
+  try {
+    await refreshPriceIfStale();
+    const st = store.loadState(DATA_DIR);
+    const hasFast = (st.bitcoin.txs || []).some((t) => {
+      if (!t.enabled) return false;
+      const type = store.triggerOf(t).type;
+      return type === 'price' || type === 'utxo';
+    });
+    if (!hasFast) return;
+    const r = await evaluateRelease({ onlyTypes: ['price', 'utxo'] });
+    if (r.action !== 'skipped') {
+      const sum = (r.results || []).map((x) => x.action + ':' + (x.txid || '').slice(0, 8)).join(', ');
+      console.log('fast tick:', r.action, sum || r.reason || '');
+    }
+  } catch (e) { console.error('fast tick failed:', e); }
 }
 
 // Test both nodes and save the per-endpoint results, so the Dashboard
@@ -1424,11 +2450,17 @@ async function handleApi(req, res, pathname) {
     mergeExternalCheckin(state, now);
     // Offline-gap grace (0.7.22): the hold is judged here too, so
     // a page load reflects it even if no release tick has run since
-    // the device came back — the card must show the held date, not
+    // the device came back — the bars measure the held window, not
     // the stale original due. The stamp is NOT refreshed on a read
     // (only the tick does that), so the gap stays honest.
-    try { if (applyOfflineHold(state, now)) store.saveState(DATA_DIR, state); } catch (e) { console.error('offline-hold apply failed:', e); }
+    try {
+      let changed = false;
+      if (applyOfflineHold(state, now)) changed = true;
+      if (applyGrace(state, now)) changed = true;
+      if (changed) store.saveState(DATA_DIR, state);
+    } catch (e) { console.error('offline-hold apply failed:', e); }
     const served = sanitizeState(state);
+    served.grace = graceStatus(state, now); // the price/UTXO grace (0.8.0): null when none is active, else { active, indefinite, graceUntil, triggeredAt, offlineGapDays }
     served.bitcoin.overlaps = bitcoin.findSharedInputs(state.bitcoin.txs || []);
     // The fee verdict's 90-day peak (0.7.20): the cached number (or
     // null when there is no usable fee data), with the fetched-at
@@ -1448,6 +2480,21 @@ async function handleApi(req, res, pathname) {
     const cf = currentFeesForState();
     served.bitcoin.currentFees = cf.fees;
     served.bitcoin.currentFeesAt = cf.fetchedAt;
+    // The BTC price (0.8.0): the cached price (or nulls when
+    // nothing has been fetched yet), so a price rule's "currently
+    // $X" line is live on the card. currentPrices is the
+    // per-source readings map (for the Settings display); the
+    // provider list is served so the Settings selects always
+    // match the registry.
+    const pc = priceCacheForState(priceAgreementPctOf(state.settings));
+    served.bitcoin.currentPrice = pc.price;
+    served.bitcoin.currentPriceAt = pc.fetchedAt;
+    served.bitcoin.currentPrices = pc.prices;
+    served.bitcoin.priceProviders = bitcoin.PRICE_PROVIDERS.map((p) => ({ id: p.id, label: p.label }));
+    // The consolidated exchange status (0.8.0): one status for
+    // the configured price sources, shown once on the readiness
+    // card (like Node Status) instead of repeated per price tx.
+    served.bitcoin.exchangeStatus = exchangeStatusFor(pc, priceSourcesOf(state.settings), priceAgreementPctOf(state.settings));
     // The inputs/outputs detail (0.7.18 refinement): derived from
     // the stored hexes on every read, like the overlaps — never
     // stored, so no migration and no restore change. An unparseable
@@ -1456,6 +2503,13 @@ async function handleApi(req, res, pathname) {
     for (const t of served.bitcoin.txs || []) {
       try { t.detail = bitcoin.txIoDetail(bitcoin.parseTx(t.hex)); }
       catch { t.detail = null; }
+      // The trigger (0.8.0): normalized (so the UI always sees a
+      // valid one — a legacy tx reads as the check-in trigger) and
+      // its current status, computed from the stored evaluation
+      // (no network on a read) — except the check-in trigger,
+      // whose state is live clock math.
+      t.trigger = store.triggerOf(t);
+      t.triggerStatus = triggerStatusFor(state, t, now);
     }
     return sendJson(res, 200, served);
   }
@@ -1465,7 +2519,12 @@ async function handleApi(req, res, pathname) {
     const merged = mergeExternalCheckin(state, now);
     // Offline-gap grace (0.7.22): see GET /api/state — the card
     // reads this endpoint, so the hold must be judged here too.
-    try { if (applyOfflineHold(state, now)) store.saveState(DATA_DIR, state); } catch (e) { console.error('offline-hold apply failed:', e); }
+    try {
+      let changed = false;
+      if (applyOfflineHold(state, now)) changed = true;
+      if (applyGrace(state, now)) changed = true;
+      if (changed) store.saveState(DATA_DIR, state);
+    } catch (e) { console.error('offline-hold apply failed:', e); }
     const txs = state.bitcoin.txs || [];
     return sendJson(res, 200, {
       ...checkinStatus(state, now),
@@ -1526,12 +2585,53 @@ async function handleApi(req, res, pathname) {
     });
   }
 
-  // POST /api/checkin — clears every tx's cycle-scoped release record:
-  // a new cycle starts. A stale record is NOT cleared: spent inputs are
-  // a fact about the transaction, not the cycle, so a stale transaction
-  // stays stale (and archived) across check-ins — only replacing the
-  // hex re-arms it. (If a broadcast already went out, the funds have
-  // already moved.) A 'submitted-slipstream' record (0.7.16) IS
+  // POST /api/triggers/check — evaluate a trigger ONCE, live, WITHOUT
+  // changing any state (0.8.0). The UI calls this when the owner picks
+  // a trigger in the Add/Edit form, so the already-true guard can warn
+  // before the rule is added ("this condition is already satisfied —
+  // it would fire on the next evaluation"). Body { trigger, txId? } — the
+  // same shape POST /api/bitcoin/txs accepts, plus an optional txId
+  // naming the transaction being edited: for a check-in rule its
+  // frozen time (disarmed / vacation) counts, so the guard measures
+  // the same effective clock the evaluator uses. A new tx (no txId)
+  // has no frozen time. An invalid trigger is
+  // a 400 with the reason. A price trigger whose price is already
+  // past the threshold (both sources agree) reports fire=true.
+  // A UTXO trigger whose outpoint is already spent (confirmed)
+  // reports fire=true. A trigger that cannot be read (a feed
+  // outage, an outpoint no node can say about) is 'unknown',
+  // never a fire.
+  if (req.method === 'POST' && pathname === '/api/triggers/check') {
+    const body = await readBody(req).catch(() => ({}));
+    const v = store.normalizeTrigger(body.trigger);
+    if (!v.trigger) return sendError(res, 400, 'invalid trigger: ' + v.error);
+    // The frozen time for the tx being edited, if any — only a
+    // check-in rule reads it (checkTriggerNow takes it as the
+    // clock's live offset); a price or UTXO rule ignores it.
+    let liveOff = 0;
+    if (typeof body.txId === 'string' && body.txId) {
+      const etx = (state.bitcoin.txs || []).find((t) => t.id === body.txId);
+      if (etx) liveOff = checkinLiveOffsetMs(etx, now);
+    }
+    try {
+      const r = await checkTriggerNow(v.trigger, state, now, liveOff);
+      return sendJson(res, 200, { ...r, trigger: v.trigger });
+    } catch (e) {
+      // Belt-and-braces: checkTriggerNow already answers 'unknown'
+      // on a fetch failure, so a throw here is a bug — but it must
+      // still answer 'unknown', never crash the check.
+      return sendJson(res, 200, { valid: true, fire: false, status: 'unknown', reason: 'could not check the trigger — will retry', warning: null, detail: { error: e.message }, trigger: v.trigger });
+    }
+  }
+
+  // POST /api/checkin — clears the CHECK-IN rules' cycle-scoped release records:
+  // a new cycle starts for them. (0.8.0) A price or UTXO rule's record belongs
+  // to its own trigger's cycle, not the check-in clock, so a check-in does
+  // not clear it — and does not reset its trigger. A stale record is NOT
+  // cleared: spent inputs are a fact about the transaction, not the cycle, so
+  // a stale transaction stays stale (and archived) across check-ins — only
+  // replacing the hex re-arms it. (If a broadcast already went out, the funds
+  // have already moved.) A 'submitted-slipstream' record (0.7.16) IS
   // cleared, like any other non-stale cycle record: the check-in ends
   // the cycle, and the card goes back to Ready — but the transaction
   // is still sitting in MARA's private mempool, and a check-in cannot
@@ -1541,20 +2641,51 @@ async function handleApi(req, res, pathname) {
   if (req.method === 'POST' && pathname === '/api/checkin') {
     const body = await readBody(req).catch(() => ({}));
     const method = body.method === 'telegram' ? 'telegram' : 'app';
-    const wasPaused = state.settings.paused;
     state.checkin.lastCheckinAt = now.toISOString();
     state.checkin.totalCheckins += 1;
     // A check-in clears an offline-gap hold (0.7.22): the owner is
     // alive, the clock resets, and there is nothing to hold back.
     state.checkin.heldUntil = null;
     for (const t of (state.bitcoin.txs || [])) {
+      if (store.triggerOf(t).type !== 'checkin') continue;
       if (t.release && t.release.status === 'stale') continue;
       t.release = null;
+      // The clock restarts at this check-in: any frozen time is
+      // wiped, then a tx that is still inactive (disarmed, or on
+      // vacation) is re-marked inactive from now — it stays frozen
+      // at 0 instead of counting while inactive. Checking in does
+      // NOT re-arm anything: there is no global pause to
+      // auto-resume any more (0.8.0, Global Arm/Disarm).
+      t.checkinOffsetMs = 0;
+      t.checkinInactiveSince = null;
     }
-    if (wasPaused) state.settings.paused = false; // owner is alive — auto-resume
+    for (const t of (state.bitcoin.txs || [])) syncCheckinFreeze(t, state, now);
     store.saveState(DATA_DIR, state);
-    store.appendCheckin(DATA_DIR, { ts: now.toISOString(), method, autoResumed: wasPaused });
-    return sendJson(res, 200, { ok: true, status: checkinStatus(state, now), autoResumed: wasPaused });
+    store.appendCheckin(DATA_DIR, { ts: now.toISOString(), method });
+    return sendJson(res, 200, { ok: true, status: checkinStatus(state, now) });
+  }
+
+  // POST /api/grace/resume — end the price/UTXO grace period
+  // immediately (0.8.0). The dashboard's Grace period card
+  // offers this while a grace is active; an indefinite grace
+  // can only end this way (saving new grace settings never
+  // changes an active one). Idempotent: resuming with no grace
+  // active is a 200 no-op. Returns the grace state after the
+  // resume (null when no grace is active). A check-in does NOT
+  // clear the grace — this endpoint is the only way.
+  // The resume also refreshes lastOnlineAt to now: the owner
+  // just used the live app, so it is online now, and the next
+  // read / tick must not re-set a grace on the same stale gap
+  // (without this, resuming while the stamp is still stale
+  // re-sets the grace on the very next read). This does not
+  // touch an already-set check-in hold — heldUntil is only
+  // cleared by a check-in — it only stops a NEW hold or grace
+  // being set on a gap the owner has already resumed from.
+  if (req.method === 'POST' && pathname === '/api/grace/resume') {
+    state.grace = { graceUntil: null, triggeredAt: null, offlineGapDays: null };
+    state.checkin.lastOnlineAt = now.toISOString();
+    store.saveState(DATA_DIR, state);
+    return sendJson(res, 200, { ok: true, grace: graceStatus(state, now) });
   }
 
   // Check-in API keys (0.6.6) — managed here, used by the check-in
@@ -1597,34 +2728,75 @@ async function handleApi(req, res, pathname) {
     return sendJson(res, 200, { ok: true, removed: keyMatch[1] });
   }
 
+  // POST /api/settings/price-sources/test {provider} (0.8.0):
+  // tests one price provider with a FRESH fetch (bypasses the
+  // price cache) and returns {provider, price, error}. Accepts
+  // any of the five providers, not only the two configured
+  // ones. Never changes the configured sources or the cache —
+  // the Settings Test button uses this to check a provider
+  // before (or without) saving it. A provider that fails
+  // answers 200 with price null and the error, so the UI can
+  // show the failure inline; only an unknown provider id is a
+  // 400.
+  if (req.method === 'POST' && pathname === '/api/settings/price-sources/test') {
+    const body = await readBody(req);
+    const prov = bitcoin.priceProviderById(body && body.provider);
+    if (!prov) return sendError(res, 400, 'unknown price provider: ' + (body && body.provider));
+    try {
+      const price = await bitcoin.fetchPriceFromProvider(prov);
+      return sendJson(res, 200, { provider: prov.id, price, error: null });
+    } catch (e) {
+      return sendJson(res, 200, { provider: prov.id, price: null, error: e.message });
+    }
+  }
+
+  // POST /api/settings/price-sources/test-all {providers: [id, ...]} (0.8.0):
+  // tests several providers at once with FRESH fetches
+  // (bypasses the price cache) and returns
+  // {results: [{provider, price, error}, ...]} in the order
+  // requested. A provider that fails answers with price null
+  // and the error (the test itself worked — the provider is
+  // down); only a missing/empty providers array is a 400, and
+  // an unknown id inside the list is reported per-result, not
+  // as a whole-call failure. Never changes the configured
+  // sources or the cache — the Settings "Test connection"
+  // button uses this to check both sources in one call.
+  if (req.method === 'POST' && pathname === '/api/settings/price-sources/test-all') {
+    const body = await readBody(req);
+    const ids = (body && Array.isArray(body.providers)) ? body.providers : [];
+    if (!ids.length) return sendError(res, 400, 'providers must be a non-empty array');
+    const results = await Promise.all(ids.map(async (id) => {
+      const prov = bitcoin.priceProviderById(id);
+      if (!prov) return { provider: String(id), price: null, error: 'unknown price provider: ' + id };
+      try {
+        const price = await bitcoin.fetchPriceFromProvider(prov);
+        return { provider: prov.id, price, error: null };
+      } catch (e) {
+        return { provider: prov.id, price: null, error: e.message };
+      }
+    }));
+    return sendJson(res, 200, { results });
+  }
+
   // PUT /api/settings
+  // PUT /api/settings (0.8.0): the global broadcast threshold is
+  // GONE — each check-in transaction carries its own threshold
+  // ("Days of silence", set when the tx is added/edited). A
+  // thresholdDays in the body is a 400, not a silent no-op: a
+  // stale client must not believe the setting saved. The
+  // danger-zone reset tied to the global threshold change is gone
+  // with it; the per-tx reset (PUT /api/bitcoin/txs/:id, add /
+  // import / arm) stays.
   if (req.method === 'PUT' && pathname === '/api/settings') {
     const body = await readBody(req);
     const s = state.settings;
-    let checkinReset = false;
     if (body.thresholdDays !== undefined) {
-      s.thresholdDays = clampInt(body.thresholdDays, s.thresholdDays, 1, 3650);
-      // (0.7.22) Shortening the threshold can make the clock
-      // instantly overdue — last check-in 20 days ago, threshold
-      // 35 -> due in 15 days; change it to 7 and the new due is
-      // 13 days ago, so the next hourly tick fires. When the new
-      // threshold would make the release immediately due, reset
-      // the check-in instead: the owner is here, changing a
-      // setting, so the clock restarts at now. This is server-side
-      // on purpose — a direct API call cannot bypass it. Only a
-      // shorten whose new due is already past resets; a shorten
-      // that keeps the due in the future, and any lengthen, leave
-      // the clock untouched.
-      // (0.7.22) The danger zone is the last 25% of the window,
-      // measured against the NEW threshold — a shorten that lands
-      // the new due inside 25% of the new threshold (including
-      // already past it) resets; a shorten or lengthen that leaves
-      // the new due comfortably out does not. The old "new due in
-      // the past" rule is subsumed (past due is inside the zone).
-      if (inDangerZone(state, now, s.thresholdDays)) {
-        resetCheckin(state, now, 'threshold-reset');
-        checkinReset = true;
-      }
+      return sendError(res, 400, 'thresholdDays is no longer a setting — set "Days of silence" on each check-in transaction instead');
+    }
+    // (0.8.0) `paused` is gone — Global Arm/Disarm replaces it.
+    // A stale client must not believe the setting saved.
+    if (body.paused !== undefined) {
+      return sendError(res, 400, 'paused is no longer a setting — use Global Arm/Disarm instead');
     }
     if (body.primaryApiUrl !== undefined) {
       const v = typeof body.primaryApiUrl === 'string' ? body.primaryApiUrl.trim() : '';
@@ -1636,27 +2808,89 @@ async function handleApi(req, res, pathname) {
       try { s.secondaryApiUrl = v ? bitcoin.normalizePublicApiUrl(v) : ''; }
       catch (e) { return sendError(res, 400, e.message); }
     }
+    if (body.priceSources !== undefined) {
+      const ps = body.priceSources;
+      if (!ps || typeof ps !== 'object') return sendError(res, 400, 'priceSources must be {source1, source2}');
+      const s1 = ps.source1, s2 = ps.source2;
+      if (typeof s1 !== 'string' || !bitcoin.priceProviderById(s1)) return sendError(res, 400, 'unknown price provider: ' + s1);
+      if (typeof s2 !== 'string' || !bitcoin.priceProviderById(s2)) return sendError(res, 400, 'unknown price provider: ' + s2);
+      if (s1 === s2) return sendError(res, 400, 'price sources must be different');
+      s.priceSources = { source1: s1, source2: s2 };
+    }
+    // Grace period (0.8.0): the offline gap that triggers a
+    // grace and how long it lasts (null = indefinite, until the
+    // owner resumes). Only the values the Settings dropdowns
+    // offer are accepted — anything else is a 400. Saving new
+    // values does NOT change an already-active grace (it keeps
+    // the duration it was created with).
+    if (body.graceOfflineDays !== undefined) {
+      if (typeof body.graceOfflineDays !== 'number' || !GRACE_OFFLINE_DAYS.includes(body.graceOfflineDays)) {
+        return sendError(res, 400, 'graceOfflineDays must be one of ' + GRACE_OFFLINE_DAYS.join(', ') + ' days');
+      }
+      s.graceOfflineDays = body.graceOfflineDays;
+    }
+    if (body.graceDurationDays !== undefined) {
+      if (body.graceDurationDays !== null && (typeof body.graceDurationDays !== 'number' || !GRACE_DURATION_DAYS.includes(body.graceDurationDays))) {
+        return sendError(res, 400, 'graceDurationDays must be one of ' + GRACE_DURATION_DAYS.join(', ') + ' days, or null for indefinite');
+      }
+      s.graceDurationDays = body.graceDurationDays;
+    }
+    // User controls (0.8.0): each is a number input with a
+    // min/max bound — anything outside is a 400, never a silent
+    // clamp. The fee pair is validated together (using the new
+    // value where given, the saved value otherwise) so a partial
+    // update cannot break the Low-above-Medium invariant.
+    if (body.priceAgreementPct !== undefined) {
+      if (typeof body.priceAgreementPct !== 'number' || !Number.isFinite(body.priceAgreementPct) || body.priceAgreementPct < PRICE_AGREEMENT_PCT_MIN || body.priceAgreementPct > PRICE_AGREEMENT_PCT_MAX) {
+        return sendError(res, 400, 'priceAgreementPct must be a number from ' + PRICE_AGREEMENT_PCT_MIN + ' to ' + PRICE_AGREEMENT_PCT_MAX + ' (%)');
+      }
+      s.priceAgreementPct = body.priceAgreementPct;
+    }
+    let cadenceChanged = false;
+    if (body.checkCadenceSeconds !== undefined) {
+      if (typeof body.checkCadenceSeconds !== 'number' || !Number.isFinite(body.checkCadenceSeconds) || body.checkCadenceSeconds < CHECK_CADENCE_SECONDS_MIN || body.checkCadenceSeconds > CHECK_CADENCE_SECONDS_MAX) {
+        return sendError(res, 400, 'checkCadenceSeconds must be a number from ' + CHECK_CADENCE_SECONDS_MIN + ' to ' + CHECK_CADENCE_SECONDS_MAX + ' (seconds)');
+      }
+      s.checkCadenceSeconds = body.checkCadenceSeconds;
+      cadenceChanged = true;
+    }
+    if (body.feeLowMultiplier !== undefined || body.feeMediumMultiplier !== undefined) {
+      const low = (body.feeLowMultiplier !== undefined) ? body.feeLowMultiplier : s.feeLowMultiplier;
+      const med = (body.feeMediumMultiplier !== undefined) ? body.feeMediumMultiplier : s.feeMediumMultiplier;
+      if (typeof low !== 'number' || !Number.isFinite(low) || low < FEE_LOW_MULT_MIN || low > FEE_LOW_MULT_MAX) {
+        return sendError(res, 400, 'feeLowMultiplier must be a number from ' + FEE_LOW_MULT_MIN + ' to ' + FEE_LOW_MULT_MAX + ' (× peak)');
+      }
+      if (typeof med !== 'number' || !Number.isFinite(med) || med < FEE_MED_MULT_MIN || med > FEE_MED_MULT_MAX) {
+        return sendError(res, 400, 'feeMediumMultiplier must be a number from ' + FEE_MED_MULT_MIN + ' to ' + FEE_MED_MULT_MAX + ' (× peak)');
+      }
+      if (low <= med) {
+        return sendError(res, 400, 'feeLowMultiplier must be greater than feeMediumMultiplier');
+      }
+      if (body.feeLowMultiplier !== undefined) s.feeLowMultiplier = body.feeLowMultiplier;
+      if (body.feeMediumMultiplier !== undefined) s.feeMediumMultiplier = body.feeMediumMultiplier;
+    }
+    // Vacation mode (0.8.0): check-in-only — while it is on, the
+    // check-in countdown freezes. vacationUntil is the last away
+    // day ('YYYY-MM-DD'); null (or '' from an older client) means
+    // indefinite, until the owner says they're back. A change to
+    // vacationMode re-syncs the freeze on every check-in tx, so
+    // the days away start / stop counting exactly here.
     if (body.vacationMode !== undefined) s.vacationMode = !!body.vacationMode;
-    if (body.vacationUntil !== undefined) s.vacationUntil = asStr(body.vacationUntil, 10);
+    if (body.vacationUntil === null) s.vacationUntil = null;
+    else if (body.vacationUntil !== undefined) s.vacationUntil = asStr(body.vacationUntil, 10) || null;
+    if (body.vacationMode !== undefined) {
+      for (const t of (state.bitcoin.txs || [])) syncCheckinFreeze(t, state, now);
+    }
     store.saveState(DATA_DIR, state);
-    const out = sanitizeState(state).settings;
-    if (checkinReset) out.checkinReset = true;
-    return sendJson(res, 200, out);
+    // A new cadence takes effect immediately — the running fast
+    // tick is cleared and restarted with the new delay.
+    if (cadenceChanged) rearmFastTick();
+    return sendJson(res, 200, sanitizeState(state).settings);
   }
 
-  // POST /api/pause — no code required; anyone who can open the app can hold a release.
-  if (req.method === 'POST' && pathname === '/api/pause') {
-    state.settings.paused = true;
-    store.saveState(DATA_DIR, state);
-    return sendJson(res, 200, { ok: true, paused: true });
-  }
-
-  // POST /api/resume
-  if (req.method === 'POST' && pathname === '/api/resume') {
-    state.settings.paused = false;
-    store.saveState(DATA_DIR, state);
-    return sendJson(res, 200, { ok: true, paused: false });
-  }
+  // (0.8.0) POST /api/pause and POST /api/resume are gone with
+  // the `paused` setting — Global Arm/Disarm (POST
+  // /api/bitcoin/txs/arm-all) replaces them. Those paths 404 now.
 
   // Transactions — the pre-signed list. Adding one arms it (the toggle
   // disarms it). The hex is validated (structure + txid) before
@@ -1689,7 +2923,7 @@ async function handleApi(req, res, pathname) {
   // null when the parents could not be fetched — the fee is
   // display-only, never a gate, so an unknown fee never blocks an
   // add.
-  function newTxRecord(parsed, hex, label, notes, broadcastVia, publicFallbackDays) {
+  function newTxRecord(parsed, hex, label, notes, broadcastVia, publicFallbackDays, trigger) {
     return {
       id: store.newTxId(),
       txid: parsed.txid,
@@ -1705,9 +2939,21 @@ async function handleApi(req, res, pathname) {
       locktime: parsed.locktime,
       segwit: parsed.segwit,
       enabled: true, // new transactions are armed by default
+      // The check-in freeze (0.8.0): the accumulated inactive
+      // time and the start of the current inactive period (see
+      // syncCheckinFreeze). Only check-in logic reads them; a new
+      // tx starts active, at 0 / null.
+      checkinOffsetMs: 0,
+      checkinInactiveSince: null,
       broadcastVia: validBroadcastVia(broadcastVia),
       publicFallbackDays: validPublicFallbackDays(publicFallbackDays),
       slipstreamFirstAttemptAt: null,
+      // The rule that fires this transaction (0.8.0) — already
+      // normalized by the caller (see the add / import handlers).
+      // triggerState is the trigger's last evaluation, null until
+      // the release has evaluated it once.
+      trigger,
+      triggerState: null,
       release: null,
       // broadcasted is set by broadcastOne() (release or manual) and
       // survives check-ins: { txid, broadcastedAt, method,
@@ -1758,24 +3004,67 @@ async function handleApi(req, res, pathname) {
     catch (e) { return sendError(res, 400, 'invalid transaction: ' + e.message); }
     const dupErr = duplicateTx(parsed.txid);
     if (dupErr) return sendError(res, 400, dupErr);
-    const tx = newTxRecord(parsed, hex, body.label, body.notes, body.broadcastVia, body.publicFallbackDays);
+    // (0.8.0) The trigger: validated server-side (an invalid one
+    // is a 400 with the reason). Omitted → the check-in trigger at
+    // the 35-day fallback, so the old add path is unchanged.
+    const trig = (body.trigger === undefined)
+      ? { trigger: store.defaultTrigger() }
+      : store.normalizeTrigger(body.trigger);
+    if (!trig.trigger) return sendError(res, 400, 'invalid trigger: ' + trig.error);
+    const tx = newTxRecord(parsed, hex, body.label, body.notes, body.broadcastVia, body.publicFallbackDays, trig.trigger);
     const fee = await feeFor(parsed);
     if (fee) { tx.feeSats = fee.feeSats; tx.feeRateSatVb = fee.feeRateSatVb; }
+    // (0.8.0) The already-satisfied check for a price or UTXO
+    // rule: a condition that is ALREADY met would fire on the
+    // next evaluation, so adding it is a mistake unless the
+    // owner confirms it (triggerConfirmed: true). What "met" means
+    // depends on the rule: for a price rule both sources must
+    // agree the price is past the threshold — a single-source or
+    // disagreeing reading is not a fire (checkTriggerNow answers
+    // fire: false), so it never blocks the add; for a UTXO rule
+    // it depends on the confirmation mode: any spend in
+    // unconfirmed mode (0), or a spend with at least N
+    // confirmations in N-confirmation mode. The check is
+    // best-effort — a reading no source can say about (unknown)
+    // does not block the add; the tick will evaluate it. A UTXO
+    // spend that is unconfirmed, or confirmed but below N, is a
+    // warning at most, not a block. The warning still rides on
+    // the response when the condition is NOT already satisfied,
+    // so the UI can say what it found.
+    let triggerWarning = null;
+    if (trig.trigger.type === 'utxo' || trig.trigger.type === 'price') {
+      try {
+        const chk = await checkTriggerNow(trig.trigger, state, now);
+        if (chk.warning) triggerWarning = chk.warning;
+        if (trig.trigger.type === 'utxo' && chk.fire && body.triggerConfirmed !== true) {
+          return sendError(res, 400, 'That UTXO is already spent — this rule would fire on the next evaluation. Add it with triggerConfirmed to add it anyway.');
+        }
+        if (trig.trigger.type === 'price' && chk.fire && body.triggerConfirmed !== true) {
+          const dir = trig.trigger.params.op === '>=' ? 'above' : 'below';
+          return sendError(res, 400, 'The price is already ' + dir + ' $' + Number(trig.trigger.params.value).toLocaleString('en-US') + ' — this rule would fire on the next evaluation. Add it with triggerConfirmed to add it anyway.');
+        }
+      } catch (e) { /* best-effort: the add proceeds without the warning */ }
+    }
     state.bitcoin.txs.push(tx);
-    // (0.7.22) A new tx is armed by default — adding one while
-    // the clock is in the danger zone (the last 25% of the
-    // window, including already past due) would let the release
-    // fire soon after, so the add resets the check-in the same
-    // way arming does (server-side, a direct API call cannot
-    // bypass it). Adding with more than 25% of the window left
-    // does not reset.
+    // (0.7.22, scoped 0.8.0) A new tx is armed by default — adding
+    // a CHECK-IN rule while the clock is in the danger zone (the
+    // last 25% of ITS window, including already past due) would
+    // let the release fire soon after, so the add resets the
+    // check-in the same way arming does (server-side, a direct API
+    // call cannot bypass it). A price, UTXO, or manual rule does
+    // not touch the check-in clock. The zone is measured against
+    // the new rule's own threshold, not the global one. Adding
+    // with more than 25% of the window left does not reset.
     let checkinReset = false;
-    if (inDangerZone(state, now, state.settings.thresholdDays)) {
+    if (trig.trigger.type === 'checkin' && inDangerZone(state, now, trig.trigger.params.thresholdDays)) {
       resetCheckin(state, now, 'add-reset');
       checkinReset = true;
     }
     store.saveState(DATA_DIR, state);
-    return sendJson(res, 201, checkinReset ? { tx, checkinReset: true } : { tx });
+    const out = { tx };
+    if (checkinReset) out.checkinReset = true;
+    if (triggerWarning) out.triggerWarning = triggerWarning;
+    return sendJson(res, 201, out);
   }
 
   // POST /api/bitcoin/txs/preview — finalize a file's contents and
@@ -1834,19 +3123,43 @@ async function handleApi(req, res, pathname) {
     catch (e) { return sendError(res, 400, 'invalid transaction: ' + e.message); }
     const dupErr = duplicateTx(parsed.txid);
     if (dupErr) return sendError(res, 400, dupErr);
-    const tx = newTxRecord(parsed, hex, body.label, body.notes, body.broadcastVia, body.publicFallbackDays);
+    // (0.8.0) The trigger — same validation and already-spent gate
+    // as the paste path (see POST /api/bitcoin/txs above).
+    const trig = (body.trigger === undefined)
+      ? { trigger: store.defaultTrigger() }
+      : store.normalizeTrigger(body.trigger);
+    if (!trig.trigger) return sendError(res, 400, 'invalid trigger: ' + trig.error);
+    const tx = newTxRecord(parsed, hex, body.label, body.notes, body.broadcastVia, body.publicFallbackDays, trig.trigger);
     const fee = await feeFor(parsed);
     if (fee) { tx.feeSats = fee.feeSats; tx.feeRateSatVb = fee.feeRateSatVb; }
+    let triggerWarning = null;
+    if (trig.trigger.type === 'utxo' || trig.trigger.type === 'price') {
+      try {
+        const chk = await checkTriggerNow(trig.trigger, state, now);
+        if (chk.warning) triggerWarning = chk.warning;
+        if (trig.trigger.type === 'utxo' && chk.fire && body.triggerConfirmed !== true) {
+          return sendError(res, 400, 'That UTXO is already spent — this rule would fire on the next evaluation. Import it with triggerConfirmed to import it anyway.');
+        }
+        if (trig.trigger.type === 'price' && chk.fire && body.triggerConfirmed !== true) {
+          const dir = trig.trigger.params.op === '>=' ? 'above' : 'below';
+          return sendError(res, 400, 'The price is already ' + dir + ' $' + Number(trig.trigger.params.value).toLocaleString('en-US') + ' — this rule would fire on the next evaluation. Import it with triggerConfirmed to import it anyway.');
+        }
+      } catch (e) { /* best-effort: the import proceeds without the warning */ }
+    }
     state.bitcoin.txs.push(tx);
-    // (0.7.22) The import path arms by default too — same reset
-    // as the paste path when the clock is in the danger zone.
+    // (0.7.22, scoped 0.8.0) The import path arms by default too —
+    // same reset as the paste path when the clock is in the danger
+    // zone, and only for a check-in rule.
     let checkinReset = false;
-    if (inDangerZone(state, now, state.settings.thresholdDays)) {
+    if (trig.trigger.type === 'checkin' && inDangerZone(state, now, trig.trigger.params.thresholdDays)) {
       resetCheckin(state, now, 'add-reset');
       checkinReset = true;
     }
     store.saveState(DATA_DIR, state);
-    return sendJson(res, 201, checkinReset ? { tx, checkinReset: true } : { tx });
+    const out = { tx };
+    if (checkinReset) out.checkinReset = true;
+    if (triggerWarning) out.triggerWarning = triggerWarning;
+    return sendJson(res, 201, out);
   }
   if (txsMatch && (req.method === 'PUT' || req.method === 'DELETE')) {
     const tx = (state.bitcoin.txs || []).find((t) => t.id === txsMatch[1]);
@@ -1907,16 +3220,59 @@ async function handleApi(req, res, pathname) {
     }
     if (typeof body.label === 'string') tx.label = asStr(body.label, 80);
     if (typeof body.notes === 'string') tx.notes = asStr(body.notes, 500);
-    // (0.7.22) Arming a transaction while the clock is in the
-    // danger zone (the last 25% of the window, including already
-    // past due) would let the release fire soon after — a
-    // present owner arming a tx should not get a surprise
+    // (0.8.0) The trigger: changing it re-rules the transaction.
+    // Validated server-side (an invalid one is a 400). A changed
+    // trigger starts fresh — the old triggerState (a price's
+    // last price, a UTXO's last outspend) belongs to the old
+    // condition and must not carry over. The already-satisfied
+    // gate (price or UTXO) applies here too (same rule as the add
+    // path). Nothing is saved until the end of this handler, so a
+    // 400 here discards the label / notes / hex changes above
+    // with it.
+    let triggerWarning = null;
+    if (body.trigger !== undefined) {
+      const v = store.normalizeTrigger(body.trigger);
+      if (!v.trigger) return sendError(res, 400, 'invalid trigger: ' + v.error);
+      // The trigger is locked with the hex and route: a transaction
+      // out the door (broadcasted, submitted to Slipstream, stale)
+      // has already fired its rule, and re-ruling it now would
+      // only rewrite history — the Edit popup disables the picker
+      // for a locked tx, and this is the server-side backstop.
+      const triggerLocked = !!(tx.broadcasted || (tx.release
+        && (tx.release.status === 'submitted-slipstream' || tx.release.status === 'stale' || tx.release.status === 'broadcast')));
+      if (triggerLocked && JSON.stringify(v.trigger) !== JSON.stringify(store.triggerOf(tx))) {
+        return sendError(res, 400, 'the trigger cannot be changed once the transaction has been broadcast');
+      }
+      if (v.trigger.type === 'utxo' || v.trigger.type === 'price') {
+        try {
+          const chk = await checkTriggerNow(v.trigger, state, now);
+          if (chk.warning) triggerWarning = chk.warning;
+          if (chk.fire && body.triggerConfirmed !== true) {
+            if (v.trigger.type === 'utxo') {
+              return sendError(res, 400, 'That UTXO is already spent — this rule would fire on the next evaluation. Save it with triggerConfirmed to save it anyway.');
+            }
+            const dir = v.trigger.params.op === '>=' ? 'above' : 'below';
+            return sendError(res, 400, 'The price is already ' + dir + ' $' + Number(v.trigger.params.value).toLocaleString('en-US') + ' — this rule would fire on the next evaluation. Save it with triggerConfirmed to save it anyway.');
+          }
+        } catch (e) { /* best-effort: the save proceeds without the warning */ }
+      }
+      if (JSON.stringify(v.trigger) !== JSON.stringify(tx.trigger)) {
+        tx.trigger = v.trigger;
+        tx.triggerState = null;
+      }
+    }
+    // (0.7.22, scoped 0.8.0) Arming a CHECK-IN transaction while
+    // the clock is in the danger zone (the last 25% of ITS window,
+    // including already past due) would let the release fire soon
+    // after — a present owner arming a tx should not get a surprise
     // broadcast. A disarmed→armed transition on a live tx (not
     // already broadcasted, not stale — one the release could
     // actually broadcast) resets the check-in instead, server-side
-    // so a direct API call cannot bypass it. Disarming, arming
+    // so a direct API call cannot bypass it. Arming a price, UTXO,
+    // or manual rule does not touch the clock. Disarming, arming
     // outside the zone, and arming a broadcasted / stale tx leave
-    // the clock untouched.
+    // the clock untouched. The zone is measured against the tx's
+    // own threshold (after a trigger change above, the new one).
     const wasEnabled = tx.enabled;
     if (typeof body.enabled === 'boolean') tx.enabled = body.enabled;
     // The route toggle on the card (0.7.16): switching the route
@@ -1933,20 +3289,70 @@ async function handleApi(req, res, pathname) {
     // fallbackDeadline), so no clock is restarted here.
     if (body.publicFallbackDays !== undefined) tx.publicFallbackDays = validPublicFallbackDays(body.publicFallbackDays);
     let checkinReset = false;
+    const txTrigger = store.triggerOf(tx);
+    // The freeze (0.8.0): the danger zone is measured from the
+    // EFFECTIVE last check-in — the tx's live frozen time — so a
+    // frozen clock is never in the danger zone for time that never
+    // counted. The freeze is re-synced after the toggle: disarming
+    // starts an inactive period, re-arming banks it.
+    const liveOff = checkinLiveOffsetMs(tx, now);
     if (body.enabled === true && wasEnabled === false
-        && inDangerZone(state, now, state.settings.thresholdDays)
+        && txTrigger.type === 'checkin'
+        && inDangerZone(state, now, txTrigger.params.thresholdDays, liveOff)
         && !tx.broadcasted && !(tx.release && tx.release.status === 'stale')) {
       resetCheckin(state, now, 'arm-reset');
       checkinReset = true;
     }
+    syncCheckinFreeze(tx, state, now);
     store.saveState(DATA_DIR, state);
-    return sendJson(res, 200, checkinReset ? { tx, checkinReset: true } : { tx });
+    const out = { tx };
+    if (checkinReset) out.checkinReset = true;
+    if (triggerWarning) out.triggerWarning = triggerWarning;
+    return sendJson(res, 200, out);
+  }
+
+  // POST /api/bitcoin/txs/arm-all — Global Arm/Disarm (0.8.0):
+  // set `enabled` on EVERY staged transaction at once. Body
+  // { enabled: true|false }. Applies to all triggers — check-in,
+  // price, UTXO, manual. "Arm all" arms EVERYTHING, including
+  // transactions individually disarmed before — the owner
+  // re-disarms those after if needed. Each check-in tx's freeze
+  // is re-synced, so disarming freezes its countdown at the day
+  // count it was left at and re-arming resumes from there.
+  // Arming a check-in tx in its danger zone resets the check-in
+  // (the same 0.7.22 guard as arming one tx), once, and the
+  // response names it. Manual broadcasts still work while a tx
+  // is disarmed — they never went through the armed toggle.
+  if (req.method === 'POST' && pathname === '/api/bitcoin/txs/arm-all') {
+    const body = await readBody(req).catch(() => ({}));
+    if (typeof body.enabled !== 'boolean') return sendError(res, 400, 'enabled must be true or false');
+    const txs = state.bitcoin.txs || [];
+    const newlyArmed = [];
+    for (const t of txs) {
+      const wasEnabled = t.enabled;
+      t.enabled = body.enabled;
+      syncCheckinFreeze(t, state, now);
+      if (body.enabled === true && wasEnabled === false) newlyArmed.push(t);
+    }
+    let checkinReset = false;
+    for (const t of newlyArmed) {
+      const trg = store.triggerOf(t);
+      if (trg.type !== 'checkin') continue;
+      if (t.broadcasted || (t.release && t.release.status === 'stale')) continue;
+      if (inDangerZone(state, now, trg.params.thresholdDays, checkinLiveOffsetMs(t, now))) {
+        resetCheckin(state, now, 'arm-all-reset');
+        checkinReset = true;
+        break;
+      }
+    }
+    store.saveState(DATA_DIR, state);
+    return sendJson(res, 200, { ok: true, enabled: body.enabled, count: txs.length, checkinReset, txs });
   }
 
   // POST /api/bitcoin/txs/:id/broadcast — MANUAL broadcast, now. Same
   // path as the release (freshness gate, then primary with secondary
   // fallback) but on the owner's explicit say-so: it ignores the
-  // check-in clock, the armed toggle, pause, and vacation mode. The UI
+  // check-in clock, the armed toggle, and vacation mode. The UI
   // asks first (a confirmation dialog). A tx already broadcast is
   // skipped, never re-sent.
   const txBroadcastMatch = pathname.match(/^\/api\/bitcoin\/txs\/([^/]+)\/broadcast$/);
@@ -2087,12 +3493,15 @@ async function handleApi(req, res, pathname) {
     }
     const bsSettings = bs.settings;
     const settings = {
-      thresholdDays: clampInt(bsSettings.thresholdDays, 35, 1, 3650),
       primaryApiUrl: bitcoin.DEFAULT_PUBLIC_API_URL,
       secondaryApiUrl: '',
-      paused: !!bsSettings.paused,
+      // (0.8.0) `paused` is gone — a backup carrying it restores
+      // WITHOUT it (ignored, not an error). vacationUntil is null
+      // for indefinite, a 'YYYY-MM-DD' date otherwise; anything
+      // else (including a legacy '') restores as null.
       vacationMode: !!bsSettings.vacationMode,
-      vacationUntil: asStr(bsSettings.vacationUntil || '', 10),
+      vacationUntil: (typeof bsSettings.vacationUntil === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(bsSettings.vacationUntil))
+        ? bsSettings.vacationUntil : null,
     };
     if (typeof bsSettings.primaryApiUrl === 'string' && bsSettings.primaryApiUrl.trim()) {
       try { settings.primaryApiUrl = bitcoin.normalizePublicApiUrl(bsSettings.primaryApiUrl); }
@@ -2101,6 +3510,85 @@ async function handleApi(req, res, pathname) {
     if (typeof bsSettings.secondaryApiUrl === 'string' && bsSettings.secondaryApiUrl.trim()) {
       try { settings.secondaryApiUrl = bitcoin.normalizePublicApiUrl(bsSettings.secondaryApiUrl); }
       catch (e) { return sendError(res, 400, 'backup secondary node URL: ' + e.message); }
+    }
+    // (0.8.0) The price sources ride along: a backup from before
+    // 0.8.0 carries none, which restores as the defaults; a present
+    // but invalid pair rejects the whole restore, like a bad node URL.
+    if (bsSettings.priceSources !== undefined && bsSettings.priceSources !== null) {
+      const ps = bsSettings.priceSources;
+      if (!ps || typeof ps !== 'object') return sendError(res, 400, 'backup priceSources must be {source1, source2}');
+      const s1 = ps.source1, s2 = ps.source2;
+      if (typeof s1 !== 'string' || !bitcoin.priceProviderById(s1)) return sendError(res, 400, 'backup unknown price provider: ' + s1);
+      if (typeof s2 !== 'string' || !bitcoin.priceProviderById(s2)) return sendError(res, 400, 'backup unknown price provider: ' + s2);
+      if (s1 === s2) return sendError(res, 400, 'backup price sources must be different');
+      settings.priceSources = { source1: s1, source2: s2 };
+    } else {
+      settings.priceSources = { source1: 'coingecko', source2: 'coinbase' };
+    }
+    // (0.8.0) The grace settings ride along the same way: a backup
+    // from before 0.8.0 carries none, which restores as the defaults
+    // (7 days offline to trigger, 7-day grace); a present but invalid
+    // value rejects the whole restore, like a bad node URL. The active
+    // grace itself does NOT ride along — a restore counts as a check-in
+    // (the owner is present), so the grace is cleared, just like the
+    // check-in hold (heldUntil).
+    if (bsSettings.graceOfflineDays !== undefined && bsSettings.graceOfflineDays !== null) {
+      if (typeof bsSettings.graceOfflineDays !== 'number' || !GRACE_OFFLINE_DAYS.includes(bsSettings.graceOfflineDays)) {
+        return sendError(res, 400, 'backup graceOfflineDays must be one of ' + GRACE_OFFLINE_DAYS.join(', ') + ' days');
+      }
+      settings.graceOfflineDays = bsSettings.graceOfflineDays;
+    } else {
+      settings.graceOfflineDays = 7;
+    }
+    if (bsSettings.graceDurationDays !== undefined) {
+      if (bsSettings.graceDurationDays !== null && (typeof bsSettings.graceDurationDays !== 'number' || !GRACE_DURATION_DAYS.includes(bsSettings.graceDurationDays))) {
+        return sendError(res, 400, 'backup graceDurationDays must be one of ' + GRACE_DURATION_DAYS.join(', ') + ' days, or null for indefinite');
+      }
+      settings.graceDurationDays = bsSettings.graceDurationDays;
+    } else {
+      settings.graceDurationDays = 7;
+    }
+    // (0.8.0) The price-agreement, check-cadence, and fee-verdict
+    // settings ride along the same way: a backup from before
+    // 0.8.0 carries none, which restores as the defaults; a
+    // present but invalid value rejects the whole restore, like a
+    // bad node URL. The fee pair is validated together (using
+    // the backup's value where present, the default otherwise)
+    // so a partial pair cannot break the Low-above-Medium
+    // invariant.
+    if (bsSettings.priceAgreementPct !== undefined && bsSettings.priceAgreementPct !== null) {
+      if (typeof bsSettings.priceAgreementPct !== 'number' || !Number.isFinite(bsSettings.priceAgreementPct) || bsSettings.priceAgreementPct < PRICE_AGREEMENT_PCT_MIN || bsSettings.priceAgreementPct > PRICE_AGREEMENT_PCT_MAX) {
+        return sendError(res, 400, 'backup priceAgreementPct must be a number from ' + PRICE_AGREEMENT_PCT_MIN + ' to ' + PRICE_AGREEMENT_PCT_MAX + ' (%)');
+      }
+      settings.priceAgreementPct = bsSettings.priceAgreementPct;
+    } else {
+      settings.priceAgreementPct = PRICE_AGREEMENT_PCT_DEFAULT;
+    }
+    if (bsSettings.checkCadenceSeconds !== undefined && bsSettings.checkCadenceSeconds !== null) {
+      if (typeof bsSettings.checkCadenceSeconds !== 'number' || !Number.isFinite(bsSettings.checkCadenceSeconds) || bsSettings.checkCadenceSeconds < CHECK_CADENCE_SECONDS_MIN || bsSettings.checkCadenceSeconds > CHECK_CADENCE_SECONDS_MAX) {
+        return sendError(res, 400, 'backup checkCadenceSeconds must be a number from ' + CHECK_CADENCE_SECONDS_MIN + ' to ' + CHECK_CADENCE_SECONDS_MAX + ' (seconds)');
+      }
+      settings.checkCadenceSeconds = bsSettings.checkCadenceSeconds;
+    } else {
+      settings.checkCadenceSeconds = CHECK_CADENCE_SECONDS_DEFAULT;
+    }
+    if (bsSettings.feeLowMultiplier !== undefined || bsSettings.feeMediumMultiplier !== undefined) {
+      const low = (bsSettings.feeLowMultiplier !== undefined && bsSettings.feeLowMultiplier !== null) ? bsSettings.feeLowMultiplier : FEE_LOW_MULT_DEFAULT;
+      const med = (bsSettings.feeMediumMultiplier !== undefined && bsSettings.feeMediumMultiplier !== null) ? bsSettings.feeMediumMultiplier : FEE_MED_MULT_DEFAULT;
+      if (typeof low !== 'number' || !Number.isFinite(low) || low < FEE_LOW_MULT_MIN || low > FEE_LOW_MULT_MAX) {
+        return sendError(res, 400, 'backup feeLowMultiplier must be a number from ' + FEE_LOW_MULT_MIN + ' to ' + FEE_LOW_MULT_MAX + ' (× peak)');
+      }
+      if (typeof med !== 'number' || !Number.isFinite(med) || med < FEE_MED_MULT_MIN || med > FEE_MED_MULT_MAX) {
+        return sendError(res, 400, 'backup feeMediumMultiplier must be a number from ' + FEE_MED_MULT_MIN + ' to ' + FEE_MED_MULT_MAX + ' (× peak)');
+      }
+      if (low <= med) {
+        return sendError(res, 400, 'backup feeLowMultiplier must be greater than feeMediumMultiplier');
+      }
+      settings.feeLowMultiplier = low;
+      settings.feeMediumMultiplier = med;
+    } else {
+      settings.feeLowMultiplier = FEE_LOW_MULT_DEFAULT;
+      settings.feeMediumMultiplier = FEE_MED_MULT_DEFAULT;
     }
     const txs = [];
     const seenIds = new Set();
@@ -2162,6 +3650,14 @@ async function handleApi(req, res, pathname) {
         locktime: parsed.locktime,
         segwit: parsed.segwit,
         enabled: typeof t.enabled === 'boolean' ? t.enabled : true,
+        // The check-in freeze (0.8.0): carried through when
+        // valid; a backup from before the redesign carries none,
+        // which restores as 0 / null — the same as an older record
+        // loaded from disk. (The restore itself counts as a
+        // check-in, so the offsets are reset to the new clock
+        // below — this carry-through is what validates them.)
+        checkinOffsetMs: (typeof t.checkinOffsetMs === 'number' && Number.isFinite(t.checkinOffsetMs) && t.checkinOffsetMs >= 0) ? t.checkinOffsetMs : 0,
+        checkinInactiveSince: (typeof t.checkinInactiveSince === 'string' && t.checkinInactiveSince && !Number.isNaN(new Date(t.checkinInactiveSince).getTime())) ? t.checkinInactiveSince : null,
         // The broadcast route (0.7.16): a backup from before 0.7.16
         // carries no route, which restores as 'public' — the same
         // as an older record loaded from disk.
@@ -2175,6 +3671,18 @@ async function handleApi(req, res, pathname) {
         publicFallbackDays: validPublicFallbackDays(t.publicFallbackDays),
         slipstreamFirstAttemptAt: (typeof t.slipstreamFirstAttemptAt === 'string'
           && !Number.isNaN(new Date(t.slipstreamFirstAttemptAt).getTime())) ? t.slipstreamFirstAttemptAt : null,
+        // The trigger (0.8.0): carried through when valid; a backup
+        // from before 0.8.0 carries none, which restores as the
+        // check-in trigger at the 35-day fallback — the same as
+        // an older record loaded from disk. An invalid trigger in a
+        // hand-edited backup falls back the same way (like the
+        // route and fallback above: lenient, never a 400 — a bad
+        // trigger must not reject a whole restore). The
+        // triggerState rides along too (a malformed one restores
+        // as null — the evaluator overwrites it on the next
+        // evaluation anyway).
+        trigger: store.triggerOf(t),
+        triggerState: (t.triggerState && typeof t.triggerState === 'object' && !Array.isArray(t.triggerState)) ? t.triggerState : null,
         release: t.release ? t.release : null,
         broadcasted: t.broadcasted ? t.broadcasted : null,
       });
@@ -2252,7 +3760,7 @@ async function handleApi(req, res, pathname) {
       }
     }
     const restored = {
-      version: 5,
+      version: 6,
       createdAt: (typeof bs.createdAt === 'string' && bs.createdAt) ? bs.createdAt : now.toISOString(),
       updatedAt: now.toISOString(),
       settings,
@@ -2276,7 +3784,23 @@ async function handleApi(req, res, pathname) {
       },
       checkinKeys: restoredKeys,
     };
+    // (0.8.0) The restore counts as a check-in (see the clock
+    // comment above): the offsets are measured against the OLD
+    // clock, so they are reset to the new one — a carried offset
+    // would otherwise push the effective last check-in into the
+    // future and the bar would read a negative count. A tx that
+    // is still inactive (disarmed, or the restored vacation is
+    // on) is re-marked inactive from now, so it stays frozen at 0.
+    for (const t of txs) {
+      if (store.triggerOf(t).type !== 'checkin') continue;
+      t.checkinOffsetMs = 0;
+      t.checkinInactiveSince = null;
+    }
+    for (const t of txs) syncCheckinFreeze(t, restored, now);
     store.saveState(DATA_DIR, restored);
+    // A restored cadence takes effect immediately — the running
+    // fast tick is cleared and restarted with it.
+    rearmFastTick();
     // The receiver's key list matches the restored state from now on.
     writeReceiverKeys(restored);
     if (Array.isArray(body.checkins)) store.writeCheckins(DATA_DIR, body.checkins.slice(-200));
@@ -2286,7 +3810,7 @@ async function handleApi(req, res, pathname) {
     // refreshed clock. Appended after the backup's own history
     // (above), so it is the most recent entry; the method reads
     // 'restore' in the recent-check-ins list.
-    store.appendCheckin(DATA_DIR, { ts: now.toISOString(), method: 'restore', autoResumed: false });
+    store.appendCheckin(DATA_DIR, { ts: now.toISOString(), method: 'restore' });
     return sendJson(res, 200, { ok: true, restoredTxs: txs.length, state: sanitizeState(restored) });
   }
 
@@ -2338,6 +3862,29 @@ async function handleApi(req, res, pathname) {
       }
       try {
         const r = await bitcoin.dryRun(DATA_DIR, { tx, endpoints: bitcoin.endpointsFor(state.settings) });
+        // (0.8.0) A price rule's dry-run note carries the source
+        // detail — which sources were used, their readings,
+        // single-source fallback, or that they disagreed — because
+        // the subcard and the readiness card no longer repeat it
+        // (it lives in the Exchange Status section and here, in
+        // the dry-run notes). A price-fetch failure never breaks
+        // the dry run itself; the note just says so.
+        const trg = store.triggerOf(tx);
+        if (trg && trg.type === 'price') {
+          try {
+            const readings = await fetchPriceCached(priceSourcesOf(state.settings), checkCadenceSecondsOf(state.settings));
+            const comb = bitcoin.combinePriceReadings(readings, trg.params.op, priceAgreementPctOf(state.settings));
+            let srcDetail;
+            if (comb.mode === 'disagree' || comb.mode === 'none') {
+              srcDetail = comb.reason.charAt(0).toUpperCase() + comb.reason.slice(1);
+            } else {
+              srcDetail = 'Price sources: ' + comb.note;
+            }
+            r.note = (r.note || '') + ' ' + srcDetail + '.';
+          } catch (e) {
+            r.note = (r.note || '') + ' Price sources: could not be checked.';
+          }
+        }
         results.push({ id: tx.id, label: tx.label || '', enabled: !!tx.enabled, ...r });
       } catch (e) {
         results.push({ id: tx.id, txid: tx.txid, label: tx.label || '', enabled: !!tx.enabled, broadcastVia: validBroadcastVia(tx.broadcastVia), wouldBroadcast: false, error: e.message });
@@ -2374,7 +3921,7 @@ async function handleApi(req, res, pathname) {
       if (r.spent && r.spent.length) {
         if (tx.release && tx.release.status === 'stale') continue;
         const spentDesc = r.spent.map((i) => String(i.prevTxid || '').slice(0, 12) + ':' + i.prevVout).join(', ');
-        tx.release = { status: 'stale', kind: 'dryrun', txid: tx.txid, method: r.checkedVia, lastAttemptAt: now.toISOString(), error: 'inputs spent: ' + spentDesc };
+        tx.release = { status: 'stale', kind: 'dryrun', trigger: releaseTriggerFor(state, tx), txid: tx.txid, method: r.checkedVia, lastAttemptAt: now.toISOString(), error: 'inputs spent: ' + spentDesc };
         verdictRecorded = true;
         continue;
       }
@@ -2393,7 +3940,7 @@ async function handleApi(req, res, pathname) {
           verdictRecorded = true;
         }
         if (!tx.release || tx.release.status !== 'broadcast') {
-          tx.release = { status: 'broadcast', kind: 'dryrun', txid: tx.txid, method: r.checkedVia, broadcastedAt: now.toISOString() };
+          tx.release = { status: 'broadcast', kind: 'dryrun', trigger: releaseTriggerFor(state, tx), txid: tx.txid, method: r.checkedVia, broadcastedAt: now.toISOString() };
           verdictRecorded = true;
         }
         continue;
@@ -2401,7 +3948,7 @@ async function handleApi(req, res, pathname) {
       if (r.conflict && r.conflict.length) {
         if (tx.release && tx.release.status === 'stale') continue;
         const conflictDesc = r.conflict.map((i) => String(i.prevTxid || '').slice(0, 12) + ':' + i.prevVout).join(', ');
-        tx.release = { status: 'conflict', kind: 'dryrun', txid: tx.txid, method: r.checkedVia, lastAttemptAt: now.toISOString(), error: 'inputs spent by an unconfirmed transaction: ' + conflictDesc };
+        tx.release = { status: 'conflict', kind: 'dryrun', trigger: releaseTriggerFor(state, tx), txid: tx.txid, method: r.checkedVia, lastAttemptAt: now.toISOString(), error: 'inputs spent by an unconfirmed transaction: ' + conflictDesc };
         verdictRecorded = true;
         continue;
       }
@@ -2528,4 +4075,18 @@ setTimeout(runReleaseTick, 5000);
 setTimeout(recomputeStoredFees, 5000);
 setTimeout(refreshFeePeakIfStale, 2000);
 setTimeout(refreshCurrentFeesIfStale, 2000);
+setTimeout(refreshPriceIfStale, 2000); // 0.8.0: a price rule's "currently $X" line is live on first load
 setInterval(runReleaseTick, 60 * 60 * 1000);
+// The fast tick (0.8.0): price + UTXO rules are evaluated every
+// checkCadenceSeconds (Settings: Check cadence; default 60) while
+// one is armed. The interval is re-armed from the saved setting
+// whenever the setting changes (PUT /api/settings, restore), so a
+// new cadence takes effect without a restart — the old interval
+// is cleared first, so there is never more than one fast tick
+// running. The hourly check-in tick above is unchanged.
+let fastTickTimer = null;
+function rearmFastTick() {
+  if (fastTickTimer) clearInterval(fastTickTimer);
+  fastTickTimer = setInterval(runFastTick, checkCadenceSecondsOf(store.loadState(DATA_DIR).settings) * 1000);
+}
+rearmFastTick();

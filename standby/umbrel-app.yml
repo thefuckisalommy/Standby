@@ -5,19 +5,31 @@ manifestVersion: 1
 id: standby
 category: automation
 name: Standby
-version: "0.7.22"
-releaseNotes: "0.7.22: offline-gap grace — if the device was off for a while and comes back with the check-in clock far along, the broadcast is held for half the check-in window (17.5 days on the 35-day threshold) instead of firing the moment the device powers back on. The hold only applies when the device was offline for over a quarter of the window AND the clock is over halfway to the broadcast date, and it is measured from the moment the device comes back, so a months-long outage still leaves a real grace window. The check-in card reflects the held date everywhere: the countdown counts to it, the progress bar and 'X of Y days elapsed' caption measure the longer held window, and the status pill reads 'Grace period'. A check-in cancels the hold. Restoring a backup also refreshes the check-in clock: a restore is proof the owner is present, so it counts as a check-in — the clock restarts at the restore moment (the backup's clock is still validated, just not carried forward) and the restore is recorded in the check-in history. The danger zone is the last 25% of the check-in window: shortening the threshold, arming a transaction, or adding a new one while less than a quarter of the window is left (including already past due) resets your check-in to today and restarts the countdown instead of letting a release fire — the app asks first, and the server enforces it even for a direct API call. Cancelling the confirm snaps the toggle (and the threshold input) back to the saved value instead of leaving it showing a change you did not make."
+version: "0.8.0"
+releaseNotes: |-
+  0.8.0 — Standby is now a general broadcast engine: each transaction carries its own trigger, the rule that fires it.
+
+  - **Check-in:** fire after N days of silence. Existing transactions keep the 35-day default; the threshold is now set per transaction.
+  - **BTC price:** fire as soon as the price is at or above, or at or below, a value you set. Two feeds you pick in Settings (CoinGecko and Coinbase by default, no key needed) must agree within 5% — a single bad feed never fires; if they disagree, or a feed fails, the rule waits.
+  - **UTXO moved:** fire when a named outpoint is spent — on any spend, or once it reaches N confirmations (you choose).
+  - **Manual only:** never fires on its own.
+
+  A price or UTXO fire never resets the check-in clock, and a check-in never clears a price or UTXO rule. The readiness card lists one row per armed rule, naming its type and current state; each transaction card shows its rule in a three-line Trigger box. Check-in rules are evaluated hourly; price and UTXO rules about once a minute (adjustable in Settings).
+
+  **Safety:** if the app was offline, price and UTXO triggers are held during a grace period (7 days by default) instead of firing on stale data. And inactive time no longer counts toward the check-in countdown — disarming a transaction, or turning on vacation, freezes its clock; re-arming resumes it where it left off.
+
+  **Also in this release:** the Add form is now a popup; Broadcast All is removed (Broadcast Armed remains); a Getting Started card when you have no staged transactions; a Settings filter and per-card help; the installed version shown in Settings; and a fee-verdict zone bar showing the Low/Medium/High risk bands.
 tagline: Presigned Bitcoin transactions, ready when they're needed.
 description: |-
   Standby helps you prepare Bitcoin transactions in advance and keep them ready for whenever the time comes to use them.
 
-  Whether you're planning for the unexpected, creating a Bitcoin inheritance plan, or simply keeping a transaction ready for future use, Standby gives you a way to prepare today without needing to act today.
+  Whether you're planning for the unexpected, creating a Bitcoin inheritance plan, watching a price, or keeping a transaction ready for a UTXO to move, Standby gives you a way to prepare today without needing to act today.
 
   How it works
 
   - Prepare: Store presigned Bitcoin transactions for future use.
   - Broadcast manually: Send a prepared transaction whenever you decide it's time.
-  - Automate: Set up periodic check-ins. If you fail to check in within your configured interval, Standby can automatically broadcast the designated transaction.
+  - Automate: Each transaction carries its own trigger — the rule that fires it. Check-in (fire after N days of silence), BTC price (fire when the price crosses a value you set), UTXO moved (fire when a named outpoint is spent), or Manual only (never fires on its own).
 
   Why Standby?
 

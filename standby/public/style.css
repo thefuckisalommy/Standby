@@ -65,15 +65,25 @@ header .spacer { flex: 1; }
   text-decoration: none; font-size: 15px;
 }
 .burger nav a:hover { background: #2f3540; }
-main { max-width: 880px; margin: 0 auto; padding: 20px; }
+main { max-width: 880px; margin: 0 auto; padding: 0 20px 20px; }
 nav.tabs {
-  display: flex; gap: 4px; flex-wrap: wrap;
+  display: flex; gap: 4px; flex-wrap: wrap; justify-content: center;
   margin-bottom: 20px;
   border-bottom: 1px solid var(--line);
+  /* Sticky tab bar (0.8.0): the tabs follow the page down, pinned
+     just below the sticky appbar (top: 60px — the appbar is ~59px
+     tall, so this leaves at most a ~1px gap showing the page
+     background, invisible against the tabs' own background, and
+     never overlaps the appbar's 1px bottom border). The background
+     is required: the buttons themselves have background: none, so
+     without it scrolling content would show through the tabs.
+     z-index 40 keeps the tabs below the appbar (50) but above the
+     scrolling content. */
+  position: sticky; top: 60px; z-index: 40; background: var(--bg);
 }
 nav.tabs button {
   background: none; border: none; border-bottom: 2px solid transparent;
-  padding: 10px 14px; font-size: 15px; color: var(--muted); cursor: pointer;
+  padding: 10px 10px; font-size: 15px; color: var(--muted); cursor: pointer;
 }
 nav.tabs button.active { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
 section.tab { display: none; }
@@ -88,7 +98,9 @@ section.tab.active { display: block; }
 .card h2 { margin: 0 0 6px; font-size: 18px; }
 .card h3 { margin: 16px 0 6px; font-size: 15px; }
 .card p { margin: 6px 0; }
-.muted { color: var(--muted); font-size: 14px; }
+.muted { color: var(--muted); font-size: 14px; overflow-wrap: break-word; }
+/* Long unbreakable strings (a 64-hex txid in an add/edit success
+   message) must wrap instead of spilling past the right edge. */
 label { display: block; font-size: 14px; font-weight: 600; margin: 12px 0 4px; }
 input[type="text"], input[type="email"], input[type="number"], input[type="date"],
 input[type="password"], textarea, select {
@@ -108,9 +120,20 @@ textarea.plain { font-family: inherit; }
 input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent); border-color: var(--accent); }
 .row { display: flex; gap: 12px; flex-wrap: wrap; }
 .row > * { flex: 1 1 160px; }
-/* Input + inline unit, e.g. Broadcast Threshold [ 90 ] days. */
+/* Input + inline unit, e.g. Days of silence [ 35 ] days. The
+   input's min-width: 0 lets it shrink below its intrinsic size
+   inside the flex row — without it, a number input's min-width:
+   auto stops it shrinking, and the price row (op select + $ +
+   input) pushes the $ amount off the right edge on a 390px
+   phone. Applies to the Add and Edit pickers, and to the
+   check-in threshold row too. */
 .inline-unit { display: flex; align-items: center; gap: 8px; }
-.inline-unit input { flex: 1; }
+/* The two selects in an inline-unit row (the price >=/<= and the
+   UTXO fire-on) also carry the base `width: 100%` — without this
+   they take a 100% flex-basis and hog the row, pushing the number
+   input off the right edge even with min-width: 0 on the input. */
+.inline-unit select { flex: 0 0 auto; width: auto; min-width: 0; }
+.inline-unit input { flex: 1; min-width: 0; }
 .inline-unit span { color: var(--muted); white-space: nowrap; }
 button {
   font: inherit; font-size: 15px; cursor: pointer;
@@ -129,8 +152,28 @@ button:disabled { opacity: 0.5; cursor: default; }
    padding than the default buttons, so they fit without wrapping
    to a second row. The labels stay readable and the buttons stay
    tappable (full height, ~100px wide each). */
-.btc-actions { display: flex; gap: 6px; flex-wrap: nowrap; }
+.card p.btc-actions { display: flex; gap: 6px; flex-wrap: nowrap; margin-top: 14px; }
 .btc-actions button { flex: 0 1 auto; min-width: 0; padding: 9px 8px; font-size: 14px; white-space: nowrap; }
+/* The "+ Add Tx" oval in the Staged Transactions header (0.8.0):
+   an accent-outlined pill, small enough to sit beside the 18px
+   heading without crowding it. It opens the Add-transaction popup
+   (same form as the Getting Started button). The button lives inside
+   the <summary>, so its click must not toggle the card — app.js
+   stops the event. The summary itself is the flex row (title + pill);
+   the native disclosure marker is replaced by a CSS triangle that
+   rotates when the card is closed, so the header stays one line. */
+#tab-bitcoin details.staged > summary { display: flex; align-items: center; gap: 8px; list-style: none; }
+#tab-bitcoin details.staged > summary::-webkit-details-marker { display: none; }
+#tab-bitcoin details.staged > summary::before { content: '\25bc'; font-size: 14px; flex: 0 0 auto; transition: transform 0.15s ease; }
+#tab-bitcoin details.staged:not([open]) > summary::before { transform: rotate(-90deg); }
+#tab-bitcoin details.staged > summary .sum-text { flex: 1; min-width: 0; }
+.add-tx-pill { flex: 0 0 auto; padding: 5px 12px; font-size: 14px; font-weight: 600; line-height: 1.4; border-radius: 999px; border-color: var(--accent); color: var(--accent); background: transparent; white-space: nowrap; }
+.add-tx-pill:hover { background: var(--accent-bg); }
+/* The "+ Add a pre-signed transaction" button at the bottom of the
+   Transactions tab (0.8.0): it replaces the inline Add form card,
+   and reads exactly like the Getting Started button (full width,
+   17px, 600 weight) — the same button, opening the same popup. */
+.add-open-full { width: 100%; padding: 14px 20px; font-size: 17px; font-weight: 600; }
 .pill {
   display: inline-block; padding: 3px 10px; border-radius: 999px;
   font-size: 13px; font-weight: 600;
@@ -154,6 +197,19 @@ button:disabled { opacity: 0.5; cursor: default; }
   font-size: 14px;
 }
 .notice.bad { border-left-color: var(--bad); background: #2a1215; }
+/* Grace period card (0.8.0): the dashboard card that appears
+   while a price/UTXO grace is active — the amber left border
+   marks it as a warning, like the Grace pill. */
+.grace-card { border-left: 4px solid var(--warn); }
+/* Getting Started card (0.8.0): the empty-state card at the top
+   of the Dashboard, shown only when no transactions are staged —
+   the first thing a fresh install sees. Centered welcome layout:
+   headline, one line, one full-width button. A plain card (no
+   amber border — that signal belongs to the grace card). */
+.empty-state { text-align: center; padding: 28px 20px 24px; }
+.empty-state h2 { font-size: 20px; margin: 0 0 10px; }
+.empty-state p { color: var(--muted); font-size: 15px; margin: 0 0 18px; }
+.empty-state button { width: 100%; padding: 14px 20px; font-size: 17px; font-weight: 600; }
 table { width: 100%; border-collapse: collapse; font-size: 14.5px; }
 th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
 th { color: var(--muted); font-weight: 600; }
@@ -168,13 +224,19 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1
 .checklist .done { color: var(--muted); text-decoration: line-through; }
 .progress { height: 8px; background: #2f3540; border-radius: 999px; overflow: hidden; margin: 8px 0; }
 .progress > div { height: 100%; background: var(--accent); }
-/* The check-in countdown + progress bar (0.7.19): how much of the
-   check-in window is used — the big day count, a bar that fills as
-   days elapse (green > 3/4 of the window left, amber past that, red
-   in the last quarter), and the elapsed-days caption. */
-.countdown { font-size: 28px; font-weight: 700; line-height: 1.25; margin: 12px 0 0; }
-.countdown-sub { color: var(--muted); font-size: 13px; margin: 0 0 12px; }
+/* The per-tx check-in bars (0.8.0): one block per armed check-in
+   tx — the label above, the bar, and the "X of N days elapsed"
+   caption below. The bar reuses .progress; its fill colour is by
+   how much time is LEFT (green > 3/4 of the window left, amber
+   past that, red in the last quarter), set inline per bar. */
+.ck-tx { margin: 14px 0 0; }
+.ck-tx-label { font-weight: 600; font-size: 15px; }
 .progress-label { color: var(--muted); font-size: 13px; margin: 4px 0 0; }
+/* Frozen check-in bar (0.8.0): a disarmed check-in tx keeps its
+   bar at the frozen day count, muted grey, so it reads as held
+   rather than live. */
+.ck-tx.frozen .ck-tx-label { color: var(--muted); font-weight: 400; }
+.ck-tx.frozen .progress > div { background: var(--muted); }
 button.btn-checkin-big { width: 100%; padding: 16px 20px; font-size: 19px; }
 .kv { display: grid; grid-template-columns: 180px 1fr; gap: 4px 12px; font-size: 15px; }
 .kv dt { color: var(--muted); }
@@ -202,6 +264,26 @@ button.btn-checkin-big { width: 100%; padding: 16px 20px; font-size: 19px; }
 .tx-row + .tx-row { border-top: 1px solid var(--line); }
 .tx-row b { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; font-size: 15px; font-weight: 400; }
 .tx-row .pill { flex-shrink: 0; }
+/* The readiness list's per-transaction block (0.8.0): one block per
+   armed rule — the label + the status pill (and the fee pill) on
+   the first line, the trigger's level and current value on the
+   second line, so the dashboard reads as a list of RULES, not
+   just transactions. The first line never wraps: the label is
+   truncated with an ellipsis so a long label cannot push the
+   status pill onto a second line. */
+.readiness-tx { margin: 10px 0; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+.readiness-tx:last-child { border-bottom: none; padding-bottom: 0; margin-bottom: 0; }
+.readiness-tx-row { display: flex; align-items: baseline; gap: 10px; flex-wrap: nowrap; }
+.readiness-tx-row b { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; font-weight: 400; }
+.readiness-tx-row .pill { flex-shrink: 0; }
+.readiness-tx-state { color: var(--muted); font-size: 13px; margin-top: 2px; overflow-wrap: anywhere; }
+/* The guard note under a trigger picker (0.8.0): the rule's own
+   safety guard, named where the rule is set — not on the card. */
+.guard-note {
+  border: 1px solid var(--line); border-left: 4px solid var(--accent);
+  background: #1c1a17; border-radius: 6px; padding: 10px 14px; margin: 12px 0 4px;
+  font-size: 14px; overflow-wrap: break-word;
+}
 /* The fee verdict suffix on a tx card's Fee line (0.7.20): the
    " — Low Risk" / " — Medium Risk" / " — High Risk" tail, coloured
    like the pills (green / amber / red). The readiness list's fee
@@ -230,6 +312,50 @@ a { color: #f59e0b; }
   gap: 12px; flex-wrap: wrap; }
 .card .section-head h2 { margin: 0; }
 
+/* Help "?" button in a Settings card header (0.8.0): a small
+   muted circle at the top right of the card, opening a pop-out
+   that explains the setting. Subtle on purpose — it must not
+   compete with the Save button. */
+.help-btn {
+  background: none; border: 1px solid var(--line); border-radius: 50%;
+  color: var(--muted); font-size: 14px; font-weight: 700;
+  width: 24px; height: 24px; line-height: 1; padding: 0;
+  cursor: pointer; flex-shrink: 0;
+}
+.help-btn:hover { color: var(--ink); border-color: var(--muted); }
+.help-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Settings filter row (0.8.0): a dropdown at the top of the
+   Settings tab, above the first card — one row, never two. */
+.settings-filter { display: flex; gap: 8px; align-items: center;
+  margin-bottom: 20px; border-bottom: 1px solid var(--line); padding-bottom: 12px; }
+.settings-filter label { font-size: 15px; color: var(--muted); }
+.settings-filter select {
+  background: var(--card); color: var(--ink); border: 1px solid var(--line);
+  border-radius: 6px; padding: 8px 10px; font-size: 15px; cursor: pointer;
+}
+
+/* Fee verdict zone bar (0.8.0): always visible under the numbers,
+   showing the three zones as a bar that moves live as you type.
+   It reflects whatever is in the inputs, so it is there whether
+   or not you are editing. The ranges are written inside each
+   zone, so there are no ticks or axis label below it. */
+.zone-bar { margin-top: 16px; }
+.zone-bar .bar {
+  display: flex; height: 52px; border-radius: 6px; overflow: hidden;
+  border: 1px solid var(--line);
+}
+.zone-bar .seg {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  overflow: hidden; white-space: nowrap; min-width: 0;
+  transition: flex-basis .12s ease;
+}
+.zone-bar .seg .name { font-size: 13px; font-weight: 700; }
+.zone-bar .seg .range { font-size: 11px; opacity: .85; }
+.zone-bar .seg-high { background: var(--bad-soft-bg); color: var(--bad-soft); }
+.zone-bar .seg-med { background: var(--warn-bg); color: var(--warn); }
+.zone-bar .seg-low { background: var(--ok-bg); color: var(--ok); }
+
 /* Toggle switch (checkbox styled as a switch). */
 .switch { display: inline-flex; align-items: center; gap: 10px; cursor: pointer;
   font-weight: 600; font-size: 15px; margin: 0; }
@@ -254,8 +380,9 @@ a { color: #f59e0b; }
    is pinned to the top-right, and the arm/disarm toggle sits
    immediately to the right of the pill, always in the same spot, no
    matter how long the label is, and the label can never run over
-   them. The pill carries the armed state in words ("Ready + armed" /
-   "Ready + unarmed"); the toggle is the control. Settled and pending
+   them. The pill carries the armed state in words ("armed" when
+   healthy, "Label + armed" for a problem state, "unarmed" when
+   disarmed); the toggle is the control. Settled and pending
    cards have no toggle. The card body lives in a collapsible Details,
    collapsed by default. */
 /* The Archived Transactions card is a <details>, collapsed by default,
@@ -266,14 +393,15 @@ a { color: #f59e0b; }
    summaries stay at their own 14px (see .tx-details summary). */
 details.archived > summary { cursor: pointer; font-size: 18px; font-weight: 700; margin: 0 0 6px; }
 /* Every card header on the Transactions tab reads the same size:
-   the Pending and Archived summaries and the Add card's heading
-   match the main "Pre-signed Bitcoin transactions" h2 (18px, bold).
-   Scoped to the Transactions tab — the other tabs keep their own
-   heading sizes. The child combinator (>) again: only the OUTER
-   summary is a header; the nested Details summaries inside the tx
-   cards are not, and keep their 14px. */
+   the Pending, Archived and Staged summaries and the Add card's
+   heading match the main "Staged Transactions" summary (18px,
+   bold). Scoped to the Transactions tab — the other tabs keep
+   their own heading sizes. The child combinator (>) again: only
+   the OUTER summary is a header; the nested Details summaries
+   inside the tx cards are not, and keep their 14px. */
 #tab-bitcoin details.pending > summary,
 #tab-bitcoin details.archived > summary,
+#tab-bitcoin details.staged > summary,
 #tab-bitcoin #btc-form-title { font-size: 18px; font-weight: 700; margin: 0 0 6px; }
 /* The margin above is the Add-header alignment (0.7.18): .card h3
    carries a 16px top margin while .card h2 has none, so the Add
@@ -282,7 +410,7 @@ details.archived > summary { cursor: pointer; font-size: 18px; font-weight: 700;
    weight are unchanged. */
 
 /* A transaction card nested inside its parent card — the active ones
-   live in the Pre-signed Bitcoin transactions card, the settled ones
+   live in the Staged Transactions card, the settled ones
    in the Archived Transactions card. A lighter panel, not a full
    card. */
 .tx-card.tx-sub { margin-top: 12px; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius); background: #14171d; }
@@ -296,6 +424,28 @@ details.archived > summary { cursor: pointer; font-size: 18px; font-weight: 700;
    the sats beside it smaller and muted. */
 .tx-amount { font-size: 21px; font-weight: 700; margin-top: 10px; }
 .tx-amount-sats { font-size: 14px; font-weight: 400; color: var(--muted); margin-left: 8px; }
+/* The trigger subcard (0.8.0): the rule that fires a transaction —
+   an amber-edged box with the trigger type, the condition, and the
+   current state — so the condition is visible without opening
+   Details. */
+.tx-trigger {
+  margin-top: 10px; padding: 9px 12px;
+  background: #0f1115;
+  border: 1px solid var(--line); border-left: 3px solid var(--accent);
+  border-radius: 8px; font-size: 14.5px; line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.tx-trigger-k {
+  display: block; color: var(--muted);
+  font-size: 11.5px; font-weight: 700; letter-spacing: 0.6px;
+  text-transform: uppercase; margin-bottom: 1px;
+}
+.tx-trigger .now { color: var(--muted); }
+/* Every trigger subcard is exactly 3 rows (owner): header,
+   condition, current state — each on its own line. The header
+   is already block; the condition and the state line are inline
+   by default, which ran them together on one row. */
+.tx-trigger span { display: block; }
 /* A label/value row inside a card's Details: the label is muted and
    held to a fixed 120px column so the values line up; the value
    takes the rest and wraps inside its own column instead of running
@@ -378,6 +528,11 @@ p.inline-btns { display: flex; gap: 8px; flex-wrap: nowrap; align-items: center;
   padding: 20px;
 }
 .modal-overlay.open { display: flex; }
+/* The confirm/details modal must stack above the Edit modal: a
+   trigger warning (or any confirm) opened while editing a tx
+   would otherwise appear behind the edit card, invisible until
+   the edit card is closed. The Edit modal keeps z-index 100. */
+#confirm-modal { z-index: 110; }
 /* A modal must never scroll or widen horizontally. Its content
    (notably a <select>'s native dropdown popout on a phone) can
    otherwise push the modal — and the page behind it — wider than

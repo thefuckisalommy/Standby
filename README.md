@@ -2,7 +2,7 @@
 
 Community app store for [Standby](https://github.com/thefuckisalommy/Standby-on-Umbrel) — presigned Bitcoin transactions, ready when they're needed.
 
-Standby helps you prepare Bitcoin transactions in advance and keep them ready for whenever the time comes to use them. Whether you're planning for the unexpected, creating a Bitcoin inheritance plan, or simply keeping a transaction ready for future use, Standby gives you a way to prepare today without needing to act today.
+Standby is a transaction broadcasting tool: you prepare Bitcoin transactions in advance, and each one carries its own trigger — the rule that fires it. Whether you're planning for the unexpected, creating a Bitcoin inheritance plan, watching a price, or keeping a transaction ready for a UTXO to move, Standby gives you a way to prepare today without needing to act today.
 
 > **Runs on Umbrel or on any Linux box with Docker.** The prebuilt image is built for arm64 and amd64, so it runs on umbrelOS (Raspberry Pi or x86) and on plain Docker — see [Run on any Linux box (Docker)](#run-on-any-linux-box-docker).
 
@@ -10,9 +10,16 @@ Standby helps you prepare Bitcoin transactions in advance and keep them ready fo
 
 - **Prepare in advance** — store presigned Bitcoin transactions for future use. Sign each one in your own wallet and paste the raw signed hex, or import it from a file — a plain hex file, or a fully-signed PSBT (.psbt); the app never sees your keys.
 - **Broadcast manually** — send a prepared transaction whenever you decide it's time.
-- **Automate with check-ins** — set a check-in interval. If you stop checking in past it, Standby broadcasts the transactions you armed.
-- **Check in from anywhere** — from the app, or with a check-in API key: one address works for any connection (a bot, a shortcut, a script, or any HTTP client). A key can only record a check-in.
-- **Dry-run before you trust it** — a dry-run checks whether the inputs are still unspent, and whether an absolute locktime has passed. It never broadcasts. A spent input is read three ways: our own transaction already out there means broadcast, a confirmed spend by another transaction means stale (never broadcast), and an unconfirmed spend by another transaction means a warning — the transaction stays active and a broadcast is still attempted. A transaction whose locktime has not passed yet is reported as timelocked — the node would reject it as non-final — and a failed broadcast is retried on the next hourly check until it succeeds or the inputs are spent.
+- **One trigger per transaction** — each transaction carries its own rule for when it fires:
+  - **Check-in** — fire after N days of silence. You check in on your schedule, from the app or with a check-in API key; if you stop checking in past the transaction's own threshold (35 days by default), Standby broadcasts it. Each check-in transaction has its own threshold and its own countdown bar.
+  - **BTC price** — fire as soon as the price is at or above, or at or below, a dollar value you set. The price comes from two sources you pick in Settings (CoinGecko and Coinbase by default, no key needed); a reading only counts when the two agree within your agreement setting (5% by default) — if they disagree, or a feed fails, the rule waits, it never fires on data it does not have. When they agree, a rule that fires above a price uses the higher of the two, and one that fires below uses the lower. Price and UTXO rules are checked about once a minute (the check cadence, adjustable in Settings).
+  - **UTXO moved** — fire when a named outpoint is spent. Watch a UTXO and broadcast when it moves: on any spend (0 confirmations), or at N confirmations. A spend by your own transaction is recognised as already broadcast, not a trigger.
+  - **Manual only** — never fires on its own. It waits for you to broadcast it by hand.
+- **Check in from anywhere** — from the app, or with a check-in API key: one address works for any connection (a bot, a shortcut, a script, or any HTTP client). A key can only record a check-in. A check-in resets the countdown on every check-in transaction; it never clears a price or UTXO rule.
+- **Grace after being offline** — if the app was offline longer than the grace threshold (7 days by default), price and UTXO triggers pause for a grace period (7 days by default, or until you resume) so they don't fire on conditions that changed while the app was away. Check-in triggers have their own offline-gap hold instead. The two stay separate.
+- **Vacation and disarm** — vacation freezes the check-in countdown while you're away (price and UTXO triggers keep firing); disarming a transaction stops it firing on its own (a manual broadcast still works). Disarmed check-in transactions freeze their countdown and resume from the same spot when re-armed.
+- **Fee verdict** — each transaction's fee rate is compared to the 90-day peak (the 90th percentile of block medians) and labelled Low, Medium, High, or Critical Risk. The pill is informational — it never blocks a broadcast. The Low and Medium multipliers are adjustable in Settings.
+- **Dry-run before you trust it** — a dry-run checks whether the inputs are still unspent, and whether an absolute locktime has passed. It never broadcasts. A spent input is read three ways: our own transaction already out there means broadcast, a confirmed spend by another transaction means stale (never broadcast), and an unconfirmed spend by another transaction means a warning — the transaction stays active and a broadcast is still attempted. A transaction whose locktime has not passed yet is reported as timelocked — the node would reject it as non-final — and a failed broadcast is retried on the next check until it succeeds or the inputs are spent.
 - **Two mempool nodes** — a primary (mempool.space) with a secondary (blockstream.info) as fallback, so one node being down doesn't stop a broadcast.
 - **Slipstream broadcast route** — each transaction can go out via the public mempool or straight to MARA Pool's private mempool (Slipstream). A Slipstream submission stays private until MARA mines it, and it gets its own status — “Slipstream Pending” — until the public nodes see it. Broadcasts and submissions waiting for confirmation live in the Pending Transactions card, and are never re-sent by Broadcast All or the release. A Slipstream transaction can also carry an opt-in Public Fallback (1–90 days, Never by default): if MARA hasn't confirmed it within the chosen time, Standby broadcasts it publicly instead.
 - **Pending Transactions** — a card above Archived for transactions that are out the door but not yet confirmed: a public broadcast waiting for its first confirmation (“Broadcast”) and a Slipstream submission waiting on MARA (“Slipstream Pending”). Once confirmed, a tx moves to Archived. A pending tx's hex and route are locked (only the label and notes can change), and a Slipstream-pending tx carries a manual “Broadcast publicly” button if you do not want to wait on MARA.
@@ -21,10 +28,12 @@ Standby helps you prepare Bitcoin transactions in advance and keep them ready fo
 ## How it works
 
 - You sign a transaction in your own wallet and paste the raw signed hex into Standby — or import it from a file (a plain hex file, or a fully-signed PSBT; a PSBT that is not fully signed is rejected).
+- Each transaction gets a trigger — the rule that fires it. Pick one when you add it: **Check-in** (fire after N days of silence), **BTC price** (fire when the price crosses a value), **UTXO moved** (fire when a named outpoint is spent), or **Manual only** (never fires on its own). A transaction without a trigger defaults to the check-in trigger at 35 days.
 - The app validates the structure and watches the inputs: spend an input with a confirmed transaction and it goes stale — it will never be broadcast; spend it with an unconfirmed one and it warns instead; and if the spending transaction is our own, the transaction is already out there, so it is recorded as broadcast.
-- You check in on your schedule, from the app or from any device with a check-in API key.
-- If you stop checking in past the broadcast threshold, Standby broadcasts the transactions you armed, in order.
-- Once a release starts, it finishes: every armed transaction broadcasts, even if you check in halfway through. The check-in is still recorded, and it resets the clock for the next cycle.
+- You check in on your schedule, from the app or from any device with a check-in API key. A check-in resets the countdown on every check-in transaction.
+- When a transaction's trigger fires, Standby broadcasts it (if it is armed). Check-in rules are evaluated hourly; price and UTXO rules are evaluated about once a minute. Each rule is evaluated on its own — one failing or stale transaction never stops the others.
+- A trigger that is already satisfied when you add or edit a transaction is blocked unless you confirm it — so a price rule set below the current price, or a UTXO rule for an outpoint already spent, does not fire the moment you save it.
+- Once a release starts, it finishes: every armed transaction whose trigger fired broadcasts, even if you check in halfway through. The check-in is still recorded, and it resets the clock for the next cycle.
 - Your keys never leave your wallet. The app holds only the signed transactions you pasted in; it queries your mempool nodes with your transaction IDs to check the inputs, and sends the full signed hex to a node only when it broadcasts.
 
 ## Setup
@@ -37,7 +46,7 @@ https://github.com/thefuckisalommy/Standby-on-Umbrel
 
 Then install Standby from the store. The app's Docker image is built for arm64 and amd64 by GitHub Actions on every push and published to GHCR, so installing just pulls it.
 
-After installing, open the app and add your first transaction: sign it in your own wallet, paste the raw signed hex (or import a hex file or a fully-signed PSBT), and arm it. Set the check-in interval in Settings, then check in — from the app, or by creating a check-in API key for your gadget, shortcut, bot, or script.
+After installing, open the app and add your first transaction: sign it in your own wallet, paste the raw signed hex (or import a hex file or a fully-signed PSBT), pick its trigger, and arm it. For a check-in transaction, set its own threshold ("Days of silence", 35 by default) when you add it. Then check in — from the app, or by creating a check-in API key for your gadget, shortcut, bot, or script.
 
 ## Run on any Linux box (Docker)
 

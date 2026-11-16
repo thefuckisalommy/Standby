@@ -46,7 +46,7 @@
 const crypto = require('crypto');
 const http = require('http');
 const https = require('https');
-const { appendBroadcastLog } = require('./store');
+const { appendBroadcastLog, PRICE_MIN_USD, PRICE_MAX_USD } = require('./store');
 
 const MAX_TX_BYTES = 1000000; // 1 MB, same ceiling as the API body limit
 const MAX_RESPONSE_BYTES = 1024 * 1024; // 1 MB — a mempool reply is a 64-char txid or small JSON; anything bigger is a faulty endpoint, not data
@@ -832,24 +832,249 @@ async function fetchCurrentFees() {
   };
 }
 
+// ---------------------------------------------------------------------------
+// BTC price (0.8.0, two-source 0.8.0): the price trigger's feeds.
+// A provider registry — id, label, default base URL, path, and a
+// response parser. All are no-auth GETs. The price is read from
+// TWO providers (Settings: priceSources {source1, source2},
+// defaults CoinGecko + Coinbase) and only trusted when they agree
+// within the configured agreement — see combinePriceReadings
+// below. Binance US quotes USDT, not USD, so the label says so (api.binance.com geo-blocks
+// the US with a 451, so the registry uses api.binance.us);
+// Kraken's c[0] is the last trade price; Bitstamp's `last` is the
+// last trade price.
+// PRICE_API_URL lets a test point every provider at a stub (the
+// same pattern as FEE_RATES_URL / SLIPSTREAM_API_URL) — when it is
+// set, all providers fetch from that base on their own paths.
+// ---------------------------------------------------------------------------
+const PRICE_PROVIDERS = [
+  { id: 'coingecko', label: 'CoinGecko', baseUrl: 'https://api.coingecko.com',
+    path: '/api/v3/simple/price?ids=bitcoin&vs_currencies=usd',
+    parse: (d) => d && d.bitcoin && d.bitcoin.usd },
+  { id: 'coinbase', label: 'Coinbase', baseUrl: 'https://api.coinbase.com',
+    path: '/v2/prices/BTC-USD/spot',
+    parse: (d) => d && d.data && d.data.amount },
+  { id: 'binance', label: 'Binance US (USDT)', baseUrl: 'https://api.binance.us',
+    path: '/api/v3/ticker/price?symbol=BTCUSDT',
+    parse: (d) => d && d.price },
+  { id: 'kraken', label: 'Kraken', baseUrl: 'https://api.kraken.com',
+    path: '/0/public/Ticker?pair=XBTUSD',
+    parse: (d) => { const r = d && d.result && d.result.XXBTZUSD; return r && r.c && r.c[0]; } },
+  { id: 'bitstamp', label: 'Bitstamp', baseUrl: 'https://www.bitstamp.net',
+    path: '/api/v2/ticker/btcusd/',
+    parse: (d) => d && d.last },
+];
+
+function priceProviderById(id) {
+  return PRICE_PROVIDERS.find((p) => p.id === id) || null;
+}
+
+function priceProviderLabel(id) {
+  const p = priceProviderById(id);
+  return p ? p.label : String(id);
+}
+
+// The User-Agent for price-provider fetches. CoinGecko's WAF
+// rejects requests with no (or a non-descriptive) User-Agent
+// with a 403 ("Please add a descriptive User-Agent"), so every
+// price fetch identifies the app. Read from package.json so it
+// tracks the release; falls back to a bare name if the file
+// cannot be read (the module must stay loadable standalone).
+// Verified live Nov 15: no UA -> 403, "Standby/0.8.0" -> 200.
+let PRICE_USER_AGENT = 'Standby';
+try { PRICE_USER_AGENT = 'Standby/' + require('../package.json').version; } catch { /* keep the bare name */ }
+
+const DEFAULT_PRICE_API_URL = 'https://api.coingecko.com';
+
+function priceApiBase() {
+  // Legacy single override (0.8.0): the CoinGecko base. Kept so
+  // fetchBtcPrice and the existing tests keep working.
+  const v = (process.env.PRICE_API_URL || '').trim();
+  if (!v) return DEFAULT_PRICE_API_URL;
+  let u;
+  try { u = new URL(v); } catch { throw new Error('invalid price URL: ' + v); }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error('price URL must be http(s): ' + v);
+  return u.protocol + '//' + u.host;
+}
+
+// The base URL one provider fetches from: PRICE_API_URL (when set)
+// overrides every provider to the same base — the test hook, so a
+// stub server can answer all five providers on their own paths.
+// Otherwise the provider's own default base.
+function priceProviderBase(provider) {
+  const v = (process.env.PRICE_API_URL || '').trim();
+  if (v) return priceApiBase();
+  return provider.baseUrl;
+}
+
+// Fetch one provider's BTC price in USD. Throws on a non-200
+// answer, an unparseable body, a shape without a usable price, a
+// non-finite or non-positive number, or a price outside the sanity
+// bounds ($1–$100M) — any of those is invalid data from that
+// source, and the caller treats it as "that source did not
+// answer", never as a reading.
+async function fetchPriceFromProvider(provider) {
+  const base = priceProviderBase(provider);
+  const u = new URL(base);
+  const r = await requestText({
+    protocol: u.protocol,
+    hostname: u.hostname,
+    port: u.port ? parseInt(u.port, 10) : (u.protocol === 'https:' ? 443 : 80),
+    path: provider.path,
+    method: 'GET',
+    headers: { 'User-Agent': PRICE_USER_AGENT },
+    timeoutMs: NET_TIMEOUT_MS,
+  });
+  if (r.status !== 200) throw new Error(provider.label + ' answered ' + r.status);
+  let data;
+  try { data = JSON.parse(r.body); } catch { throw new Error(provider.label + ' body is not JSON'); }
+  let raw;
+  try { raw = provider.parse(data); } catch { throw new Error(provider.label + ' has no usable BTC price'); }
+  const price = (typeof raw === 'number') ? raw : (typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : NaN);
+  if (!Number.isFinite(price) || price <= 0) throw new Error(provider.label + ' has no usable BTC price');
+  if (price < PRICE_MIN_USD || price > PRICE_MAX_USD) throw new Error(provider.label + ' price out of bounds: $' + price.toLocaleString('en-US'));
+  return price;
+}
+
+// Fetch both configured sources in parallel — one failing must not
+// block the other (all-settled). Returns { [sourceId]: { provider,
+// price|null, error|null } }. An unknown source id is a failed
+// source, not a throw.
+async function fetchPriceReadings(source1Id, source2Id) {
+  const jobs = [source1Id, source2Id].map(async (id) => {
+    const prov = priceProviderById(id);
+    if (!prov) return { provider: id, price: null, error: 'unknown price provider: ' + id };
+    try {
+      const price = await fetchPriceFromProvider(prov);
+      return { provider: id, price, error: null };
+    } catch (e) {
+      return { provider: id, price: null, error: e.message };
+    }
+  });
+  const [r1, r2] = await Promise.all(jobs);
+  const out = {};
+  out[source1Id] = r1;
+  out[source2Id] = r2;
+  return out;
+}
+
+// The agreement rule (0.8.0): two price readings are only
+// trusted together when the higher is at most `agreementPct`%
+// above the lower:
+//   |p1 - p2| / min(p1, p2) <= agreementPct / 100
+// (Settings: Price agreement; default 5.) Combine two fetched
+// readings into one effective price for a threshold direction
+// (op '>=' or '<='):
+//   both valid + agree  → the directional extreme (>= the higher,
+//                          <= the lower) — mode 'dual'
+//   one valid           → that price alone, no agreement check —
+//                          mode 'single' (the other is unreachable)
+//   both valid + disagree → invalid, mode 'disagree', reason names it
+//   neither valid        → invalid, mode 'none'
+// Returns { valid, price, mode, note, reason, readings }. `note`
+// names the readings behind the price (dual) or the fallback
+// (single); `reason` is the human-readable unknown reason when
+// !valid. Pure — no I/O, so the evaluator, the UI status, and the
+// already-true check all agree on one rule.
+function combinePriceReadings(readings, op, agreementPct) {
+  const agree = (typeof agreementPct === 'number' && Number.isFinite(agreementPct) && agreementPct > 0) ? agreementPct / 100 : 0.05;
+  const valid = [];
+  for (const id of Object.keys(readings || {})) {
+    const r = readings[id];
+    if (r && typeof r.price === 'number' && Number.isFinite(r.price)) {
+      valid.push({ id, label: priceProviderLabel(id), price: r.price });
+    }
+  }
+  if (valid.length === 0) {
+    // No source answered with a usable price. A feed returning a
+    // price outside the sanity bounds is bad data, not a market
+    // move — name it as implausible (the old single-source guard's
+    // wording), so the owner can tell garbage from an outage. A
+    // feed that did not answer at all is 'unavailable'.
+    const bad = Object.keys(readings || {}).filter((id) => {
+      const r = readings[id];
+      return r && r.error && /out of bounds/.test(r.error);
+    });
+    if (bad.length) {
+      const names = bad.map((id) => readings[id].error).join('; ');
+      return { valid: false, price: null, mode: 'none', note: '', reason: 'implausible price reading (' + names + ') — ignored', readings };
+    }
+    return { valid: false, price: null, mode: 'none', note: '', reason: 'price unavailable — will retry', readings };
+  }
+  if (valid.length === 1) {
+    const only = valid[0];
+    const otherId = Object.keys(readings || {}).find((id) => id !== only.id);
+    const otherLabel = otherId ? priceProviderLabel(otherId) : 'the other source';
+    const otherErr = (otherId && readings[otherId] && readings[otherId].error) || '';
+    // The other source either did not answer (unreachable) or
+    // answered with garbage (invalid data) — name which, so the
+    // owner can tell an outage from a bad feed.
+    const otherWhy = /out of bounds|no usable BTC price/.test(otherErr) ? 'returned invalid data' : 'unreachable';
+    return { valid: true, price: only.price, mode: 'single',
+      note: only.label + ' only — ' + otherLabel + ' ' + otherWhy, reason: '', readings };
+  }
+  const a = valid[0], b = valid[1];
+  const lo = Math.min(a.price, b.price), hi = Math.max(a.price, b.price);
+  const diff = (hi - lo) / lo;
+  if (diff > agree) {
+    const pct = (diff * 100).toFixed(1);
+    return { valid: false, price: null, mode: 'disagree', note: '',
+      reason: 'price sources disagree — ' + a.label + ' $' + a.price.toLocaleString('en-US') + ' vs ' + b.label + ' $' + b.price.toLocaleString('en-US') + ' (' + pct + '% apart)',
+      readings };
+  }
+  const price = op === '>=' ? hi : lo;
+  return { valid: true, price, mode: 'dual',
+    note: a.label + ' $' + a.price.toLocaleString('en-US') + ' · ' + b.label + ' $' + b.price.toLocaleString('en-US'),
+    reason: '', readings };
+}
+
+// The consensus price for /api/state (a single representative
+// number, no direction): the average of two agreeing readings, the
+// single valid reading, or null when they disagree or neither
+// answers. The per-tx effective price is directional (see
+// combinePriceReadings) — this is only the display number.
+function priceConsensus(readings, agreementPct) {
+  const agree = (typeof agreementPct === 'number' && Number.isFinite(agreementPct) && agreementPct > 0) ? agreementPct / 100 : 0.05;
+  const valid = [];
+  for (const id of Object.keys(readings || {})) {
+    const r = readings[id];
+    if (r && typeof r.price === 'number' && Number.isFinite(r.price)) valid.push(r.price);
+  }
+  if (valid.length === 0) return null;
+  if (valid.length === 1) return valid[0];
+  const lo = Math.min(valid[0], valid[1]), hi = Math.max(valid[0], valid[1]);
+  if ((hi - lo) / lo > agree) return null;
+  return (valid[0] + valid[1]) / 2;
+}
+
+// Fetch the current BTC price in USD from the default (CoinGecko)
+// feed. Kept for backward compatibility — the price trigger now
+// reads two sources via fetchPriceReadings.
+async function fetchBtcPrice() {
+  return fetchPriceFromProvider(priceProviderById('coingecko'));
+}
+
 // The verdict itself (Ryan's ladder, Nov 14, extended 0.7.21 with
 // Critical Risk): first the CURRENT check — a fee below the current
 // economy fee would not confirm within a day right now, so it is
 // Critical Risk whatever the history says. Otherwise the
-// historical ladder against the 90-day peak: Low Risk at 2x the
-// peak, Medium Risk at 1x–2x, High Risk below the peak. The
-// economy fee is optional: when it is not supplied (or not a
+// historical ladder against the 90-day peak: Low Risk at
+// `lowMult`x the peak, Medium Risk at `medMult`x–`lowMult`x, High
+// Risk below the peak (Settings: Fee verdict; defaults 2 and 1).
+// The economy fee is optional: when it is not supplied (or not a
 // usable number) the Critical check is skipped and only the
 // historical ladder runs. Pure — the frontend mirrors this exact
 // rule (it cannot import this module). Returns null when there is
 // no peak or no fee rate, so the caller shows no verdict instead
 // of a wrong one.
-function feeVerdict(rate, peak, economyFee) {
+function feeVerdict(rate, peak, economyFee, lowMult, medMult) {
   if (typeof rate !== 'number' || !Number.isFinite(rate) || rate < 0) return null;
   if (typeof peak !== 'number' || !Number.isFinite(peak) || peak <= 0) return null;
+  const low = (typeof lowMult === 'number' && Number.isFinite(lowMult) && lowMult > 0) ? lowMult : 2;
+  const med = (typeof medMult === 'number' && Number.isFinite(medMult) && medMult > 0) ? medMult : 1;
   if (typeof economyFee === 'number' && Number.isFinite(economyFee) && economyFee >= 0 && rate < economyFee) return 'Critical Risk';
-  if (rate >= 2 * peak) return 'Low Risk';
-  if (rate >= peak) return 'Medium Risk';
+  if (rate >= low * peak) return 'Low Risk';
+  if (rate >= med * peak) return 'Medium Risk';
   return 'High Risk';
 }
 
@@ -1112,6 +1337,47 @@ async function checkInputsUnspent(parsed, endpoints) {
     }
   }
   throw new Error('could not verify inputs (' + errors.join('; ') + ')');
+}
+
+// ---------------------------------------------------------------------------
+// UTXO trigger (0.8.0): is one outpoint spent yet? A single-outpoint
+// version of the input-freshness check above — it answers the same
+// question the release asks about a transaction's input, but about a
+// WATCHED outpoint that is not necessarily one of our inputs.
+// Returns { outpoint, spent, confirmed, txid, blockHeight, unknown,
+// checkedVia, checkedBase, error? }. `unknown` is true when no
+// endpoint could say — the parent tx is unknown to the node that
+// answered (404), or no endpoint answered at all — and the trigger
+// must not fire on it. A 404 is a completed check (the endpoint
+// answered), so it does not fall through to the next endpoint — the
+// same rule as the input check — it just reports unknown.
+// `blockHeight` is the spending tx's block height (from
+// out.status.block_height) when the spend is confirmed, so the
+// caller can count confirmations; null otherwise. A spent outpoint
+// is only a fire when the spend is confirmed (an unconfirmed spend
+// may still be evicted or replaced, so it only watches) — unless
+// the trigger asked for the unconfirmed mode (confirmations 0),
+// which the caller decides from this answer.
+async function checkOutspend(outpoint, endpoints) {
+  const parts = String(outpoint || '').split(':');
+  const prevTxid = parts[0] || '';
+  const prevVout = parseInt(parts[1], 10);
+  const errors = [];
+  for (const ep of endpoints) {
+    try {
+      const out = await mempoolOutspend(prevTxid, prevVout, ep.base);
+      if (out === null) {
+        return { outpoint, spent: false, confirmed: false, txid: null, blockHeight: null, unknown: true, checkedVia: ep.label, checkedBase: ep.base };
+      }
+      const spent = !!out.spent;
+      const confirmed = !!(out.status && out.status.confirmed === true);
+      const blockHeight = (confirmed && out.status && Number.isFinite(out.status.block_height)) ? out.status.block_height : null;
+      return { outpoint, spent, confirmed, txid: spent ? (out.txid || null) : null, blockHeight, unknown: false, checkedVia: ep.label, checkedBase: ep.base };
+    } catch (e) {
+      errors.push(ep.label + ' (' + mempoolHostLabel(ep.base) + '): ' + e.message);
+    }
+  }
+  return { outpoint, spent: false, confirmed: false, txid: null, blockHeight: null, unknown: true, checkedVia: null, checkedBase: null, error: errors.join('; ') };
 }
 
 // ---------------------------------------------------------------------------
@@ -1522,6 +1788,20 @@ async function mempoolTipHeight(apiBase) {
   return h;
 }
 
+// Tip height from the endpoints in order — the first that answers
+// wins. Used by the UTXO trigger to count confirmations of a
+// spending tx (confirmations = tip - spendBlockHeight + 1).
+// Throws if no endpoint answers, so the caller can fail safe
+// (an uncountable spend never fires).
+async function getTipHeight(endpoints) {
+  const errors = [];
+  for (const ep of endpoints) {
+    try { return await mempoolTipHeight(ep.base); }
+    catch (e) { errors.push(ep.label + ' (' + mempoolHostLabel(ep.base) + '): ' + e.message); }
+  }
+  throw new Error('could not fetch tip height (' + errors.join('; ') + ')');
+}
+
 // Confirmations for a broadcast transaction, via the endpoints in order.
 // Returns { found, confirmed, blockHeight, confirmations, checkedVia,
 // checkedBase }. A transaction the network has never seen (or that
@@ -1633,10 +1913,13 @@ async function testOnePath(apiBase) {
 }
 
 module.exports = {
-  parseTx, extractTxFromPsbt, checkInputsUnspent, dryRun, broadcastTx, testConnection,
-  getConfirmations, findSharedInputs, isArchivedTx, timelockedUntil, computeFee, txIoDetail, scriptPubKeyInfo,
+  parseTx, extractTxFromPsbt, checkInputsUnspent, checkOutspend, dryRun, broadcastTx, testConnection,
+  getConfirmations, getTipHeight, findSharedInputs, isArchivedTx, timelockedUntil, computeFee, txIoDetail, scriptPubKeyInfo,
   broadcastViaSlipstream, getSlipstreamTxStatus,
   feePeakFromRates, fetchFeePeak, fetchCurrentFees, feeVerdict, DEFAULT_FEE_RATES_URL,
+  fetchBtcPrice, priceApiBase, DEFAULT_PRICE_API_URL,
+  PRICE_PROVIDERS, priceProviderById, priceProviderLabel, fetchPriceFromProvider, PRICE_USER_AGENT,
+  fetchPriceReadings, combinePriceReadings, priceConsensus,
   normalizePublicApiUrl, mempoolBase, endpointsFor,
   DEFAULT_PUBLIC_API_URL, DEFAULT_SECONDARY_API_URL,
   DEFAULT_SLIPSTREAM_API_URL,
