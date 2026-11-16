@@ -1291,9 +1291,14 @@ function triggerStatusFor(state, tx, now) {
 // agree on proves the condition. The 10x-jump guard does not
 // apply here (it needs a stored baseline — the evaluator owns
 // it); only the absolute bounds are checked.
-async function checkTriggerNow(trg, state, now) {
+async function checkTriggerNow(trg, state, now, liveOffsetMs) {
   if (trg.type === 'checkin') {
-    const clock = checkinClock(state, now, trg.params.thresholdDays);
+    // (0.8.0) liveOffsetMs is the tx's frozen time (disarmed /
+    // vacation) — the same effective clock the evaluator uses.
+    // A caller that knows the tx passes it (POST
+    // /api/triggers/check takes an optional txId); a new tx has
+    // none, so the clock is measured from the raw last check-in.
+    const clock = checkinClock(state, now, trg.params.thresholdDays, liveOffsetMs);
     if (clock.state === 'release-due') {
       return { valid: true, fire: true, status: 'release-due', reason: 'Release due', warning: 'This condition is already satisfied — it would fire on the next evaluation.', detail: { daysSince: clock.daysSince, nextDue: clock.nextDue } };
     }
@@ -2584,8 +2589,12 @@ async function handleApi(req, res, pathname) {
   // changing any state (0.8.0). The UI calls this when the owner picks
   // a trigger in the Add/Edit form, so the already-true guard can warn
   // before the rule is added ("this condition is already satisfied —
-  // it would fire on the next evaluation"). Body { trigger } — the
-  // same shape POST /api/bitcoin/txs accepts. An invalid trigger is
+  // it would fire on the next evaluation"). Body { trigger, txId? } — the
+  // same shape POST /api/bitcoin/txs accepts, plus an optional txId
+  // naming the transaction being edited: for a check-in rule its
+  // frozen time (disarmed / vacation) counts, so the guard measures
+  // the same effective clock the evaluator uses. A new tx (no txId)
+  // has no frozen time. An invalid trigger is
   // a 400 with the reason. A price trigger whose price is already
   // past the threshold (both sources agree) reports fire=true.
   // A UTXO trigger whose outpoint is already spent (confirmed)
@@ -2596,8 +2605,16 @@ async function handleApi(req, res, pathname) {
     const body = await readBody(req).catch(() => ({}));
     const v = store.normalizeTrigger(body.trigger);
     if (!v.trigger) return sendError(res, 400, 'invalid trigger: ' + v.error);
+    // The frozen time for the tx being edited, if any — only a
+    // check-in rule reads it (checkTriggerNow takes it as the
+    // clock's live offset); a price or UTXO rule ignores it.
+    let liveOff = 0;
+    if (typeof body.txId === 'string' && body.txId) {
+      const etx = (state.bitcoin.txs || []).find((t) => t.id === body.txId);
+      if (etx) liveOff = checkinLiveOffsetMs(etx, now);
+    }
     try {
-      const r = await checkTriggerNow(v.trigger, state, now);
+      const r = await checkTriggerNow(v.trigger, state, now, liveOff);
       return sendJson(res, 200, { ...r, trigger: v.trigger });
     } catch (e) {
       // Belt-and-braces: checkTriggerNow already answers 'unknown'

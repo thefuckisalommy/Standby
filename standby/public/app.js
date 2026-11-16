@@ -41,22 +41,44 @@
     return d.toLocaleDateString() + ', ' + d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
   }
 
+  // The check-in freeze (0.8.0): the live frozen time for a tx —
+  // the banked offset plus the open inactive period, if any.
+  // Mirrors server.js checkinLiveOffsetMs. A tx that was disarmed
+  // or on vacation has time that never counted toward its
+  // countdown, so the danger zone is measured from the EFFECTIVE
+  // last check-in, not the raw one.
+  function liveOffsetMs(tx) {
+    var base = (typeof tx.checkinOffsetMs === 'number' && isFinite(tx.checkinOffsetMs) && tx.checkinOffsetMs >= 0) ? tx.checkinOffsetMs : 0;
+    if (typeof tx.checkinInactiveSince === 'string' && tx.checkinInactiveSince) {
+      var since = new Date(tx.checkinInactiveSince).getTime();
+      if (isFinite(since)) return base + Math.max(0, Date.now() - since);
+    }
+    return base;
+  }
+
   // The danger zone (0.7.22): the last 25% of the check-in window —
   // the time remaining until the due date is a quarter of the
   // threshold or less (already past due is inside the zone).
   // thresholdDays is the threshold to measure against (the
   // entered value for the tx being armed/added/edited).
-  // Returns null outside the zone (or with no check-in yet), else
-  // { overdue, daysLeft, daysSince } for the confirm wording.
-  function dangerZone(thresholdDays) {
+  // offMs is the tx's frozen time (liveOffsetMs) — the due is
+  // measured from the EFFECTIVE last check-in, so a frozen clock
+  // is never in the danger zone for time that never counted.
+  // A new tx has no frozen time (offMs 0). Returns null outside
+  // the zone (or with no check-in yet), else { overdue, daysLeft,
+  // daysSince } for the confirm wording — daysSince is the
+  // EFFECTIVE days elapsed, matching the server's clock.
+  function dangerZone(thresholdDays, offMs) {
     var last = S && S.checkin && S.checkin.lastCheckinAt;
     if (!last || !thresholdDays || thresholdDays <= 0) return null;
-    var remainingMs = new Date(last).getTime() + thresholdDays * 86400000 - Date.now();
+    var off = (typeof offMs === 'number' && isFinite(offMs) && offMs >= 0) ? offMs : 0;
+    var effLast = new Date(last).getTime() + off;
+    var remainingMs = effLast + thresholdDays * 86400000 - Date.now();
     if (remainingMs > 0.25 * thresholdDays * 86400000) return null;
     return {
       overdue: remainingMs <= 0,
       daysLeft: Math.max(0, Math.ceil(remainingMs / 86400000)),
-      daysSince: Math.floor((Date.now() - new Date(last).getTime()) / 86400000),
+      daysSince: Math.floor((Date.now() - effLast) / 86400000),
     };
   }
 
@@ -1591,7 +1613,7 @@
     // it never warns — and the zone is measured against the
     // rule's OWN threshold, not the global one.
     var armTx = (S.bitcoin.txs || []).find(function (t) { return t.id === id; });
-    var dz = (enabled && armTx && triggerOf(armTx).type === 'checkin') ? dangerZone(triggerOf(armTx).params.thresholdDays) : null;
+    var dz = (enabled && armTx && triggerOf(armTx).type === 'checkin') ? dangerZone(triggerOf(armTx).params.thresholdDays, liveOffsetMs(armTx)) : null;
     if (dz) {
       showConfirm('Reset your check-in?',
         dz.overdue
@@ -2922,9 +2944,11 @@
       body: 'Back up or restore everything Standby knows. A backup is a file holding all your staged transactions, triggers, and settings. Restoring replaces the current state with the backup\u2019s \u2014 a restore counts as a check-in and clears any active grace period. It is a plain JSON file \u2014 keep it somewhere safe. It contains the signed hexes, which reveal the destination addresses and amounts, so treat it like the transactions themselves. The backup is not encrypted.',
       triggers: ['general'],
     },
+    // No title/body: the version card has no "?" button and no
+    // details pop-out — just the version line. The entry exists
+    // only so the filter knows it is General (bottom of General
+    // settings, hidden under the trigger filters).
     version: {
-      title: 'App version',
-      body: 'The version of Standby installed on this device. It only changes when you update the app — in Umbrel, or by pulling a new image on Docker. If a feature in the release notes is missing here, the installed version is older than the notes describe.',
       triggers: ['general'],
     },
   };
