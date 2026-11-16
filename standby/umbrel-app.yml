@@ -6,7 +6,19 @@ id: standby
 category: automation
 name: Standby
 version: "0.8.0"
-releaseNotes: "0.8.0: each transaction now carries its own trigger — the rule that fires it. Check-in (fire after N days of silence), BTC price (fire as soon as the price is at or above, or at or below, a dollar value — both feeds must agree, so a single bad feed never fires), UTXO moved (fire when a named outpoint is spent — a confirmed spend only, an unconfirmed mempool spend only watches), and Manual only (never fires on its own). Transactions without a trigger keep working exactly as before: they default to the check-in trigger at the 35-day threshold. The check-in card and its danger-zone guards now belong to the check-in trigger only — a price or UTXO fire never resets the check-in clock, and a check-in never clears a price or UTXO rule. The Release readiness card lists one row per armed rule with a trigger-mode pill and the rule's current state; each transaction card shows its rule in a Trigger box under the amount. Check-in rules are evaluated hourly; price and UTXO rules are evaluated every minute, so a rule whose condition is met fires within a minute. Price comes from two feeds you pick in Settings (CoinGecko and Coinbase by default, no key needed); a reading only counts when the two agree within 5% — if they disagree, or a feed fails, the rule waits — it never fires on data it does not have."
+releaseNotes: |-
+  0.8.0 — Standby is now a general broadcast engine: each transaction carries its own trigger, the rule that fires it.
+
+  - **Check-in:** fire after N days of silence. Existing transactions keep the 35-day default; the threshold is now set per transaction.
+  - **BTC price:** fire as soon as the price is at or above, or at or below, a value you set. Two feeds you pick in Settings (CoinGecko and Coinbase by default, no key needed) must agree within 5% — a single bad feed never fires; if they disagree, or a feed fails, the rule waits.
+  - **UTXO moved:** fire when a named outpoint is spent — on any spend, or once it reaches N confirmations (you choose).
+  - **Manual only:** never fires on its own.
+
+  A price or UTXO fire never resets the check-in clock, and a check-in never clears a price or UTXO rule. The readiness card lists one row per armed rule, naming its type and current state; each transaction card shows its rule in a three-line Trigger box. Check-in rules are evaluated hourly; price and UTXO rules about once a minute (adjustable in Settings).
+
+  **Safety:** if the app was offline, price and UTXO triggers are held during a grace period (7 days by default) instead of firing on stale data. And inactive time no longer counts toward the check-in countdown — disarming a transaction, or turning on vacation, freezes its clock; re-arming resumes it where it left off.
+
+  **Also in this release:** the Add form is now a popup; Broadcast All is removed (Broadcast Armed remains); a Getting Started card when you have no staged transactions; a Settings filter and per-card help; the installed version shown in Settings; and a fee-verdict zone bar showing the Low/Medium/High risk bands.
 tagline: Presigned Bitcoin transactions, ready when they're needed.
 description: |-
   Standby helps you prepare Bitcoin transactions in advance and keep them ready for whenever the time comes to use them.
