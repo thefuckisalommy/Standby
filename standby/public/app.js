@@ -196,7 +196,7 @@
   // Each tab is its own subpage: the URL hash names it (#dashboard,
   // #transactions, #settings, #logs), so refreshing the page lands
   // back on the tab you were on instead of the Dashboard, and the
-  // browser's Back / Forward steps through tabs. The Transaction(s)
+  // browser's Back / Forward steps through tabs. The Transactions
   // tab reads #transactions in the address bar (the internal tab key
   // is still 'bitcoin'; #bitcoin is accepted as an alias).
   var TAB_HASH = { dashboard: 'dashboard', bitcoin: 'transactions', settings: 'settings', logs: 'logs' };
