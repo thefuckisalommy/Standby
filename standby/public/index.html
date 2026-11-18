@@ -306,6 +306,7 @@
       </div>
       <label for="set-check-cadence">Check every</label>
       <div class="inline-unit" id="set-check-cadence-row"><input id="set-check-cadence" type="number" min="10" max="3600" step="1" value="60"><span>seconds</span></div>
+      <p class="muted">Applies to every trigger, including check-in.</p>
       <p>
         <button id="btn-save-check-cadence" class="primary">Save check cadence</button>
       </p>
@@ -412,13 +413,15 @@
     <textarea id="edit-notes" class="plain" style="min-height:56px" placeholder="What is this one for?"></textarea>
     <label for="edit-hex">Signed transaction (hex or PSBT)</label>
     <textarea id="edit-hex" class="plain" style="min-height:120px" placeholder="02000000…" spellcheck="false"></textarea>
+    <div class="op-section" id="edit-op-section">
+      <label>How the rules combine</label>
+      <button type="button" id="edit-op-any" class="op-card selected"><span class="op-radio"></span><span class="op-card-text"><b>Any rule fires</b><span>Broadcasts when any one rule is met</span></span></button>
+      <button type="button" id="edit-op-all" class="op-card"><span class="op-radio"></span><span class="op-card-text"><b>All rules hold</b><span>Broadcasts when all rules are simultaneously met</span></span></button>
+      <p id="edit-op-note" class="op-note" style="display:none">With one rule this doesn’t change anything — it matters once you add a second rule.</p>
+    </div>
     <div class="rules-label-row">
       <label>Rules</label>
-      <div class="op-toggle" id="edit-op-toggle">
-        <button type="button" id="edit-op-any" class="active">Any rule fires</button><button type="button" id="edit-op-all">All rules hold</button>
-      </div>
     </div>
-    <p id="edit-op-explain" class="op-explain">Fires when any rule fires.</p>
     <div id="edit-rules-list"></div>
     <p><button type="button" id="edit-add-rule" class="rule-add">+ Add rule</button></p>
     <p id="edit-rules-cap-note" class="muted" style="display:none">Maximum 5 rules per transaction.</p>
@@ -469,13 +472,15 @@
     <textarea id="btc-notes" class="plain" style="min-height:56px" placeholder="What is this one for? e.g. Pays the mortgage from the joint wallet; signed Oct 2026, RBF on."></textarea>
     <label for="btc-hex">Signed transaction (hex or PSBT)</label>
     <textarea id="btc-hex" class="plain" style="min-height:120px" placeholder="02000000…" spellcheck="false"></textarea>
+    <div class="op-section" id="btc-op-section">
+      <label>How the rules combine</label>
+      <button type="button" id="btc-op-any" class="op-card selected"><span class="op-radio"></span><span class="op-card-text"><b>Any rule fires</b><span>Broadcasts when any one rule is met</span></span></button>
+      <button type="button" id="btc-op-all" class="op-card"><span class="op-radio"></span><span class="op-card-text"><b>All rules hold</b><span>Broadcasts when all rules are simultaneously met</span></span></button>
+      <p id="btc-op-note" class="op-note" style="display:none">With one rule this doesn’t change anything — it matters once you add a second rule.</p>
+    </div>
     <div class="rules-label-row">
       <label>Rules</label>
-      <div class="op-toggle" id="btc-op-toggle">
-        <button type="button" id="btc-op-any" class="active">Any rule fires</button><button type="button" id="btc-op-all">All rules hold</button>
-      </div>
     </div>
-    <p id="btc-op-explain" class="op-explain">Fires when any rule fires.</p>
     <div id="btc-rules-list"></div>
     <p><button type="button" id="btc-add-rule" class="rule-add">+ Add rule</button></p>
     <p id="btc-rules-cap-note" class="muted" style="display:none">Maximum 5 rules per transaction.</p>

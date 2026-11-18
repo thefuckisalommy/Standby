@@ -484,6 +484,25 @@
     // for a manual broadcast).
     return (ts && ts.reason) ? ts.reason : 'Not evaluated yet';
   }
+  // The per-rule state pill (0.8.2 v2): whether this rule's
+  // criterion is met right now, from its triggerStatus slice —
+  // so an AND set shows at a glance which rules hold and which
+  // don't. 'due' / 'release-due' → "Met" (green); 'watching' /
+  // 'on-track' → "Not met" (muted); 'unknown' / 'not-evaluated'
+  // (or no status at all) → "Unknown" (amber — an unknown rule
+  // blocks AND, so it stands out); 'grace' / 'vacation' / 'held'
+  // → "Held" (amber); 'manual' → no pill at all (a manual rule
+  // never fires, so neither word fits). Only "Met" is green — an
+  // unmet rule never reads as an error. Returns null for no pill.
+  function ruleStatePill(trigger, ts) {
+    if (trigger.type === 'manual') return null;
+    var st = ts && ts.status;
+    if (st === 'manual') return null;
+    if (st === 'due' || st === 'release-due') return { text: 'Met', cls: 'ok' };
+    if (st === 'grace' || st === 'vacation' || st === 'held') return { text: 'Held', cls: 'warn' };
+    if (st === 'unknown' || st === 'not-evaluated' || !st) return { text: 'Unknown', cls: 'warn' };
+    return { text: 'Not met', cls: 'muted' };
+  }
   // The UTXO guard note for a confirmation mode — the Add and Edit
   // pickers both use it. Unconfirmed warns the spend can be
   // evicted or replaced; N confirmations names the threshold.
@@ -1454,7 +1473,10 @@
       // exactly the 0.8.1 subcard ("TRIGGER - <TYPE>", 3 rows);
       // a multi-rule set gets the combination line ("Fires when
       // ANY rule fires" / "Fires when ALL rules hold") and one
-      // 3-row subcard per rule ("Rule N — <Type>").
+      // 3-row subcard per rule ("Rule N — <Type>"). (0.8.2 v2)
+      // Every subcard header also carries the per-rule state
+      // pill (ruleStatePill) — Met / Not met / Unknown / Held,
+      // or no pill on a manual rule — including a one-rule tx's.
       var ruleSet = triggerSetOf(tx);
       var ruleStates = triggerStatesOf(tx);
       if (ruleSet.rules.length > 1) {
@@ -1473,7 +1495,21 @@
         var trigK = document.createElement('span');
         trigK.className = ruleSet.rules.length > 1 ? 'tx-trigger-k rule-k' : 'tx-trigger-k';
         trigK.textContent = ruleSet.rules.length > 1 ? 'Rule ' + (ri + 1) + ' \u2014 ' + triggerLabel(rule) : 'TRIGGER - ' + triggerLabel(rule).toUpperCase();
-        trigBox.appendChild(trigK);
+        var trigHead = document.createElement('span');
+        trigHead.className = 'tx-trigger-head';
+        trigHead.appendChild(trigK);
+        // (0.8.2 v2) The per-rule state pill in the subcard
+        // header — Met / Not met / Unknown / Held, or no pill
+        // on a manual rule. On every subcard, including a
+        // one-rule tx's.
+        var trigPill = ruleStatePill(rule, ruleStates[ri] || {});
+        if (trigPill) {
+          var trigPillEl = document.createElement('span');
+          trigPillEl.className = 'pill ' + trigPill.cls;
+          trigPillEl.textContent = trigPill.text;
+          trigHead.appendChild(trigPillEl);
+        }
+        trigBox.appendChild(trigHead);
         var trigCond = document.createElement('span');
         trigCond.textContent = triggerCondition(rule);
         trigBox.appendChild(trigCond);
@@ -2082,10 +2118,10 @@
   });
   // ---------- rule lists (0.8.2) ----------
   // The Add / Edit forms carry a LIST of rules instead of one
-  // trigger picker: an AND/OR toggle, one boxed panel per rule
-  // (each with the same trigger picker and param rows the
-  // single picker had), and a full-width "+ Add rule" button.
-  // Panels are built in JS and held by reference — a panel
+  // trigger picker: a "How the rules combine" section, one boxed
+  // panel per rule (each with the same trigger picker and param
+  // rows the single picker had), and a full-width "+ Add rule"
+  // button. Panels are built in JS and held by reference — a panel
   // field is never re-queried by id after creation.
   var MAX_RULES_PER_TX = 5;
   var TRIGGER_TYPE_OPTIONS = [
@@ -2130,7 +2166,7 @@
   // returned references.
   function buildRulePanel(prefix, idx, rule) {
     var pfx = prefix + '-rule-' + idx;
-    var panel = { root: null, titleEl: null, typeSel: null, rows: {}, f: {}, removeBtn: null };
+    var panel = { root: null, titleEl: null, typeSel: null, rows: {}, f: {}, removeBtn: null, prefix: prefix };
     var root = mkEl('div', 'rule');
     root.id = pfx;
     panel.root = root;
@@ -2150,7 +2186,7 @@
     sel.id = pfx + '-trigger';
     TRIGGER_TYPE_OPTIONS.forEach(function (o) { sel.appendChild(mkOption(o.value, o.label, o.value === rule.type)); });
     sel.value = rule.type;
-    sel.addEventListener('change', function () { syncRulePanel(panel); });
+    sel.addEventListener('change', function () { syncRulePanel(panel); syncRuleTypeOptions(panel.prefix); });
     panel.typeSel = sel;
     root.appendChild(sel);
     // Check-in row.
@@ -2367,10 +2403,56 @@
     if (!rules.length) return { set: null, error: 'Add at least one rule.' };
     return { set: { op: list.op, rules: rules }, error: null };
   }
+  // The default params for a fresh rule of a type — just enough
+  // that fillRulePanel renders empty fields instead of
+  // "undefined" (a fresh rule is "not filled in yet" until the
+  // owner completes it, and ruleFromPanel says so).
+  function defaultRuleParams(type) {
+    if (type === 'checkin') return { thresholdDays: 35 };
+    if (type === 'price') return { op: '>=', value: '' };
+    if (type === 'utxo') return { outpoint: '', condition: 'spent', confirmations: 1 };
+    if (type === 'blockheight') return { targetHeight: '' };
+    if (type === 'setdate') return { fireAt: '' };
+    if (type === 'feemarket') return { maxFeeRate: '', direction: 'below' };
+    return {};
+  }
+  // A fresh panel's rule: the first trigger type no other panel
+  // in this form uses yet (0.8.2 v2 — a tx never holds the same
+  // type twice, so a new panel never opens as a duplicate).
+  function defaultRuleFor(prefix) {
+    var list = ruleLists[prefix];
+    var used = {};
+    list.panels.forEach(function (p) { used[p.typeSel.value] = true; });
+    var t = null;
+    TRIGGER_TYPE_OPTIONS.some(function (o) { if (!used[o.value]) { t = o.value; return true; } return false; });
+    if (!t) t = 'checkin';
+    return { type: t, params: defaultRuleParams(t) };
+  }
+  // No duplicate trigger types in one tx (0.8.2 v2, picker only):
+  // in every panel's type select, the types the OTHER panels use
+  // are disabled and labelled "(already used)" — the panel's own
+  // type always stays available. Runs on every add, remove, and
+  // type change, so removing a rule frees its type at once.
+  function syncRuleTypeOptions(prefix) {
+    var list = ruleLists[prefix];
+    var used = {};
+    list.panels.forEach(function (p) { used[p.typeSel.value] = true; });
+    list.panels.forEach(function (p) {
+      var own = p.typeSel.value;
+      Array.prototype.forEach.call(p.typeSel.children, function (o) {
+        if (o.tagName !== 'OPTION') return;
+        var taken = o.value !== own && !!used[o.value];
+        o.disabled = taken;
+        var base = null;
+        TRIGGER_TYPE_OPTIONS.some(function (t) { if (t.value === o.value) { base = t.label; return true; } return false; });
+        o.textContent = taken ? (base || o.value) + ' (already used)' : (base || o.value);
+      });
+    });
+  }
   function addRulePanel(prefix, rule) {
     var list = ruleLists[prefix];
     if (list.panels.length >= MAX_RULES_PER_TX) return null;
-    var panel = buildRulePanel(prefix, list.nextIdx++, rule || { type: 'checkin', params: { thresholdDays: 35 } });
+    var panel = buildRulePanel(prefix, list.nextIdx++, rule || defaultRuleFor(prefix));
     list.panels.push(panel);
     $(prefix + '-rules-list').appendChild(panel.root);
     syncRuleListChrome(prefix);
@@ -2385,11 +2467,12 @@
     $(prefix + '-rules-list').removeChild(panel.root);
     syncRuleListChrome(prefix);
   }
-  // The toggle state, the explainer, the Add-rule button and
-  // the cap note all follow the list: the Remove button hides
+  // The combine cards, the one-rule note, the Add-rule button
+  // and the cap note all follow the list: the Remove button hides
   // when a single panel is left (a tx always has a rule), and
   // at the 5-rule cap the Add button disables and the note
-  // shows.
+  // shows. The type options re-sync here too, so an add or a
+  // remove frees (or takes) a type at once.
   function syncRuleListChrome(prefix) {
     var list = ruleLists[prefix];
     list.panels.forEach(function (p, i) {
@@ -2398,15 +2481,19 @@
     });
     var anyBtn = $(prefix + '-op-any');
     var allBtn = $(prefix + '-op-all');
-    if (anyBtn) anyBtn.className = list.op === 'OR' ? 'active' : '';
-    if (allBtn) allBtn.className = list.op === 'AND' ? 'active' : '';
-    var ex = $(prefix + '-op-explain');
-    if (ex) ex.textContent = list.op === 'AND' ? 'Fires only when every rule holds at the same moment.' : 'Fires when any rule fires.';
+    if (anyBtn) anyBtn.className = list.op === 'OR' ? 'op-card selected' : 'op-card';
+    if (allBtn) allBtn.className = list.op === 'AND' ? 'op-card selected' : 'op-card';
+    // The one-rule note: the combine choice only matters once a
+    // second rule exists — but the section stays visible from the
+    // first rule, so it is never scrolled past unseen.
+    var opNote = $(prefix + '-op-note');
+    if (opNote) opNote.style.display = list.panels.length <= 1 ? '' : 'none';
     var addBtn = $(prefix + '-add-rule');
     var atCap = list.panels.length >= MAX_RULES_PER_TX;
     if (addBtn) addBtn.disabled = atCap;
     var capNote = $(prefix + '-rules-cap-note');
     if (capNote) capNote.style.display = atCap ? '' : 'none';
+    syncRuleTypeOptions(prefix);
   }
   function resetRuleList(prefix, set) {
     var list = ruleLists[prefix];

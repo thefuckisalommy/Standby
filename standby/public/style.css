@@ -490,27 +490,36 @@ details.archived > summary { cursor: pointer; font-size: 18px; font-weight: 700;
   text-transform: uppercase; margin-bottom: 1px;
 }
 .tx-trigger .now { color: var(--muted); }
+.tx-trigger .tx-trigger-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.tx-trigger-head .tx-trigger-k { flex: 1 1 auto; min-width: 0; }
+.tx-trigger-head .pill { flex-shrink: 0; font-size: 12px; padding: 2px 9px; }
 /* Every trigger subcard is exactly 3 rows (owner): header,
    condition, current state — each on its own line. The header
    is already block; the condition and the state line are inline
    by default, which ran them together on one row. */
 .tx-trigger span { display: block; }
 /* The rule list (0.8.2): the Add / Edit forms carry a list of
-   rules instead of one trigger picker. The AND/OR toggle picks
-   whether any rule fires or all must hold; each rule is a boxed
-   panel with its own trigger picker and param rows; "+ Add rule"
-   appends a panel (up to 5). The combination line above a
-   multi-rule card's subcards names the mode ("Fires when ANY
-   rule fires"). A per-rule subcard header ("Rule 1 — BTC Price")
+   rules instead of one trigger picker. The "How the rules
+   combine" section (0.8.2 v2) sits above the list — two large
+   cards, one per mode, each with a plain description, visible
+   from the first rule on; each rule is a boxed panel with its
+   own trigger picker and param rows; "+ Add rule" appends a
+   panel (up to 5). The combination line above a multi-rule
+   card's subcards names the mode ("Fires when ANY rule
+   fires"). A per-rule subcard header ("Rule 1 — BTC Price")
    is NOT uppercased, unlike the single-rule "TRIGGER - TYPE"
    header above. */
 .rules-label-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 12px 0 4px; }
 .rules-label-row label { margin: 0; }
-.op-toggle { display: flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; flex-shrink: 0; }
-.op-toggle button { border: none; background: #262b35; color: var(--muted); padding: 7px 11px; font-size: 13px; font-weight: 600; border-radius: 0; white-space: nowrap; }
-.op-toggle button.active { background: var(--accent); color: #fff; }
-.op-toggle button:disabled { opacity: 0.5; cursor: default; }
-.op-explain { color: var(--muted); font-size: 13px; margin: 2px 0 0; }
+.op-section { border: 1px solid var(--line); border-radius: 8px; background: #14171d; padding: 12px; margin: 12px 0 4px; }
+.op-section > label { margin: 0 0 4px; font-size: 14px; }
+.op-card { display: flex; align-items: flex-start; gap: 10px; width: 100%; text-align: left; background: #0f1115; border: 1px solid var(--line); border-left: 3px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-top: 8px; }
+.op-card.selected { border-left-color: var(--accent); background: #1c1a17; }
+.op-radio { flex-shrink: 0; width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--muted); margin-top: 2px; }
+.op-card.selected .op-radio { border-color: var(--accent); background: var(--accent); box-shadow: inset 0 0 0 3px #1c1a17; }
+.op-card-text b { display: block; font-size: 15px; }
+.op-card-text span { display: block; color: var(--muted); font-size: 13.5px; margin-top: 1px; }
+.op-note { color: var(--muted); font-size: 13px; margin: 10px 0 0; }
 .rule { background: #14171d; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-top: 10px; }
 .rule-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .rule-head b { font-size: 14px; }
