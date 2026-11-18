@@ -7,7 +7,7 @@
 // broadcast the owner's pre-signed Bitcoin transactions if they stop
 // checking in past the broadcast threshold — or immediately, on the
 // owner's say-so (Broadcast Now on a transaction's own card, or
-// Broadcast All). There is no message delivery any more: no Part 1 /
+// Broadcast Armed for the armed ones). There is no message delivery any more: no Part 1 /
 // Part 2, no recipient, no channels, no reminders. Each transaction is
 // signed in the owner's own wallet and pasted as raw hex; the app never
 // sees keys. Each has its own enable toggle and its own release
@@ -28,8 +28,8 @@
 // moment a transaction is edited away from the shared input.
 // The check-in status turns 'broadcasted' once a release has gone
 // out (a manual broadcast does not count) and a check-in resets it
-// to 'on-track'. Broadcast All only attempts the transactions that
-// are not archived (broadcasted or stale).
+// to 'on-track'. Broadcast Armed only attempts the armed transactions
+// that are not archived (broadcasted or stale).
 // 0.6.6 adds check-in API keys: a key lets a service or app check in
 // for the owner, and it can only record a check-in — it cannot read
 // transactions or broadcast. Each service gets its own labelled key
@@ -59,7 +59,7 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 // (last.json). Absent on a plain `node server.js` run — the key
 // feature is dormant then; every file access is guarded.
 const CHECKIN_DIR = process.env.CHECKIN_DIR || '/checkin';
-const VERSION = '0.8.0';
+const VERSION = '0.8.1';
 const MAX_BODY = 1024 * 1024; // 1 MB
 
 const MIME = {
@@ -179,13 +179,16 @@ function triggerLabel(trigger) {
     case 'price': return 'BTC price';
     case 'utxo': return 'UTXO';
     case 'manual': return 'Manual';
+    case 'blockheight': return 'Block height';
+    case 'setdate': return 'Set date';
+    case 'feemarket': return 'Fee market';
     default: return 'Check-in';
   }
 }
 
 // The condition in plain words, as shown in the trigger subcard:
-// "Fired when you don't check in for 35 days",
-// "Fired when BTC price ≥ $150,000", "Fired when UTXO 4a74…:0 is spent",
+// "Fires when you don't check in for 35 days",
+// "Fires when BTC price ≥ $150,000", "Fires when UTXO 4a74…:0 is spent",
 // "Never fires — manual only". `trigger` is normalized (see
 // triggerOf) — the callers pass the normalized one; a missing one
 // falls back to the check-in default.
@@ -193,9 +196,9 @@ function triggerConditionText(trigger) {
   const t = (trigger && trigger.type) ? trigger : store.defaultTrigger(35);
   switch (t.type) {
     case 'checkin':
-      return "Fired when you don't check in for " + t.params.thresholdDays + (t.params.thresholdDays === 1 ? ' day' : ' days');
+      return "Fires when you don't check in for " + t.params.thresholdDays + (t.params.thresholdDays === 1 ? ' day' : ' days');
     case 'price':
-      return 'Fired when BTC price ' + (t.params.op === '>=' ? '≥' : '≤') + ' $' + t.params.value.toLocaleString('en-US');
+      return 'Fires when BTC price ' + (t.params.op === '>=' ? '≥' : '≤') + ' $' + t.params.value.toLocaleString('en-US');
     case 'utxo': {
       const parts = String(t.params.outpoint || '').split(':');
       // (0.8.0) The confirmation mode rides on the condition:
@@ -204,10 +207,19 @@ function triggerConditionText(trigger) {
       // so explicitly, so the subcard names the rule.
       const confs = (t.params.confirmations === 0) ? 0 : (t.params.confirmations || 1);
       const suffix = confs === 0 ? ' (unconfirmed)' : (confs === 1 ? '' : ' (' + confs + ' confirmations)');
-      return 'Fired when UTXO ' + (parts[0] || '').slice(0, 4) + '…:' + (parts[1] || '') + ' is spent' + suffix;
+      return 'Fires when UTXO ' + (parts[0] || '').slice(0, 4) + '…:' + (parts[1] || '') + ' is spent' + suffix;
     }
     case 'manual':
       return 'Never fires — manual only';
+    case 'blockheight':
+      return 'Fires when the chain reaches block ' + Number(t.params.targetHeight).toLocaleString('en-US');
+    case 'setdate': {
+      const d = new Date(t.params.fireAt);
+      const shown = Number.isFinite(d.getTime()) ? d.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : String(t.params.fireAt);
+      return 'Fires on ' + shown;
+    }
+    case 'feemarket':
+      return 'Fires when tx fees are ' + (t.params.direction === 'above' ? '>= ' : '<= ') + Number(t.params.maxFeeRate).toLocaleString('en-US') + ' sat/vB';
     default:
       return '';
   }
@@ -831,16 +843,28 @@ function checkinStatus(state, now) {
 const PRICE_JUMP_WINDOW_MS = 60 * 60 * 1000; // the 10x-jump guard (below) only applies when the last good reading is recent — over a longer gap a real 10x move is possible
 
 // The configured price sources (Settings: priceSources
-// {source1, source2}), defaulting to CoinGecko + Coinbase. An
-// unknown id or identical sources fall back to the defaults —
-// the settings validator (PUT /api/settings) rejects those, but
-// a hand-edited or restored state must never break the fetch.
+// {source1, source2}). Each slot is either a provider id string
+// ('kraken', ...) or a custom object { id: 'custom', url, path }
+// (0.8.1). An unusable value or two identical sources fall back
+// to the defaults — the settings validator (PUT /api/settings)
+// rejects those, but a hand-edited or restored state must never
+// break the fetch.
 function priceSourcesOf(settings) {
   const s = (settings && settings.priceSources && typeof settings.priceSources === 'object') ? settings.priceSources : {};
-  const s1 = (typeof s.source1 === 'string' && bitcoin.priceProviderById(s.source1)) ? s.source1 : 'coingecko';
-  const s2 = (typeof s.source2 === 'string' && bitcoin.priceProviderById(s.source2)) ? s.source2 : 'coinbase';
-  if (s1 === s2) return { source1: 'coingecko', source2: 'coinbase' };
-  return { source1: s1, source2: s2 };
+  const s1 = bitcoin.normalizePriceSourceValue(s.source1);
+  const s2 = bitcoin.normalizePriceSourceValue(s.source2);
+  const v1 = (s1 === null) ? 'coingecko' : s1;
+  const v2 = (s2 === null) ? 'coinbase' : s2;
+  if (bitcoin.priceSourceKey(v1) === bitcoin.priceSourceKey(v2)) return { source1: 'coingecko', source2: 'coinbase' };
+  return { source1: v1, source2: v2 };
+}
+
+// The 400 message for a price-source value the validator
+// rejects: an unknown provider id, or a custom object without a
+// valid http(s) URL and a well-formed JSON path.
+function priceSourceError(v) {
+  if (v && typeof v === 'object') return 'custom price source needs a valid http(s) URL and a JSON path to the price (e.g. data.amount)';
+  return 'unknown price provider: ' + v;
 }
 
 // The user controls (0.8.0), read defensively like
@@ -881,22 +905,59 @@ async function fetchPriceCached(sources, cadenceSeconds) {
   const src = (sources && sources.source1 && sources.source2) ? sources : { source1: 'coingecko', source2: 'coinbase' };
   const ttlMs = ((typeof cadenceSeconds === 'number' && Number.isFinite(cadenceSeconds) && cadenceSeconds > 0) ? cadenceSeconds : CHECK_CADENCE_SECONDS_DEFAULT) * 1000;
   const nowMs = Date.now();
-  if (priceCache.fetchedAt && priceCache.source1 === src.source1 && priceCache.source2 === src.source2
+  const k1 = bitcoin.priceSourceKey(src.source1), k2 = bitcoin.priceSourceKey(src.source2);
+  if (priceCache.fetchedAt && priceCache.source1Key === k1 && priceCache.source2Key === k2
       && priceCache.readings && Object.keys(priceCache.readings).length
       && (nowMs - new Date(priceCache.fetchedAt).getTime()) < ttlMs) {
     return priceCache.readings;
   }
   const readings = await bitcoin.fetchPriceReadings(src.source1, src.source2);
-  priceCache = { readings, fetchedAt: new Date(nowMs).toISOString(), source1: src.source1, source2: src.source2 };
+  priceCache = { readings, fetchedAt: new Date(nowMs).toISOString(), source1: src.source1, source2: src.source2, source1Key: k1, source2Key: k2 };
+  return readings;
+}
+
+// The fee cache for the fee-market trigger (0.8.1): the economy
+// fee from BOTH configured nodes (per endpoint, TTL = the check
+// cadence — Settings: Check cadence, default 60 seconds) — the
+// same cadence as the price cache, so the fee trigger is
+// evaluated on data no older than one tick. This is separate
+// from the hourly currentFeesCache (used by the fee verdict):
+// the verdict only needs an hourly fee, but a trigger that
+// should fire when fees drop needs to see the drop within a
+// tick. The cache is keyed by the endpoint URLs — a settings
+// change makes it stale, so the next read fetches the new nodes
+// instead of serving the old ones. readings is
+// { [label]: { endpoint, fee|null, source|null, error|null } }.
+// A failed fetch does NOT throw — the readings carry the error
+// per node, and the caller combines them (the primary node's
+// fee decides, the secondary is only a fallback) via
+// bitcoin.combineFeeReadings; no usable reading means 'unknown',
+// never a fire.
+let nodeFeeCache = { readings: null, fetchedAt: null, primary: null, secondary: null };
+
+async function fetchNodeFeesCached(endpoints, cadenceSeconds) {
+  const eps = (endpoints && endpoints.length) ? endpoints : bitcoin.endpointsFor({ primaryApiUrl: 'https://mempool.space', secondaryApiUrl: 'https://blockstream.info/api' });
+  const primary = eps[0] ? eps[0].base : null;
+  const secondary = eps[1] ? eps[1].base : null;
+  const ttlMs = ((typeof cadenceSeconds === 'number' && Number.isFinite(cadenceSeconds) && cadenceSeconds > 0) ? cadenceSeconds : CHECK_CADENCE_SECONDS_DEFAULT) * 1000;
+  const nowMs = Date.now();
+  if (nodeFeeCache.fetchedAt && nodeFeeCache.primary === primary && nodeFeeCache.secondary === secondary
+      && nodeFeeCache.readings && Object.keys(nodeFeeCache.readings).length
+      && (nowMs - new Date(nodeFeeCache.fetchedAt).getTime()) < ttlMs) {
+    return nodeFeeCache.readings;
+  }
+  const readings = await bitcoin.fetchNodeFeeReadings(eps);
+  nodeFeeCache = { readings, fetchedAt: new Date(nowMs).toISOString(), primary, secondary };
   return readings;
 }
 
 // The cached prices as served to the UI (GET /api/state) — the
 // per-source readings, the consensus price (a single display
-// number: the average of two agreeing readings, the single valid
-// one, or null), and the fetched-at timestamp. `agreementPct`
-// is the configured agreement (Settings: Price agreement), so
-// the displayed consensus uses the same rule as the trigger.
+// number: the primary exchange's price when the two agree, the
+// single valid one, or null), and the fetched-at timestamp.
+// `agreementPct` is the configured agreement (Settings: Price
+// agreement), so the displayed consensus uses the same rule as
+// the trigger.
 function priceCacheForState(agreementPct) {
   return {
     price: bitcoin.priceConsensus(priceCache.readings || {}, agreementPct),
@@ -921,24 +982,30 @@ function priceCacheForState(agreementPct) {
 // like the node rows. `pc` is the priceCacheForState() shape.
 function exchangeStatusFor(pc, sources, agreementPct) {
   const ok = pc && pc.prices && Object.keys(pc.prices).length
-    && pc.source1 === sources.source1 && pc.source2 === sources.source2;
+    && bitcoin.priceSourceKey(pc.source1) === bitcoin.priceSourceKey(sources.source1)
+    && bitcoin.priceSourceKey(pc.source2) === bitcoin.priceSourceKey(sources.source2);
   // One row per configured price source (in configured order).
   // A row is 'ok' when it has a price, 'error' when it has an
   // error (or no reading at all), and 'not-tested' while the
-  // cache is cold or for different sources.
-  const rows = [sources.source1, sources.source2].map((pid) => {
-    const prov = bitcoin.PRICE_PROVIDERS.find((p) => p.id === pid);
-    const label = prov ? prov.label : pid;
-    if (!ok) return { provider: pid, label, price: null, error: null, status: 'not-tested' };
-    const r = pc.prices[pid] || null;
-    if (!r) return { provider: pid, label, price: null, error: 'No reading', status: 'error' };
+  // cache is cold or for different sources. Readings are keyed
+  // by slot (source1/source2), and a custom source's label is
+  // 'Custom' — the URL itself is never shown on the readiness
+  // card.
+  const rows = ['source1', 'source2'].map((slot) => {
+    const src = sources[slot];
+    const isCustom = src && typeof src === 'object' && src.id === 'custom';
+    const label = isCustom ? 'Custom' : (bitcoin.priceProviderById(src) ? bitcoin.priceProviderById(src).label : String(src));
+    const provider = isCustom ? 'custom' : String(src);
+    if (!ok) return { provider, label, price: null, error: null, status: 'not-tested' };
+    const r = pc.prices[slot] || null;
+    if (!r) return { provider, label, price: null, error: 'No reading', status: 'error' };
     const price = typeof r.price === 'number' ? r.price : null;
     const error = r.error ? String(r.error) : null;
-    return { provider: pid, label, price, error, status: price != null ? 'ok' : 'error' };
+    return { provider, label, price, error, status: price != null ? 'ok' : 'error' };
   });
   if (!ok) return { status: 'not-tested', detail: 'No price readings yet', sources: rows };
   const agree = (typeof agreementPct === 'number' && Number.isFinite(agreementPct) && agreementPct > 0) ? agreementPct : PRICE_AGREEMENT_PCT_DEFAULT;
-  const comb = bitcoin.combinePriceReadings(pc.prices, '>=', agree);
+  const comb = bitcoin.combinePriceReadings(pc.prices, agree);
   if (comb.mode === 'dual') return { status: 'ok', detail: 'Both price sources agree', sources: rows };
   if (comb.mode === 'single') return { status: 'degraded', detail: 'One price source down — running on a single source', sources: rows };
   if (comb.mode === 'disagree') return { status: 'error', detail: 'Price sources disagree by more than ' + agree + '%', sources: rows };
@@ -1013,9 +1080,10 @@ function evaluateCheckinTrigger(state, tx, now) {
 // from TWO providers (Settings: priceSources) and combined by
 // bitcoin.combinePriceReadings: the reading is only trusted when
 // the two agree within the configured agreement (Settings: Price
-// agreement); a rule that fires above a price uses the HIGHER of
-// the two, below uses the LOWER; when only one source answers,
-// that price is used alone (no agreement check).
+// agreement); when they agree, the PRIMARY exchange's price is
+// the one that decides (the secondary is only a fallback); when
+// only one source answers, that price is used alone (no
+// agreement check).
 // Guards, in order:
 //   (a) Immediate fire: the EFFECTIVE price crossing the
 //       threshold (at/above, or at/below) fires at once — no
@@ -1057,7 +1125,7 @@ async function evaluatePriceTrigger(state, tx, now) {
     };
     return { fire: false, status: 'unknown', reason: 'price unavailable — will retry' };
   }
-  const comb = bitcoin.combinePriceReadings(readings, p.op, priceAgreementPctOf(state.settings));
+  const comb = bitcoin.combinePriceReadings(readings, priceAgreementPctOf(state.settings));
   if (!comb.valid) {
     tx.triggerState = {
       ...freshTriggerState(now, 'unknown', comb.reason),
@@ -1177,6 +1245,122 @@ async function evaluateUtxoTrigger(state, tx, now) {
   return { fire: false, status: 'watching', reason: 'spent — ' + confs + ' of ' + needConfs + ' confirmations' };
 }
 
+// The block-height trigger (0.8.1). Fires when the chain tip
+// reaches params.targetHeight — the PRIMARY node's tip is the one
+// that counts (the secondary is only a fallback if the primary
+// does not answer; a node a block or two ahead is normal
+// propagation lag). Deterministic: the tip height comes from
+// the nodes' own chains, and a reorg cannot un-fire it — once the
+// tip has reached the height, the rule has fired (the release is
+// one-shot; a later reorg does not retract a broadcast). Fail-safe:
+// if neither node answers, the trigger is 'unknown' — it never
+// fires on data it cannot read. No grace period: the tip height is
+// the chain's own state, not a feed that can go stale — an offline
+// gap that ends past the height means the height was genuinely reached.
+async function evaluateBlockHeightTrigger(state, tx, now) {
+  const trg = store.triggerOf(tx);
+  const target = trg.params.targetHeight;
+  const endpoints = bitcoin.endpointsFor(state.settings);
+  let comb;
+  try { comb = bitcoin.combineTipHeights(await bitcoin.fetchTipHeights(endpoints)); }
+  catch (e) {
+    tx.triggerState = { ...freshTriggerState(now, 'unknown', 'could not fetch the tip height — will retry'), lastError: e.message };
+    return { fire: false, status: 'unknown', reason: 'could not fetch the tip height — will retry' };
+  }
+  if (!comb.valid) {
+    tx.triggerState = { ...freshTriggerState(now, 'unknown', comb.reason), lastError: comb.reason };
+    return { fire: false, status: 'unknown', reason: comb.reason };
+  }
+  const tip = comb.tip;
+  if (typeof tip !== 'number' || !Number.isFinite(tip) || tip < 0) {
+    tx.triggerState = { ...freshTriggerState(now, 'unknown', 'tip height unreadable — will retry'), lastError: 'tip height is not a number: ' + String(tip) };
+    return { fire: false, status: 'unknown', reason: 'tip height unreadable — will retry' };
+  }
+  if (tip >= target) {
+    tx.triggerState = { ...freshTriggerState(now, 'due', 'block ' + tip.toLocaleString('en-US') + ' reached — firing'), lastTipHeight: tip, lastError: null };
+    return { fire: true, status: 'due', reason: 'block ' + tip.toLocaleString('en-US') + ' reached — firing' };
+  }
+  tx.triggerState = { ...freshTriggerState(now, 'watching', 'block ' + tip.toLocaleString('en-US') + ' of ' + target.toLocaleString('en-US')), lastTipHeight: tip, lastError: null };
+  return { fire: false, status: 'watching', reason: 'block ' + tip.toLocaleString('en-US') + ' of ' + target.toLocaleString('en-US') };
+}
+
+// The set-date trigger (0.8.1). Fires when the wall clock
+// reaches params.fireAt — a pure deadline, regardless of
+// check-ins. No network call, so it cannot be 'unknown' except
+// on a malformed date (which validation prevents). No grace
+// period: the clock is the clock — an offline gap that ends
+// past the date means the date genuinely passed. The
+// "fire unless I check in" snooze variant is a later addition,
+// not this rule.
+function evaluateSetDateTrigger(state, tx, now) {
+  const trg = store.triggerOf(tx);
+  const fireMs = Date.parse(trg.params.fireAt);
+  if (!Number.isFinite(fireMs)) {
+    tx.triggerState = { ...freshTriggerState(now, 'unknown', 'set date is not a valid date — will retry'), lastError: 'fireAt is not a valid date: ' + String(trg.params.fireAt) };
+    return { fire: false, status: 'unknown', reason: 'set date is not a valid date — will retry' };
+  }
+  if (now.getTime() >= fireMs) {
+    tx.triggerState = { ...freshTriggerState(now, 'due', 'date reached — firing'), lastError: null };
+    return { fire: true, status: 'due', reason: 'date reached — firing' };
+  }
+  const d = new Date(fireMs);
+  const shown = d.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
+  tx.triggerState = { ...freshTriggerState(now, 'watching', 'fires on ' + shown), lastError: null };
+  return { fire: false, status: 'watching', reason: 'fires on ' + shown };
+}
+
+// The fee-market trigger (0.8.1). Fires when the economy fee
+// rate crosses params.maxFeeRate (sat/vB) in the direction the
+// owner chose: 'below' fires when the fee falls to or below it,
+// 'above' fires when it rises to or above it. The threshold is
+// user-set; the tx's own fee rate is not consulted — the rule
+// fires on the market rate alone. The fee comes from BOTH
+// configured nodes (combineFeeReadings) but NO agreement check:
+// the PRIMARY node's fee is the one that counts — the secondary
+// is only a fallback if the primary is down. One node down means
+// the other is used alone, with no agreement check. No 10x-jump
+// guard: fee spikes are real and are exactly what an 'above' rule
+// is for — the guard would block the trigger from doing its job.
+// The fee comes from the cached fetch (TTL = the check cadence),
+// so the trigger sees a move within a tick. Fail-safe: if no
+// usable fee can be read, the trigger is 'unknown' — it never
+// fires on data it cannot read. No grace period: the fee is a
+// live market reading, not a feed that can go stale in the
+// price-trigger sense — an offline gap that ends in a low-fee
+// market means fees genuinely are low.
+async function evaluateFeeMarketTrigger(state, tx, now) {
+  const trg = store.triggerOf(tx);
+  const maxRate = trg.params.maxFeeRate;
+  const dir = trg.params.direction === 'above' ? 'above' : 'below';
+  const prev = (tx.triggerState && typeof tx.triggerState === 'object') ? tx.triggerState : {};
+  // The last GOOD fee, kept across unknown readings (fail-safe):
+  // a disagreement or outage never fires the rule, and the
+  // subcard keeps showing the last fee it could trust.
+  const keepGood = {
+    lastEconomyFee: (typeof prev.lastEconomyFee === 'number' && Number.isFinite(prev.lastEconomyFee)) ? prev.lastEconomyFee : null,
+  };
+  let readings;
+  try { readings = await fetchNodeFeesCached(bitcoin.endpointsFor(state.settings), checkCadenceSecondsOf(state.settings)); }
+  catch (e) {
+    tx.triggerState = { ...freshTriggerState(now, 'unknown', 'fee unavailable — will retry'), ...keepGood, lastError: e.message, feeMode: 'none', feeNote: '' };
+    return { fire: false, status: 'unknown', reason: 'fee unavailable — will retry' };
+  }
+  const comb = bitcoin.combineFeeReadings(readings);
+  if (!comb.valid) {
+    tx.triggerState = { ...freshTriggerState(now, 'unknown', comb.reason), ...keepGood, lastError: comb.reason, feeMode: comb.mode, feeNote: '' };
+    return { fire: false, status: 'unknown', reason: comb.reason };
+  }
+  const econ = comb.fee;
+  const fired = dir === 'above' ? econ >= maxRate : econ <= maxRate;
+  if (fired) {
+    tx.triggerState = { ...freshTriggerState(now, 'due', 'economy fee ' + econ + ' sat/vB — firing'), lastEconomyFee: econ, lastError: null, feeMode: comb.mode, feeNote: comb.note };
+    return { fire: true, status: 'due', reason: 'economy fee ' + econ + ' sat/vB — firing' };
+  }
+  const side = dir === 'above' ? 'below ' : 'above ';
+  tx.triggerState = { ...freshTriggerState(now, 'watching', 'economy fee ' + econ + ' sat/vB (' + side + maxRate + ')'), lastEconomyFee: econ, lastError: null, feeMode: comb.mode, feeNote: comb.note };
+  return { fire: false, status: 'watching', reason: 'economy fee ' + econ + ' sat/vB (' + side + maxRate + ')' };
+}
+
 // Dispatch by trigger type. Returns { fire, status, reason } and
 // writes the tx's triggerState (the caller saves). The manual
 // trigger never fires — the owner broadcasts it by hand.
@@ -1198,6 +1382,9 @@ async function evaluateTrigger(state, tx, now) {
     case 'checkin': return evaluateCheckinTrigger(state, tx, now);
     case 'price': return await evaluatePriceTrigger(state, tx, now);
     case 'utxo': return await evaluateUtxoTrigger(state, tx, now);
+    case 'blockheight': return await evaluateBlockHeightTrigger(state, tx, now);
+    case 'setdate': return evaluateSetDateTrigger(state, tx, now);
+    case 'feemarket': return await evaluateFeeMarketTrigger(state, tx, now);
     case 'manual': {
       tx.triggerState = freshTriggerState(now, 'manual', 'Waiting for manual broadcast');
       return { fire: false, status: 'manual', reason: 'Waiting for manual broadcast' };
@@ -1236,10 +1423,10 @@ function triggerStatusFor(state, tx, now) {
     // price and its note.
     const src = priceSourcesOf(state.settings);
     const cacheOk = priceCache.readings && Object.keys(priceCache.readings).length
-      && priceCache.source1 === src.source1 && priceCache.source2 === src.source2;
+      && priceCache.source1Key === bitcoin.priceSourceKey(src.source1) && priceCache.source2Key === bitcoin.priceSourceKey(src.source2);
     let price = null, note = '', mode = null;
     if (cacheOk) {
-      const comb = bitcoin.combinePriceReadings(priceCache.readings, trg.params.op, priceAgreementPctOf(state.settings));
+      const comb = bitcoin.combinePriceReadings(priceCache.readings, priceAgreementPctOf(state.settings));
       if (comb.valid) { price = comb.price; note = comb.note; mode = comb.mode; }
       else {
         // The latest fetch says the reading is not valid (the
@@ -1274,6 +1461,18 @@ function triggerStatusFor(state, tx, now) {
   if (trg.type === 'utxo') {
     if (!st) return { ...base, status: 'not-evaluated', reason: 'Not evaluated yet', lastOutspend: null };
     return { ...base, status: st.status || 'watching', reason: st.reason || 'still unspent', lastOutspend: st.lastOutspend || null };
+  }
+  if (trg.type === 'blockheight') {
+    if (!st) return { ...base, status: 'not-evaluated', reason: 'Not evaluated yet', lastTipHeight: null };
+    return { ...base, status: st.status || 'watching', reason: st.reason || 'waiting for the height', lastTipHeight: (typeof st.lastTipHeight === 'number' ? st.lastTipHeight : null) };
+  }
+  if (trg.type === 'setdate') {
+    if (!st) return { ...base, status: 'not-evaluated', reason: 'Not evaluated yet' };
+    return { ...base, status: st.status || 'watching', reason: st.reason || 'waiting for the date' };
+  }
+  if (trg.type === 'feemarket') {
+    if (!st) return { ...base, status: 'not-evaluated', reason: 'Not evaluated yet', lastEconomyFee: null };
+    return { ...base, status: st.status || 'watching', reason: st.reason || 'waiting for fees to fall', lastEconomyFee: (typeof st.lastEconomyFee === 'number' ? st.lastEconomyFee : null) };
   }
   return { ...base, status: 'not-evaluated', reason: 'Not evaluated yet' };
 }
@@ -1312,7 +1511,7 @@ async function checkTriggerNow(trg, state, now, liveOffsetMs) {
     let readings;
     try { readings = await fetchPriceCached(priceSourcesOf(state.settings), checkCadenceSecondsOf(state.settings)); }
     catch (e) { return { valid: true, fire: false, status: 'unknown', reason: 'price unavailable — will retry', warning: null, detail: { error: e.message } }; }
-    const comb = bitcoin.combinePriceReadings(readings, trg.params.op, priceAgreementPctOf(state.settings));
+    const comb = bitcoin.combinePriceReadings(readings, priceAgreementPctOf(state.settings));
     if (!comb.valid) {
       return { valid: true, fire: false, status: 'unknown', reason: comb.reason, warning: null, detail: { mode: comb.mode, readings: comb.readings } };
     }
@@ -1360,6 +1559,52 @@ async function checkTriggerNow(trg, state, now, liveOffsetMs) {
     // the spend reaches N confirmations.
     return { valid: true, fire: false, status: 'watching', reason: 'spent — ' + confs + ' of ' + needConfs + ' confirmations', warning: null, detail: { spent: true, confirmed: true, txid: res.txid, confirmations: confs, blockHeight: res.blockHeight } };
   }
+  if (trg.type === 'blockheight') {
+    const endpoints = bitcoin.endpointsFor(state.settings);
+    let comb;
+    try { comb = bitcoin.combineTipHeights(await bitcoin.fetchTipHeights(endpoints)); }
+    catch (e) { return { valid: true, fire: false, status: 'unknown', reason: 'could not fetch the tip height — will retry', warning: null, detail: { error: e.message } }; }
+    if (!comb.valid) {
+      return { valid: true, fire: false, status: 'unknown', reason: comb.reason, warning: null, detail: { error: comb.reason } };
+    }
+    const tip = comb.tip;
+    if (typeof tip !== 'number' || !Number.isFinite(tip) || tip < 0) {
+      return { valid: true, fire: false, status: 'unknown', reason: 'tip height unreadable — will retry', warning: null, detail: { tip: String(tip) } };
+    }
+    if (tip >= trg.params.targetHeight) {
+      return { valid: true, fire: true, status: 'due', reason: 'block ' + tip.toLocaleString('en-US') + ' reached — firing', warning: 'This height has already been reached — it would fire on the next evaluation.', detail: { tip, targetHeight: trg.params.targetHeight } };
+    }
+    return { valid: true, fire: false, status: 'watching', reason: 'block ' + tip.toLocaleString('en-US') + ' of ' + trg.params.targetHeight.toLocaleString('en-US'), warning: null, detail: { tip, targetHeight: trg.params.targetHeight } };
+  }
+  if (trg.type === 'setdate') {
+    const fireMs = Date.parse(trg.params.fireAt);
+    if (!Number.isFinite(fireMs)) {
+      return { valid: true, fire: false, status: 'unknown', reason: 'set date is not a valid date — will retry', warning: null, detail: { fireAt: String(trg.params.fireAt) } };
+    }
+    if (now.getTime() >= fireMs) {
+      return { valid: true, fire: true, status: 'due', reason: 'date reached — firing', warning: 'This date has already passed — it would fire on the next evaluation.', detail: { fireAt: trg.params.fireAt } };
+    }
+    const d = new Date(fireMs);
+    const shown = d.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
+    return { valid: true, fire: false, status: 'watching', reason: 'fires on ' + shown, warning: null, detail: { fireAt: trg.params.fireAt } };
+  }
+  if (trg.type === 'feemarket') {
+    let readings;
+    try { readings = await fetchNodeFeesCached(bitcoin.endpointsFor(state.settings), checkCadenceSecondsOf(state.settings)); }
+    catch (e) { return { valid: true, fire: false, status: 'unknown', reason: 'fee unavailable — will retry', warning: null, detail: { error: e.message } }; }
+    const dir = trg.params.direction === 'above' ? 'above' : 'below';
+    const comb = bitcoin.combineFeeReadings(readings);
+    if (!comb.valid) {
+      return { valid: true, fire: false, status: 'unknown', reason: comb.reason, warning: null, detail: { mode: comb.mode, error: comb.reason } };
+    }
+    const econ = comb.fee;
+    const fired = dir === 'above' ? econ >= trg.params.maxFeeRate : econ <= trg.params.maxFeeRate;
+    if (fired) {
+      return { valid: true, fire: true, status: 'due', reason: 'economy fee ' + econ + ' sat/vB — firing', warning: 'The economy fee is already at or ' + dir + ' your threshold — it would fire on the next evaluation.', detail: { economyFee: econ, maxFeeRate: trg.params.maxFeeRate, direction: dir } };
+    }
+    const side = dir === 'above' ? 'below ' : 'above ';
+    return { valid: true, fire: false, status: 'watching', reason: 'economy fee ' + econ + ' sat/vB (' + side + trg.params.maxFeeRate + ')', warning: null, detail: { economyFee: econ, maxFeeRate: trg.params.maxFeeRate, direction: dir } };
+  }
   return { valid: true, fire: false, status: 'manual', reason: 'Waiting for manual broadcast', warning: null, detail: {} };
 }
 
@@ -1382,10 +1627,10 @@ function days(from, to) {
 // itself is NOT written to this snapshot: broadcastOne reloads fresh
 // state again after the network call and merges only the record in
 // (see below), so a check-in that lands mid-broadcast survives.
-// `opts.releaseRun` (set by the release evaluation) skips the clock
-// re-check inside an already-decided release run — all-or-none,
-// 0.7.10 — while the other guards above still apply.
-function preBroadcastCheck(tx, logKind, now, opts) {
+// The clock is NOT re-checked here: the release decision was made
+// once, above — all-or-none, 0.7.10 — while the other guards
+// above still apply.
+function preBroadcastCheck(tx, logKind, opts) {
   const fresh = store.loadState(DATA_DIR);
   const ftx = (fresh.bitcoin.txs || []).find((t) => t.id === tx.id);
   if (!ftx) return { ok: false, reason: 'transaction was deleted' };
@@ -1418,21 +1663,13 @@ function preBroadcastCheck(tx, logKind, now, opts) {
     // NOT re-checked here; the guards above (disabled, vacation)
     // still apply, because those are explicit owner actions on the
     // transaction or the switch, not the clock.
-    // Outside a decided run, the clock must still be due, and
-    // 'broadcasted' counts as still due: it only means a release
-    // already went out in this cycle, and the remaining armed txs
-    // must still broadcast.
-    if (!opts || !opts.releaseRun) {
-      const st = checkinStatus(fresh, now).state;
-      if (st !== 'release-due' && st !== 'broadcasted') return { ok: false, reason: 'no longer release-due' };
-    }
   }
   return { ok: true, state: fresh, tx: ftx };
 }
 
 // ---------------------------------------------------------------------------
 // Broadcast ONE transaction for real — the shared path the release and
-// the manual buttons (Broadcast Now, Broadcast All) both use.
+// the manual buttons (Broadcast Now, Broadcast Armed) both use.
 //   1. Freshness gate: re-check every input right before broadcasting.
 //      A spent input is three things (0.7.12, third-audit finding 1):
 //      our OWN txid as the spender means the transaction is already
@@ -1467,7 +1704,7 @@ function preBroadcastCheck(tx, logKind, now, opts) {
 // Callers skip already-broadcast and stale txs themselves.
 // ---------------------------------------------------------------------------
 // Broadcasts in flight, by transaction id — a manual Broadcast Now /
-// Broadcast All and the automatic release must never broadcast the
+// Broadcast Armed and the automatic release must never broadcast the
 // same transaction twice at once (audit finding 6). Only the release
 // evaluation has a single-flight lock (0.7.6); the manual endpoints
 // call broadcastOne directly, so a double-click or a manual call
@@ -1576,7 +1813,7 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
   // evaluation retries that same route. The manual "Broadcast
   // publicly" escape hatch (opts.forcePublic) overrides the route:
   // it always goes public, whatever the stored route says.
-  const pre = preBroadcastCheck(tx, logKind, now, opts);
+  const pre = preBroadcastCheck(tx, logKind, opts);
   if (!pre.ok) {
     return { id: tx.id, txid: tx.txid, label: tx.label || '', action: 'skipped', reason: pre.reason };
   }
@@ -1729,11 +1966,12 @@ function recordRelease(state, tx, record, logEntry) {
 // stick — and Node's single thread makes the check-and-set atomic.
 let releaseEvaluationInFlight = false;
 // `options.onlyTypes` (optional) restricts which trigger types this
-// evaluation covers — the fast tick passes ['price', 'utxo'], the
-// hourly tick ['checkin'], the manual release check passes nothing
-// (all types). The check-in merge below is only a gate when the
-// evaluation includes check-in triggers: a price/UTXO-only fast
-// tick must not be blocked by a check-in receiver problem.
+// evaluation covers — the fast tick passes ['price', 'utxo',
+// 'blockheight', 'setdate', 'feemarket'], the hourly tick
+// ['checkin'], the manual release check passes nothing (all types).
+// The check-in merge below is only a gate when the evaluation
+// includes check-in triggers: a fast-tick-only evaluation must not
+// be blocked by a check-in receiver problem.
 async function evaluateRelease(options) {
   const onlyTypes = (options && Array.isArray(options.onlyTypes)) ? options.onlyTypes : null;
   const includeCheckin = !onlyTypes || onlyTypes.includes('checkin');
@@ -1799,10 +2037,11 @@ async function evaluateReleaseInner(onlyTypes) {
   const now = new Date();
   const s = state.settings;
   // `onlyTypes` (optional) restricts the evaluation to those trigger
-  // types — the fast tick passes ['price', 'utxo'], the hourly tick
-  // ['checkin'], the manual check passes nothing (all types). A
-  // filtered run that finds no armed tx of its types is a skip, and
-  // it must not touch the other types' triggerState.
+  // types — the fast tick passes ['price', 'utxo', 'blockheight',
+  // 'setdate', 'feemarket'], the hourly tick ['checkin'], the manual
+  // check passes nothing (all types). A filtered run that finds no
+  // armed tx of its types is a skip, and it must not touch the other
+  // types' triggerState.
   let armed = (state.bitcoin.txs || []).filter((t) => t.enabled);
   if (onlyTypes) armed = armed.filter((t) => onlyTypes.includes(store.triggerOf(t).type));
   if (!armed.length) return { action: 'skipped', reason: 'no armed transactions', results: [] };
@@ -1879,10 +2118,10 @@ async function evaluateReleaseInner(onlyTypes) {
       results.push({ id: tx.id, txid: tx.txid, label: tx.label || '', action: 'skipped', reason: 'submitted to Slipstream — waiting on MARA' });
       continue;
     }
-    // releaseRun: the release decision was made once, above — a
-    // check-in landing mid-run is recorded but does not stop the
-    // remaining transactions (all-or-none, 0.7.10).
-    results.push(await broadcastOne(state, tx, endpoints, now, 'release', { releaseRun: true }));
+    // The release decision was made once, above — a check-in landing
+    // mid-run is recorded but does not stop the remaining
+    // transactions (all-or-none, 0.7.10).
+    results.push(await broadcastOne(state, tx, endpoints, now, 'release'));
   }
 
   const action = results.some((r) => r.action === 'broadcast') ? 'broadcast'
@@ -2095,7 +2334,7 @@ async function refreshMaraWaiting(state) {
 // the tx goes public even when nobody is watching.
 // Runs on the hourly tick and on the manual release check, AFTER
 // refreshMaraWaiting, so a tx MARA just confirmed as visible is not
-// also fallback-broadcast. It is NOT reachable from Broadcast All
+// also fallback-broadcast. It is NOT reachable from Broadcast Armed
 // (that path never calls it) and NOT triggered by the manual escape
 // hatch (a separate, immediate path). Returns [{ id, txid, action,
 // ... }] — 'broadcast', 'failed', or 'stale' per tx.
@@ -2139,13 +2378,12 @@ async function refreshPublicFallbacks(state) {
       out.push({ id: tx.id, txid: tx.txid, action: 'broadcast', alreadyVisible: true });
       continue;
     }
-    // Not visible: broadcast it publicly. releaseRun skips the clock
-    // re-check in preBroadcastCheck (the fallback's own deadline is
-    // the trigger, not the check-in clock); forcePublic forces the
+    // Not visible: broadcast it publicly. The fallback's own deadline
+    // is the trigger, not the check-in clock; forcePublic forces the
     // public route past the 'submitted-slipstream' block, sets the
     // stored route to 'public' on success, and skips the 'failed'
     // record on failure. fallbackDays marks the log entry.
-    const r = await broadcastOne(state, tx, endpoints, now, 'release', { releaseRun: true, forcePublic: true, fallbackDays: tx.publicFallbackDays });
+    const r = await broadcastOne(state, tx, endpoints, now, 'release', { forcePublic: true, fallbackDays: tx.publicFallbackDays });
     out.push({ id: tx.id, txid: tx.txid, action: r.action, method: r.method, error: r.error, reason: r.reason });
   }
   return out;
@@ -2299,21 +2537,24 @@ async function runReleaseTick() {
   try { await refreshCurrentFeesIfStale(); } catch (e) { console.error('current-fees refresh failed:', e); }
 }
 
-// The fast tick (0.8.0): every minute, while a price or UTXO rule
-// is armed, run a release evaluation for those trigger types only.
-// The hourly tick samples them once an hour — too coarse: an
-// unconfirmed UTXO trigger must be caught well within one block
-// time (~10 min), and a price that holds for an hour should fire
-// within a minute of the hour being up, not up to an hour later.
-// The 1-minute cadence is a price/UTXO cadence: a setup with no
-// armed price or UTXO rule never runs this tick, so a check-in-only
-// setup keeps the pure hourly cadence and makes no extra API calls.
-// The evaluation is the same single-flight evaluateRelease() the
-// hourly tick and the manual check use, restricted to ['price',
-// 'utxo'] — so a check-in rule is never evaluated (and never
-// broadcast) by this tick; the hourly tick owns check-in. The
-// cache refresh runs first, so the price rule's "currently $X"
-// line stays fresh even while its trigger is held by a grace.
+// The fast tick (0.8.0, extended 0.8.1): every minute, while a price,
+// UTXO, block-height, set-date, or fee-market rule is armed, run a
+// release evaluation for those trigger types only. The hourly tick
+// samples them once an hour — too coarse: an unconfirmed UTXO
+// trigger must be caught well within one block time (~10 min), a
+// price that holds for an hour should fire within a minute of the
+// hour being up, not up to an hour later, and a set date or block
+// height should fire within a minute of its moment, not up to an
+// hour later. The 1-minute cadence is a fast-trigger cadence: a
+// setup with no armed fast rule never runs this tick, so a
+// check-in-only setup keeps the pure hourly cadence and makes no
+// extra API calls. The evaluation is the same single-flight
+// evaluateRelease() the hourly tick and the manual check use,
+// restricted to the fast types — so a check-in rule is never
+// evaluated (and never broadcast) by this tick; the hourly tick
+// owns check-in. The cache refresh runs first, so the price rule's
+// "currently $X" line stays fresh even while its trigger is held
+// by a grace.
 async function runFastTick() {
   try {
     await refreshPriceIfStale();
@@ -2321,10 +2562,10 @@ async function runFastTick() {
     const hasFast = (st.bitcoin.txs || []).some((t) => {
       if (!t.enabled) return false;
       const type = store.triggerOf(t).type;
-      return type === 'price' || type === 'utxo';
+      return type === 'price' || type === 'utxo' || type === 'blockheight' || type === 'setdate' || type === 'feemarket';
     });
     if (!hasFast) return;
-    const r = await evaluateRelease({ onlyTypes: ['price', 'utxo'] });
+    const r = await evaluateRelease({ onlyTypes: ['price', 'utxo', 'blockheight', 'setdate', 'feemarket'] });
     if (r.action !== 'skipped') {
       const sum = (r.results || []).map((x) => x.action + ':' + (x.txid || '').slice(0, 8)).join(', ');
       console.log('fast tick:', r.action, sum || r.reason || '');
@@ -2490,7 +2731,7 @@ async function handleApi(req, res, pathname) {
     served.bitcoin.currentPrice = pc.price;
     served.bitcoin.currentPriceAt = pc.fetchedAt;
     served.bitcoin.currentPrices = pc.prices;
-    served.bitcoin.priceProviders = bitcoin.PRICE_PROVIDERS.map((p) => ({ id: p.id, label: p.label }));
+    served.bitcoin.priceProviders = bitcoin.PRICE_PROVIDERS.map((p) => ({ id: p.id, label: p.label })).concat([{ id: 'custom', label: 'Custom' }]);
     // The consolidated exchange status (0.8.0): one status for
     // the configured price sources, shown once on the readiness
     // card (like Node Status) instead of repeated per price tx.
@@ -2750,29 +2991,33 @@ async function handleApi(req, res, pathname) {
     }
   }
 
-  // POST /api/settings/price-sources/test-all {providers: [id, ...]} (0.8.0):
-  // tests several providers at once with FRESH fetches
+  // POST /api/settings/price-sources/test-all {providers: [...]} (0.8.0):
+  // tests several sources at once with FRESH fetches
   // (bypasses the price cache) and returns
-  // {results: [{provider, price, error}, ...]} in the order
-  // requested. A provider that fails answers with price null
-  // and the error (the test itself worked — the provider is
-  // down); only a missing/empty providers array is a 400, and
-  // an unknown id inside the list is reported per-result, not
-  // as a whole-call failure. Never changes the configured
-  // sources or the cache — the Settings "Test connection"
-  // button uses this to check both sources in one call.
+  // {results: [{provider, label, price, error}, ...]} in the order
+  // requested. Each entry is a provider id string or a custom
+  // { id: 'custom', url, path } object (0.8.1). A source that
+  // fails answers with price null and the error (the test itself
+  // worked — the source is down); only a missing/empty providers
+  // array is a 400, and an unknown id inside the list is reported
+  // per-result, not as a whole-call failure. Never changes the
+  // configured sources or the cache — the Settings "Test
+  // connection" button uses this to check both sources in one call.
   if (req.method === 'POST' && pathname === '/api/settings/price-sources/test-all') {
     const body = await readBody(req);
     const ids = (body && Array.isArray(body.providers)) ? body.providers : [];
     if (!ids.length) return sendError(res, 400, 'providers must be a non-empty array');
-    const results = await Promise.all(ids.map(async (id) => {
-      const prov = bitcoin.priceProviderById(id);
-      if (!prov) return { provider: String(id), price: null, error: 'unknown price provider: ' + id };
+    const results = await Promise.all(ids.map(async (src) => {
+      const prov = bitcoin.resolvePriceSource(src);
+      if (!prov) {
+        const id = (typeof src === 'string') ? src : 'custom';
+        return { provider: id, label: (typeof src === 'string') ? src : 'Custom', price: null, error: 'unknown price provider: ' + id };
+      }
       try {
         const price = await bitcoin.fetchPriceFromProvider(prov);
-        return { provider: prov.id, price, error: null };
+        return { provider: prov.id, label: prov.label, price, error: null };
       } catch (e) {
-        return { provider: prov.id, price: null, error: e.message };
+        return { provider: prov.id, label: prov.label, price: null, error: e.message };
       }
     }));
     return sendJson(res, 200, { results });
@@ -2811,10 +3056,11 @@ async function handleApi(req, res, pathname) {
     if (body.priceSources !== undefined) {
       const ps = body.priceSources;
       if (!ps || typeof ps !== 'object') return sendError(res, 400, 'priceSources must be {source1, source2}');
-      const s1 = ps.source1, s2 = ps.source2;
-      if (typeof s1 !== 'string' || !bitcoin.priceProviderById(s1)) return sendError(res, 400, 'unknown price provider: ' + s1);
-      if (typeof s2 !== 'string' || !bitcoin.priceProviderById(s2)) return sendError(res, 400, 'unknown price provider: ' + s2);
-      if (s1 === s2) return sendError(res, 400, 'price sources must be different');
+      const s1 = bitcoin.normalizePriceSourceValue(ps.source1);
+      const s2 = bitcoin.normalizePriceSourceValue(ps.source2);
+      if (s1 === null) return sendError(res, 400, priceSourceError(ps.source1));
+      if (s2 === null) return sendError(res, 400, priceSourceError(ps.source2));
+      if (bitcoin.priceSourceKey(s1) === bitcoin.priceSourceKey(s2)) return sendError(res, 400, 'price sources must be different');
       s.priceSources = { source1: s1, source2: s2 };
     }
     // Grace period (0.8.0): the offline gap that triggers a
@@ -3014,25 +3260,29 @@ async function handleApi(req, res, pathname) {
     const tx = newTxRecord(parsed, hex, body.label, body.notes, body.broadcastVia, body.publicFallbackDays, trig.trigger);
     const fee = await feeFor(parsed);
     if (fee) { tx.feeSats = fee.feeSats; tx.feeRateSatVb = fee.feeRateSatVb; }
-    // (0.8.0) The already-satisfied check for a price or UTXO
-    // rule: a condition that is ALREADY met would fire on the
-    // next evaluation, so adding it is a mistake unless the
-    // owner confirms it (triggerConfirmed: true). What "met" means
+    // (0.8.0, extended 0.8.1) The already-satisfied check for a
+    // price, UTXO, block-height, set-date, or fee-market rule: a
+    // condition that is ALREADY met would fire on the next
+    // evaluation, so adding it is a mistake unless the owner
+    // confirms it (triggerConfirmed: true). What "met" means
     // depends on the rule: for a price rule both sources must
     // agree the price is past the threshold — a single-source or
     // disagreeing reading is not a fire (checkTriggerNow answers
     // fire: false), so it never blocks the add; for a UTXO rule
     // it depends on the confirmation mode: any spend in
     // unconfirmed mode (0), or a spend with at least N
-    // confirmations in N-confirmation mode. The check is
-    // best-effort — a reading no source can say about (unknown)
-    // does not block the add; the tick will evaluate it. A UTXO
-    // spend that is unconfirmed, or confirmed but below N, is a
-    // warning at most, not a block. The warning still rides on
-    // the response when the condition is NOT already satisfied,
-    // so the UI can say what it found.
+    // confirmations in N-confirmation mode. For a block-height
+    // rule the tip is already at or past the height; for a
+    // set-date rule the date has already passed; for a fee-market
+    // rule the economy fee is already at or below the threshold.
+    // The check is best-effort — a reading no source can say
+    // about (unknown) does not block the add; the tick will
+    // evaluate it. A UTXO spend that is unconfirmed, or confirmed
+    // but below N, is a warning at most, not a block. The warning
+    // still rides on the response when the condition is NOT
+    // already satisfied, so the UI can say what it found.
     let triggerWarning = null;
-    if (trig.trigger.type === 'utxo' || trig.trigger.type === 'price') {
+    if (trig.trigger.type === 'utxo' || trig.trigger.type === 'price' || trig.trigger.type === 'blockheight' || trig.trigger.type === 'setdate' || trig.trigger.type === 'feemarket') {
       try {
         const chk = await checkTriggerNow(trig.trigger, state, now);
         if (chk.warning) triggerWarning = chk.warning;
@@ -3042,6 +3292,15 @@ async function handleApi(req, res, pathname) {
         if (trig.trigger.type === 'price' && chk.fire && body.triggerConfirmed !== true) {
           const dir = trig.trigger.params.op === '>=' ? 'above' : 'below';
           return sendError(res, 400, 'The price is already ' + dir + ' $' + Number(trig.trigger.params.value).toLocaleString('en-US') + ' — this rule would fire on the next evaluation. Add it with triggerConfirmed to add it anyway.');
+        }
+        if (trig.trigger.type === 'blockheight' && chk.fire && body.triggerConfirmed !== true) {
+          return sendError(res, 400, 'That block height has already been reached — this rule would fire on the next evaluation. Add it with triggerConfirmed to add it anyway.');
+        }
+        if (trig.trigger.type === 'setdate' && chk.fire && body.triggerConfirmed !== true) {
+          return sendError(res, 400, 'That date has already passed — this rule would fire on the next evaluation. Add it with triggerConfirmed to add it anyway.');
+        }
+        if (trig.trigger.type === 'feemarket' && chk.fire && body.triggerConfirmed !== true) {
+          const fdir = trig.trigger.params.direction === 'above' ? 'at or above' : 'at or below'; return sendError(res, 400, 'The economy fee is already ' + fdir + ' ' + Number(trig.trigger.params.maxFeeRate).toLocaleString('en-US') + ' sat/vB — this rule would fire on the next evaluation. Add it with triggerConfirmed to add it anyway.');
         }
       } catch (e) { /* best-effort: the add proceeds without the warning */ }
     }
@@ -3133,7 +3392,7 @@ async function handleApi(req, res, pathname) {
     const fee = await feeFor(parsed);
     if (fee) { tx.feeSats = fee.feeSats; tx.feeRateSatVb = fee.feeRateSatVb; }
     let triggerWarning = null;
-    if (trig.trigger.type === 'utxo' || trig.trigger.type === 'price') {
+    if (trig.trigger.type === 'utxo' || trig.trigger.type === 'price' || trig.trigger.type === 'blockheight' || trig.trigger.type === 'setdate' || trig.trigger.type === 'feemarket') {
       try {
         const chk = await checkTriggerNow(trig.trigger, state, now);
         if (chk.warning) triggerWarning = chk.warning;
@@ -3143,6 +3402,15 @@ async function handleApi(req, res, pathname) {
         if (trig.trigger.type === 'price' && chk.fire && body.triggerConfirmed !== true) {
           const dir = trig.trigger.params.op === '>=' ? 'above' : 'below';
           return sendError(res, 400, 'The price is already ' + dir + ' $' + Number(trig.trigger.params.value).toLocaleString('en-US') + ' — this rule would fire on the next evaluation. Import it with triggerConfirmed to import it anyway.');
+        }
+        if (trig.trigger.type === 'blockheight' && chk.fire && body.triggerConfirmed !== true) {
+          return sendError(res, 400, 'That block height has already been reached — this rule would fire on the next evaluation. Import it with triggerConfirmed to import it anyway.');
+        }
+        if (trig.trigger.type === 'setdate' && chk.fire && body.triggerConfirmed !== true) {
+          return sendError(res, 400, 'That date has already passed — this rule would fire on the next evaluation. Import it with triggerConfirmed to import it anyway.');
+        }
+        if (trig.trigger.type === 'feemarket' && chk.fire && body.triggerConfirmed !== true) {
+          const fdir = trig.trigger.params.direction === 'above' ? 'at or above' : 'at or below'; return sendError(res, 400, 'The economy fee is already ' + fdir + ' ' + Number(trig.trigger.params.maxFeeRate).toLocaleString('en-US') + ' sat/vB — this rule would fire on the next evaluation. Import it with triggerConfirmed to import it anyway.');
         }
       } catch (e) { /* best-effort: the import proceeds without the warning */ }
     }
@@ -3243,13 +3511,22 @@ async function handleApi(req, res, pathname) {
       if (triggerLocked && JSON.stringify(v.trigger) !== JSON.stringify(store.triggerOf(tx))) {
         return sendError(res, 400, 'the trigger cannot be changed once the transaction has been broadcast');
       }
-      if (v.trigger.type === 'utxo' || v.trigger.type === 'price') {
+      if (v.trigger.type === 'utxo' || v.trigger.type === 'price' || v.trigger.type === 'blockheight' || v.trigger.type === 'setdate' || v.trigger.type === 'feemarket') {
         try {
           const chk = await checkTriggerNow(v.trigger, state, now);
           if (chk.warning) triggerWarning = chk.warning;
           if (chk.fire && body.triggerConfirmed !== true) {
             if (v.trigger.type === 'utxo') {
               return sendError(res, 400, 'That UTXO is already spent — this rule would fire on the next evaluation. Save it with triggerConfirmed to save it anyway.');
+            }
+            if (v.trigger.type === 'blockheight') {
+              return sendError(res, 400, 'That block height has already been reached — this rule would fire on the next evaluation. Save it with triggerConfirmed to save it anyway.');
+            }
+            if (v.trigger.type === 'setdate') {
+              return sendError(res, 400, 'That date has already passed — this rule would fire on the next evaluation. Save it with triggerConfirmed to save it anyway.');
+            }
+            if (v.trigger.type === 'feemarket') {
+              const fdir = v.trigger.params.direction === 'above' ? 'at or above' : 'at or below'; return sendError(res, 400, 'The economy fee is already ' + fdir + ' ' + Number(v.trigger.params.maxFeeRate).toLocaleString('en-US') + ' sat/vB — this rule would fire on the next evaluation. Save it with triggerConfirmed to save it anyway.');
             }
             const dir = v.trigger.params.op === '>=' ? 'above' : 'below';
             return sendError(res, 400, 'The price is already ' + dir + ' $' + Number(v.trigger.params.value).toLocaleString('en-US') + ' — this rule would fire on the next evaluation. Save it with triggerConfirmed to save it anyway.');
@@ -3382,7 +3659,7 @@ async function handleApi(req, res, pathname) {
   // failure the error is surfaced and the tx STAYS Slipstream-pending
   // (no 'failed' record is written — MARA is still holding it).
   // MANUAL ONLY: it is not reachable from the release evaluation or
-  // Broadcast All — only this endpoint calls broadcastOne with
+  // Broadcast Armed — only this endpoint calls broadcastOne with
   // forcePublic, and only for the one tx named here.
   const txBroadcastPublicMatch = pathname.match(/^\/api\/bitcoin\/txs\/([^/]+)\/broadcast-public$/);
   if (req.method === 'POST' && txBroadcastPublicMatch) {
@@ -3517,10 +3794,11 @@ async function handleApi(req, res, pathname) {
     if (bsSettings.priceSources !== undefined && bsSettings.priceSources !== null) {
       const ps = bsSettings.priceSources;
       if (!ps || typeof ps !== 'object') return sendError(res, 400, 'backup priceSources must be {source1, source2}');
-      const s1 = ps.source1, s2 = ps.source2;
-      if (typeof s1 !== 'string' || !bitcoin.priceProviderById(s1)) return sendError(res, 400, 'backup unknown price provider: ' + s1);
-      if (typeof s2 !== 'string' || !bitcoin.priceProviderById(s2)) return sendError(res, 400, 'backup unknown price provider: ' + s2);
-      if (s1 === s2) return sendError(res, 400, 'backup price sources must be different');
+      const s1 = bitcoin.normalizePriceSourceValue(ps.source1);
+      const s2 = bitcoin.normalizePriceSourceValue(ps.source2);
+      if (s1 === null) return sendError(res, 400, 'backup ' + priceSourceError(ps.source1));
+      if (s2 === null) return sendError(res, 400, 'backup ' + priceSourceError(ps.source2));
+      if (bitcoin.priceSourceKey(s1) === bitcoin.priceSourceKey(s2)) return sendError(res, 400, 'backup price sources must be different');
       settings.priceSources = { source1: s1, source2: s2 };
     } else {
       settings.priceSources = { source1: 'coingecko', source2: 'coinbase' };
@@ -3873,7 +4151,7 @@ async function handleApi(req, res, pathname) {
         if (trg && trg.type === 'price') {
           try {
             const readings = await fetchPriceCached(priceSourcesOf(state.settings), checkCadenceSecondsOf(state.settings));
-            const comb = bitcoin.combinePriceReadings(readings, trg.params.op, priceAgreementPctOf(state.settings));
+            const comb = bitcoin.combinePriceReadings(readings, priceAgreementPctOf(state.settings));
             let srcDetail;
             if (comb.mode === 'disagree' || comb.mode === 'none') {
               srcDetail = comb.reason.charAt(0).toUpperCase() + comb.reason.slice(1);

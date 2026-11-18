@@ -19,7 +19,7 @@ function defaultState() {
     settings: {
       primaryApiUrl: 'https://mempool.space', // the primary node: a mempool API endpoint (any mempool.space-compatible instance — another public one, or your own mempool on the LAN)
       secondaryApiUrl: 'https://blockstream.info/api', // the secondary node, tried only if the primary does not answer; blank = primary runs alone
-      priceSources: { source1: 'coingecko', source2: 'coinbase' }, // the two BTC price feeds for price rules (provider ids — see PRICE_PROVIDERS in lib/bitcoin.js); a reading is only trusted when the two agree within the configured agreement (Settings: Price agreement), and a rule that fires above a price uses the higher, below uses the lower
+      priceSources: { source1: 'coingecko', source2: 'coinbase' }, // the two BTC price feeds for price rules — each a provider id (see PRICE_PROVIDERS in lib/bitcoin.js) or a custom { id: 'custom', url, path } object (0.8.1); a reading is only trusted when the two agree within the configured agreement (Settings: Price agreement), and when they agree the primary source's price is the one that decides
       // Price agreement (0.8.0): the two BTC price sources must
       // agree within this % for a reading to count (Settings:
       // Price agreement; 1–20, default 5). Tighter is safer but
@@ -126,7 +126,7 @@ function newTxId() {
 // $999,999,999 is a typo, not a rule); the outpoint must be a
 // 64-hex txid, a colon, and an output index.
 // ---------------------------------------------------------------------------
-const TRIGGER_TYPES = ['checkin', 'price', 'utxo', 'manual'];
+const TRIGGER_TYPES = ['checkin', 'price', 'utxo', 'manual', 'blockheight', 'setdate', 'feemarket'];
 // (0.8.0) The check-in fallback: there is no global broadcast
 // threshold any more — each check-in tx carries its own
 // thresholdDays ("Days of silence"). A tx with no usable trigger
@@ -189,6 +189,45 @@ function normalizeTrigger(input) {
     }
     case 'manual':
       return { trigger: { type: 'manual', params: {} } };
+    case 'blockheight': {
+      // (0.8.1) Fire when the chain tip reaches a height. The
+      // height is a positive integer; a reorg cannot un-fire it
+      // (once the tip has reached the height, the rule has fired).
+      const h = params.targetHeight;
+      if (typeof h !== 'number' || !Number.isInteger(h) || h < 1 || h > 10000000) {
+        return { error: 'block-height trigger targetHeight must be an integer block height from 1 to 10,000,000' };
+      }
+      return { trigger: { type: 'blockheight', params: { targetHeight: h } } };
+    }
+    case 'setdate': {
+      // (0.8.1) Fire at a date/time, regardless of check-ins (a
+      // pure deadline — the "fire unless I check in" snooze variant
+      // is a later addition). Stored normalized as an ISO string.
+      const raw = typeof params.fireAt === 'string' ? params.fireAt.trim() : '';
+      const ms = raw ? Date.parse(raw) : NaN;
+      if (!raw || !Number.isFinite(ms)) return { error: 'set-date trigger fireAt must be a valid date/time' };
+      return { trigger: { type: 'setdate', params: { fireAt: new Date(ms).toISOString() } } };
+    }
+    case 'feemarket': {
+      // (0.8.1) Fire when the economy fee rate crosses a threshold
+      // the owner sets (sat/vB), in the direction they choose:
+      // 'below' fires when the fee falls to or below it (cheap
+      // fees — the original rule), 'above' fires when the fee
+      // rises to or above it (expensive fees). The threshold is
+      // user-set (not per-tx) — the tx's own fee rate is not
+      // consulted; the rule fires on the market rate alone.
+      // Direction defaults to 'below' so existing rules keep
+      // their meaning.
+      const r = params.maxFeeRate;
+      if (typeof r !== 'number' || !Number.isFinite(r) || r < 0.1 || r > 10000) {
+        return { error: 'fee-market trigger maxFeeRate must be a number of sat/vB from 0.1 to 10,000' };
+      }
+      const dir = params.direction === undefined || params.direction === null ? 'below' : params.direction;
+      if (dir !== 'below' && dir !== 'above') {
+        return { error: 'fee-market trigger direction must be "below" or "above"' };
+      }
+      return { trigger: { type: 'feemarket', params: { maxFeeRate: r, direction: dir } } };
+    }
     default:
       return { error: 'unknown trigger type: ' + String(input.type) };
   }

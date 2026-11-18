@@ -41,6 +41,20 @@
     return d.toLocaleDateString() + ', ' + d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
   }
 
+  // The readiness "last checked" caption (0.8.1): time only when
+  // the check was today ("4:29 PM"), date + time when older — the
+  // full fmtDateShort string is too long to share the "Exchange
+  // Status" label line at 390px.
+  function fmtCheckedAt(iso) {
+    if (!iso) return '—';
+    var d = new Date(iso);
+    var now = new Date();
+    if (d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate()) {
+      return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+    }
+    return fmtDateShort(iso);
+  }
+
   // The check-in freeze (0.8.0): the live frozen time for a tx —
   // the banked offset plus the open inactive period, if any.
   // Mirrors server.js checkinLiveOffsetMs. A tx that was disarmed
@@ -308,15 +322,28 @@
       return { type: 'utxo', params: { outpoint: p.outpoint.trim().toLowerCase(), condition: 'spent', confirmations: cf } };
     }
     if (t.type === 'manual') return { type: 'manual', params: {} };
+    if (t.type === 'blockheight' && typeof p.targetHeight === 'number' && isFinite(p.targetHeight) && Math.floor(p.targetHeight) === p.targetHeight && p.targetHeight >= 1) {
+      return { type: 'blockheight', params: { targetHeight: p.targetHeight } };
+    }
+    if (t.type === 'setdate' && typeof p.fireAt === 'string' && isFinite(Date.parse(p.fireAt))) {
+      return { type: 'setdate', params: { fireAt: new Date(Date.parse(p.fireAt)).toISOString() } };
+    }
+    if (t.type === 'feemarket' && typeof p.maxFeeRate === 'number' && isFinite(p.maxFeeRate) && p.maxFeeRate > 0) {
+      return { type: 'feemarket', params: { maxFeeRate: p.maxFeeRate, direction: p.direction === 'above' ? 'above' : 'below' } };
+    }
     return { type: 'checkin', params: { thresholdDays: 35 } };
   }
   // The pill text for a trigger type ("Check-in", "BTC Price",
-  // "UTXO", "Manual") — the readiness rows and the trigger
-  // subcards both use it. (The subcard uppercases it.)
+  // "UTXO", "Manual", "Block height", "Set date", "Fee market") —
+  // the readiness rows and the trigger subcards both use it. (The
+  // subcard uppercases it.)
   function triggerLabel(trigger) {
     return trigger.type === 'checkin' ? 'Check-in'
       : trigger.type === 'price' ? 'BTC Price'
       : trigger.type === 'utxo' ? 'UTXO'
+      : trigger.type === 'blockheight' ? 'Block height'
+      : trigger.type === 'setdate' ? 'Set date'
+      : trigger.type === 'feemarket' ? 'Fee market'
       : 'Manual';
   }
   // The trigger's condition in plain words ("Fires when BTC ≥
@@ -325,13 +352,20 @@
   // confirmation) reads as before — "is spent" already meant
   // confirmed — while unconfirmed and N > 1 say so explicitly.
   function triggerCondition(trigger) {
-    if (trigger.type === 'checkin') return 'Fired when you don\u2019t check in for ' + trigger.params.thresholdDays + ' days';
-    if (trigger.type === 'price') return 'Fired when BTC price ' + (trigger.params.op === '>=' ? '≥' : '≤') + ' $' + Number(trigger.params.value).toLocaleString('en-US');
+    if (trigger.type === 'checkin') return 'Fires when you don\u2019t check in for ' + trigger.params.thresholdDays + ' days';
+    if (trigger.type === 'price') return 'Fires when BTC price ' + (trigger.params.op === '>=' ? '≥' : '≤') + ' $' + Number(trigger.params.value).toLocaleString('en-US');
     if (trigger.type === 'utxo') {
       var ucf = (trigger.params.confirmations === 0) ? 0 : (trigger.params.confirmations || 1);
       var usuffix = ucf === 0 ? ' (unconfirmed)' : (ucf === 1 ? '' : ' (' + ucf + ' confirmations)');
-      return 'Fired when UTXO ' + trigger.params.outpoint.slice(0, 6) + '…' + trigger.params.outpoint.slice(-2) + ' is spent' + usuffix;
+      return 'Fires when UTXO ' + trigger.params.outpoint.slice(0, 6) + '…' + trigger.params.outpoint.slice(-2) + ' is spent' + usuffix;
     }
+    if (trigger.type === 'blockheight') return 'Fires when the chain reaches block ' + Number(trigger.params.targetHeight).toLocaleString('en-US');
+    if (trigger.type === 'setdate') {
+      var sd = new Date(trigger.params.fireAt);
+      var shown = isFinite(sd.getTime()) ? sd.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : String(trigger.params.fireAt);
+      return 'Fires on ' + shown;
+    }
+    if (trigger.type === 'feemarket') return 'Fires when tx fees are ' + (trigger.params.direction === 'above' ? '>= ' : '<= ') + Number(trigger.params.maxFeeRate).toLocaleString('en-US') + ' sat/vB';
     return 'Never fires — manual only';
   }
   // Row 3 of the trigger subcard: the current state/value for
@@ -352,36 +386,18 @@
       }
       return (ts && ts.reason) ? ts.reason : 'No check-in recorded yet';
     }
-    // UTXO and manual: the reason already states the state
-    // (unspent / spent + confirmations; waiting for a manual
-    // broadcast).
+    if (trigger.type === 'blockheight') {
+      var th = (ts && typeof ts.lastTipHeight === 'number' && Number.isFinite(ts.lastTipHeight)) ? ts.lastTipHeight : null;
+      return th !== null ? 'Chain at block ' + th.toLocaleString('en-US') + ' of ' + Number(trigger.params.targetHeight).toLocaleString('en-US') : ((ts && ts.reason) ? ts.reason : 'Tip height unknown');
+    }
+    if (trigger.type === 'feemarket') {
+      var ef = (ts && typeof ts.lastEconomyFee === 'number' && Number.isFinite(ts.lastEconomyFee)) ? ts.lastEconomyFee : null;
+      return ef !== null ? 'Economy fee currently ' + ef + ' sat/vB' : ((ts && ts.reason) ? ts.reason : 'Fee unknown');
+    }
+    // UTXO, set date, and manual: the reason already states the
+    // state (unspent / spent + confirmations; the date; waiting
+    // for a manual broadcast).
     return (ts && ts.reason) ? ts.reason : 'Not evaluated yet';
-  }
-  // The readiness row's state line (0.8.0): one row of text naming
-  // the trigger AND its current value — "[Type] Trigger: <level>,
-  // <current>". The trigger type is text here, not a pill (the
-  // mode pill is gone). The check-in reason already carries its
-  // threshold ("0 of 35 days elapsed"), so it needs no level
-  // prefix; the price and UTXO reasons do not name their level, so
-  // the level is added. The price reason is trigger-only (the
-  // server returns the generic "price feed unknown" when the
-  // sources disagree or are down), so no source names ever appear
-  // here.
-  function readinessLine(trigger, ts) {
-    var label = triggerLabel(trigger); // 'Check-in' / 'BTC Price' / 'UTXO' / 'Manual'
-    var reason = (ts && ts.reason) ? ts.reason : 'Not evaluated yet';
-    if (trigger.type === 'checkin') return label + ' Trigger: ' + reason;
-    if (trigger.type === 'price') {
-      var dir = trigger.params.op === '>=' ? '≥' : '≤';
-      return label + ' Trigger: fires at ' + dir + ' $' + Number(trigger.params.value).toLocaleString('en-US') + ', ' + reason;
-    }
-    if (trigger.type === 'utxo') {
-      // The condition without its "Fired when" lead-in, so the
-      // line reads "UTXO Trigger: fires when ... is spent, <current>".
-      var level = triggerCondition(trigger).replace(/^Fired when /, 'fires when ');
-      return label + ' Trigger: ' + level + ', ' + reason;
-    }
-    return label + ' Trigger: never fires automatically — ' + reason;
   }
   // The UTXO guard note for a confirmation mode — the Add and Edit
   // pickers both use it. Unconfirmed warns the spend can be
@@ -400,6 +416,15 @@
     var n = parseInt($(prefix + '-trigger-utxo-confs').value, 10);
     if (!isFinite(n) || n < 1 || n > 100) return null;
     return n;
+  }
+  // Convert an ISO UTC string to a datetime-local input value
+  // (local time, YYYY-MM-DDTHH:MM) — the Edit popup's set-date
+  // field. Returns '' for an unparseable input.
+  function isoToLocalDatetime(iso) {
+    var d = new Date(iso);
+    if (!isFinite(d.getTime())) return '';
+    function pad(n) { return (n < 10 ? '0' : '') + n; }
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + 'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
   }
 
   function renderDashboard(status) {
@@ -573,10 +598,10 @@
         var st = txStatus(t);
         // (0.8.0) One block per armed rule: the label + the status
         // pill on the first line (and the fee pill, unchanged), the
-        // trigger's level and current value on the second line —
-        // so the dashboard reads as a list of RULES, not just
-        // transactions. The trigger type is part of the second
-        // line's text ("[Type] Trigger: ..."), not a pill of its own.
+        // trigger's condition on the second line — the same summary
+        // the tx card shows ("Fires when ...") — so the dashboard
+        // reads as a list of RULES, not just transactions. The
+        // current value lives on the tx card's third row, not here.
         var item = document.createElement('div');
         item.className = 'readiness-tx';
         var row = document.createElement('div');
@@ -598,14 +623,13 @@
         item.appendChild(row);
         var stateLine = document.createElement('div');
         stateLine.className = 'readiness-tx-state';
-        var ts = t.triggerStatus || null;
-        // (0.8.0) The line names the trigger AND its current value
-        // ("[Type] Trigger: <level>, <current>") — see
-        // readinessLine. The reason is trigger-only — a price tx's
-        // line shows the effective price, never the source detail
-        // (that lives in the Exchange Status section below, and in
-        // the dry-run notes).
-        stateLine.textContent = readinessLine(triggerOf(t), ts);
+        // The state line is the tx card's condition summary —
+        // triggerCondition, the same text as the subcard's second
+        // row ("Fires when tx fees are >= 5 sat/vB") — so the
+        // readiness list stays one row per rule. The live current
+        // value is not repeated here; it lives on the tx card's
+        // third row and in the Exchange / Node Status sections.
+        stateLine.textContent = triggerCondition(triggerOf(t));
         item.appendChild(stateLine);
         txsEl.appendChild(item);
       });
@@ -624,13 +648,15 @@
     renderNodeStatus('readiness-', 'primary', status.primaryApiUrl, conn);
     renderNodeStatus('readiness-', 'secondary', status.secondaryApiUrl, conn);
     // Exchange Status (0.8.0): one row per configured price
-    // source, each with its own status pill and last price —
-    // mirroring Node Status. There is NO overall agreement pill
-    // next to the header: the status (OK / Failed) lives only
-    // on each exchange row. The per-price-tx lines stay
-    // trigger-only. A row shows only the label and its price
-    // (when it has one) — never the error reason; that detail
-    // lives in the Settings card only.
+    // source, each with its own status pill and last price.
+    // There is NO overall agreement pill next to the header:
+    // the status (OK / Failed) lives only on each exchange
+    // row. The per-price-tx lines stay trigger-only. The price
+    // sits in a small muted span to the left of the pill — the
+    // same `.node-check-detail` shape as the Settings rows —
+    // never inside the label span, and never the error reason;
+    // that detail lives in the Settings card only. The pill
+    // stays pinned to the right edge, with the Node pills.
     var hasPriceTx = (S.bitcoin.txs || []).some(function (t) { return triggerOf(t).type === 'price'; });
     var exItem = $('readiness-exchange-item');
     if (exItem) exItem.style.display = hasPriceTx ? '' : 'none';
@@ -639,18 +665,27 @@
       (ex.sources || []).forEach(function (src, i) {
         var host = $('readiness-exchange-' + (i + 1));
         var pill = $('readiness-exchange-' + (i + 1) + '-status');
+        var priceEl = $('readiness-exchange-' + (i + 1) + '-price');
         if (!host || !pill) return;
-        var txt = src.label || src.provider || '';
-        if (src.price != null) txt += ' $' + Number(src.price).toLocaleString('en-US');
-        host.textContent = txt;
+        host.textContent = src.label || src.provider || '';
+        // The price sits to the left of the status pill, in the
+        // same small muted text as the node rows' values
+        // ("Reachable") — never inside the label span. The pill
+        // stays pinned to the right edge, with the Node pills.
+        if (priceEl) priceEl.textContent = (src.price != null && Number.isFinite(Number(src.price))) ? '$' + Number(src.price).toLocaleString('en-US') : '';
         if (src.status === 'ok') { pill.textContent = 'OK'; pill.className = 'pill ok'; }
         else if (src.status === 'error') { pill.textContent = 'Failed'; pill.className = 'pill bad'; }
         else { pill.textContent = 'Not tested'; pill.className = 'pill muted'; }
       });
     }
-    $('readiness-checked').textContent = conn.checkedAt
-      ? 'Nodes last checked ' + fmtDate(conn.checkedAt) + '.'
-      : '';
+    // "Last checked", inline on each section's label line (0.8.1):
+    // nodes use the connection test's checkedAt, exchanges use the
+    // last price-fetch time (currentPriceAt, already served) — two
+    // different values, not one shared line at the card's bottom.
+    var nodeChecked = $('readiness-node-checked');
+    if (nodeChecked) nodeChecked.textContent = conn.checkedAt ? 'last checked ' + fmtCheckedAt(conn.checkedAt) : '';
+    var exChecked = $('readiness-exchange-checked');
+    if (exChecked) exChecked.textContent = (hasPriceTx && S.bitcoin && S.bitcoin.currentPriceAt) ? 'last checked ' + fmtCheckedAt(S.bitcoin.currentPriceAt) : '';
   }
 
   // The Logs tab: the broadcast log and the recent check-ins. They
@@ -823,13 +858,25 @@
   // endpoint (OK / Failed / Not tested). `prefix` is 'readiness-' on the
   // Dashboard and 'btc-' on the Settings tab; both render the same
   // data. A blank URL means no secondary node is set.
+  // One node's status line (0.8.1): the host plus an overall pill —
+  // OK (all three capabilities ready), CAUTION (the height probe
+  // works but broadcast and/or fees are not ready), FAIL (the
+  // height probe failed — unreachable or not a node at all), or
+  // Not tested / Not set. The pill's tooltip carries the detail.
+  // In the Settings nodes card (prefix 'btc-') the three
+  // capability rows render under it too; the Dashboard (prefix
+  // 'readiness-') has no capability elements, so it shows the
+  // overall pill only. A legacy result without a status derives
+  // it from ok (true → OK, false → FAIL) and hides the rows.
   function renderNodeStatus(prefix, label, url, conn) {
     var host = $(prefix + label);
     var pill = $(prefix + label + '-status');
+    var checksEl = $(prefix + label + '-checks');
     if (!url) {
       host.textContent = 'Not set';
       pill.textContent = 'Not set';
       pill.className = 'pill muted';
+      if (checksEl) checksEl.style.display = 'none';
       return;
     }
     host.textContent = hostOf(url);
@@ -838,14 +885,59 @@
       pill.textContent = 'Not tested';
       pill.className = 'pill muted';
       pill.title = '';
-    } else if (res.ok) {
+      if (checksEl) checksEl.style.display = 'none';
+      return;
+    }
+    var status = res.status || (res.ok ? 'ok' : 'fail');
+    if (status === 'ok') {
       pill.textContent = 'OK';
       pill.className = 'pill ok';
-      pill.title = res.detail || '';
+    } else if (status === 'caution') {
+      pill.textContent = 'CAUTION';
+      pill.className = 'pill warn';
     } else {
-      pill.textContent = 'Failed';
+      pill.textContent = 'FAIL';
       pill.className = 'pill bad';
-      pill.title = res.detail || '';
+    }
+    pill.title = res.detail || '';
+    if (checksEl) renderNodeChecks(prefix, label, res);
+  }
+  // The three capability checks under one node's summary row,
+  // variant C (0.8.1): the node is a <details> — the summary is
+  // just the node name + status pill, and the checks open on tap
+  // as plain label — value lines, no pills. On failure the value
+  // IS the reason, shown in red. Only the Settings nodes card has
+  // these elements; the Dashboard rows have no -checks block and
+  // are untouched.
+  function renderNodeChecks(prefix, label, res) {
+    var checksEl = $(prefix + label + '-checks');
+    if (!checksEl) return;
+    var checks = res.checks || null;
+    if (!checks) { checksEl.style.display = 'none'; return; }
+    checksEl.style.display = '';
+    setNodeCheckValue(prefix + label + '-broadcast-value', checks.broadcast);
+    setNodeCheckValue(prefix + label + '-fees-value', checks.fees);
+    setNodeCheckValue(prefix + label + '-height-value', checks.height);
+  }
+  function setNodeCheckValue(id, check) {
+    var val = $(id);
+    if (!val) return;
+    if (!check) { val.textContent = ''; val.classList.remove('failed'); return; }
+    val.textContent = check.value || '';
+    if (check.ok) val.classList.remove('failed');
+    else val.classList.add('failed');
+  }
+  // After a connection test, open the details of any node that is
+  // not OK so the failure is visible without a tap; OK nodes stay
+  // closed. Runs once per test, never on re-render, so it does not
+  // fight a manual open/close.
+  function openFailedNodeDetails() {
+    var conn = (S.bitcoin && S.bitcoin.connection) || null;
+    var results = (conn && conn.results) || [];
+    for (var i = 0; i < results.length; i++) {
+      var r = results[i];
+      var det = $('btc-' + r.endpoint + '-details');
+      if (det) det.open = (r.status !== 'ok');
     }
   }
   // Which endpoint broadcast it — 'primary'/'secondary' today, and the
@@ -1182,7 +1274,7 @@
     });
     // The three lists: the ones still waiting live inside the
     // Staged Transactions card, below the Dry-run All /
-    // Broadcast All buttons; the ones broadcast or submitted but not
+    // Broadcast Armed buttons; the ones broadcast or submitted but not
     // yet confirmed live in the Pending Transactions card; the
     // settled ones (broadcasted-and-confirmed, or stale) live in the
     // Archived Transactions card.
@@ -1549,7 +1641,7 @@
       actions.appendChild(dryBtn); actions.appendChild(editBtn); actions.appendChild(delBtn); actions.appendChild(bcBtn);
       // The escape hatch for a slow MARA tx (0.7.16, Pending card):
       // a Slipstream-pending tx can be broadcast publicly instead,
-      // by hand. It is NOT part of Broadcast All or the release —
+      // by hand. It is NOT part of Broadcast Armed or the release —
       // only this button, after a confirmation that names the
       // privacy cost (the tx becomes visible in the public mempool).
       if (waitingMara) {
@@ -1666,7 +1758,7 @@
   // Active list — one line each, naming the transaction and the
   // reason (its inputs are spent, or it is already out there). Only
   // the ones that moved in this run; if none moved, no pop-up. The
-  // broadcast cases do not need one: Broadcast All already lists
+  // broadcast cases do not need one: Broadcast Armed already lists
   // each transaction and its outcome, and Broadcast Now shows the
   // sent line on the card. A move can land in the Pending
   // Transactions card (a dry-run discovering the tx is already out
@@ -1782,6 +1874,13 @@
     $('edit-trigger-op').value = trig.type === 'price' ? trig.params.op : '>=';
     $('edit-trigger-value').value = trig.type === 'price' ? String(trig.params.value) : '';
     $('edit-trigger-outpoint').value = trig.type === 'utxo' ? trig.params.outpoint : '';
+    $('edit-trigger-blockheight').value = trig.type === 'blockheight' ? String(trig.params.targetHeight) : '';
+    // The set-date field is a datetime-local input (local time,
+    // YYYY-MM-DDTHH:MM) — the stored fireAt is an ISO UTC string,
+    // so it is converted to local time for the picker.
+    $('edit-trigger-setdate').value = trig.type === 'setdate' ? isoToLocalDatetime(trig.params.fireAt) : '';
+    $('edit-trigger-feemarket').value = trig.type === 'feemarket' ? String(trig.params.maxFeeRate) : '';
+    $('edit-trigger-feemarket-dir').value = trig.type === 'feemarket' && trig.params.direction === 'above' ? 'above' : 'below';
     // The UTXO confirmation mode follows the rule being edited:
     // unconfirmed (0) or N confirmations. A non-UTXO rule (or a
     // legacy one with no confirmations) resets to confirmed / 1.
@@ -1881,8 +1980,11 @@
     $('edit-trigger-checkin-row').style.display = v === 'checkin' ? '' : 'none';
     $('edit-trigger-price-row').style.display = v === 'price' ? '' : 'none';
     $('edit-trigger-utxo-row').style.display = v === 'utxo' ? '' : 'none';
+    $('edit-trigger-blockheight-row').style.display = v === 'blockheight' ? '' : 'none';
+    $('edit-trigger-setdate-row').style.display = v === 'setdate' ? '' : 'none';
+    $('edit-trigger-feemarket-row').style.display = v === 'feemarket' ? '' : 'none';
     if (v === 'price') {
-      $('edit-trigger-price-note').textContent = 'Guard: both price sources must agree the price is ' + ($('edit-trigger-op').value === '>=' ? 'above' : 'below') + ' the threshold — a single bad source can’t fire it.';
+      $('edit-trigger-price-note').textContent = 'Guard: the two price sources must agree within your price-agreement setting — the primary price source decides.';
     }
     if (v === 'utxo') syncEditUtxoNote();
   }
@@ -1919,6 +2021,21 @@
       if (ecf === null) return null;
       return { type: 'utxo', params: { outpoint: out.toLowerCase(), condition: 'spent', confirmations: ecf } };
     }
+    if (v === 'blockheight') {
+      var bh = parseInt($('edit-trigger-blockheight').value, 10);
+      if (!isFinite(bh) || bh < 1) return null;
+      return { type: 'blockheight', params: { targetHeight: bh } };
+    }
+    if (v === 'setdate') {
+      var sdv = $('edit-trigger-setdate').value;
+      if (!sdv || !isFinite(Date.parse(sdv))) return null;
+      return { type: 'setdate', params: { fireAt: new Date(Date.parse(sdv)).toISOString() } };
+    }
+    if (v === 'feemarket') {
+      var fm = parseFloat($('edit-trigger-feemarket').value);
+      if (!isFinite(fm) || fm <= 0) return null;
+      return { type: 'feemarket', params: { maxFeeRate: fm, direction: $('edit-trigger-feemarket-dir').value === 'above' ? 'above' : 'below' } };
+    }
     return { type: 'manual', params: {} };
   }
   var editModalX = $('edit-modal-x');
@@ -1936,7 +2053,7 @@
     var hex = $('edit-hex').value.trim();
     if (!hex) { setMsg($('edit-msg'), 'Paste the signed transaction hex first.', false); return; }
     var trig = editTriggerFromForm();
-    if (!trig) { setMsg($('edit-msg'), 'Fill in the trigger: ' + ($('edit-trigger').value === 'price' ? 'a BTC price above $0.' : $('edit-trigger').value === 'utxo' ? 'an outpoint like txid:vout.' : 'a number of days.'), false); return; }
+    if (!trig) { setMsg($('edit-msg'), 'Fill in the trigger: ' + ($('edit-trigger').value === 'price' ? 'a BTC price above $0.' : $('edit-trigger').value === 'utxo' ? 'an outpoint like txid:vout.' : $('edit-trigger').value === 'blockheight' ? 'a block height above 0.' : $('edit-trigger').value === 'setdate' ? 'a date and time.' : $('edit-trigger').value === 'feemarket' ? 'a fee rate above 0 sat/vB.' : 'a number of days.'), false); return; }
     var oldTx0 = (S.bitcoin.txs || []).find(function (t) { return t.id === editingId; });
     // (0.8.0) A price or UTXO trigger whose condition is already
     // satisfied warns first (same guard as the Add form) — but
@@ -1976,14 +2093,14 @@
         }
       })();
     }
-    if (triggerChanged && (trig.type === 'price' || trig.type === 'utxo')) {
+    if (triggerChanged && (trig.type === 'price' || trig.type === 'utxo' || trig.type === 'blockheight' || trig.type === 'setdate' || trig.type === 'feemarket')) {
       try {
         var chk = await api('POST', '/api/triggers/check', { trigger: trig });
         if (chk && chk.warning) {
           showConfirm('Save a rule that is already satisfied?', chk.warning + ' Save it anyway?', function () { doSave(true); }, 'Save anyway');
           return;
         }
-      } catch (e) { /* the save proceeds — the server gates the price and UTXO cases */ }
+      } catch (e) { /* the save proceeds — the server gates the price, UTXO, block-height, set-date, and fee-market cases */ }
     }
     doSave();
   });
@@ -2020,6 +2137,7 @@
       await api('POST', '/api/bitcoin/connection/test', {});
       setMsg($('btc-nodes-msg'), '', true);
       await load();
+      openFailedNodeDetails();
     } catch (e) { setMsg($('btc-nodes-msg'), e.message, false); }
   });
 
@@ -2049,8 +2167,11 @@
     $('btc-trigger-checkin-row').style.display = v === 'checkin' ? '' : 'none';
     $('btc-trigger-price-row').style.display = v === 'price' ? '' : 'none';
     $('btc-trigger-utxo-row').style.display = v === 'utxo' ? '' : 'none';
+    $('btc-trigger-blockheight-row').style.display = v === 'blockheight' ? '' : 'none';
+    $('btc-trigger-setdate-row').style.display = v === 'setdate' ? '' : 'none';
+    $('btc-trigger-feemarket-row').style.display = v === 'feemarket' ? '' : 'none';
     if (v === 'price') {
-      $('btc-trigger-price-note').textContent = 'Guard: both price sources must agree the price is ' + ($('btc-trigger-op').value === '>=' ? 'above' : 'below') + ' the threshold — a single bad source can’t fire it.';
+      $('btc-trigger-price-note').textContent = 'Guard: the two price sources must agree within your price-agreement setting — the primary price source decides.';
     }
     if (v === 'utxo') syncAddUtxoNote();
   }
@@ -2087,6 +2208,21 @@
       if (cf === null) return null;
       return { type: 'utxo', params: { outpoint: out.toLowerCase(), condition: 'spent', confirmations: cf } };
     }
+    if (v === 'blockheight') {
+      var bh = parseInt($('btc-trigger-blockheight').value, 10);
+      if (!isFinite(bh) || bh < 1) return null;
+      return { type: 'blockheight', params: { targetHeight: bh } };
+    }
+    if (v === 'setdate') {
+      var sdv = $('btc-trigger-setdate').value;
+      if (!sdv || !isFinite(Date.parse(sdv))) return null;
+      return { type: 'setdate', params: { fireAt: new Date(Date.parse(sdv)).toISOString() } };
+    }
+    if (v === 'feemarket') {
+      var fm = parseFloat($('btc-trigger-feemarket').value);
+      if (!isFinite(fm) || fm <= 0) return null;
+      return { type: 'feemarket', params: { maxFeeRate: fm, direction: $('btc-trigger-feemarket-dir').value === 'above' ? 'above' : 'below' } };
+    }
     return { type: 'manual', params: {} };
   }
 
@@ -2097,7 +2233,7 @@
     var hex = $('btc-hex').value.trim();
     if (!hex) { setMsg($('btc-msg'), 'Paste the signed transaction hex first.', false); return; }
     var trig = addTriggerFromForm();
-    if (!trig) { setMsg($('btc-msg'), 'Fill in the trigger: ' + ($('btc-trigger').value === 'price' ? 'a BTC price above $0.' : $('btc-trigger').value === 'utxo' ? 'an outpoint like txid:vout.' : 'a number of days.'), false); return; }
+    if (!trig) { setMsg($('btc-msg'), 'Fill in the trigger: ' + ($('btc-trigger').value === 'price' ? 'a BTC price above $0.' : $('btc-trigger').value === 'utxo' ? 'an outpoint like txid:vout.' : $('btc-trigger').value === 'blockheight' ? 'a block height above 0.' : $('btc-trigger').value === 'setdate' ? 'a date and time.' : $('btc-trigger').value === 'feemarket' ? 'a fee rate above 0 sat/vB.' : 'a number of days.'), false); return; }
     function doAdd(triggerConfirmed) {
       return (async function () {
         try {
@@ -2123,6 +2259,10 @@
           $('btc-trigger-outpoint').value = '';
           $('btc-trigger-utxo-mode').value = 'confirmed';
           $('btc-trigger-utxo-confs').value = '1';
+          $('btc-trigger-blockheight').value = '';
+          $('btc-trigger-setdate').value = '';
+          $('btc-trigger-feemarket').value = '';
+          $('btc-trigger-feemarket-dir').value = 'below';
           syncAddTriggerRow();
           syncAddFallbackRow();
           await load();
@@ -2160,20 +2300,22 @@
       doAdd();
       return;
     }
-    // (0.8.0) A price or UTXO rule whose condition is ALREADY
+    // (0.8.0, extended 0.8.1) A price, UTXO, block-height,
+    // set-date, or fee-market rule whose condition is ALREADY
     // satisfied would fire on the next evaluation — ask the
     // server once (live, no state change) and warn first, so an
-    // already-spent outpoint or an already-crossed price is never
-    // a surprise. Confirming adds it with triggerConfirmed, so
-    // the server's already-satisfied gate lets the rule through.
-    if (trig.type === 'price' || trig.type === 'utxo') {
+    // already-spent outpoint, an already-crossed price, a passed
+    // height or date, or an already-low fee is never a surprise.
+    // Confirming adds it with triggerConfirmed, so the server's
+    // already-satisfied gate lets the rule through.
+    if (trig.type === 'price' || trig.type === 'utxo' || trig.type === 'blockheight' || trig.type === 'setdate' || trig.type === 'feemarket') {
       try {
         var chk = await api('POST', '/api/triggers/check', { trigger: trig });
         if (chk && chk.warning) {
           showConfirm('Add a rule that is already satisfied?', chk.warning + ' Add it anyway?', function () { doAdd(true); }, 'Add anyway');
           return;
         }
-      } catch (e) { /* the add proceeds without the check — the server gates the price and UTXO cases */ }
+      } catch (e) { /* the add proceeds without the check — the server gates the price, UTXO, block-height, set-date, and fee-market cases */ }
     }
     doAdd();
   });
@@ -2384,7 +2526,7 @@
 
   // The manual escape hatch for a slow MARA tx (0.7.16, Pending
   // card): broadcast a Slipstream-pending transaction publicly
-  // instead. MANUAL ONLY — it is not part of Broadcast All or the
+  // instead. MANUAL ONLY — it is not part of Broadcast Armed or the
   // release. The confirm names the privacy cost: the tx is
   // currently private in MARA's mempool, and broadcasting it
   // publicly puts it in the public mempool, visible to everyone.
@@ -2408,8 +2550,8 @@
       'Broadcast publicly — I understand');
   }
 
-  // Broadcast Armed (round 12, revised; Broadcast All removed
-  // 0.8.0): one button on the main card — "Broadcast armed" — with
+  // Broadcast Armed (round 12, revised; the all-transactions button
+  // removed in 0.8.0): one button on the main card — "Broadcast armed" — with
   // its own confirmation dialog. It sends only the armed
   // unbroadcasted transactions; the unarmed ones are left alone.
   // Cancel sends nothing. The dialog names the count, and once the
@@ -2597,6 +2739,7 @@
         { id: 'binance', label: 'Binance US (USDT)' },
         { id: 'kraken', label: 'Kraken' },
         { id: 'bitstamp', label: 'Bitstamp' },
+        { id: 'custom', label: 'Custom' },
       ];
     var psrc = (S.settings && S.settings.priceSources) || { source1: 'coingecko', source2: 'coinbase' };
     function providerLabel(id) {
@@ -2610,21 +2753,31 @@
         o.value = p.id; o.textContent = p.label;
         sel.appendChild(o);
       });
-      sel.value = val;
+      sel.value = (val && typeof val === 'object') ? 'custom' : val;
     }
     fillPriceSelect($('set-price-source1'), psrc.source1 || 'coingecko');
     fillPriceSelect($('set-price-source2'), psrc.source2 || 'coinbase');
-    // The row label names the provider the dropdown currently
-    // holds — just the name, no price inline (the prices the
-    // test retrieves are shown below the Test button, and the
-    // readiness card's per-exchange rows show the last price).
-    // The status pill next to it reads OK / Failed / Not
-    // Tested — never '—'. refreshPriceSourceRow (module level)
-    // re-renders both, and the dropdowns' change listeners
-    // (attached once, next to the Save listener) call it on
-    // every change — so the label and the Test connection
-    // button always agree on which provider they mean. A changed
-    // dropdown never leaves the old name showing.
+    // Custom sources (0.8.1): when a slot holds a custom object,
+    // its URL + JSON-path inputs show the saved values; the
+    // visibility itself is set by refreshPriceSourceCustom below.
+    [1, 2].forEach(function (n) {
+      var v = psrc['source' + n];
+      if (v && typeof v === 'object') {
+        var u = $('set-price-source' + n + '-url'); if (u) u.value = v.url || '';
+        var pp = $('set-price-source' + n + '-path'); if (pp) pp.value = v.path || '';
+      }
+      refreshPriceSourceCustom(n);
+    });
+    // The row shows the provider name with its last price inline
+    // next to the status pill — "Kraken $98,200 [OK]" — the same
+    // shape as the readiness card's Exchange Status rows. The
+    // price comes from the last Test verdict for the row, or from
+    // the cached reading when there is none.
+    // refreshPriceSourceRow (module level) re-renders the row, and
+    // the dropdowns' change listeners (attached once, next to the
+    // Save listener) call it on every change — so the row and the
+    // Test connection button always agree on which provider they
+    // mean. A changed dropdown never leaves the old name showing.
     refreshPriceSourceRow(1);
     refreshPriceSourceRow(2);
     // Grace period (0.8.0): the two dropdowns reflect the saved
@@ -2659,29 +2812,69 @@
     renderApiKeys();
   }
 
-  // BTC price sources (0.8.0): save the two provider choices. The
-  // server rejects an unknown provider or two identical sources
-  // (400) — the error shows in the message line.
+  // BTC price sources (0.8.0): save the two source choices — a
+  // provider id string, or a Custom { url, path } object. The
+  // server rejects an unknown provider, a bad custom URL/path,
+  // or two identical sources (400) — the error shows in the
+  // message line.
   // BTC price sources (0.8.0): re-render one source row from
-  // the provider its dropdown currently holds. The row shows
-  // ONLY the provider name — no price inline (the prices the
-  // test retrieves are shown below the Test button, and the
-  // readiness card's per-exchange rows show the last price).
-  // The status pill next to it reads OK / Failed / Not Tested
-  // — never '—'. It is test-driven: the last Test connection
-  // verdict for that provider (kept in priceSourceStatus, in
-  // this session, keyed by provider id) wins; with no verdict
-  // yet it reflects the last cached reading for that provider
-  // (a price means OK, an error means Failed, no reading means
-  // Not Tested). Changing the dropdown resets it to Not Tested
-  // until the test runs again — pass resetStatus for that.
-  // Keying by provider (not by row) means a test verdict
-  // survives a save for a provider that is unchanged — a
-  // source tested OK stays OK after saving. The change
+  // the provider its dropdown currently holds. The row shows the
+  // provider name with its last price inline next to the status
+  // pill — "Kraken $98,200 [OK]" — the same shape as the
+  // readiness card's Exchange Status rows. The pill reads OK /
+  // Failed / Not Tested — never '—'. It is test-driven: the last
+  // Test connection verdict for that row (kept in
+  // priceSourceStatus / priceSourcePrice, in this session, keyed
+  // by row) wins — but only an actual test result ('ok' or
+  // 'failed'). A change reset is NOT a verdict: it deletes the
+  // row's verdict, so the row falls back to the cached reading
+  // below. With no verdict it reflects the cached reading in
+  // the Exchange Status — but only when the dropdown still holds
+  // the SAVED source for this slot. A changed (unsaved)
+  // selection has no cached reading, so it reads Not Tested
+  // with no price until it is tested. The Exchange Status is
+  // only current when the cache is for the configured sources,
+  // so a stale cache reads Not Tested with no price, never a
+  // wrong one. Pass resetStatus when the dropdown changes.
+  // Keying by row (source1/source2 — a custom source has no
+  // provider id to key by) means a test verdict survives a save
+  // for a source that is unchanged in that row — a source
+  // tested OK stays OK after saving. Changing the dropdown
+  // resets the row to Not Tested first, so a verdict can never
+  // linger on a different source than the one tested. The change
   // listeners are attached once, here, like the rest of the
   // app's select listeners (renderSettings runs on every load,
   // so attaching them there would stack a duplicate each time).
-  var priceSourceStatus = {}; // provider id -> 'ok' | 'failed' | 'not-tested': the last Test verdict (or change reset) for that provider, in this session
+  // Custom price sources (0.8.1): the URL + JSON-path inputs for
+  // a row show only while that row's dropdown holds Custom.
+  function refreshPriceSourceCustom(n) {
+    var sel = $('set-price-source' + n);
+    var box = $('price-source' + n + '-custom');
+    if (!sel || !box) return;
+    box.style.display = (sel.value === 'custom') ? '' : 'none';
+  }
+  // Two source values are the same selection: a provider id
+  // compared as a string, or a Custom object compared on its URL
+  // + JSON path (the id is 'custom' for both).
+  function samePriceSource(a, b) {
+    if (typeof a === 'string' || typeof b === 'string') return a === b;
+    if (!a || !b) return a === b;
+    return a.id === b.id && (a.url || '') === (b.url || '') && (a.path || '') === (b.path || '');
+  }
+  // One source's value for save/test: a built-in is its id
+  // string; Custom is the { id, url, path } object from its two
+  // inputs (trimmed; the server rejects a bad URL or path).
+  function priceSourceValue(n) {
+    var sel = $('set-price-source' + n);
+    if (sel && sel.value === 'custom') {
+      var u = $('set-price-source' + n + '-url');
+      var pp = $('set-price-source' + n + '-path');
+      return { id: 'custom', url: u ? u.value.trim() : '', path: pp ? pp.value.trim() : '' };
+    }
+    return sel ? sel.value : '';
+  }
+  var priceSourceStatus = {}; // row ('source1'/'source2') -> 'ok' | 'failed' | 'not-tested': the last Test verdict (or change reset) for that row, in this session
+  var priceSourcePrice = {}; // row -> the last tested price (a number) or null: the price shown to the right of the pill
   function setPriceSourceStatus(n, state) {
     var pill = $('price-source' + n + '-status');
     if (!pill) return;
@@ -2702,42 +2895,59 @@
         { id: 'binance', label: 'Binance US (USDT)' },
         { id: 'kraken', label: 'Kraken' },
         { id: 'bitstamp', label: 'Bitstamp' },
+        { id: 'custom', label: 'Custom' },
       ];
     var label = id;
     for (var i = 0; i < providers.length; i++) if (providers[i].id === id) { label = providers[i].label; break; }
-    host.textContent = label;
+    var status, price = null;
     if (resetStatus) {
-      priceSourceStatus[id] = 'not-tested';
-      setPriceSourceStatus(n, 'not-tested');
-    } else if (priceSourceStatus[id]) {
-      setPriceSourceStatus(n, priceSourceStatus[id]);
-    } else {
-      var cp = (S.bitcoin && S.bitcoin.currentPrices) || {};
-      var r = cp[id];
-      if (r && typeof r.price === 'number' && Number.isFinite(r.price)) setPriceSourceStatus(n, 'ok');
-      else if (r && r.error) setPriceSourceStatus(n, 'failed');
-      else setPriceSourceStatus(n, 'not-tested');
+      delete priceSourceStatus['source' + n];
+      delete priceSourcePrice['source' + n];
     }
+    if (priceSourceStatus['source' + n] === 'ok' || priceSourceStatus['source' + n] === 'failed') {
+      status = priceSourceStatus['source' + n];
+      price = priceSourcePrice['source' + n];
+    } else {
+      // No test verdict for this row: fall back to the cached
+      // reading, but only when the dropdown still holds the saved
+      // source for the slot (samePriceSource compares a provider
+      // id, or a Custom object's URL + path).
+      var saved = (S.settings && S.settings.priceSources) || {};
+      var ex = samePriceSource(priceSourceValue(n), saved['source' + n])
+        ? ((S.bitcoin && S.bitcoin.exchangeStatus && S.bitcoin.exchangeStatus.sources) || [])
+        : [];
+      var r = ex[n - 1];
+      if (r && r.status === 'ok' && typeof r.price === 'number' && Number.isFinite(r.price)) { status = 'ok'; price = r.price; }
+      else if (r && r.status === 'error') { status = 'failed'; }
+      else { status = 'not-tested'; }
+    }
+    host.textContent = label;
+    // The price sits to the right of the status pill, in the same
+    // small muted text as the node rows' values ("Reachable") —
+    // never inside the label span.
+    var priceEl = $('price-source' + n + '-price');
+    if (priceEl) priceEl.textContent = (typeof price === 'number' && Number.isFinite(price)) ? '$' + price.toLocaleString('en-US') : '';
+    setPriceSourceStatus(n, status);
   }
-  $('set-price-source1').addEventListener('change', function () { refreshPriceSourceRow(1, true); });
-  $('set-price-source2').addEventListener('change', function () { refreshPriceSourceRow(2, true); });
+  $('set-price-source1').addEventListener('change', function () { refreshPriceSourceRow(1, true); refreshPriceSourceCustom(1); });
+  $('set-price-source2').addEventListener('change', function () { refreshPriceSourceRow(2, true); refreshPriceSourceCustom(2); });
 
   $('btn-save-price-sources').addEventListener('click', async function () {
-    var s1 = $('set-price-source1').value;
-    var s2 = $('set-price-source2').value;
+    var s1 = priceSourceValue(1);
+    var s2 = priceSourceValue(2);
     try {
       var s = await api('PUT', '/api/settings', { priceSources: { source1: s1, source2: s2 } });
       S.settings = s;
       setMsg($('price-sources-msg'), 'Price sources saved.', true);
-      // The test verdicts are keyed by provider, so they are
-      // NOT cleared here — a source that was tested and
-      // returned a price stays OK after saving. A provider
-      // that was just changed (and not yet tested) was reset
-      // to Not Tested by its change listener, so the re-render
-      // after load() shows that. (Clearing the map used to
-      // flip a tested source back to Not Tested on save,
-      // because the re-render found no cached reading for the
-      // newly-saved source yet.)
+      // The test verdicts are keyed by row, so they are NOT
+      // cleared here — a source that was tested and returned a
+      // price stays OK after saving. A source that was just
+      // changed (and not yet tested) had its verdict deleted by
+      // its change listener, so the re-render after load() falls
+      // back to the cached reading for the saved source.
+      // (Clearing the map used to flip a tested source back to
+      // Not Tested on save, because the re-render found no
+      // cached reading for the newly-saved source yet.)
       await load();
     } catch (e) { setMsg($('price-sources-msg'), e.message, false); }
   });
@@ -2825,66 +3035,46 @@
     try {
       var s = await api('PUT', '/api/settings', { feeLowMultiplier: low, feeMediumMultiplier: med });
       S.settings = s;
-      setMsg($('fee-verdict-msg'), 'Fee verdict saved.', true);
+      setMsg($('fee-verdict-msg'), 'Broadcast fee risk saved.', true);
       await load();
     } catch (e) { setMsg($('fee-verdict-msg'), e.message, false); }
   });
 
   // BTC price sources (0.8.0): ONE "Test connection" button
   // tests BOTH sources at once — like the Node Status "Test
-  // connection" button tests all nodes. It tests the providers
-  // currently selected in the two dropdowns (any of the five,
-  // not only the two configured ones) with fresh fetches (the
-  // server bypasses the price cache), and shows both results
-  // inline. The configured sources and the cache are untouched.
+  // connection" button tests all nodes. It tests the sources
+  // currently selected in the two dropdowns (a provider or
+  // Custom, not only the two configured ones) with fresh fetches
+  // (the server bypasses the price cache), and shows both results
+  // inline on the rows. The configured sources and the cache are
+  // untouched.
   async function testPriceSources() {
-    var out = $('price-sources-test');
     var btn = $('btn-test-price-sources');
-    if (!out || !btn) return;
-    var ids = [$('set-price-source1').value, $('set-price-source2').value];
-    // The display label for a provider, from the provider list
-    // the server serves (the same list that filled the select) —
-    // not read off select.options, so it works wherever the select
-    // itself is not modelled.
-    var providers = (S.bitcoin && Array.isArray(S.bitcoin.priceProviders) && S.bitcoin.priceProviders.length)
-      ? S.bitcoin.priceProviders
-      : [
-        { id: 'coingecko', label: 'CoinGecko' },
-        { id: 'coinbase', label: 'Coinbase' },
-        { id: 'binance', label: 'Binance US (USDT)' },
-        { id: 'kraken', label: 'Kraken' },
-        { id: 'bitstamp', label: 'Bitstamp' },
-      ];
-    function labelFor(id) {
-      for (var i = 0; i < providers.length; i++) if (providers[i].id === id) return providers[i].label;
-      return id;
-    }
+    if (!btn) return;
+    var ids = [priceSourceValue(1), priceSourceValue(2)];
     btn.disabled = true;
-    out.textContent = 'Testing…';
     try {
       var r = await api('POST', '/api/settings/price-sources/test-all', { providers: ids });
-      out.textContent = (r.results || []).map(function (x) {
-        var l = labelFor(x.provider);
-        return (typeof x.price === 'number' && Number.isFinite(x.price))
-          ? l + ': $' + x.price.toLocaleString('en-US')
-          : l + ': failed — ' + (x.error || 'no price');
-      }).join(', ');
-      // The per-source status pills follow the test verdicts —
-      // OK when a price came back, Failed when it did not — so
-      // the rows never sit on '—' after a test. The results come
-      // back in the order requested, so result i is row i + 1;
-      // the verdict is keyed by provider id, so it survives a
-      // save for that provider.
+      // The results land on the rows themselves — each row shows
+      // its price inline next to its pill ("Kraken $98,200 [OK]"),
+      // the same shape as the readiness card's Exchange Status
+      // rows. There is no results line under the button anymore.
+      // The results come back in the order requested, so result i
+      // is row i + 1; the verdict is keyed by row, so it survives a
+      // save for that row.
       (r.results || []).forEach(function (x, i) {
         var n = i + 1;
-        priceSourceStatus[x.provider] = (typeof x.price === 'number' && Number.isFinite(x.price)) ? 'ok' : 'failed';
-        setPriceSourceStatus(n, priceSourceStatus[x.provider]);
+        var ok = (typeof x.price === 'number' && Number.isFinite(x.price));
+        priceSourceStatus['source' + n] = ok ? 'ok' : 'failed';
+        priceSourcePrice['source' + n] = ok ? x.price : null;
+        refreshPriceSourceRow(n);
       });
     } catch (e) {
-      out.textContent = 'Test failed — ' + e.message;
+      setMsg($('price-sources-msg'), 'Test failed — ' + e.message, false);
     }
     btn.disabled = false;
   }
+
   $('btn-test-price-sources').addEventListener('click', testPriceSources);
 
   // Settings "?" help (0.8.0): every Settings card has a "?"
@@ -2907,22 +3097,22 @@
   var SETTINGS_HELP = {
     vacation: {
       title: 'Vacation mode',
-      body: 'Freezes the check-in countdown while you\u2019re away. Leave at 13 of 25 days and you come back to 13 of 25 \u2014 the days do not count while you\u2019re gone. Check-in transactions do not fire while you\u2019re away. Price and UTXO triggers keep firing while you\u2019re away. Set an end date, or leave it indefinite and it holds until you say you\u2019re back.',
+      body: 'Freezes the check-in countdown while you\u2019re away. Leave at 13 of 25 days and you come back to 13 of 25 \u2014 the days do not count while you\u2019re gone. Check-in transactions do not fire while you\u2019re away. Price, UTXO, block-height, set-date, and fee-market triggers keep firing while you\u2019re away. Set an end date, or leave it indefinite and it holds until you say you\u2019re back.',
       triggers: ['checkin'],
     },
     arm: {
       title: 'Global Arm/Disarm',
-      body: 'Arms or disarms every staged transaction at once \u2014 check-in, BTC price, UTXO, and manual. Disarming stops automatic firing for all triggers \u2014 nothing broadcasts on its own. A manual broadcast still works while disarmed (it is you explicitly sending it). Disarmed check-in transactions freeze their countdown and resume from the same spot when re-armed. \u2018Arm all\u2019 arms everything, including transactions you had individually disarmed before.',
+      body: 'Arms or disarms every staged transaction at once \u2014 check-in, BTC price, UTXO, block height, set date, fee market, and manual. Disarming stops automatic firing for all triggers \u2014 nothing broadcasts on its own. A manual broadcast still works while disarmed (it is you explicitly sending it). Disarmed check-in transactions freeze their countdown and resume from the same spot when re-armed. \u2018Arm all\u2019 arms everything, including transactions you had individually disarmed before.',
       triggers: ['general'],
     },
     nodes: {
       title: 'Bitcoin nodes',
-      body: 'The Bitcoin nodes Standby talks to. Standby reads the chain through these nodes \u2014 it checks whether a UTXO is spent, confirms a broadcast landed, and submits your transactions. The primary is tried first; if it fails, the secondary is used. Leave the secondary blank to use the primary alone. The address is a mempool instance \u2014 mempool.space by default, another public instance, or your own mempool on the LAN. UTXO triggers ask the node whether the watched UTXO is spent, and every transaction\u2019s broadcast goes through a node. Check-in and price triggers do not read the node to decide whether to fire.',
+      body: 'The Bitcoin nodes Standby talks to. Standby reads the chain through these nodes \u2014 it checks whether a UTXO is spent, confirms a broadcast landed, and submits your transactions. The primary is tried first; if it fails, the secondary is used. Leave the secondary blank to use the primary alone. The address is a mempool instance \u2014 mempool.space by default, another public instance, or your own mempool on the LAN. UTXO triggers ask the node whether the watched UTXO is spent, and every transaction\u2019s broadcast goes through a node. Check-in, set-date, and manual triggers do not read the node to decide whether to fire; price triggers read the exchanges instead. Block-height and fee-market triggers read the node (the tip height and the fee estimate).',
       triggers: ['general'],
     },
     'price-sources': {
-      title: 'BTC price sources',
-      body: 'The two exchanges Standby reads the BTC price from. Every check, Standby fetches the price from both sources. A price trigger only fires when both agree within your price-agreement setting; if one is down, the other is used alone. When they agree, a rule that fires above a price uses the higher of the two, and a rule that fires below uses the lower.',
+      title: 'Bitcoin price source',
+      body: 'The two price sources Standby reads the BTC price from. Every check, Standby fetches the price from both. A price trigger only fires when both agree within your price-agreement setting; if one is down, the other is used alone. When they agree, the primary price source\u2019s price is the one that decides. Pick Custom for either source to point Standby at your own endpoint \u2014 give its full URL and the Custom endpoint json path (for example, data.amount).',
       triggers: ['price'],
     },
     grace: {
@@ -2937,11 +3127,11 @@
     },
     cadence: {
       title: 'Check cadence',
-      body: 'How often price and UTXO triggers are checked. Standby evaluates price and UTXO triggers every X seconds. Faster catches an unconfirmed spend and a brief price spike sooner; slower means fewer API calls. The price cache matches this interval so a faster cadence fetches fresher prices. Check-in triggers are evaluated once an hour, not by this tick.',
-      triggers: ['price', 'utxo'],
+      body: 'How often the fast triggers are checked. Standby evaluates price, UTXO, block-height, set-date, and fee-market triggers every X seconds. Faster catches an unconfirmed spend, a brief price spike, a block height, and a fee move sooner; slower means fewer API calls. The price and fee caches match this interval so a faster cadence fetches fresher readings. Check-in triggers are evaluated once an hour, not by this tick.',
+      triggers: ['price', 'utxo', 'blockheight', 'setdate', 'feemarket'],
     },
     fee: {
-      title: 'Fee verdict',
+      title: 'Broadcast Fee Risk',
       body: 'Where the Low / Medium / High fee pill flips. Each transaction\u2019s fee rate is compared to the 90-day peak (the 90th percentile of block medians). Low Risk is at or above the Low multiplier, Medium Risk at or above the Medium multiplier, High Risk below it. A fee below the current economy fee is Critical Risk. The pill is informational \u2014 it never blocks a broadcast. The pill shows on every staged transaction. The Low multiplier must stay above the Medium one.',
       triggers: ['general'],
     },
@@ -2966,24 +3156,32 @@
   // The "Applies to" label, derived from the triggers array —
   // never a second hardcoded per-card string. Trigger codes
   // alone: one code reads "<Name> triggers only", two read
-  // "<Name> and <Name> triggers", all four read "All trigger
-  // types". 'general' alone reads "General — not tied to a
-  // specific trigger"; 'general' WITH trigger codes reads
-  // "<Trigger label>, and general infrastructure" (the 'only'
-  // drops, because the card's scope is wider than that one
+  // "<Name> and <Name> triggers", three or more read an Oxford
+  // list ("<Name>, <Name>, and <Name> triggers"), all seven read
+  // "All trigger types". 'general' alone reads "General — not
+  // tied to a specific trigger"; 'general' WITH trigger codes
+  // reads "<Trigger label>, and general infrastructure" (the
+  // 'only' drops, because the card's scope is wider than that one
   // trigger — e.g. Bitcoin nodes: "UTXO triggers, and general
   // infrastructure").
-  var TRIGGER_NAMES = { checkin: 'Check-in', price: 'BTC price', utxo: 'UTXO', manual: 'Manual' };
+  var TRIGGER_NAMES = { checkin: 'Check-in', price: 'BTC price', utxo: 'UTXO', manual: 'Manual', blockheight: 'Block height', setdate: 'Set date', feemarket: 'Fee market' };
   function helpAppliesLabel(triggers) {
     var general = triggers.indexOf('general') !== -1;
     var codes = triggers.filter(function (t) { return t !== 'general'; });
     var label;
     if (codes.length === 0) {
       label = 'General — not tied to a specific trigger';
-    } else if (codes.length === 4) {
+    } else if (codes.length === 7) {
       label = 'All trigger types';
     } else {
-      label = codes.map(function (c) { return TRIGGER_NAMES[c] || c; }).join(' and ') + ' triggers';
+      var names = codes.map(function (c) { return TRIGGER_NAMES[c] || c; });
+      if (names.length === 1) {
+        label = names[0] + ' triggers';
+      } else if (names.length === 2) {
+        label = names.join(' and ') + ' triggers';
+      } else {
+        label = names.slice(0, -1).join(', ') + ', and ' + names[names.length - 1] + ' triggers';
+      }
       if (codes.length === 1 && !general) label += ' only';
     }
     if (general && codes.length > 0) label += ', and general infrastructure';

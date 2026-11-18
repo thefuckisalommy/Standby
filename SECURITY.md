@@ -20,9 +20,9 @@ The dry-run buttons only check whether the inputs are still unspent — they nev
 
 A release re-checks every armed transaction's inputs first — a spent input means stale, never broadcast — and a broadcast has a 15-second deadline. Releases are evaluated hourly and on demand.
 
-## Broadcast All sends disarmed transactions too
+## Disarming stops automatic release, not manual broadcasts
 
-Disarming a transaction only stops automatic release. Broadcast All sends every stored transaction that has not broadcast yet, including disarmed ones. (The confirmation dialog says so when you click it.)
+Disarming a transaction only stops it firing on its own — the release and Broadcast Armed both skip disarmed transactions. You can still broadcast a disarmed transaction by hand, from its own card.
 
 ## Check-in keys and the receiver (port 3101)
 

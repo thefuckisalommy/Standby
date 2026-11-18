@@ -71,21 +71,22 @@
         <div class="readiness-label">Transaction</div>
         <div id="readiness-txs" class="tx-list"></div>
       </div>
-      <div class="readiness-item">
-        <div class="readiness-label">Node Status</div>
-        <div class="node-lines">
-          <div><span id="readiness-primary">—</span> <span id="readiness-primary-status" class="pill muted">Not tested</span></div>
-          <div><span id="readiness-secondary">—</span> <span id="readiness-secondary-status" class="pill muted">Not tested</span></div>
+      <div class="readiness-status">
+        <div class="readiness-item">
+          <div class="readiness-label readiness-label-row"><span>Node Status</span><span id="readiness-node-checked" class="checked-inline"></span></div>
+          <div class="node-lines">
+            <div><span id="readiness-primary">—</span> <span id="readiness-primary-status" class="pill muted">Not tested</span></div>
+            <div><span id="readiness-secondary">—</span> <span id="readiness-secondary-status" class="pill muted">Not tested</span></div>
+          </div>
+        </div>
+        <div class="readiness-item" id="readiness-exchange-item" style="display:none">
+          <div class="readiness-label readiness-label-row"><span>Exchange Status</span><span id="readiness-exchange-checked" class="checked-inline"></span></div>
+          <div class="node-lines">
+            <div><span id="readiness-exchange-1">—</span> <span id="readiness-exchange-1-price" class="node-check-detail"></span> <span id="readiness-exchange-1-status" class="pill muted">Not tested</span></div>
+            <div><span id="readiness-exchange-2">—</span> <span id="readiness-exchange-2-price" class="node-check-detail"></span> <span id="readiness-exchange-2-status" class="pill muted">Not tested</span></div>
+          </div>
         </div>
       </div>
-      <div class="readiness-item" id="readiness-exchange-item" style="display:none">
-        <div class="readiness-label">Exchange Status</div>
-        <div class="node-lines">
-          <div><span id="readiness-exchange-1">—</span> <span id="readiness-exchange-1-status" class="pill muted">Not tested</span></div>
-          <div><span id="readiness-exchange-2">—</span> <span id="readiness-exchange-2-status" class="pill muted">Not tested</span></div>
-        </div>
-      </div>
-      <p id="readiness-checked" class="muted"></p>
     </div>
   </section>
 
@@ -153,6 +154,9 @@
         <option value="checkin">Check-in Trigger</option>
         <option value="price">BTC Price Trigger</option>
         <option value="utxo">UTXO Trigger</option>
+        <option value="blockheight">Block Height Trigger</option>
+        <option value="setdate">Set Date Trigger</option>
+        <option value="feemarket">Fee Market Trigger</option>
       </select>
     </div>
 
@@ -196,38 +200,61 @@
       </p>
       <div class="readiness-item">
         <div class="readiness-label">Primary</div>
-        <div><span id="btc-primary">—</span> <span id="btc-primary-status" class="pill muted">Not tested</span></div>
+        <details id="btc-primary-details" class="node-details">
+          <summary><span id="btc-primary">—</span> <span id="btc-primary-status" class="pill muted">Not tested</span></summary>
+          <div id="btc-primary-checks" class="node-checks" style="display:none">
+            <div class="node-check-line"><span class="node-check-label">Broadcast</span> <span id="btc-primary-broadcast-value" class="node-check-detail"></span></div>
+            <div class="node-check-line"><span class="node-check-label">Fee estimates</span> <span id="btc-primary-fees-value" class="node-check-detail"></span></div>
+            <div class="node-check-line"><span class="node-check-label">Block height</span> <span id="btc-primary-height-value" class="node-check-detail"></span></div>
+          </div>
+        </details>
       </div>
       <div class="readiness-item">
         <div class="readiness-label">Secondary</div>
-        <div><span id="btc-secondary">—</span> <span id="btc-secondary-status" class="pill muted">Not tested</span></div>
+        <details id="btc-secondary-details" class="node-details">
+          <summary><span id="btc-secondary">—</span> <span id="btc-secondary-status" class="pill muted">Not tested</span></summary>
+          <div id="btc-secondary-checks" class="node-checks" style="display:none">
+            <div class="node-check-line"><span class="node-check-label">Broadcast</span> <span id="btc-secondary-broadcast-value" class="node-check-detail"></span></div>
+            <div class="node-check-line"><span class="node-check-label">Fee estimates</span> <span id="btc-secondary-fees-value" class="node-check-detail"></span></div>
+            <div class="node-check-line"><span class="node-check-label">Block height</span> <span id="btc-secondary-height-value" class="node-check-detail"></span></div>
+          </div>
+        </details>
       </div>
       <p id="btc-nodes-msg" class="muted"></p>
     </div>
 
     <div class="card" id="card-price-sources">
       <div class="section-head">
-        <h2>BTC price sources</h2>
+        <h2>Bitcoin price source</h2>
         <button class="help-btn" id="help-price-sources" data-help="price-sources" aria-label="About this setting" title="About this setting">?</button>
       </div>
-      <label for="set-price-source1">Source 1</label>
+      <label for="set-price-source1">Primary price source</label>
       <select id="set-price-source1"></select>
-      <label for="set-price-source2">Source 2</label>
+      <div class="price-source-custom" id="price-source1-custom" style="display:none">
+        <label for="set-price-source1-url">Custom endpoint URL</label>
+        <input id="set-price-source1-url" type="url" placeholder="https://example.com/api/price" autocomplete="off">
+        <label for="set-price-source1-path">Custom endpoint json path</label>
+        <input id="set-price-source1-path" type="text" placeholder="data.amount" autocomplete="off">
+      </div>
+      <label for="set-price-source2">Secondary price source</label>
       <select id="set-price-source2"></select>
+      <div class="price-source-custom" id="price-source2-custom" style="display:none">
+        <label for="set-price-source2-url">Custom endpoint URL</label>
+        <input id="set-price-source2-url" type="url" placeholder="https://example.com/api/price" autocomplete="off">
+        <label for="set-price-source2-path">Custom endpoint json path</label>
+        <input id="set-price-source2-path" type="text" placeholder="data.amount" autocomplete="off">
+      </div>
       <p class="muted" id="price-sources-note">A reading is only trusted when the two agree within <span id="price-sources-agreement">5%</span>.</p>
       <div class="readiness-item">
-        <div class="readiness-label">Source 1</div>
-        <div><span id="price-source1">—</span> <span id="price-source1-status" class="pill muted">Not tested</span></div>
+        <div id="price-source1-row"><span id="price-source1">—</span> <span id="price-source1-status" class="pill muted">Not tested</span> <span id="price-source1-price" class="node-check-detail"></span></div>
       </div>
       <div class="readiness-item">
-        <div class="readiness-label">Source 2</div>
-        <div><span id="price-source2">—</span> <span id="price-source2-status" class="pill muted">Not tested</span></div>
+        <div id="price-source2-row"><span id="price-source2">—</span> <span id="price-source2-status" class="pill muted">Not tested</span> <span id="price-source2-price" class="node-check-detail"></span></div>
       </div>
       <p>
         <button id="btn-save-price-sources" class="primary">Save price sources</button>
         <button id="btn-test-price-sources">Test connection</button>
       </p>
-      <p id="price-sources-test" class="muted"></p>
       <p id="price-sources-msg" class="muted"></p>
     </div>
 
@@ -287,7 +314,7 @@
 
     <div class="card" id="card-fee">
       <div class="section-head">
-        <h2>Fee verdict</h2>
+        <h2>Broadcast Fee Risk</h2>
         <button class="help-btn" id="help-fee" data-help="fee" aria-label="About this setting" title="About this setting">?</button>
       </div>
       <label for="set-fee-low">Low Risk at or above</label>
@@ -306,7 +333,7 @@
         </div>
       </div>
       <p>
-        <button id="btn-save-fee-verdict" class="primary">Save fee verdict</button>
+        <button id="btn-save-fee-verdict" class="primary">Save broadcast fee risk</button>
       </p>
       <p id="fee-verdict-msg" class="muted"></p>
     </div>
@@ -354,7 +381,7 @@
   </section>
 </main>
 
-<!-- Confirmation dialog (Broadcast Now / Broadcast All / Delete) and
+<!-- Confirmation dialog (Broadcast Now / Broadcast Armed / Delete) and
      details pop-out (a broadcast log entry). A native confirm() would
      work, but this keeps the warning inside the app and testable. -->
 <div id="confirm-modal" class="modal-overlay">
@@ -390,6 +417,9 @@
       <option value="checkin" selected>Check-in — fire after days of silence</option>
       <option value="price">BTC price</option>
       <option value="utxo">UTXO moved</option>
+      <option value="blockheight">Block height</option>
+      <option value="setdate">Set date</option>
+      <option value="feemarket">Fee market</option>
       <option value="manual">Manual only — no trigger</option>
     </select>
     <div id="edit-trigger-checkin-row">
@@ -399,7 +429,7 @@
     <div id="edit-trigger-price-row" style="display:none">
       <label for="edit-trigger-value">BTC price</label>
       <div class="inline-unit"><select id="edit-trigger-op" style="flex:0 0 auto"><option value=">=" selected>≥</option><option value="<=">≤</option></select><span>$</span><input id="edit-trigger-value" type="number" min="1" step="any" placeholder="150000"></div>
-      <p id="edit-trigger-price-note" class="guard-note">Guard: both price sources must agree the price is above the threshold — a single bad source can’t fire it.</p>
+      <p id="edit-trigger-price-note" class="guard-note">Guard: the two price sources must agree within your price-agreement setting — the primary price source decides.</p>
     </div>
     <div id="edit-trigger-utxo-row" style="display:none">
       <label for="edit-trigger-outpoint">UTXO (txid:vout)</label>
@@ -414,6 +444,26 @@
         <div class="inline-unit"><input id="edit-trigger-utxo-confs" type="number" min="1" max="100" value="1"><span>confirmations</span></div>
       </div>
       <p id="edit-trigger-utxo-note" class="guard-note">Guard: only a confirmed spend fires — an unconfirmed (mempool) spend only watches until it confirms.</p>
+    </div>
+    <div id="edit-trigger-blockheight-row" style="display:none">
+      <label for="edit-trigger-blockheight">Block height</label>
+      <div class="inline-unit"><input id="edit-trigger-blockheight" type="number" min="1" max="10000000" placeholder="1000000"><span>block</span></div>
+      <p class="guard-note">Fires when the chain reaches this height — a reorg can’t un-fire it.</p>
+    </div>
+    <div id="edit-trigger-setdate-row" style="display:none">
+      <label for="edit-trigger-setdate">Date and time</label>
+      <input id="edit-trigger-setdate" type="datetime-local">
+      <p class="guard-note">Fires at this date and time, whether or not you check in.</p>
+    </div>
+    <div id="edit-trigger-feemarket-row" style="display:none">
+      <label for="edit-trigger-feemarket-dir">Direction</label>
+      <select id="edit-trigger-feemarket-dir">
+        <option value="below" selected>Fee falls to or below</option>
+        <option value="above">Fee rises to or above</option>
+      </select>
+      <label for="edit-trigger-feemarket">Economy fee</label>
+      <div class="inline-unit"><input id="edit-trigger-feemarket" type="number" min="0.1" step="any" placeholder="5"><span>sat/vB</span></div>
+      <p class="guard-note">Fires when the fee crosses this rate in the direction you choose.</p>
     </div>
     <label for="edit-route">Broadcast via</label>
     <select id="edit-route">
@@ -467,6 +517,9 @@
       <option value="checkin" selected>Check-in — fire after days of silence</option>
       <option value="price">BTC price</option>
       <option value="utxo">UTXO moved</option>
+      <option value="blockheight">Block height</option>
+      <option value="setdate">Set date</option>
+      <option value="feemarket">Fee market</option>
       <option value="manual">Manual only — no trigger</option>
     </select>
     <div id="btc-trigger-checkin-row">
@@ -476,7 +529,7 @@
     <div id="btc-trigger-price-row" style="display:none">
       <label for="btc-trigger-value">BTC price</label>
       <div class="inline-unit"><select id="btc-trigger-op" style="flex:0 0 auto"><option value=">=" selected>≥</option><option value="<=">≤</option></select><span>$</span><input id="btc-trigger-value" type="number" min="1" step="any" placeholder="150000"></div>
-      <p id="btc-trigger-price-note" class="guard-note">Guard: both price sources must agree the price is above the threshold — a single bad source can’t fire it.</p>
+      <p id="btc-trigger-price-note" class="guard-note">Guard: the two price sources must agree within your price-agreement setting — the primary price source decides.</p>
     </div>
     <div id="btc-trigger-utxo-row" style="display:none">
       <label for="btc-trigger-outpoint">UTXO (txid:vout)</label>
@@ -491,6 +544,26 @@
         <div class="inline-unit"><input id="btc-trigger-utxo-confs" type="number" min="1" max="100" value="1"><span>confirmations</span></div>
       </div>
       <p id="btc-trigger-utxo-note" class="guard-note">Guard: only a confirmed spend fires — an unconfirmed (mempool) spend only watches until it confirms.</p>
+    </div>
+    <div id="btc-trigger-blockheight-row" style="display:none">
+      <label for="btc-trigger-blockheight">Block height</label>
+      <div class="inline-unit"><input id="btc-trigger-blockheight" type="number" min="1" max="10000000" placeholder="1000000"><span>block</span></div>
+      <p class="guard-note">Fires when the chain reaches this height — a reorg can’t un-fire it.</p>
+    </div>
+    <div id="btc-trigger-setdate-row" style="display:none">
+      <label for="btc-trigger-setdate">Date and time</label>
+      <input id="btc-trigger-setdate" type="datetime-local">
+      <p class="guard-note">Fires at this date and time, whether or not you check in.</p>
+    </div>
+    <div id="btc-trigger-feemarket-row" style="display:none">
+      <label for="btc-trigger-feemarket-dir">Direction</label>
+      <select id="btc-trigger-feemarket-dir">
+        <option value="below" selected>Fee falls to or below</option>
+        <option value="above">Fee rises to or above</option>
+      </select>
+      <label for="btc-trigger-feemarket">Economy fee</label>
+      <div class="inline-unit"><input id="btc-trigger-feemarket" type="number" min="0.1" step="any" placeholder="5"><span>sat/vB</span></div>
+      <p class="guard-note">Fires when the fee crosses this rate in the direction you choose.</p>
     </div>
     <label for="btc-route">Broadcast via</label>
     <select id="btc-route">

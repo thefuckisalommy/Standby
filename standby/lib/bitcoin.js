@@ -870,8 +870,111 @@ function priceProviderById(id) {
 }
 
 function priceProviderLabel(id) {
+  if (id === 'custom') return 'Custom';
   const p = priceProviderById(id);
   return p ? p.label : String(id);
+}
+
+// A custom price source (0.8.1): the owner points Standby at
+// their own endpoint and tells it where the price lives in the
+// JSON answer. The stored form is { id: 'custom', url, path } —
+// `url` is the FULL endpoint URL (base + path, e.g.
+// https://example.com/api/price?ids=bitcoin), `path` is the
+// dot-path to the price inside the JSON body (e.g.
+// `data.amount`, `result.XXBTZUSD.c[0]`). A path step is a key
+// (letters, digits, _, $), optionally followed by [n]; a bare
+// [n] addresses an array element. parseJsonPath returns the
+// steps or null when the path is not well-formed; priceFromPath
+// walks them and returns the raw leaf (or undefined when any
+// step misses). Both are pure, so the UI, the validator and the
+// fetch all agree on what a path means.
+function parseJsonPath(path) {
+  if (typeof path !== 'string') return null;
+  const trimmed = path.trim();
+  if (!trimmed) return null;
+  const steps = [];
+  for (const seg of trimmed.split('.')) {
+    if (!seg) return null;
+    const m = /^([A-Za-z0-9_$]+)?(?:\[(\d+)\])?$/.exec(seg);
+    if (!m || (m[1] === undefined && m[2] === undefined)) return null;
+    steps.push({ key: m[1] === undefined ? null : m[1], index: m[2] === undefined ? null : parseInt(m[2], 10) });
+  }
+  return steps.length ? steps : null;
+}
+
+function priceFromPath(data, path) {
+  const steps = parseJsonPath(path);
+  if (!steps) return undefined;
+  let cur = data;
+  for (const st of steps) {
+    if (cur === null || cur === undefined) return undefined;
+    if (st.key !== null) {
+      if (typeof cur !== 'object') return undefined;
+      cur = cur[st.key];
+    }
+    if (st.index !== null) {
+      if (!Array.isArray(cur)) return undefined;
+      cur = cur[st.index];
+    }
+  }
+  return cur;
+}
+
+// Build the provider-like object a custom source fetches
+// through: the full URL splits into base (protocol + host) and
+// path (pathname + search), and the parse step is the JSON-path
+// walker. Throws on a non-http(s) or unparseable URL — the
+// caller treats that as "this source is not configured", never
+// as a reading.
+function customPriceProvider(url, jsonPath) {
+  const u = new URL(String(url).trim());
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error('custom price URL must be http(s): ' + url);
+  return {
+    id: 'custom', label: 'Custom',
+    baseUrl: u.protocol + '//' + u.host,
+    path: (u.pathname || '/') + (u.search || ''),
+    parse: (d) => priceFromPath(d, jsonPath),
+  };
+}
+
+// Normalize one stored price-source value (0.8.1): a known
+// provider id string passes through; a custom object
+// { id: 'custom', url, path } passes through trimmed when the
+// URL is http(s) and the JSON path is well-formed; anything else
+// is null (unknown id, bad URL, bad path). The settings
+// validator, the restore path and the defensive reader all use
+// this one rule, so a stored source is either usable or rejected
+// in exactly the same way everywhere.
+function normalizePriceSourceValue(v) {
+  if (typeof v === 'string') return priceProviderById(v) ? v : null;
+  if (v && typeof v === 'object' && v.id === 'custom') {
+    const url = typeof v.url === 'string' ? v.url.trim() : '';
+    const path = typeof v.path === 'string' ? v.path.trim() : '';
+    if (!url || !path || !parseJsonPath(path)) return null;
+    try { customPriceProvider(url, path); } catch { return null; }
+    return { id: 'custom', url, path };
+  }
+  return null;
+}
+
+// The stable cache/comparison key for one stored source value:
+// the provider id, or the custom URL + JSON path. Two sources
+// are "the same" when their keys match.
+function priceSourceKey(v) {
+  if (typeof v === 'string') return v;
+  if (v && typeof v === 'object' && v.id === 'custom') return 'custom:' + (v.url || '') + '\n' + (v.path || '');
+  return String(v);
+}
+
+// Resolve one stored source value to the provider-like object
+// the fetch uses, or null when it is not usable. A custom
+// source resolves through customPriceProvider (its own URL +
+// JSON-path parser); a built-in resolves through the registry.
+function resolvePriceSource(v) {
+  const norm = normalizePriceSourceValue(v);
+  if (norm === null) return null;
+  if (typeof norm === 'string') return priceProviderById(norm);
+  return customPriceProvider(norm.url, norm.path);
 }
 
 // The User-Agent for price-provider fetches. CoinGecko's WAF
@@ -888,7 +991,7 @@ const DEFAULT_PRICE_API_URL = 'https://api.coingecko.com';
 
 function priceApiBase() {
   // Legacy single override (0.8.0): the CoinGecko base. Kept so
-  // fetchBtcPrice and the existing tests keep working.
+  // the built-in providers and the existing tests keep working.
   const v = (process.env.PRICE_API_URL || '').trim();
   if (!v) return DEFAULT_PRICE_API_URL;
   let u;
@@ -898,12 +1001,14 @@ function priceApiBase() {
 }
 
 // The base URL one provider fetches from: PRICE_API_URL (when set)
-// overrides every provider to the same base — the test hook, so a
-// stub server can answer all five providers on their own paths.
-// Otherwise the provider's own default base.
+// overrides every BUILT-IN provider to the same base — the test
+// hook, so a stub server can answer all five providers on their
+// own paths. A custom source's URL is explicit (the owner typed
+// it), so the override never redirects it. Otherwise the
+// provider's own default base.
 function priceProviderBase(provider) {
   const v = (process.env.PRICE_API_URL || '').trim();
-  if (v) return priceApiBase();
+  if (v && provider.id !== 'custom') return priceApiBase();
   return provider.baseUrl;
 }
 
@@ -937,25 +1042,31 @@ async function fetchPriceFromProvider(provider) {
 }
 
 // Fetch both configured sources in parallel — one failing must not
-// block the other (all-settled). Returns { [sourceId]: { provider,
-// price|null, error|null } }. An unknown source id is a failed
+// block the other (all-settled). `source1`/`source2` are the
+// STORED values (a provider id string, or a custom
+// { id: 'custom', url, path } object). Returns the readings
+// keyed by SLOT — { source1: {...}, source2: {...} } — because
+// two custom sources share the id 'custom' and cannot be keyed
+// by id. Each entry is { provider, label, price|null,
+// error|null }; `provider` is the id ('kraken' or 'custom') and
+// `label` the display name. An unusable source value is a failed
 // source, not a throw.
-async function fetchPriceReadings(source1Id, source2Id) {
-  const jobs = [source1Id, source2Id].map(async (id) => {
-    const prov = priceProviderById(id);
-    if (!prov) return { provider: id, price: null, error: 'unknown price provider: ' + id };
+async function fetchPriceReadings(source1, source2) {
+  const jobs = [source1, source2].map(async (src) => {
+    const prov = resolvePriceSource(src);
+    if (!prov) {
+      const id = (typeof src === 'string') ? src : 'custom';
+      return { provider: id, label: (typeof src === 'string') ? src : 'Custom', price: null, error: 'unknown price provider: ' + id };
+    }
     try {
       const price = await fetchPriceFromProvider(prov);
-      return { provider: id, price, error: null };
+      return { provider: prov.id, label: prov.label, price, error: null };
     } catch (e) {
-      return { provider: id, price: null, error: e.message };
+      return { provider: prov.id, label: prov.label, price: null, error: e.message };
     }
   });
   const [r1, r2] = await Promise.all(jobs);
-  const out = {};
-  out[source1Id] = r1;
-  out[source2Id] = r2;
-  return out;
+  return { source1: r1, source2: r2 };
 }
 
 // The agreement rule (0.8.0): two price readings are only
@@ -963,10 +1074,10 @@ async function fetchPriceReadings(source1Id, source2Id) {
 // above the lower:
 //   |p1 - p2| / min(p1, p2) <= agreementPct / 100
 // (Settings: Price agreement; default 5.) Combine two fetched
-// readings into one effective price for a threshold direction
-// (op '>=' or '<='):
-//   both valid + agree  → the directional extreme (>= the higher,
-//                          <= the lower) — mode 'dual'
+// readings into one effective price — the PRIMARY exchange's
+// price (`primaryId`, Settings: source1). The secondary is only
+// a fallback when the primary does not answer:
+//   both valid + agree  → the primary's price — mode 'dual'
 //   one valid           → that price alone, no agreement check —
 //                          mode 'single' (the other is unreachable)
 //   both valid + disagree → invalid, mode 'disagree', reason names it
@@ -976,13 +1087,13 @@ async function fetchPriceReadings(source1Id, source2Id) {
 // (single); `reason` is the human-readable unknown reason when
 // !valid. Pure — no I/O, so the evaluator, the UI status, and the
 // already-true check all agree on one rule.
-function combinePriceReadings(readings, op, agreementPct) {
+function combinePriceReadings(readings, agreementPct) {
   const agree = (typeof agreementPct === 'number' && Number.isFinite(agreementPct) && agreementPct > 0) ? agreementPct / 100 : 0.05;
   const valid = [];
-  for (const id of Object.keys(readings || {})) {
-    const r = readings[id];
+  for (const slot of ['source1', 'source2']) {
+    const r = (readings || {})[slot];
     if (r && typeof r.price === 'number' && Number.isFinite(r.price)) {
-      valid.push({ id, label: priceProviderLabel(id), price: r.price });
+      valid.push({ slot, label: r.label || r.provider || slot, price: r.price });
     }
   }
   if (valid.length === 0) {
@@ -991,21 +1102,22 @@ function combinePriceReadings(readings, op, agreementPct) {
     // move — name it as implausible (the old single-source guard's
     // wording), so the owner can tell garbage from an outage. A
     // feed that did not answer at all is 'unavailable'.
-    const bad = Object.keys(readings || {}).filter((id) => {
-      const r = readings[id];
+    const bad = ['source1', 'source2'].filter((slot) => {
+      const r = (readings || {})[slot];
       return r && r.error && /out of bounds/.test(r.error);
     });
     if (bad.length) {
-      const names = bad.map((id) => readings[id].error).join('; ');
+      const names = bad.map((slot) => readings[slot].error).join('; ');
       return { valid: false, price: null, mode: 'none', note: '', reason: 'implausible price reading (' + names + ') — ignored', readings };
     }
     return { valid: false, price: null, mode: 'none', note: '', reason: 'price unavailable — will retry', readings };
   }
   if (valid.length === 1) {
     const only = valid[0];
-    const otherId = Object.keys(readings || {}).find((id) => id !== only.id);
-    const otherLabel = otherId ? priceProviderLabel(otherId) : 'the other source';
-    const otherErr = (otherId && readings[otherId] && readings[otherId].error) || '';
+    const otherSlot = only.slot === 'source1' ? 'source2' : 'source1';
+    const other = (readings || {})[otherSlot];
+    const otherLabel = (other && (other.label || other.provider)) || 'the other source';
+    const otherErr = (other && other.error) || '';
     // The other source either did not answer (unreachable) or
     // answered with garbage (invalid data) — name which, so the
     // owner can tell an outage from a bad feed.
@@ -1022,36 +1134,33 @@ function combinePriceReadings(readings, op, agreementPct) {
       reason: 'price sources disagree — ' + a.label + ' $' + a.price.toLocaleString('en-US') + ' vs ' + b.label + ' $' + b.price.toLocaleString('en-US') + ' (' + pct + '% apart)',
       readings };
   }
-  const price = op === '>=' ? hi : lo;
+  // Both agree: the PRIMARY slot's price decides (source1 is the
+  // primary by construction — the slot order is the priority).
+  const primary = valid.find((v) => v.slot === 'source1') || valid[0];
+  const price = primary.price;
   return { valid: true, price, mode: 'dual',
     note: a.label + ' $' + a.price.toLocaleString('en-US') + ' · ' + b.label + ' $' + b.price.toLocaleString('en-US'),
     reason: '', readings };
 }
 
 // The consensus price for /api/state (a single representative
-// number, no direction): the average of two agreeing readings, the
-// single valid reading, or null when they disagree or neither
-// answers. The per-tx effective price is directional (see
-// combinePriceReadings) — this is only the display number.
+// number, no direction): the PRIMARY exchange's price when the
+// two agree, the single valid reading, or null when they disagree
+// or neither answers. The per-tx effective price comes from
+// combinePriceReadings — this is only the display number.
 function priceConsensus(readings, agreementPct) {
   const agree = (typeof agreementPct === 'number' && Number.isFinite(agreementPct) && agreementPct > 0) ? agreementPct / 100 : 0.05;
   const valid = [];
-  for (const id of Object.keys(readings || {})) {
-    const r = readings[id];
-    if (r && typeof r.price === 'number' && Number.isFinite(r.price)) valid.push(r.price);
+  for (const slot of ['source1', 'source2']) {
+    const r = (readings || {})[slot];
+    if (r && typeof r.price === 'number' && Number.isFinite(r.price)) valid.push({ slot, price: r.price });
   }
   if (valid.length === 0) return null;
-  if (valid.length === 1) return valid[0];
-  const lo = Math.min(valid[0], valid[1]), hi = Math.max(valid[0], valid[1]);
+  if (valid.length === 1) return valid[0].price;
+  const lo = Math.min(valid[0].price, valid[1].price), hi = Math.max(valid[0].price, valid[1].price);
   if ((hi - lo) / lo > agree) return null;
-  return (valid[0] + valid[1]) / 2;
-}
-
-// Fetch the current BTC price in USD from the default (CoinGecko)
-// feed. Kept for backward compatibility — the price trigger now
-// reads two sources via fetchPriceReadings.
-async function fetchBtcPrice() {
-  return fetchPriceFromProvider(priceProviderById('coingecko'));
+  const primary = valid.find((v) => v.slot === 'source1') || valid[0];
+  return primary.price;
 }
 
 // The verdict itself (Ryan's ladder, Nov 14, extended 0.7.21 with
@@ -1788,6 +1897,62 @@ async function mempoolTipHeight(apiBase) {
   return h;
 }
 
+// Tip height from BOTH endpoints in parallel (0.8.1, block-height
+// trigger): both readings are fetched, and the PRIMARY node's tip
+// is the one that counts (the secondary is only a fallback if
+// the primary does not answer). One endpoint down never stops
+// the other. Mirrors
+// fetchNodeFeeReadings. Returns { primary: {...}, secondary: {...} }
+// keyed by endpoint label, each { endpoint, height, error }.
+async function fetchTipHeights(endpoints) {
+  const jobs = endpoints.map(async (ep) => {
+    try {
+      const h = await mempoolTipHeight(ep.base);
+      return { endpoint: ep.label, height: h, error: null };
+    } catch (e) {
+      return { endpoint: ep.label, height: null, error: e.message || String(e) };
+    }
+  });
+  const results = await Promise.all(jobs);
+  const out = {};
+  for (const r of results) out[r.endpoint] = r;
+  return out;
+}
+
+// Combine two tip-height readings for the block-height trigger:
+// the PRIMARY node's tip is the one that counts; the secondary
+// is only a fallback when the primary does not answer. No
+// agreement check — a node a block or two ahead is normal
+// propagation lag, and either reading is a real chain height.
+// One valid reading is enough (mode 'single'); none is
+// 'unknown' (mode 'none').
+// Returns { valid, tip, mode, note, reason, readings }.
+function combineTipHeights(readings) {
+  const valid = [];
+  for (const label of Object.keys(readings || {})) {
+    const r = readings[label];
+    if (!r || typeof r.height !== 'number' || !Number.isFinite(r.height) || r.height < 0) continue;
+    valid.push({ label, height: r.height });
+  }
+  if (valid.length === 0) {
+    return { valid: false, tip: null, mode: 'none', note: '', reason: 'tip height unavailable — will retry', readings };
+  }
+  if (valid.length === 1) {
+    const only = valid[0];
+    const otherLabel = Object.keys(readings || {}).find((label) => label !== only.label) || 'the other node';
+    const other = readings[otherLabel];
+    const otherWhy = (other && other.error) ? 'unreachable' : 'returned invalid data';
+    return { valid: true, tip: only.height, mode: 'single',
+      note: only.label + ' only — ' + otherLabel + ' ' + otherWhy, reason: '', readings };
+  }
+  const a = valid[0], b = valid[1];
+  const primary = valid.find((v) => v.label === 'primary') || valid[0];
+  const tip = primary.height;
+  return { valid: true, tip, mode: 'dual',
+    note: a.label + ' ' + a.height.toLocaleString('en-US') + ' · ' + b.label + ' ' + b.height.toLocaleString('en-US'),
+    reason: '', readings };
+}
+
 // Tip height from the endpoints in order — the first that answers
 // wins. Used by the UTXO trigger to count confirmations of a
 // spending tx (confirmations = tip - spendBlockHeight + 1).
@@ -1890,25 +2055,223 @@ async function testConnection(endpoints) {
   for (const ep of endpoints) results.push({ endpoint: ep.label, base: ep.base, ...(await testOnePath(ep.base)) });
   const ok = results.some((r) => r.ok);
   const detail = results
-    .map((r) => (r.endpoint === 'primary' ? 'Primary' : 'Secondary') + ' (' + mempoolHostLabel(r.base) + '): ' + (r.ok ? 'OK — ' + r.detail : 'FAILED — ' + r.detail))
+    .map((r) => (r.endpoint === 'primary' ? 'Primary' : 'Secondary') + ' (' + mempoolHostLabel(r.base) + '): ' + r.status.toUpperCase() + ' — ' + r.detail)
     .join('; ');
   return { ok, detail, results };
 }
 
+// One endpoint, three capabilities (0.8.1): block height, fee
+// estimates, and broadcast. Each check returns {ok, detail}.
+// The overall status:
+//   OK — all three good.
+//   CAUTION — the height probe works (the endpoint IS a node) but
+//     broadcast and/or fees are not ready.
+//   FAIL — the height probe fails (network error, timeout, or a
+//     non-200 answer): the endpoint is unreachable or is not a
+//     mempool/Esplora API at all. Height is the gate because it is
+//     the one capability every node provides.
+// `ok` stays true for OK and CAUTION (the old meaning: the height
+// probe passed, so the node is usable) and false for FAIL, so the
+// stored connection.ok keeps its old semantics.
 async function testOnePath(apiBase) {
+  const height = await testNodeHeight(apiBase);
+  if (!height.ok) {
+    return {
+      ok: false, status: 'fail',
+      detail: 'height: ' + height.detail,
+      checks: { height, fees: { ok: false, detail: 'not checked — height failed', value: '—' }, broadcast: { ok: false, detail: 'not checked — height failed', value: '—' } },
+    };
+  }
+  const fees = await testNodeFees(apiBase);
+  const broadcast = await testNodeBroadcast(apiBase);
+  const allOk = fees.ok && broadcast.ok;
+  const detail = 'height ' + height.detail + ' · fees: ' + fees.detail + ' · broadcast: ' + broadcast.detail;
+  return {
+    ok: true, status: allOk ? 'ok' : 'caution', detail,
+    checks: { height, fees, broadcast },
+  };
+}
+
+// Block height: GET /api/blocks/tip/height — answered by both
+// mempool.space and Esplora, so it is the probe that works for
+// any endpoint. A 200 with a parseable integer is ready. `value`
+// is the short display string shown next to the status pill
+// ("Height 976,200"); `detail` is the tooltip text. On failure
+// the value IS the reason, so the row shows why it failed.
+async function testNodeHeight(apiBase) {
   try {
-    // The probe is the tip height, not the fee endpoint:
-    // /v1/fees/recommended is mempool.space-specific, and Esplora
-    // backends (blockstream.info) answer it with 404 — so the test
-    // failed even when the node was fine. /api/blocks/tip/height is
-    // answered by both mempool.space and Esplora, so it is the probe
-    // that works for any endpoint.
     const res = await mempoolReq('/api/blocks/tip/height', 'GET', undefined, apiBase);
-    if (res.status !== 200) return { ok: false, detail: 'answered HTTP ' + res.status };
+    if (res.status !== 200) return { ok: false, detail: 'answered HTTP ' + res.status, value: 'answered HTTP ' + res.status };
     const height = parseInt(res.body.trim(), 10);
-    return { ok: true, detail: Number.isFinite(height) ? 'reachable, tip height ' + height : 'reachable' };
+    return Number.isFinite(height)
+      ? { ok: true, detail: 'tip height ' + height, value: 'Height ' + height.toLocaleString('en-US') }
+      : { ok: false, detail: 'answered 200 with an unparseable height', value: 'unparseable height' };
   } catch (e) {
-    return { ok: false, detail: e.message };
+    return { ok: false, detail: e.message, value: e.message };
+  }
+}
+
+// Fee estimates: the mempool endpoint first, then Esplora's.
+// /api/v1/fees/recommended (mempool) returns the named tiers —
+// a 200 with a usable economyFee is ready, and the value is that
+// economy fee ("1 sat/vB"). A plain Esplora answers that with
+// 404, so the fallback is /api/fee-estimates, which returns a map
+// of confirmation target to fee rate — a 200 with at least one
+// numeric rate is ready, and the value is the 6-block rate (the
+// economy analogue), falling back to the cheapest rate if the
+// 6-block target is missing. Either shape proves the node can
+// provide fee estimates. On failure the value IS the reason.
+// The economy fee from ONE node (0.8.1): the mempool endpoint
+// first, then Esplora's. Returns { fee, source } — source is
+// 'mempool' (the /api/v1/fees/recommended economyFee) or
+// 'esplora' (the 6-block rate from /api/fee-estimates, falling
+// back to the cheapest rate if the 6-block target is missing).
+// Throws with an informative message when the node has no usable
+// fee endpoint, so callers can tell "no fee data" from "bad data".
+// The fee-market trigger and the node capability test share this
+// — one rule for what a node's fee reading is.
+async function fetchNodeFee(apiBase) {
+  let res;
+  try {
+    res = await mempoolReq('/api/v1/fees/recommended', 'GET', undefined, apiBase);
+  } catch (e) {
+    throw new Error(e.message);
+  }
+  if (res.status === 200) {
+    let data;
+    try { data = JSON.parse(res.body); } catch { throw new Error('fees/recommended body is not JSON'); }
+    const econ = data && data.economyFee;
+    if (typeof econ === 'number' && Number.isFinite(econ) && econ >= 0) {
+      return { fee: econ, source: 'mempool' };
+    }
+    throw new Error('fees/recommended has no usable economyFee');
+  }
+  if (res.status !== 404) throw new Error('fees/recommended answered HTTP ' + res.status);
+  try {
+    res = await mempoolReq('/api/fee-estimates', 'GET', undefined, apiBase);
+  } catch (e) {
+    throw new Error(e.message);
+  }
+  if (res.status !== 200) throw new Error('no fee endpoint (404 on both)');
+  let data;
+  try { data = JSON.parse(res.body); } catch { throw new Error('fee-estimates body is not JSON'); }
+  const rates = data && Object.values(data).filter((v) => typeof v === 'number' && Number.isFinite(v) && v >= 0);
+  if (!rates || !rates.length) throw new Error('fee-estimates has no usable rates');
+  const six = data && data['6'];
+  const fee = (typeof six === 'number' && Number.isFinite(six) && six >= 0) ? six : Math.min.apply(null, rates);
+  return { fee, source: 'esplora' };
+}
+
+// Fee estimates: the mempool endpoint first, then Esplora's.
+// /api/v1/fees/recommended (mempool) returns the named tiers —
+// a 200 with a usable economyFee is ready. A plain Esplora
+// answers that with 404, so the fallback is /api/fee-estimates,
+// which returns a map of confirmation target to fee rate — a 200
+// with at least one numeric rate is ready. Either shape proves
+// the node can provide fee estimates.
+async function testNodeFees(apiBase) {
+  try {
+    const r = await fetchNodeFee(apiBase);
+    if (r.source === 'mempool') return { ok: true, detail: 'ready (economy ' + r.fee + ' sat/vB)', value: r.fee + ' sat/vB' };
+    return { ok: true, detail: 'ready (Esplora estimates)', value: r.fee + ' sat/vB' };
+  } catch (e) {
+    const msg = e.message || String(e);
+    const value = /no fee endpoint/.test(msg) ? 'no fee endpoint' : /no usable economyFee/.test(msg) ? 'no economy fee' : /no usable rates/.test(msg) ? 'no usable rates' : /not JSON/.test(msg) ? 'not JSON' : msg;
+    return { ok: false, detail: msg, value };
+  }
+}
+
+// Fetch the economy fee from both configured nodes, in parallel
+// (0.8.1): one reading per endpoint, keyed by endpoint label
+// ('primary'/'secondary'). Each reading is { fee, source } on
+// success or { fee: null, error } on failure — a failure on one
+// node never stops the other. Mirrors fetchPriceReadings.
+async function fetchNodeFeeReadings(endpoints) {
+  const jobs = endpoints.map(async (ep) => {
+    try {
+      const r = await fetchNodeFee(ep.base);
+      return { endpoint: ep.label, fee: r.fee, source: r.source, error: null };
+    } catch (e) {
+      return { endpoint: ep.label, fee: null, source: null, error: e.message || String(e) };
+    }
+  });
+  const results = await Promise.all(jobs);
+  const out = {};
+  for (const r of results) out[r.endpoint] = r;
+  return out;
+}
+
+// A fee above this is implausible data, not a market move — the
+// highest economy fee ever observed is orders of magnitude below
+// it, and the fee-market trigger's own threshold caps at the
+// same value (store.js). An implausible reading is ignored, never
+// trusted — like the price trigger's out-of-bounds guard.
+const FEE_IMPLAUSIBLE_SATVB = 10000;
+
+// Combine two fetched fee readings into one effective fee —
+// the PRIMARY node's fee is the one that counts; the secondary
+// is only a fallback when the primary does not answer. No
+// agreement check: the two nodes read the same mempool, and a
+// small difference between them is normal (one may lag a block
+// behind the other) — mode 'dual'. One valid reading is used
+// alone — mode 'single' (the other is unreachable). Neither
+// valid → invalid, mode 'none'. An implausible reading
+// (> FEE_IMPLAUSIBLE_SATVB) is never valid — it is bad data,
+// not a market move, so it is ignored rather than trusted. No
+// 10x-jump guard: fee spikes are real and are exactly what an
+// 'above' rule is for — the guard would block the trigger from
+// doing its job. Returns { valid, fee, mode, note, reason,
+// readings }. Pure — no I/O, so the evaluator, the UI status,
+// and the already-true check all agree on one rule.
+function combineFeeReadings(readings) {
+  const valid = [];
+  const implausible = [];
+  for (const label of Object.keys(readings || {})) {
+    const r = readings[label];
+    if (!r || typeof r.fee !== 'number' || !Number.isFinite(r.fee) || r.fee < 0) continue;
+    if (r.fee > FEE_IMPLAUSIBLE_SATVB) { implausible.push({ label, fee: r.fee }); continue; }
+    valid.push({ label, fee: r.fee, source: r.source });
+  }
+  if (valid.length === 0) {
+    if (implausible.length) {
+      const names = implausible.map((x) => x.label + ' ' + x.fee + ' sat/vB').join('; ');
+      return { valid: false, fee: null, mode: 'none', note: '', reason: 'implausible fee reading (' + names + ') — ignored', readings };
+    }
+    return { valid: false, fee: null, mode: 'none', note: '', reason: 'fee unavailable — will retry', readings };
+  }
+  if (valid.length === 1) {
+    const only = valid[0];
+    const otherLabel = Object.keys(readings || {}).find((label) => label !== only.label) || 'the other node';
+    const other = readings[otherLabel];
+    const otherWhy = (other && other.error) ? 'unreachable' : 'returned invalid data';
+    return { valid: true, fee: only.fee, mode: 'single',
+      note: only.label + ' only — ' + otherLabel + ' ' + otherWhy, reason: '', readings };
+  }
+  const a = valid[0], b = valid[1];
+  const primary = valid.find((v) => v.label === 'primary') || valid[0];
+  const fee = primary.fee;
+  return { valid: true, fee, mode: 'dual',
+    note: a.label + ' ' + a.fee + ' sat/vB · ' + b.label + ' ' + b.fee + ' sat/vB',
+    reason: '', readings };
+}
+
+// Broadcast: POST /api/tx with an invalid hex. Nothing is
+// broadcast — "00" is not a valid transaction, so the node
+// rejects it at parse time before touching the mempool. A live
+// broadcast endpoint answers 400/422 (invalid tx) — and the
+// test stub answers 200 for the same garbage, so 200 counts too.
+// A 404 means the endpoint does not exist; anything else (or a
+// network error) means the broadcast path is not ready. The
+// value on success is "Reachable"; on failure it IS the reason.
+async function testNodeBroadcast(apiBase) {
+  try {
+    const res = await mempoolReq('/api/tx', 'POST', '00', apiBase);
+    if (res.status === 200 || res.status === 400 || res.status === 422) {
+      return { ok: true, detail: 'ready (endpoint live)', value: 'Reachable' };
+    }
+    return { ok: false, detail: 'answered HTTP ' + res.status, value: 'answered HTTP ' + res.status };
+  } catch (e) {
+    return { ok: false, detail: e.message, value: e.message };
   }
 }
 
@@ -1917,9 +2280,13 @@ module.exports = {
   getConfirmations, getTipHeight, findSharedInputs, isArchivedTx, timelockedUntil, computeFee, txIoDetail, scriptPubKeyInfo,
   broadcastViaSlipstream, getSlipstreamTxStatus,
   feePeakFromRates, fetchFeePeak, fetchCurrentFees, feeVerdict, DEFAULT_FEE_RATES_URL,
-  fetchBtcPrice, priceApiBase, DEFAULT_PRICE_API_URL,
+  priceApiBase, DEFAULT_PRICE_API_URL,
   PRICE_PROVIDERS, priceProviderById, priceProviderLabel, fetchPriceFromProvider, PRICE_USER_AGENT,
   fetchPriceReadings, combinePriceReadings, priceConsensus,
+  parseJsonPath, priceFromPath, customPriceProvider,
+  normalizePriceSourceValue, priceSourceKey, resolvePriceSource,
+  fetchNodeFee, fetchNodeFeeReadings, combineFeeReadings, FEE_IMPLAUSIBLE_SATVB,
+  fetchTipHeights, combineTipHeights,
   normalizePublicApiUrl, mempoolBase, endpointsFor,
   DEFAULT_PUBLIC_API_URL, DEFAULT_SECONDARY_API_URL,
   DEFAULT_SLIPSTREAM_API_URL,
