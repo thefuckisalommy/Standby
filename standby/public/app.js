@@ -1595,7 +1595,7 @@
       // The History (0.8.2): the tx's own event trail — added,
       // fired, broadcast, confirmed, stale, failed, edited,
       // armed, disarmed — oldest first, in a collapsible of its
-      // own below Details, collapsed by default. Only transitions
+      // own nested inside Details, collapsed by default. Only transitions
       // are logged, never the hourly release checks. The open state
       // is remembered like Details (txUiState). Hidden entirely
       // when the tx has no history (a hand-edited state — every tx
@@ -1636,7 +1636,7 @@
           tl.appendChild(li);
         });
         histDet.appendChild(tl);
-        row.appendChild(histDet);
+        details.appendChild(histDet);
       }
       var actions = document.createElement('div');
       actions.className = 'tx-actions';
