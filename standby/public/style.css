@@ -495,6 +495,33 @@ details.archived > summary { cursor: pointer; font-size: 18px; font-weight: 700;
    is already block; the condition and the state line are inline
    by default, which ran them together on one row. */
 .tx-trigger span { display: block; }
+/* The rule list (0.8.2): the Add / Edit forms carry a list of
+   rules instead of one trigger picker. The AND/OR toggle picks
+   whether any rule fires or all must hold; each rule is a boxed
+   panel with its own trigger picker and param rows; "+ Add rule"
+   appends a panel (up to 5). The combination line above a
+   multi-rule card's subcards names the mode ("Fires when ANY
+   rule fires"). A per-rule subcard header ("Rule 1 — BTC Price")
+   is NOT uppercased, unlike the single-rule "TRIGGER - TYPE"
+   header above. */
+.rules-label-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 12px 0 4px; }
+.rules-label-row label { margin: 0; }
+.op-toggle { display: flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; flex-shrink: 0; }
+.op-toggle button { border: none; background: #262b35; color: var(--muted); padding: 7px 11px; font-size: 13px; font-weight: 600; border-radius: 0; white-space: nowrap; }
+.op-toggle button.active { background: var(--accent); color: #fff; }
+.op-toggle button:disabled { opacity: 0.5; cursor: default; }
+.op-explain { color: var(--muted); font-size: 13px; margin: 2px 0 0; }
+.rule { background: #14171d; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-top: 10px; }
+.rule-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.rule-head b { font-size: 14px; }
+.rule-remove { background: transparent; border: 1px solid var(--line); color: var(--muted); font-size: 13px; padding: 4px 10px; }
+.rule .guard-note { margin: 10px 0 2px; }
+.rule-manual-note { color: var(--muted); font-size: 14px; margin: 8px 0 2px; }
+.rule-add { width: 100%; margin-top: 10px; }
+.rule-add:disabled { opacity: 0.5; cursor: default; }
+.tx-rules-combo { color: var(--muted); font-size: 13px; margin: 10px 0 0; }
+.tx-rules-combo strong { color: var(--ink); }
+.tx-trigger-k.rule-k { text-transform: none; }
 /* A label/value row inside a card's Details: the label is muted and
    held to a fixed 120px column so the values line up; the value
    takes the rest and wraps inside its own column instead of running

@@ -322,14 +322,14 @@
 
   // Triggers (0.8.0): the rule that fires a transaction. The tx's
   // trigger, normalized — a missing or unusable trigger defaults
+  // Normalize ONE rule: a rule with an unknown shape falls back
   // to the check-in trigger at 35 days, so a legacy tx (written
   // before triggers existed) reads as a check-in rule. There is
   // no global threshold any more: 35 is the per-tx default.
-  // Mirrors lib/store.js triggerOf — the frontend cannot import
+  // Mirrors lib/store.js normalizeRule — the frontend cannot import
   // that module, so the normalization is duplicated here (same
   // pattern as the feeVerdict mirror).
-  function triggerOf(tx) {
-    var t = tx && tx.trigger;
+  function normalizeRule(t) {
     if (!t || typeof t !== 'object') return { type: 'checkin', params: { thresholdDays: 35 } };
     var p = (t.params && typeof t.params === 'object') ? t.params : {};
     if (t.type === 'checkin') {
@@ -354,6 +354,69 @@
       return { type: 'feemarket', params: { maxFeeRate: p.maxFeeRate, direction: p.direction === 'above' ? 'above' : 'below' } };
     }
     return { type: 'checkin', params: { thresholdDays: 35 } };
+  }
+  // (0.8.2) A transaction now carries a rule SET, not one
+  // trigger: {op: 'AND'|'OR', rules: [...]}. The server still
+  // serves a one-rule set as its single rule with a flat
+  // triggerState (legacy shape), so the set normalizer accepts
+  // both shapes on read and always returns the set shape.
+  function triggerSetOf(tx) {
+    var t = tx && tx.trigger;
+    if (t && typeof t === 'object' && Array.isArray(t.rules)) {
+      var rs = t.rules.map(function (r) { return normalizeRule(r); });
+      if (!rs.length) rs = [{ type: 'checkin', params: { thresholdDays: 35 } }];
+      return { op: t.op === 'AND' ? 'AND' : 'OR', rules: rs };
+    }
+    return { op: 'OR', rules: [normalizeRule(t)] };
+  }
+  // The per-rule triggerState slices, parallel to the rules.
+  // The server serves a flat slice for a one-rule set, and one
+  // ruleset object for a multi-rule set — its per-rule slices
+  // live under .rules (see server.js triggerStatusFor). A
+  // one-rule set served as an array (the old interim shape)
+  // reads the same way. Missing slices read as {}.
+  function triggerStatesOf(tx) {
+    var set = triggerSetOf(tx);
+    var ts = tx && tx.triggerStatus;
+    if (Array.isArray(ts)) {
+      return set.rules.map(function (r, i) { return (ts[i] && typeof ts[i] === 'object') ? ts[i] : {}; });
+    }
+    if (ts && typeof ts === 'object') {
+      if (Array.isArray(ts.rules)) {
+        return set.rules.map(function (r, i) { return (ts.rules[i] && typeof ts.rules[i] === 'object') ? ts.rules[i] : {}; });
+      }
+      return set.rules.map(function (r, i) { return i === 0 ? ts : {}; });
+    }
+    return set.rules.map(function () { return {}; });
+  }
+  // Whether any rule in the set has this type.
+  function hasRuleType(tx, type) {
+    return triggerSetOf(tx).rules.some(function (r) { return r.type === type; });
+  }
+  // The smallest check-in threshold in a rule set, or null when
+  // the set has no check-in rule — the danger-zone reset and
+  // the arming warning measure against the soonest rule.
+  function minSetCheckinThreshold(set) {
+    var ths = (set.rules || []).filter(function (r) { return r.type === 'checkin'; }).map(function (r) { return r.params.thresholdDays; });
+    return ths.length ? Math.min.apply(null, ths) : null;
+  }
+  function minCheckinThreshold(tx) {
+    return minSetCheckinThreshold(triggerSetOf(tx));
+  }
+  // The set's condition in plain words — the per-rule
+  // conditions joined with AND / OR. A one-rule set reads
+  // exactly like the single rule (identical to 0.8.1); for
+  // later rules the "Fires when/on" prefix is dropped, so a
+  // two-rule set reads "Fires when BTC price ≥ $150,000 OR the
+  // chain reaches block 1,000,000".
+  function triggerSetCondition(tx) {
+    var set = triggerSetOf(tx);
+    var parts = set.rules.map(function (r) { return triggerCondition(r); });
+    if (parts.length <= 1) return parts[0] || '';
+    var joiner = set.op === 'AND' ? ' AND ' : ' OR ';
+    return parts.map(function (p, i) {
+      return i === 0 ? p : p.replace(/^Fires (when|on) /, '');
+    }).join(joiner);
   }
   // The pill text for a trigger type ("Check-in", "BTC Price",
   // "UTXO", "Manual", "Block height", "Set date", "Fee market") —
@@ -429,16 +492,6 @@
     if (confs === 1) return 'Guard: only a confirmed spend fires — an unconfirmed (mempool) spend only watches until it confirms.';
     return 'Guard: fires once the spend has ' + confs + ' confirmations — an unconfirmed (mempool) spend only watches until it confirms.';
   }
-  // Read the confirmation mode from a trigger picker ('btc' for
-  // the Add form, 'edit' for the Edit popup). Returns 0 for
-  // unconfirmed, N (1..100) for confirmed, or null when the
-  // confirmations field is not a usable number.
-  function utxoConfsFromForm(prefix) {
-    if ($(prefix + '-trigger-utxo-mode').value === 'unconfirmed') return 0;
-    var n = parseInt($(prefix + '-trigger-utxo-confs').value, 10);
-    if (!isFinite(n) || n < 1 || n > 100) return null;
-    return n;
-  }
   // Convert an ISO UTC string to a datetime-local input value
   // (local time, YYYY-MM-DDTHH:MM) — the Edit popup's set-date
   // field. Returns '' for an unparseable input.
@@ -512,7 +565,7 @@
     // The one exception is a fresh install with no
     // transactions at all: the card stays visible so the clock
     // can be started before the first rule exists.
-    var anyCheckinActive = (S.bitcoin.txs || []).some(function (t) { return triggerOf(t).type === 'checkin' && !txStatus(t).settled && !txStatus(t).pending; });
+    var anyCheckinActive = (S.bitcoin.txs || []).some(function (t) { return hasRuleType(t, 'checkin') && !txStatus(t).settled && !txStatus(t).pending; });
     var showCheckin = anyCheckinActive || !(S.bitcoin.txs || []).length;
     $('checkin-card').style.display = showCheckin ? '' : 'none';
     var pill = $('status-pill');
@@ -555,20 +608,35 @@
       // Settled / pending txs get no bar here either — same
       // rule as the server (txStatus is the authority). A
       // disarmed tx keeps a frozen bar here too.
-      bars = (S.bitcoin.txs || []).filter(function (t) { return triggerOf(t).type === 'checkin' && !txStatus(t).settled && !txStatus(t).pending; })
-        .map(function (t) {
-          var ts = t.triggerStatus || {};
-          var th = triggerOf(t).params.thresholdDays;
-          return {
-            id: t.id, label: t.label || '',
+      // One entry per check-in RULE (a tx with two check-in
+      // rules gets two bars), each at its own threshold, from
+      // that rule's triggerState slice — the same shape the
+      // server sends in status.checkinTxs.
+      bars = [];
+      (S.bitcoin.txs || []).forEach(function (t) {
+        if (txStatus(t).settled || txStatus(t).pending) return;
+        var bset = triggerSetOf(t);
+        var bstates = triggerStatesOf(t);
+        bset.rules.forEach(function (rule, i) {
+          if (rule.type !== 'checkin') return;
+          var ts = bstates[i] || {};
+          var th = rule.params.thresholdDays;
+          bars.push({
+            id: t.id, label: t.label || '', ruleIndex: i,
             thresholdDays: th,
             daysSince: (typeof ts.daysSince === 'number') ? ts.daysSince : 0,
             windowDays: (typeof ts.windowDays === 'number' && ts.windowDays > 0) ? ts.windowDays : th,
             nextDue: ts.nextDue || null, state: ts.status || 'not-started',
             enabled: !!t.enabled,
-          };
+          });
         });
+      });
     }
+    // A tx with two check-in rules sends two bars with the same
+    // label — tell them apart by rule number, matching the
+    // "Rule N" headers on the tx card.
+    var barsById = {};
+    bars.forEach(function (b) { barsById[b.id] = (barsById[b.id] || 0) + 1; });
     bars.forEach(function (b) {
       var daysSince = b.daysSince || 0;
       var windowDays = (typeof b.windowDays === 'number' && b.windowDays > 0) ? b.windowDays : (b.thresholdDays || 35);
@@ -577,7 +645,7 @@
       block.className = 'ck-tx' + (frozen ? ' frozen' : '');
       var label = document.createElement('div');
       label.className = 'ck-tx-label';
-      label.textContent = b.label || 'Untitled transaction';
+      label.textContent = (b.label || 'Untitled transaction') + ((barsById[b.id] || 0) > 1 && typeof b.ruleIndex === 'number' ? ' \u2014 Rule ' + (b.ruleIndex + 1) : '');
       block.appendChild(label);
       var bar = document.createElement('div');
       bar.className = 'progress';
@@ -651,7 +719,7 @@
         // readiness list stays one row per rule. The live current
         // value is not repeated here; it lives on the tx card's
         // third row and in the Exchange / Node Status sections.
-        stateLine.textContent = triggerCondition(triggerOf(t));
+        stateLine.textContent = triggerSetCondition(t);
         item.appendChild(stateLine);
         txsEl.appendChild(item);
       });
@@ -679,7 +747,7 @@
     // never inside the label span, and never the error reason;
     // that detail lives in the Settings card only. The pill
     // stays pinned to the right edge, with the Node pills.
-    var hasPriceTx = (S.bitcoin.txs || []).some(function (t) { return triggerOf(t).type === 'price'; });
+    var hasPriceTx = (S.bitcoin.txs || []).some(function (t) { return hasRuleType(t, 'price'); });
     var exItem = $('readiness-exchange-item');
     if (exItem) exItem.style.display = hasPriceTx ? '' : 'none';
     if (hasPriceTx) {
@@ -789,7 +857,6 @@
     var m = $('add-modal');
     if (!m) return;
     setMsg($('btc-msg'), '', true);
-    syncAddTriggerRow();
     syncAddFallbackRow();
     m.classList.add('open');
     var hex = $('btc-hex');
@@ -870,7 +937,7 @@
     if (!submittedAt) return '(No automatic fallback)';
     var deadline = new Date(submittedAt).getTime() + days * 86400000;
     var left = Math.ceil((deadline - Date.now()) / 86400000);
-    if (left <= 0) return '(fallback due \u2014 broadcasts publicly on the next hourly check)';
+    if (left <= 0) return '(fallback due \u2014 broadcasts publicly on the next check)';
     return '(' + left + (left === 1 ? ' day' : ' days') + ' left before fallback)';
   }
   var txCardEls = {}; // tx id -> { row, sentLine }: the rendered card, so the confirmations poll can update the sent line in place
@@ -1026,7 +1093,7 @@
       // as two rows.
       return 'Submitted to Slipstream (MARA) ' + fmtDate(rel.submittedAt) + ' — waiting for MARA to mine it.';
     }
-    return 'Failed — ' + (rel.error || 'unknown error') + '. Will retry on the next hourly check.';
+    return 'Failed — ' + (rel.error || 'unknown error') + '. Will retry automatically, at most once an hour.';
   }
 
   // The overall status of one transaction, shown as a pill at the
@@ -1085,8 +1152,7 @@
   // nothing to pause is not worth a card.
   function graceHoldsTx(tx) {
     if (!graceActive() || !tx || !tx.enabled) return false;
-    var type = triggerOf(tx).type;
-    if (type !== 'price' && type !== 'utxo') return false;
+    if (!hasRuleType(tx, 'price') && !hasRuleType(tx, 'utxo')) return false;
     var st = txStatus(tx);
     return !st.settled && !st.pending;
   }
@@ -1250,8 +1316,7 @@
     // state line, the trigger condition + current value, is
     // unchanged, because the grace does not change the rule.)
     if (graceActive()) {
-      var gt = triggerOf(tx).type;
-      if (gt === 'price' || gt === 'utxo') return { label: 'Grace', cls: 'warn', settled: false, pending: false };
+      if (hasRuleType(tx, 'price') || hasRuleType(tx, 'utxo')) return { label: 'Grace', cls: 'warn', settled: false, pending: false };
     }
     return { label: 'Ready', cls: 'ok', settled: false, pending: false };
   }
@@ -1385,22 +1450,39 @@
       // current state/value for that trigger. No extra detail and
       // no source breakdown here — the source detail lives in
       // the Exchange Status section and the dry-run notes.
-      var trig = triggerOf(tx);
-      var trigBox = document.createElement('div');
-      trigBox.className = 'tx-trigger';
-      var trigK = document.createElement('span');
-      trigK.className = 'tx-trigger-k';
-      trigK.textContent = 'TRIGGER - ' + triggerLabel(trig).toUpperCase();
-      trigBox.appendChild(trigK);
-      var trigCond = document.createElement('span');
-      trigCond.textContent = triggerCondition(trig);
-      trigBox.appendChild(trigCond);
-      var ts = tx.triggerStatus || null;
-      var trigNow = document.createElement('span');
-      trigNow.className = 'now';
-      trigNow.textContent = triggerStateLine(trig, ts);
-      trigBox.appendChild(trigNow);
-      row.appendChild(trigBox);
+      // (0.8.2) One subcard per rule. A one-rule set renders
+      // exactly the 0.8.1 subcard ("TRIGGER - <TYPE>", 3 rows);
+      // a multi-rule set gets the combination line ("Fires when
+      // ANY rule fires" / "Fires when ALL rules hold") and one
+      // 3-row subcard per rule ("Rule N — <Type>").
+      var ruleSet = triggerSetOf(tx);
+      var ruleStates = triggerStatesOf(tx);
+      if (ruleSet.rules.length > 1) {
+        var combo = document.createElement('div');
+        combo.className = 'tx-rules-combo';
+        combo.appendChild(document.createElement('span')).textContent = 'Fires when ';
+        var comboOp = document.createElement('strong');
+        comboOp.textContent = ruleSet.op === 'AND' ? 'ALL' : 'ANY';
+        combo.appendChild(comboOp);
+        combo.appendChild(document.createElement('span')).textContent = ruleSet.op === 'AND' ? ' rules hold' : ' rule fires';
+        row.appendChild(combo);
+      }
+      ruleSet.rules.forEach(function (rule, ri) {
+        var trigBox = document.createElement('div');
+        trigBox.className = 'tx-trigger';
+        var trigK = document.createElement('span');
+        trigK.className = ruleSet.rules.length > 1 ? 'tx-trigger-k rule-k' : 'tx-trigger-k';
+        trigK.textContent = ruleSet.rules.length > 1 ? 'Rule ' + (ri + 1) + ' \u2014 ' + triggerLabel(rule) : 'TRIGGER - ' + triggerLabel(rule).toUpperCase();
+        trigBox.appendChild(trigK);
+        var trigCond = document.createElement('span');
+        trigCond.textContent = triggerCondition(rule);
+        trigBox.appendChild(trigCond);
+        var trigNow = document.createElement('span');
+        trigNow.className = 'now';
+        trigNow.textContent = triggerStateLine(rule, ruleStates[ri] || {});
+        trigBox.appendChild(trigNow);
+        row.appendChild(trigBox);
+      });
       // The Details — collapsed by default on every card (round 12:
       // Ryan decided all cards start collapsed). Everything but the
       // title, status, amount, and actions lives here, one
@@ -1596,7 +1678,7 @@
       // fired, broadcast, confirmed, stale, failed, edited,
       // armed, disarmed — oldest first, in a collapsible of its
       // own nested inside Details, collapsed by default. Only transitions
-      // are logged, never the hourly release checks. The open state
+      // are logged, never the routine release evaluations. The open state
       // is remembered like Details (txUiState). Hidden entirely
       // when the tx has no history (a hand-edited state — every tx
       // the app writes carries at least the 'added' event).
@@ -1798,7 +1880,8 @@
     // it never warns — and the zone is measured against the
     // rule's OWN threshold, not the global one.
     var armTx = (S.bitcoin.txs || []).find(function (t) { return t.id === id; });
-    var dz = (enabled && armTx && triggerOf(armTx).type === 'checkin') ? dangerZone(triggerOf(armTx).params.thresholdDays, liveOffsetMs(armTx)) : null;
+    var armTh = (enabled && armTx) ? minCheckinThreshold(armTx) : null;
+    var dz = (armTh !== null) ? dangerZone(armTh, liveOffsetMs(armTx)) : null;
     if (dz) {
       showConfirm('Reset your check-in?',
         dz.overdue
@@ -1932,30 +2015,12 @@
     // the transaction. An Active tx has no deadline yet, and a
     // settled tx has no fallback at all, so neither shows it.
     $('edit-fallback-note').style.display = (stEdit.pending && tx.broadcastVia === 'slipstream') ? '' : 'none';
-    // The trigger picker (0.8.0) follows the transaction being
-    // edited — its type, and its fields. A locked tx keeps its
-    // rule: the picker is disabled with the hex and route, since
-    // the rule has already fired (the server enforces the same).
-    var trig = triggerOf(tx);
-    $('edit-trigger').value = trig.type;
-    $('edit-trigger-threshold').value = trig.type === 'checkin' ? String(trig.params.thresholdDays) : '35';
-    $('edit-trigger-op').value = trig.type === 'price' ? trig.params.op : '>=';
-    $('edit-trigger-value').value = trig.type === 'price' ? String(trig.params.value) : '';
-    $('edit-trigger-outpoint').value = trig.type === 'utxo' ? trig.params.outpoint : '';
-    $('edit-trigger-blockheight').value = trig.type === 'blockheight' ? String(trig.params.targetHeight) : '';
-    // The set-date field is a datetime-local input (local time,
-    // YYYY-MM-DDTHH:MM) — the stored fireAt is an ISO UTC string,
-    // so it is converted to local time for the picker.
-    $('edit-trigger-setdate').value = trig.type === 'setdate' ? isoToLocalDatetime(trig.params.fireAt) : '';
-    $('edit-trigger-feemarket').value = trig.type === 'feemarket' ? String(trig.params.maxFeeRate) : '';
-    $('edit-trigger-feemarket-dir').value = trig.type === 'feemarket' && trig.params.direction === 'above' ? 'above' : 'below';
-    // The UTXO confirmation mode follows the rule being edited:
-    // unconfirmed (0) or N confirmations. A non-UTXO rule (or a
-    // legacy one with no confirmations) resets to confirmed / 1.
-    var uconfs = trig.type === 'utxo' ? ((trig.params.confirmations === 0) ? 0 : (trig.params.confirmations || 1)) : 1;
-    $('edit-trigger-utxo-mode').value = (trig.type === 'utxo' && uconfs === 0) ? 'unconfirmed' : 'confirmed';
-    $('edit-trigger-utxo-confs').value = String(uconfs === 0 ? 1 : uconfs);
-    syncEditTriggerRow();
+    // The rule list (0.8.2) follows the transaction being
+    // edited — its op, and its rules, each panel filled from
+    // its rule. A locked tx keeps its rules: the list is
+    // disabled with the hex and route, since the rules have
+    // already fired (the server enforces the same).
+    resetRuleList('edit', triggerSetOf(tx));
     // A locked tx (Pending or Archived) may change only its label
     // and notes: the hex box, the route selector and the Import
     // button are disabled (import would only populate a hex that
@@ -1970,14 +2035,7 @@
     // The trigger is locked with the hex and route: the rule has
     // already fired, so the picker and its fields are disabled
     // with them.
-    $('edit-trigger').disabled = locked;
-    $('edit-trigger').title = locked ? 'The trigger cannot be changed once the transaction has been broadcast' : '';
-    $('edit-trigger-threshold').disabled = locked;
-    $('edit-trigger-op').disabled = locked;
-    $('edit-trigger-value').disabled = locked;
-    $('edit-trigger-outpoint').disabled = locked;
-    $('edit-trigger-utxo-mode').disabled = locked;
-    $('edit-trigger-utxo-confs').disabled = locked;
+    setRuleListLocked('edit', locked);
     $('edit-locked-note').style.display = locked ? '' : 'none';
     $('edit-form-title').textContent = !locked ? 'Edit transaction'
       : stEdit.settled ? 'Edit transaction — label and notes only'
@@ -1996,29 +2054,15 @@
     $('edit-fallback').value = '';
     $('edit-fallback-row').style.display = 'none';
     $('edit-fallback-note').style.display = 'none';
-    // (0.8.0) Reset the trigger picker to the check-in default.
-    $('edit-trigger').value = 'checkin';
-    $('edit-trigger-threshold').value = '35';
-    $('edit-trigger-op').value = '>=';
-    $('edit-trigger-value').value = '';
-    $('edit-trigger-outpoint').value = '';
-    $('edit-trigger-utxo-mode').value = 'confirmed';
-    $('edit-trigger-utxo-confs').value = '1';
-    syncEditTriggerRow();
+    // (0.8.2) Reset the rule list to one default check-in rule.
+    resetRuleList('edit');
     // Re-enable the fields a locked edit disabled.
     $('edit-hex').disabled = false;
     $('edit-hex').title = '';
     $('edit-route').disabled = false;
     $('edit-route').title = '';
     $('btn-edit-import-file').disabled = false;
-    $('edit-trigger').disabled = false;
-    $('edit-trigger').title = '';
-    $('edit-trigger-threshold').disabled = false;
-    $('edit-trigger-op').disabled = false;
-    $('edit-trigger-value').disabled = false;
-    $('edit-trigger-outpoint').disabled = false;
-    $('edit-trigger-utxo-mode').disabled = false;
-    $('edit-trigger-utxo-confs').disabled = false;
+    setRuleListLocked('edit', false);
     $('edit-locked-note').style.display = 'none';
     $('edit-form-title').textContent = 'Edit transaction';
     $('edit-msg').textContent = '';
@@ -2036,76 +2080,365 @@
   $('edit-route').addEventListener('change', function () {
     $('edit-fallback-row').style.display = $('edit-route').value === 'slipstream' ? '' : 'none';
   });
-  // The trigger picker in the Edit popup (0.8.0): the fields
-  // follow the type, exactly like the Add form's picker — the
-  // check-in days input, the price op + value, the UTXO outpoint,
-  // nothing for manual. The guard note under the price row names
-  // the two-source agreement guard (above or below, per the op).
-  // The UTXO guard note follows the confirmation mode, and the
-  // confirmations row shows only in confirmed mode.
-  function syncEditTriggerRow() {
-    var v = $('edit-trigger').value;
-    $('edit-trigger-checkin-row').style.display = v === 'checkin' ? '' : 'none';
-    $('edit-trigger-price-row').style.display = v === 'price' ? '' : 'none';
-    $('edit-trigger-utxo-row').style.display = v === 'utxo' ? '' : 'none';
-    $('edit-trigger-blockheight-row').style.display = v === 'blockheight' ? '' : 'none';
-    $('edit-trigger-setdate-row').style.display = v === 'setdate' ? '' : 'none';
-    $('edit-trigger-feemarket-row').style.display = v === 'feemarket' ? '' : 'none';
-    if (v === 'price') {
-      $('edit-trigger-price-note').textContent = 'Guard: the two price sources must agree within your price-agreement setting — the primary price source decides.';
-    }
-    if (v === 'utxo') syncEditUtxoNote();
+  // ---------- rule lists (0.8.2) ----------
+  // The Add / Edit forms carry a LIST of rules instead of one
+  // trigger picker: an AND/OR toggle, one boxed panel per rule
+  // (each with the same trigger picker and param rows the
+  // single picker had), and a full-width "+ Add rule" button.
+  // Panels are built in JS and held by reference — a panel
+  // field is never re-queried by id after creation.
+  var MAX_RULES_PER_TX = 5;
+  var TRIGGER_TYPE_OPTIONS = [
+    { value: 'checkin', label: 'Check-in — fire after days of silence' },
+    { value: 'price', label: 'BTC price' },
+    { value: 'utxo', label: 'UTXO moved' },
+    { value: 'blockheight', label: 'Block height' },
+    { value: 'setdate', label: 'Set date' },
+    { value: 'feemarket', label: 'Fee market' },
+    { value: 'manual', label: 'Manual only — no trigger' },
+  ];
+  var ruleLists = { btc: { op: 'OR', panels: [], nextIdx: 0 }, edit: { op: 'OR', panels: [], nextIdx: 0 } };
+  function mkEl(tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined && text !== null) e.textContent = text;
+    return e;
   }
-  function syncEditUtxoNote() {
-    var mode = $('edit-trigger-utxo-mode').value;
-    $('edit-trigger-utxo-confs-row').style.display = mode === 'confirmed' ? '' : 'none';
-    var n = parseInt($('edit-trigger-utxo-confs').value, 10);
+  function mkOption(value, label, selected) {
+    var o = document.createElement('option');
+    o.value = value;
+    o.textContent = label;
+    if (selected) o.selected = true;
+    return o;
+  }
+  function fieldLabel(forId, text) {
+    var l = document.createElement('label');
+    l.htmlFor = forId;
+    l.textContent = text;
+    return l;
+  }
+  function inlineUnit(children) {
+    var d = mkEl('div', 'inline-unit');
+    children.forEach(function (c) { d.appendChild(c); });
+    return d;
+  }
+  // One rule panel: the trigger picker + the param rows for
+  // every type (only the picked type's rows show). The field
+  // ids follow the old static ids with the panel index in the
+  // middle (btc-rule-0-trigger, ...), so a real browser's
+  // labels still resolve; the code itself only ever uses the
+  // returned references.
+  function buildRulePanel(prefix, idx, rule) {
+    var pfx = prefix + '-rule-' + idx;
+    var panel = { root: null, titleEl: null, typeSel: null, rows: {}, f: {}, removeBtn: null };
+    var root = mkEl('div', 'rule');
+    root.id = pfx;
+    panel.root = root;
+    var head = mkEl('div', 'rule-head');
+    var title = mkEl('b', null, 'Rule ' + (idx + 1));
+    panel.titleEl = title;
+    head.appendChild(title);
+    var rm = mkEl('button', 'rule-remove', '\u00d7 Remove');
+    rm.type = 'button';
+    rm.addEventListener('click', function () { removeRulePanel(prefix, panel); });
+    panel.removeBtn = rm;
+    head.appendChild(rm);
+    root.appendChild(head);
+    var lab = fieldLabel(pfx + '-trigger', 'Trigger');
+    root.appendChild(lab);
+    var sel = document.createElement('select');
+    sel.id = pfx + '-trigger';
+    TRIGGER_TYPE_OPTIONS.forEach(function (o) { sel.appendChild(mkOption(o.value, o.label, o.value === rule.type)); });
+    sel.value = rule.type;
+    sel.addEventListener('change', function () { syncRulePanel(panel); });
+    panel.typeSel = sel;
+    root.appendChild(sel);
+    // Check-in row.
+    var rCheckin = mkEl('div');
+    rCheckin.id = pfx + '-trigger-checkin-row';
+    rCheckin.appendChild(fieldLabel(pfx + '-threshold', 'Days of silence'));
+    var th = document.createElement('input');
+    th.type = 'number'; th.id = pfx + '-threshold'; th.min = '1'; th.max = '3650'; th.value = '35';
+    rCheckin.appendChild(inlineUnit([th, mkEl('span', null, 'days')]));
+    panel.f.threshold = th;
+    panel.rows.checkin = rCheckin;
+    root.appendChild(rCheckin);
+    // Price row.
+    var rPrice = mkEl('div');
+    rPrice.id = pfx + '-trigger-price-row';
+    rPrice.appendChild(fieldLabel(pfx + '-value', 'BTC price'));
+    var opSel = document.createElement('select');
+    opSel.id = pfx + '-op'; opSel.style.flex = '0 0 auto';
+    opSel.appendChild(mkOption('>=', '\u2265', true));
+    opSel.appendChild(mkOption('<=', '\u2264', false));
+    opSel.value = '>=';
+    var val = document.createElement('input');
+    val.type = 'number'; val.id = pfx + '-value'; val.min = '1'; val.step = 'any'; val.placeholder = '150000';
+    rPrice.appendChild(inlineUnit([opSel, mkEl('span', null, '$'), val]));
+    var priceNote = mkEl('p', 'guard-note', 'Guard: the two price sources must agree within your price-agreement setting \u2014 the primary price source decides.');
+    priceNote.id = pfx + '-trigger-price-note';
+    rPrice.appendChild(priceNote);
+    panel.f.op = opSel; panel.f.value = val; panel.f.priceNote = priceNote;
+    panel.rows.price = rPrice;
+    root.appendChild(rPrice);
+    // UTXO row.
+    var rUtxo = mkEl('div');
+    rUtxo.id = pfx + '-trigger-utxo-row';
+    rUtxo.appendChild(fieldLabel(pfx + '-outpoint', 'UTXO (txid:vout)'));
+    var out = document.createElement('input');
+    out.type = 'text'; out.id = pfx + '-outpoint'; out.placeholder = 'f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16:0'; out.spellcheck = false;
+    rUtxo.appendChild(out);
+    rUtxo.appendChild(fieldLabel(pfx + '-utxo-mode', 'Fire on'));
+    var mode = document.createElement('select');
+    mode.id = pfx + '-utxo-mode';
+    mode.appendChild(mkOption('confirmed', 'Confirmed \u2014 N confirmations', true));
+    mode.appendChild(mkOption('unconfirmed', 'Unconfirmed (in mempool)', false));
+    mode.value = 'confirmed';
+    mode.addEventListener('change', function () { syncRuleUtxoNote(panel); });
+    rUtxo.appendChild(mode);
+    var confsRow = mkEl('div');
+    confsRow.id = pfx + '-trigger-utxo-confs-row';
+    confsRow.appendChild(fieldLabel(pfx + '-utxo-confs', 'Fire after'));
+    var confs = document.createElement('input');
+    confs.type = 'number'; confs.id = pfx + '-utxo-confs'; confs.min = '1'; confs.max = '100'; confs.value = '1';
+    confs.addEventListener('input', function () { syncRuleUtxoNote(panel); });
+    confsRow.appendChild(inlineUnit([confs, mkEl('span', null, 'confirmations')]));
+    rUtxo.appendChild(confsRow);
+    var utxoNote = mkEl('p', 'guard-note', 'Guard: only a confirmed spend fires \u2014 an unconfirmed (mempool) spend only watches until it confirms.');
+    utxoNote.id = pfx + '-trigger-utxo-note';
+    rUtxo.appendChild(utxoNote);
+    panel.f.outpoint = out; panel.f.utxoMode = mode; panel.f.utxoConfs = confs; panel.f.utxoConfsRow = confsRow; panel.f.utxoNote = utxoNote;
+    panel.rows.utxo = rUtxo;
+    root.appendChild(rUtxo);
+    // Block-height row.
+    var rBh = mkEl('div');
+    rBh.id = pfx + '-trigger-blockheight-row';
+    rBh.appendChild(fieldLabel(pfx + '-blockheight', 'Block height'));
+    var bh = document.createElement('input');
+    bh.type = 'number'; bh.id = pfx + '-blockheight'; bh.min = '1'; bh.max = '10000000'; bh.placeholder = '1000000';
+    rBh.appendChild(inlineUnit([bh, mkEl('span', null, 'block')]));
+    rBh.appendChild(mkEl('p', 'guard-note', 'Fires when the chain reaches this height \u2014 a reorg can\u2019t un-fire it.'));
+    panel.f.blockheight = bh;
+    panel.rows.blockheight = rBh;
+    root.appendChild(rBh);
+    // Set-date row.
+    var rSd = mkEl('div');
+    rSd.id = pfx + '-trigger-setdate-row';
+    rSd.appendChild(fieldLabel(pfx + '-setdate', 'Date and time'));
+    var sd = document.createElement('input');
+    sd.type = 'datetime-local'; sd.id = pfx + '-setdate';
+    rSd.appendChild(sd);
+    rSd.appendChild(mkEl('p', 'guard-note', 'Fires at this date and time, whether or not you check in.'));
+    panel.f.setdate = sd;
+    panel.rows.setdate = rSd;
+    root.appendChild(rSd);
+    // Fee-market row.
+    var rFm = mkEl('div');
+    rFm.id = pfx + '-trigger-feemarket-row';
+    rFm.appendChild(fieldLabel(pfx + '-feemarket-dir', 'Direction'));
+    var dir = document.createElement('select');
+    dir.id = pfx + '-feemarket-dir';
+    dir.appendChild(mkOption('below', 'Fee falls to or below', true));
+    dir.appendChild(mkOption('above', 'Fee rises to or above', false));
+    dir.value = 'below';
+    rFm.appendChild(dir);
+    rFm.appendChild(fieldLabel(pfx + '-feemarket', 'Economy fee'));
+    var fm = document.createElement('input');
+    fm.type = 'number'; fm.id = pfx + '-feemarket'; fm.min = '0.1'; fm.step = 'any'; fm.placeholder = '5';
+    rFm.appendChild(inlineUnit([fm, mkEl('span', null, 'sat/vB')]));
+    rFm.appendChild(mkEl('p', 'guard-note', 'Fires when the fee crosses this rate in the direction you choose.'));
+    panel.f.feemarketDir = dir; panel.f.feemarket = fm;
+    panel.rows.feemarket = rFm;
+    root.appendChild(rFm);
+    // Manual row.
+    var rManual = mkEl('div');
+    rManual.id = pfx + '-trigger-manual-row';
+    var mNote = mkEl('p', 'rule-manual-note', 'Never fires \u2014 manual only');
+    mNote.id = pfx + '-trigger-manual-note';
+    rManual.appendChild(mNote);
+    panel.f.manualNote = mNote;
+    panel.rows.manual = rManual;
+    root.appendChild(rManual);
+    fillRulePanel(panel, rule);
+    return panel;
+  }
+  // Show only the picked type's rows; the UTXO guard note
+  // follows the confirmation mode.
+  function syncRulePanel(panel) {
+    var v = panel.typeSel.value;
+    panel.rows.checkin.style.display = v === 'checkin' ? '' : 'none';
+    panel.rows.price.style.display = v === 'price' ? '' : 'none';
+    panel.rows.utxo.style.display = v === 'utxo' ? '' : 'none';
+    panel.rows.blockheight.style.display = v === 'blockheight' ? '' : 'none';
+    panel.rows.setdate.style.display = v === 'setdate' ? '' : 'none';
+    panel.rows.feemarket.style.display = v === 'feemarket' ? '' : 'none';
+    panel.rows.manual.style.display = v === 'manual' ? '' : 'none';
+    if (v === 'utxo') syncRuleUtxoNote(panel);
+  }
+  function syncRuleUtxoNote(panel) {
+    var mode = panel.f.utxoMode.value;
+    panel.f.utxoConfsRow.style.display = mode === 'confirmed' ? '' : 'none';
+    var n = parseInt(panel.f.utxoConfs.value, 10);
     if (!isFinite(n) || n < 1) n = 1;
-    $('edit-trigger-utxo-note').textContent = utxoGuardNote(mode, n);
+    panel.f.utxoNote.textContent = utxoGuardNote(mode, n);
   }
-  $('edit-trigger').addEventListener('change', syncEditTriggerRow);
-  $('edit-trigger-op').addEventListener('change', syncEditTriggerRow);
-  $('edit-trigger-utxo-mode').addEventListener('change', syncEditUtxoNote);
-  $('edit-trigger-utxo-confs').addEventListener('input', syncEditUtxoNote);
-  // Read the trigger the Edit popup describes, or null when the
-  // fields are incomplete (the caller shows the error). An empty
-  // price value or outpoint is "not filled in yet", not a trigger.
-  function editTriggerFromForm() {
-    var v = $('edit-trigger').value;
+  // Fill one panel from a rule (the Add form's default and the
+  // Edit form's pre-fill share this).
+  function fillRulePanel(panel, rule) {
+    var f = panel.f;
+    panel.typeSel.value = rule.type;
+    f.threshold.value = rule.type === 'checkin' ? String(rule.params.thresholdDays) : '35';
+    f.op.value = rule.type === 'price' ? rule.params.op : '>=';
+    f.value.value = rule.type === 'price' ? String(rule.params.value) : '';
+    f.outpoint.value = rule.type === 'utxo' ? rule.params.outpoint : '';
+    f.blockheight.value = rule.type === 'blockheight' ? String(rule.params.targetHeight) : '';
+    f.setdate.value = rule.type === 'setdate' ? isoToLocalDatetime(rule.params.fireAt) : '';
+    f.feemarket.value = rule.type === 'feemarket' ? String(rule.params.maxFeeRate) : '';
+    f.feemarketDir.value = rule.type === 'feemarket' && rule.params.direction === 'above' ? 'above' : 'below';
+    var uconfs = rule.type === 'utxo' ? ((rule.params.confirmations === 0) ? 0 : (rule.params.confirmations || 1)) : 1;
+    f.utxoMode.value = (rule.type === 'utxo' && uconfs === 0) ? 'unconfirmed' : 'confirmed';
+    f.utxoConfs.value = String(uconfs === 0 ? 1 : uconfs);
+    syncRulePanel(panel);
+  }
+  function utxoConfsFromPanel(panel) {
+    if (panel.f.utxoMode.value === 'unconfirmed') return 0;
+    var n = parseInt(panel.f.utxoConfs.value, 10);
+    if (!isFinite(n) || n < 1 || n > 100) return null;
+    return n;
+  }
+  // Read the rule one panel describes, or null when its fields
+  // are incomplete (the caller shows the error). An empty
+  // price value or outpoint is "not filled in yet", not a rule.
+  function ruleFromPanel(panel) {
+    var v = panel.typeSel.value;
+    var f = panel.f;
     if (v === 'checkin') {
-      var th = parseInt($('edit-trigger-threshold').value, 10);
+      var th = parseInt(f.threshold.value, 10);
       if (!isFinite(th) || th < 1) return null;
       return { type: 'checkin', params: { thresholdDays: th } };
     }
     if (v === 'price') {
-      var val = parseFloat($('edit-trigger-value').value);
+      var val = parseFloat(f.value.value);
       if (!isFinite(val) || val <= 0) return null;
-      return { type: 'price', params: { asset: 'BTC', op: $('edit-trigger-op').value, value: val } };
+      return { type: 'price', params: { asset: 'BTC', op: f.op.value, value: val } };
     }
     if (v === 'utxo') {
-      var out = $('edit-trigger-outpoint').value.trim();
+      var out = f.outpoint.value.trim();
       if (!/^[0-9a-fA-F]{64}:[0-9]+$/.test(out)) return null;
-      var ecf = utxoConfsFromForm('edit');
+      var ecf = utxoConfsFromPanel(panel);
       if (ecf === null) return null;
       return { type: 'utxo', params: { outpoint: out.toLowerCase(), condition: 'spent', confirmations: ecf } };
     }
     if (v === 'blockheight') {
-      var bh = parseInt($('edit-trigger-blockheight').value, 10);
+      var bh = parseInt(f.blockheight.value, 10);
       if (!isFinite(bh) || bh < 1) return null;
       return { type: 'blockheight', params: { targetHeight: bh } };
     }
     if (v === 'setdate') {
-      var sdv = $('edit-trigger-setdate').value;
+      var sdv = f.setdate.value;
       if (!sdv || !isFinite(Date.parse(sdv))) return null;
       return { type: 'setdate', params: { fireAt: new Date(Date.parse(sdv)).toISOString() } };
     }
     if (v === 'feemarket') {
-      var fm = parseFloat($('edit-trigger-feemarket').value);
+      var fm = parseFloat(f.feemarket.value);
       if (!isFinite(fm) || fm <= 0) return null;
-      return { type: 'feemarket', params: { maxFeeRate: fm, direction: $('edit-trigger-feemarket-dir').value === 'above' ? 'above' : 'below' } };
+      return { type: 'feemarket', params: { maxFeeRate: fm, direction: f.feemarketDir.value === 'above' ? 'above' : 'below' } };
     }
     return { type: 'manual', params: {} };
   }
+  function ruleErrorHint(type) {
+    return type === 'price' ? 'a BTC price above $0.'
+      : type === 'utxo' ? 'an outpoint like txid:vout.'
+      : type === 'blockheight' ? 'a block height above 0.'
+      : type === 'setdate' ? 'a date and time.'
+      : type === 'feemarket' ? 'a fee rate above 0 sat/vB.'
+      : 'a number of days.';
+  }
+  // Read the rule set one form describes, or {set: null,
+  // error} naming the first incomplete rule.
+  function ruleSetFromForm(prefix) {
+    var list = ruleLists[prefix];
+    var rules = [];
+    for (var i = 0; i < list.panels.length; i++) {
+      var r = ruleFromPanel(list.panels[i]);
+      if (!r) return { set: null, error: 'Fill in rule ' + (i + 1) + ': ' + ruleErrorHint(list.panels[i].typeSel.value) };
+      rules.push(r);
+    }
+    if (!rules.length) return { set: null, error: 'Add at least one rule.' };
+    return { set: { op: list.op, rules: rules }, error: null };
+  }
+  function addRulePanel(prefix, rule) {
+    var list = ruleLists[prefix];
+    if (list.panels.length >= MAX_RULES_PER_TX) return null;
+    var panel = buildRulePanel(prefix, list.nextIdx++, rule || { type: 'checkin', params: { thresholdDays: 35 } });
+    list.panels.push(panel);
+    $(prefix + '-rules-list').appendChild(panel.root);
+    syncRuleListChrome(prefix);
+    return panel;
+  }
+  function removeRulePanel(prefix, panel) {
+    var list = ruleLists[prefix];
+    if (list.panels.length <= 1) return;
+    var i = list.panels.indexOf(panel);
+    if (i === -1) return;
+    list.panels.splice(i, 1);
+    $(prefix + '-rules-list').removeChild(panel.root);
+    syncRuleListChrome(prefix);
+  }
+  // The toggle state, the explainer, the Add-rule button and
+  // the cap note all follow the list: the Remove button hides
+  // when a single panel is left (a tx always has a rule), and
+  // at the 5-rule cap the Add button disables and the note
+  // shows.
+  function syncRuleListChrome(prefix) {
+    var list = ruleLists[prefix];
+    list.panels.forEach(function (p, i) {
+      p.titleEl.textContent = 'Rule ' + (i + 1);
+      p.removeBtn.style.display = list.panels.length > 1 ? '' : 'none';
+    });
+    var anyBtn = $(prefix + '-op-any');
+    var allBtn = $(prefix + '-op-all');
+    if (anyBtn) anyBtn.className = list.op === 'OR' ? 'active' : '';
+    if (allBtn) allBtn.className = list.op === 'AND' ? 'active' : '';
+    var ex = $(prefix + '-op-explain');
+    if (ex) ex.textContent = list.op === 'AND' ? 'Fires only when every rule holds at the same moment.' : 'Fires when any rule fires.';
+    var addBtn = $(prefix + '-add-rule');
+    var atCap = list.panels.length >= MAX_RULES_PER_TX;
+    if (addBtn) addBtn.disabled = atCap;
+    var capNote = $(prefix + '-rules-cap-note');
+    if (capNote) capNote.style.display = atCap ? '' : 'none';
+  }
+  function resetRuleList(prefix, set) {
+    var list = ruleLists[prefix];
+    var listEl = $(prefix + '-rules-list');
+    if (listEl) listEl.innerHTML = '';
+    list.panels = [];
+    list.nextIdx = 0;
+    list.op = (set && set.op === 'AND') ? 'AND' : 'OR';
+    var rules = (set && set.rules && set.rules.length) ? set.rules : [{ type: 'checkin', params: { thresholdDays: 35 } }];
+    rules.forEach(function (r) { addRulePanel(prefix, r); });
+    syncRuleListChrome(prefix);
+  }
+  function setRuleListLocked(prefix, locked) {
+    var list = ruleLists[prefix];
+    [$(prefix + '-op-any'), $(prefix + '-op-all'), $(prefix + '-add-rule')].forEach(function (b) { if (b) b.disabled = locked; });
+    list.panels.forEach(function (p) {
+      p.typeSel.disabled = locked;
+      p.typeSel.title = locked ? 'The trigger cannot be changed once the transaction has been broadcast' : '';
+      Object.keys(p.f).forEach(function (k) { p.f[k].disabled = locked; });
+      p.removeBtn.disabled = locked;
+    });
+  }
+  // The toggle and "+ Add rule" wiring, then the boot state:
+  // one default check-in rule in each form.
+  $('btc-op-any').addEventListener('click', function () { ruleLists.btc.op = 'OR'; syncRuleListChrome('btc'); });
+  $('btc-op-all').addEventListener('click', function () { ruleLists.btc.op = 'AND'; syncRuleListChrome('btc'); });
+  $('btc-add-rule').addEventListener('click', function () { addRulePanel('btc'); });
+  $('edit-op-any').addEventListener('click', function () { ruleLists.edit.op = 'OR'; syncRuleListChrome('edit'); });
+  $('edit-op-all').addEventListener('click', function () { ruleLists.edit.op = 'AND'; syncRuleListChrome('edit'); });
+  $('edit-add-rule').addEventListener('click', function () { addRulePanel('edit'); });
+  resetRuleList('btc');
+  resetRuleList('edit');
   var editModalX = $('edit-modal-x');
   if (editModalX) editModalX.addEventListener('click', function () { cancelEdit(); });
   $('edit-modal').addEventListener('click', function (e) {
@@ -2120,16 +2453,18 @@
     if (!editingId) return;
     var hex = $('edit-hex').value.trim();
     if (!hex) { setMsg($('edit-msg'), 'Paste the signed transaction hex first.', false); return; }
-    var trig = editTriggerFromForm();
-    if (!trig) { setMsg($('edit-msg'), 'Fill in the trigger: ' + ($('edit-trigger').value === 'price' ? 'a BTC price above $0.' : $('edit-trigger').value === 'utxo' ? 'an outpoint like txid:vout.' : $('edit-trigger').value === 'blockheight' ? 'a block height above 0.' : $('edit-trigger').value === 'setdate' ? 'a date and time.' : $('edit-trigger').value === 'feemarket' ? 'a fee rate above 0 sat/vB.' : 'a number of days.'), false); return; }
+    var eres = ruleSetFromForm('edit');
+    var trig = eres.set;
+    if (!trig) { setMsg($('edit-msg'), eres.error, false); return; }
+    var saveTitle = trig.rules.length > 1 ? 'Save a rule set that is already satisfied?' : 'Save a rule that is already satisfied?';
     var oldTx0 = (S.bitcoin.txs || []).find(function (t) { return t.id === editingId; });
-    // (0.8.0) A price or UTXO trigger whose condition is already
+    // (0.8.0) A price or UTXO rule whose condition is already
     // satisfied warns first (same guard as the Add form) — but
-    // only when the trigger CHANGED: editing a label on a rule
+    // only when the rule set CHANGED: editing a label on a rule
     // that has already fired must not re-warn. A check-in rule
     // needs no warn on edit — the danger-zone reset only attaches
     // to ARMING, not to editing.
-    var triggerChanged = oldTx0 && (JSON.stringify(triggerOf(oldTx0)) !== JSON.stringify(trig));
+    var triggerChanged = oldTx0 && (JSON.stringify(triggerSetOf(oldTx0)) !== JSON.stringify(trig));
     function doSave(triggerConfirmed) {
       return (async function () {
         try {
@@ -2154,18 +2489,18 @@
           // A gate 400 offers the same confirm instead of a dead
           // error.
           if (e.message && e.message.indexOf('would fire on the next evaluation') !== -1) {
-            showConfirm('Save a rule that is already satisfied?', 'This rule is already satisfied — it would fire on the next evaluation. Save it anyway?', function () { doSave(true); }, 'Save anyway');
+            showConfirm(saveTitle, 'This rule is already satisfied — it would fire on the next evaluation. Save it anyway?', function () { doSave(true); }, 'Save anyway');
             return;
           }
           setMsg($('edit-msg'), e.message, false);
         }
       })();
     }
-    if (triggerChanged && (trig.type === 'price' || trig.type === 'utxo' || trig.type === 'blockheight' || trig.type === 'setdate' || trig.type === 'feemarket')) {
+    if (triggerChanged && trig.rules.some(function (r) { return r.type === 'price' || r.type === 'utxo' || r.type === 'blockheight' || r.type === 'setdate' || r.type === 'feemarket'; })) {
       try {
         var chk = await api('POST', '/api/triggers/check', { trigger: trig });
         if (chk && chk.warning) {
-          showConfirm('Save a rule that is already satisfied?', chk.warning + ' Save it anyway?', function () { doSave(true); }, 'Save anyway');
+          showConfirm(saveTitle, chk.warning + ' Save it anyway?', function () { doSave(true); }, 'Save anyway');
           return;
         }
       } catch (e) { /* the save proceeds — the server gates the price, UTXO, block-height, set-date, and fee-market cases */ }
@@ -2223,85 +2558,18 @@
   }
   $('btc-route').addEventListener('change', syncAddFallbackRow);
   $('btc-fallback').addEventListener('change', syncAddFallbackRow);
-  // The trigger picker in the Add form (0.8.0): the fields follow
-  // the type — the check-in days input, the price op + value, the
-  // UTXO outpoint, nothing for manual. The guard note under the
-  // price row names the two-source agreement guard (above or
-  // below, per the op). The UTXO guard note follows the
-  // confirmation mode, and the confirmations row shows only in
-  // confirmed mode.
-  function syncAddTriggerRow() {
-    var v = $('btc-trigger').value;
-    $('btc-trigger-checkin-row').style.display = v === 'checkin' ? '' : 'none';
-    $('btc-trigger-price-row').style.display = v === 'price' ? '' : 'none';
-    $('btc-trigger-utxo-row').style.display = v === 'utxo' ? '' : 'none';
-    $('btc-trigger-blockheight-row').style.display = v === 'blockheight' ? '' : 'none';
-    $('btc-trigger-setdate-row').style.display = v === 'setdate' ? '' : 'none';
-    $('btc-trigger-feemarket-row').style.display = v === 'feemarket' ? '' : 'none';
-    if (v === 'price') {
-      $('btc-trigger-price-note').textContent = 'Guard: the two price sources must agree within your price-agreement setting — the primary price source decides.';
-    }
-    if (v === 'utxo') syncAddUtxoNote();
-  }
-  function syncAddUtxoNote() {
-    var mode = $('btc-trigger-utxo-mode').value;
-    $('btc-trigger-utxo-confs-row').style.display = mode === 'confirmed' ? '' : 'none';
-    var n = parseInt($('btc-trigger-utxo-confs').value, 10);
-    if (!isFinite(n) || n < 1) n = 1;
-    $('btc-trigger-utxo-note').textContent = utxoGuardNote(mode, n);
-  }
-  $('btc-trigger').addEventListener('change', syncAddTriggerRow);
-  $('btc-trigger-op').addEventListener('change', syncAddTriggerRow);
-  $('btc-trigger-utxo-mode').addEventListener('change', syncAddUtxoNote);
-  $('btc-trigger-utxo-confs').addEventListener('input', syncAddUtxoNote);
-  // Read the trigger the Add form describes, or null when the
-  // fields are incomplete (the caller shows the error). An empty
-  // price value or outpoint is "not filled in yet", not a trigger.
-  function addTriggerFromForm() {
-    var v = $('btc-trigger').value;
-    if (v === 'checkin') {
-      var th = parseInt($('btc-trigger-threshold').value, 10);
-      if (!isFinite(th) || th < 1) return null;
-      return { type: 'checkin', params: { thresholdDays: th } };
-    }
-    if (v === 'price') {
-      var val = parseFloat($('btc-trigger-value').value);
-      if (!isFinite(val) || val <= 0) return null;
-      return { type: 'price', params: { asset: 'BTC', op: $('btc-trigger-op').value, value: val } };
-    }
-    if (v === 'utxo') {
-      var out = $('btc-trigger-outpoint').value.trim();
-      if (!/^[0-9a-fA-F]{64}:[0-9]+$/.test(out)) return null;
-      var cf = utxoConfsFromForm('btc');
-      if (cf === null) return null;
-      return { type: 'utxo', params: { outpoint: out.toLowerCase(), condition: 'spent', confirmations: cf } };
-    }
-    if (v === 'blockheight') {
-      var bh = parseInt($('btc-trigger-blockheight').value, 10);
-      if (!isFinite(bh) || bh < 1) return null;
-      return { type: 'blockheight', params: { targetHeight: bh } };
-    }
-    if (v === 'setdate') {
-      var sdv = $('btc-trigger-setdate').value;
-      if (!sdv || !isFinite(Date.parse(sdv))) return null;
-      return { type: 'setdate', params: { fireAt: new Date(Date.parse(sdv)).toISOString() } };
-    }
-    if (v === 'feemarket') {
-      var fm = parseFloat($('btc-trigger-feemarket').value);
-      if (!isFinite(fm) || fm <= 0) return null;
-      return { type: 'feemarket', params: { maxFeeRate: fm, direction: $('btc-trigger-feemarket-dir').value === 'above' ? 'above' : 'below' } };
-    }
-    return { type: 'manual', params: {} };
-  }
-
   // The Add card is add-only now (0.7.16 amendment): editing lives
   // in the popup, so this button always POSTs a new transaction.
   // After a successful add the form clears, ready for the next one.
   $('btn-btc-add').addEventListener('click', async function () {
     var hex = $('btc-hex').value.trim();
     if (!hex) { setMsg($('btc-msg'), 'Paste the signed transaction hex first.', false); return; }
-    var trig = addTriggerFromForm();
-    if (!trig) { setMsg($('btc-msg'), 'Fill in the trigger: ' + ($('btc-trigger').value === 'price' ? 'a BTC price above $0.' : $('btc-trigger').value === 'utxo' ? 'an outpoint like txid:vout.' : $('btc-trigger').value === 'blockheight' ? 'a block height above 0.' : $('btc-trigger').value === 'setdate' ? 'a date and time.' : $('btc-trigger').value === 'feemarket' ? 'a fee rate above 0 sat/vB.' : 'a number of days.'), false); return; }
+    var res = ruleSetFromForm('btc');
+    var trig = res.set;
+    if (!trig) { setMsg($('btc-msg'), res.error, false); return; }
+    // A multi-rule set that is already satisfied reads "rule
+    // set" in the confirm title; a single rule keeps "rule".
+    var addTitle = trig.rules.length > 1 ? 'Add a rule set that is already satisfied?' : 'Add a rule that is already satisfied?';
     function doAdd(triggerConfirmed) {
       return (async function () {
         try {
@@ -2321,17 +2589,7 @@
           $('btc-hex').value = '';
           $('btc-route').value = 'public';
           $('btc-fallback').value = '';
-          $('btc-trigger').value = 'checkin';
-          $('btc-trigger-threshold').value = '35';
-          $('btc-trigger-value').value = '';
-          $('btc-trigger-outpoint').value = '';
-          $('btc-trigger-utxo-mode').value = 'confirmed';
-          $('btc-trigger-utxo-confs').value = '1';
-          $('btc-trigger-blockheight').value = '';
-          $('btc-trigger-setdate').value = '';
-          $('btc-trigger-feemarket').value = '';
-          $('btc-trigger-feemarket-dir').value = 'below';
-          syncAddTriggerRow();
+          resetRuleList('btc');
           syncAddFallbackRow();
           await load();
         } catch (e) {
@@ -2341,22 +2599,25 @@
           // the check and the add. A gate 400 offers the same
           // confirm instead of a dead error.
           if (e.message && e.message.indexOf('would fire on the next evaluation') !== -1) {
-            showConfirm('Add a rule that is already satisfied?', 'This rule is already satisfied — it would fire on the next evaluation. Add it anyway?', function () { doAdd(true); }, 'Add anyway');
+            showConfirm(addTitle, 'This rule is already satisfied — it would fire on the next evaluation. Add it anyway?', function () { doAdd(true); }, 'Add anyway');
             return;
           }
           setMsg($('btc-msg'), e.message, false);
         }
       })();
     }
-    // (0.7.22, scoped 0.8.0) A new CHECK-IN tx is armed by
-    // default — adding one while the clock is in the danger zone
-    // (the last 25% of ITS window, including already past due)
-    // would let the release fire soon after. Warn first; the
-    // server resets the check-in in that case anyway (a direct API
-    // call cannot bypass it). A price, UTXO, or manual rule never
-    // touches the clock, so it never warns about a reset.
-    if (trig.type === 'checkin') {
-      var dz = dangerZone(trig.params.thresholdDays);
+    // (0.7.22, scoped 0.8.0) A new tx with a CHECK-IN rule is
+    // armed by default — adding one while the clock is in the
+    // danger zone (the last 25% of ITS window, including already
+    // past due) would let the release fire soon after. Warn
+    // first; the server resets the check-in in that case anyway
+    // (a direct API call cannot bypass it). A price, UTXO, or
+    // manual rule never touches the clock, so it never warns
+    // about a reset. The soonest check-in rule measures the
+    // window when the set has more than one.
+    var addCkTh = minSetCheckinThreshold(trig);
+    if (addCkTh !== null) {
+      var dz = dangerZone(addCkTh);
       if (dz) {
         showConfirm('Reset your check-in?',
           dz.overdue
@@ -2376,11 +2637,12 @@
     // height or date, or an already-low fee is never a surprise.
     // Confirming adds it with triggerConfirmed, so the server's
     // already-satisfied gate lets the rule through.
-    if (trig.type === 'price' || trig.type === 'utxo' || trig.type === 'blockheight' || trig.type === 'setdate' || trig.type === 'feemarket') {
+    var addHasLive = trig.rules.some(function (r) { return r.type === 'price' || r.type === 'utxo' || r.type === 'blockheight' || r.type === 'setdate' || r.type === 'feemarket'; });
+    if (addHasLive) {
       try {
         var chk = await api('POST', '/api/triggers/check', { trigger: trig });
         if (chk && chk.warning) {
-          showConfirm('Add a rule that is already satisfied?', chk.warning + ' Add it anyway?', function () { doAdd(true); }, 'Add anyway');
+          showConfirm(addTitle, chk.warning + ' Add it anyway?', function () { doAdd(true); }, 'Add anyway');
           return;
         }
       } catch (e) { /* the add proceeds without the check — the server gates the price, UTXO, block-height, set-date, and fee-market cases */ }
@@ -2791,9 +3053,10 @@
     // (0.8.0) A new check-in rule defaults to 35 days — but
     // only while the Add form is untouched (no hex pasted yet),
     // so a re-render never clobbers a value the owner is
-    // mid-typing.
+    // mid-typing. (0.8.2) The days field lives in the first
+    // rule panel now.
     if (!$('btc-hex').value.trim()) {
-      $('btc-trigger-threshold').value = '35';
+      if (ruleLists.btc.panels.length) ruleLists.btc.panels[0].f.threshold.value = '35';
     }
     // BTC price sources (0.8.0): two provider selects, populated
     // from the provider list the server serves (with a fallback
@@ -3195,7 +3458,7 @@
     },
     cadence: {
       title: 'Check cadence',
-      body: 'How often the fast triggers are checked. Standby evaluates price, UTXO, block-height, set-date, and fee-market triggers every X seconds. Faster catches an unconfirmed spend, a brief price spike, a block height, and a fee move sooner; slower means fewer API calls. The price and fee caches match this interval so a faster cadence fetches fresher readings. Check-in triggers are evaluated once an hour, not by this tick.',
+      body: 'How often every trigger is checked. Standby evaluates all triggers — check-in, price, UTXO, block-height, set-date, and fee-market — together every X seconds. Faster catches an unconfirmed spend, a brief price spike, a block height, and a fee move sooner; slower means fewer API calls. The price and fee caches match this interval so a faster cadence fetches fresher readings.',
       triggers: ['price', 'utxo', 'blockheight', 'setdate', 'feemarket'],
     },
     fee: {

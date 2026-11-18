@@ -412,59 +412,16 @@
     <textarea id="edit-notes" class="plain" style="min-height:56px" placeholder="What is this one for?"></textarea>
     <label for="edit-hex">Signed transaction (hex or PSBT)</label>
     <textarea id="edit-hex" class="plain" style="min-height:120px" placeholder="02000000…" spellcheck="false"></textarea>
-    <label for="edit-trigger">Trigger</label>
-    <select id="edit-trigger">
-      <option value="checkin" selected>Check-in — fire after days of silence</option>
-      <option value="price">BTC price</option>
-      <option value="utxo">UTXO moved</option>
-      <option value="blockheight">Block height</option>
-      <option value="setdate">Set date</option>
-      <option value="feemarket">Fee market</option>
-      <option value="manual">Manual only — no trigger</option>
-    </select>
-    <div id="edit-trigger-checkin-row">
-      <label for="edit-trigger-threshold">Days of silence</label>
-      <div class="inline-unit"><input id="edit-trigger-threshold" type="number" min="1" max="3650" value="35"><span>days</span></div>
-    </div>
-    <div id="edit-trigger-price-row" style="display:none">
-      <label for="edit-trigger-value">BTC price</label>
-      <div class="inline-unit"><select id="edit-trigger-op" style="flex:0 0 auto"><option value=">=" selected>≥</option><option value="<=">≤</option></select><span>$</span><input id="edit-trigger-value" type="number" min="1" step="any" placeholder="150000"></div>
-      <p id="edit-trigger-price-note" class="guard-note">Guard: the two price sources must agree within your price-agreement setting — the primary price source decides.</p>
-    </div>
-    <div id="edit-trigger-utxo-row" style="display:none">
-      <label for="edit-trigger-outpoint">UTXO (txid:vout)</label>
-      <input id="edit-trigger-outpoint" type="text" placeholder="f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16:0" spellcheck="false">
-      <label for="edit-trigger-utxo-mode">Fire on</label>
-      <select id="edit-trigger-utxo-mode">
-        <option value="confirmed" selected>Confirmed — N confirmations</option>
-        <option value="unconfirmed">Unconfirmed (in mempool)</option>
-      </select>
-      <div id="edit-trigger-utxo-confs-row">
-        <label for="edit-trigger-utxo-confs">Fire after</label>
-        <div class="inline-unit"><input id="edit-trigger-utxo-confs" type="number" min="1" max="100" value="1"><span>confirmations</span></div>
+    <div class="rules-label-row">
+      <label>Rules</label>
+      <div class="op-toggle" id="edit-op-toggle">
+        <button type="button" id="edit-op-any" class="active">Any rule fires</button><button type="button" id="edit-op-all">All rules hold</button>
       </div>
-      <p id="edit-trigger-utxo-note" class="guard-note">Guard: only a confirmed spend fires — an unconfirmed (mempool) spend only watches until it confirms.</p>
     </div>
-    <div id="edit-trigger-blockheight-row" style="display:none">
-      <label for="edit-trigger-blockheight">Block height</label>
-      <div class="inline-unit"><input id="edit-trigger-blockheight" type="number" min="1" max="10000000" placeholder="1000000"><span>block</span></div>
-      <p class="guard-note">Fires when the chain reaches this height — a reorg can’t un-fire it.</p>
-    </div>
-    <div id="edit-trigger-setdate-row" style="display:none">
-      <label for="edit-trigger-setdate">Date and time</label>
-      <input id="edit-trigger-setdate" type="datetime-local">
-      <p class="guard-note">Fires at this date and time, whether or not you check in.</p>
-    </div>
-    <div id="edit-trigger-feemarket-row" style="display:none">
-      <label for="edit-trigger-feemarket-dir">Direction</label>
-      <select id="edit-trigger-feemarket-dir">
-        <option value="below" selected>Fee falls to or below</option>
-        <option value="above">Fee rises to or above</option>
-      </select>
-      <label for="edit-trigger-feemarket">Economy fee</label>
-      <div class="inline-unit"><input id="edit-trigger-feemarket" type="number" min="0.1" step="any" placeholder="5"><span>sat/vB</span></div>
-      <p class="guard-note">Fires when the fee crosses this rate in the direction you choose.</p>
-    </div>
+    <p id="edit-op-explain" class="op-explain">Fires when any rule fires.</p>
+    <div id="edit-rules-list"></div>
+    <p><button type="button" id="edit-add-rule" class="rule-add">+ Add rule</button></p>
+    <p id="edit-rules-cap-note" class="muted" style="display:none">Maximum 5 rules per transaction.</p>
     <label for="edit-route">Broadcast via</label>
     <select id="edit-route">
       <option value="public" selected>Public mempool</option>
@@ -512,59 +469,16 @@
     <textarea id="btc-notes" class="plain" style="min-height:56px" placeholder="What is this one for? e.g. Pays the mortgage from the joint wallet; signed Oct 2026, RBF on."></textarea>
     <label for="btc-hex">Signed transaction (hex or PSBT)</label>
     <textarea id="btc-hex" class="plain" style="min-height:120px" placeholder="02000000…" spellcheck="false"></textarea>
-    <label for="btc-trigger">Trigger</label>
-    <select id="btc-trigger">
-      <option value="checkin" selected>Check-in — fire after days of silence</option>
-      <option value="price">BTC price</option>
-      <option value="utxo">UTXO moved</option>
-      <option value="blockheight">Block height</option>
-      <option value="setdate">Set date</option>
-      <option value="feemarket">Fee market</option>
-      <option value="manual">Manual only — no trigger</option>
-    </select>
-    <div id="btc-trigger-checkin-row">
-      <label for="btc-trigger-threshold">Days of silence</label>
-      <div class="inline-unit"><input id="btc-trigger-threshold" type="number" min="1" max="3650" value="35"><span>days</span></div>
-    </div>
-    <div id="btc-trigger-price-row" style="display:none">
-      <label for="btc-trigger-value">BTC price</label>
-      <div class="inline-unit"><select id="btc-trigger-op" style="flex:0 0 auto"><option value=">=" selected>≥</option><option value="<=">≤</option></select><span>$</span><input id="btc-trigger-value" type="number" min="1" step="any" placeholder="150000"></div>
-      <p id="btc-trigger-price-note" class="guard-note">Guard: the two price sources must agree within your price-agreement setting — the primary price source decides.</p>
-    </div>
-    <div id="btc-trigger-utxo-row" style="display:none">
-      <label for="btc-trigger-outpoint">UTXO (txid:vout)</label>
-      <input id="btc-trigger-outpoint" type="text" placeholder="f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16:0" spellcheck="false">
-      <label for="btc-trigger-utxo-mode">Fire on</label>
-      <select id="btc-trigger-utxo-mode">
-        <option value="confirmed" selected>Confirmed — N confirmations</option>
-        <option value="unconfirmed">Unconfirmed (in mempool)</option>
-      </select>
-      <div id="btc-trigger-utxo-confs-row">
-        <label for="btc-trigger-utxo-confs">Fire after</label>
-        <div class="inline-unit"><input id="btc-trigger-utxo-confs" type="number" min="1" max="100" value="1"><span>confirmations</span></div>
+    <div class="rules-label-row">
+      <label>Rules</label>
+      <div class="op-toggle" id="btc-op-toggle">
+        <button type="button" id="btc-op-any" class="active">Any rule fires</button><button type="button" id="btc-op-all">All rules hold</button>
       </div>
-      <p id="btc-trigger-utxo-note" class="guard-note">Guard: only a confirmed spend fires — an unconfirmed (mempool) spend only watches until it confirms.</p>
     </div>
-    <div id="btc-trigger-blockheight-row" style="display:none">
-      <label for="btc-trigger-blockheight">Block height</label>
-      <div class="inline-unit"><input id="btc-trigger-blockheight" type="number" min="1" max="10000000" placeholder="1000000"><span>block</span></div>
-      <p class="guard-note">Fires when the chain reaches this height — a reorg can’t un-fire it.</p>
-    </div>
-    <div id="btc-trigger-setdate-row" style="display:none">
-      <label for="btc-trigger-setdate">Date and time</label>
-      <input id="btc-trigger-setdate" type="datetime-local">
-      <p class="guard-note">Fires at this date and time, whether or not you check in.</p>
-    </div>
-    <div id="btc-trigger-feemarket-row" style="display:none">
-      <label for="btc-trigger-feemarket-dir">Direction</label>
-      <select id="btc-trigger-feemarket-dir">
-        <option value="below" selected>Fee falls to or below</option>
-        <option value="above">Fee rises to or above</option>
-      </select>
-      <label for="btc-trigger-feemarket">Economy fee</label>
-      <div class="inline-unit"><input id="btc-trigger-feemarket" type="number" min="0.1" step="any" placeholder="5"><span>sat/vB</span></div>
-      <p class="guard-note">Fires when the fee crosses this rate in the direction you choose.</p>
-    </div>
+    <p id="btc-op-explain" class="op-explain">Fires when any rule fires.</p>
+    <div id="btc-rules-list"></div>
+    <p><button type="button" id="btc-add-rule" class="rule-add">+ Add rule</button></p>
+    <p id="btc-rules-cap-note" class="muted" style="display:none">Maximum 5 rules per transaction.</p>
     <label for="btc-route">Broadcast via</label>
     <select id="btc-route">
       <option value="public" selected>Public mempool</option>
