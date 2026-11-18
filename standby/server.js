@@ -1260,6 +1260,20 @@ async function evaluateUtxoTrigger(state, tx, now) {
 async function evaluateBlockHeightTrigger(state, tx, now) {
   const trg = store.triggerOf(tx);
   const target = trg.params.targetHeight;
+  // (0.8.1, audit finding 1) One-way latch: once the chain has been
+  // observed at or past the target, the rule has fired — a later
+  // reorg that drops the tip below the target, or a node outage,
+  // cannot un-fire it. Without this, a broadcast that failed while
+  // the tip was past the target would never be retried after a
+  // reorg, because the next evaluation would say 'watching'. The
+  // latch is keyed to the target height, so editing the rule to a
+  // different height starts fresh (the edit path also clears
+  // triggerState on a trigger change).
+  const prev = (tx.triggerState && typeof tx.triggerState === 'object') ? tx.triggerState : {};
+  if (prev.heightReachedFor === target) {
+    tx.triggerState = { ...freshTriggerState(now, 'due', 'block ' + target.toLocaleString('en-US') + ' reached — firing'), lastTipHeight: (typeof prev.lastTipHeight === 'number' ? prev.lastTipHeight : target), lastError: null, heightReachedFor: target };
+    return { fire: true, status: 'due', reason: 'block ' + target.toLocaleString('en-US') + ' reached — firing' };
+  }
   const endpoints = bitcoin.endpointsFor(state.settings);
   let comb;
   try { comb = bitcoin.combineTipHeights(await bitcoin.fetchTipHeights(endpoints)); }
@@ -1277,7 +1291,7 @@ async function evaluateBlockHeightTrigger(state, tx, now) {
     return { fire: false, status: 'unknown', reason: 'tip height unreadable — will retry' };
   }
   if (tip >= target) {
-    tx.triggerState = { ...freshTriggerState(now, 'due', 'block ' + tip.toLocaleString('en-US') + ' reached — firing'), lastTipHeight: tip, lastError: null };
+    tx.triggerState = { ...freshTriggerState(now, 'due', 'block ' + tip.toLocaleString('en-US') + ' reached — firing'), lastTipHeight: tip, lastError: null, heightReachedFor: target };
     return { fire: true, status: 'due', reason: 'block ' + tip.toLocaleString('en-US') + ' reached — firing' };
   }
   tx.triggerState = { ...freshTriggerState(now, 'watching', 'block ' + tip.toLocaleString('en-US') + ' of ' + target.toLocaleString('en-US')), lastTipHeight: tip, lastError: null };
@@ -1489,8 +1503,12 @@ function triggerStatusFor(state, tx, now) {
 // sustained wait, so a single live sample that both sources
 // agree on proves the condition. The 10x-jump guard does not
 // apply here (it needs a stored baseline — the evaluator owns
-// it); only the absolute bounds are checked.
-async function checkTriggerNow(trg, state, now, liveOffsetMs) {
+// it); only the absolute bounds are checked. `latchedTarget`
+// (0.8.1, audit finding 1) is a block-height target the chain
+// has already been observed at or past — a latched rule fires
+// even if the tip has since reorged below it; the add/edit
+// gates pass nothing (a new rule has no latch).
+async function checkTriggerNow(trg, state, now, liveOffsetMs, latchedTarget) {
   if (trg.type === 'checkin') {
     // (0.8.0) liveOffsetMs is the tx's frozen time (disarmed /
     // vacation) — the same effective clock the evaluator uses.
@@ -1560,6 +1578,11 @@ async function checkTriggerNow(trg, state, now, liveOffsetMs) {
     return { valid: true, fire: false, status: 'watching', reason: 'spent — ' + confs + ' of ' + needConfs + ' confirmations', warning: null, detail: { spent: true, confirmed: true, txid: res.txid, confirmations: confs, blockHeight: res.blockHeight } };
   }
   if (trg.type === 'blockheight') {
+    // A latched rule (0.8.1, audit finding 1): the height was
+    // already observed — it fires without consulting the tip.
+    if (latchedTarget === trg.params.targetHeight) {
+      return { valid: true, fire: true, status: 'due', reason: 'block ' + trg.params.targetHeight.toLocaleString('en-US') + ' reached — firing', warning: 'This height has already been reached — it would fire on the next evaluation.', detail: { tip: null, targetHeight: trg.params.targetHeight, latched: true } };
+    }
     const endpoints = bitcoin.endpointsFor(state.settings);
     let comb;
     try { comb = bitcoin.combineTipHeights(await bitcoin.fetchTipHeights(endpoints)); }
@@ -2663,6 +2686,27 @@ const RELEASE_STATUSES = new Set(['stale', 'failed', 'broadcast', 'conflict', 's
 // dry-run verdict. Used by the restore validation (0.7.13).
 const RELEASE_KINDS = new Set(['release', 'broadcast', 'dryrun']);
 
+// (0.8.1, audit finding 4) A mutating API handler loads state once at
+// the top of handleApi, then awaits the network (fee lookups, trigger
+// checks, node tests) — or just the request body — before saving. A
+// second request, or the tick, may have saved newer state in between,
+// and saving this stale snapshot would clobber it — a lost check-in,
+// a lost disarm, a lost edit. So a handler NEVER saves its own
+// snapshot after an await: it applies its change to FRESH state,
+// synchronously, through saveMutation. The load, the mutation, and
+// the save run with no await between them, so no other writer can
+// interleave — the same pattern the background refreshes already use
+// (see refreshConfirmations). The mutator gets the fresh state and
+// returns false to decline the save (the tx or key it named is gone,
+// or a fresh-state validation failed); anything else means save.
+// Returns the fresh state, or null when the mutator declined.
+function saveMutation(mutator) {
+  const fresh = store.loadState(DATA_DIR);
+  if (mutator(fresh) === false) return null;
+  store.saveState(DATA_DIR, fresh);
+  return fresh;
+}
+
 async function handleApi(req, res, pathname) {
   const now = new Date();
   // CSRF gate (0.7.12): state-changing requests must come from the
@@ -2849,13 +2893,21 @@ async function handleApi(req, res, pathname) {
     // The frozen time for the tx being edited, if any — only a
     // check-in rule reads it (checkTriggerNow takes it as the
     // clock's live offset); a price or UTXO rule ignores it.
+    // A latched block-height rule (0.8.1, audit finding 1) is
+    // passed the same way, so the check answers what the
+    // evaluator would answer for this tx.
     let liveOff = 0;
+    let latchedTarget = null;
     if (typeof body.txId === 'string' && body.txId) {
       const etx = (state.bitcoin.txs || []).find((t) => t.id === body.txId);
-      if (etx) liveOff = checkinLiveOffsetMs(etx, now);
+      if (etx) {
+        liveOff = checkinLiveOffsetMs(etx, now);
+        const ets = (etx.triggerState && typeof etx.triggerState === 'object') ? etx.triggerState : {};
+        if (typeof ets.heightReachedFor === 'number') latchedTarget = ets.heightReachedFor;
+      }
     }
     try {
-      const r = await checkTriggerNow(v.trigger, state, now, liveOff);
+      const r = await checkTriggerNow(v.trigger, state, now, liveOff, latchedTarget);
       return sendJson(res, 200, { ...r, trigger: v.trigger });
     } catch (e) {
       // Belt-and-braces: checkTriggerNow already answers 'unknown'
@@ -2882,28 +2934,29 @@ async function handleApi(req, res, pathname) {
   if (req.method === 'POST' && pathname === '/api/checkin') {
     const body = await readBody(req).catch(() => ({}));
     const method = body.method === 'telegram' ? 'telegram' : 'app';
-    state.checkin.lastCheckinAt = now.toISOString();
-    state.checkin.totalCheckins += 1;
-    // A check-in clears an offline-gap hold (0.7.22): the owner is
-    // alive, the clock resets, and there is nothing to hold back.
-    state.checkin.heldUntil = null;
-    for (const t of (state.bitcoin.txs || [])) {
-      if (store.triggerOf(t).type !== 'checkin') continue;
-      if (t.release && t.release.status === 'stale') continue;
-      t.release = null;
-      // The clock restarts at this check-in: any frozen time is
-      // wiped, then a tx that is still inactive (disarmed, or on
-      // vacation) is re-marked inactive from now — it stays frozen
-      // at 0 instead of counting while inactive. Checking in does
-      // NOT re-arm anything: there is no global pause to
-      // auto-resume any more (0.8.0, Global Arm/Disarm).
-      t.checkinOffsetMs = 0;
-      t.checkinInactiveSince = null;
-    }
-    for (const t of (state.bitcoin.txs || [])) syncCheckinFreeze(t, state, now);
-    store.saveState(DATA_DIR, state);
+    const fresh = saveMutation((f) => {
+      f.checkin.lastCheckinAt = now.toISOString();
+      f.checkin.totalCheckins += 1;
+      // A check-in clears an offline-gap hold (0.7.22): the owner is
+      // alive, the clock resets, and there is nothing to hold back.
+      f.checkin.heldUntil = null;
+      for (const t of (f.bitcoin.txs || [])) {
+        if (store.triggerOf(t).type !== 'checkin') continue;
+        if (t.release && t.release.status === 'stale') continue;
+        t.release = null;
+        // The clock restarts at this check-in: any frozen time is
+        // wiped, then a tx that is still inactive (disarmed, or on
+        // vacation) is re-marked inactive from now — it stays frozen
+        // at 0 instead of counting while inactive. Checking in does
+        // NOT re-arm anything: there is no global pause to
+        // auto-resume any more (0.8.0, Global Arm/Disarm).
+        t.checkinOffsetMs = 0;
+        t.checkinInactiveSince = null;
+      }
+      for (const t of (f.bitcoin.txs || [])) syncCheckinFreeze(t, f, now);
+    });
     store.appendCheckin(DATA_DIR, { ts: now.toISOString(), method });
-    return sendJson(res, 200, { ok: true, status: checkinStatus(state, now) });
+    return sendJson(res, 200, { ok: true, status: checkinStatus(fresh, now) });
   }
 
   // POST /api/grace/resume — end the price/UTXO grace period
@@ -2923,10 +2976,11 @@ async function handleApi(req, res, pathname) {
   // cleared by a check-in — it only stops a NEW hold or grace
   // being set on a gap the owner has already resumed from.
   if (req.method === 'POST' && pathname === '/api/grace/resume') {
-    state.grace = { graceUntil: null, triggeredAt: null, offlineGapDays: null };
-    state.checkin.lastOnlineAt = now.toISOString();
-    store.saveState(DATA_DIR, state);
-    return sendJson(res, 200, { ok: true, grace: graceStatus(state, now) });
+    const fresh = saveMutation((f) => {
+      f.grace = { graceUntil: null, triggeredAt: null, offlineGapDays: null };
+      f.checkin.lastOnlineAt = now.toISOString();
+    });
+    return sendJson(res, 200, { ok: true, grace: graceStatus(fresh, now) });
   }
 
   // Check-in API keys (0.6.6) — managed here, used by the check-in
@@ -2952,20 +3006,23 @@ async function handleApi(req, res, pathname) {
       id: newCheckinKeyId(), label, hash: hashCheckinKey(plain),
       createdAt: now.toISOString(), lastUsedAt: null,
     };
-    state.checkinKeys = state.checkinKeys || [];
-    state.checkinKeys.push(key);
-    store.saveState(DATA_DIR, state);
-    writeReceiverKeys(state);
+    const fresh = saveMutation((f) => {
+      f.checkinKeys = f.checkinKeys || [];
+      f.checkinKeys.push(key);
+    });
+    writeReceiverKeys(fresh);
     return sendJson(res, 201, { key: publicCheckinKey(key), plain });
   }
   const keyMatch = pathname.match(/^\/api\/checkin-keys\/([^/]+)$/);
   if (req.method === 'DELETE' && keyMatch) {
-    const keys = state.checkinKeys || [];
-    const idx = keys.findIndex((k) => k.id === keyMatch[1]);
-    if (idx === -1) return sendError(res, 404, 'no such key');
-    keys.splice(idx, 1);
-    store.saveState(DATA_DIR, state);
-    writeReceiverKeys(state);
+    const fresh = saveMutation((f) => {
+      const keys = f.checkinKeys || [];
+      const idx = keys.findIndex((k) => k.id === keyMatch[1]);
+      if (idx === -1) return false;
+      keys.splice(idx, 1);
+    });
+    if (!fresh) return sendError(res, 404, 'no such key');
+    writeReceiverKeys(fresh);
     return sendJson(res, 200, { ok: true, removed: keyMatch[1] });
   }
 
@@ -3035,6 +3092,10 @@ async function handleApi(req, res, pathname) {
   if (req.method === 'PUT' && pathname === '/api/settings') {
     const body = await readBody(req);
     const s = state.settings;
+    // (0.8.1, audit finding 4) Snapshot for the fresh-state merge
+    // below: only the settings this request changed are copied
+    // into fresh state at save time.
+    const origSettings = { ...s };
     if (body.thresholdDays !== undefined) {
       return sendError(res, 400, 'thresholdDays is no longer a setting — set "Days of silence" on each check-in transaction instead');
     }
@@ -3124,14 +3185,26 @@ async function handleApi(req, res, pathname) {
     if (body.vacationMode !== undefined) s.vacationMode = !!body.vacationMode;
     if (body.vacationUntil === null) s.vacationUntil = null;
     else if (body.vacationUntil !== undefined) s.vacationUntil = asStr(body.vacationUntil, 10) || null;
-    if (body.vacationMode !== undefined) {
-      for (const t of (state.bitcoin.txs || [])) syncCheckinFreeze(t, state, now);
-    }
-    store.saveState(DATA_DIR, state);
+    // (0.8.1, audit finding 4) The assignments above mutated the
+    // request's snapshot; only the CHANGED settings ride into fresh
+    // state, so a concurrent save is not clobbered. The fee pair is
+    // re-checked on the fresh values when this request touched it
+    // (a concurrent save could have moved the half it did not set).
+    const fresh = saveMutation((f) => {
+      for (const k of Object.keys(s)) {
+        if (JSON.stringify(s[k]) !== JSON.stringify(origSettings[k])) f.settings[k] = s[k];
+      }
+      if ((body.feeLowMultiplier !== undefined || body.feeMediumMultiplier !== undefined)
+          && !(f.settings.feeLowMultiplier > f.settings.feeMediumMultiplier)) return false;
+      if (body.vacationMode !== undefined) {
+        for (const t of (f.bitcoin.txs || [])) syncCheckinFreeze(t, f, now);
+      }
+    });
+    if (!fresh) return sendError(res, 400, 'feeLowMultiplier must be greater than feeMediumMultiplier');
     // A new cadence takes effect immediately — the running fast
     // tick is cleared and restarted with the new delay.
     if (cadenceChanged) rearmFastTick();
-    return sendJson(res, 200, sanitizeState(state).settings);
+    return sendJson(res, 200, sanitizeState(fresh).settings);
   }
 
   // (0.8.0) POST /api/pause and POST /api/resume are gone with
@@ -3304,7 +3377,6 @@ async function handleApi(req, res, pathname) {
         }
       } catch (e) { /* best-effort: the add proceeds without the warning */ }
     }
-    state.bitcoin.txs.push(tx);
     // (0.7.22, scoped 0.8.0) A new tx is armed by default — adding
     // a CHECK-IN rule while the clock is in the danger zone (the
     // last 25% of ITS window, including already past due) would
@@ -3314,12 +3386,29 @@ async function handleApi(req, res, pathname) {
     // not touch the check-in clock. The zone is measured against
     // the new rule's own threshold, not the global one. Adding
     // with more than 25% of the window left does not reset.
+    // (0.8.1, audit finding 4) The push + the reset ride into
+    // FRESH state: the fee and trigger checks above awaited the
+    // network, so a second request may have saved in between. The
+    // duplicate-txid check is re-run on fresh state too — a
+    // concurrent add of the same txid would otherwise slip past
+    // the stale-side check.
     let checkinReset = false;
-    if (trig.trigger.type === 'checkin' && inDangerZone(state, now, trig.trigger.params.thresholdDays)) {
-      resetCheckin(state, now, 'add-reset');
-      checkinReset = true;
+    let dupTx = null;
+    const fresh = saveMutation((f) => {
+      const txs = f.bitcoin.txs || [];
+      const dup = txs.find((t) => t.txid === tx.txid);
+      if (dup) { dupTx = dup; return false; }
+      if (txs.some((t) => t.id === tx.id)) return false;
+      txs.push(tx);
+      if (trig.trigger.type === 'checkin' && inDangerZone(f, now, trig.trigger.params.thresholdDays)) {
+        resetCheckin(f, now, 'add-reset');
+        checkinReset = true;
+      }
+    });
+    if (!fresh) {
+      if (dupTx) return sendError(res, 400, "This transaction is already stored as '" + (dupTx.label || dupTx.id) + "'");
+      return sendError(res, 400, 'could not save the transaction — try again');
     }
-    store.saveState(DATA_DIR, state);
     const out = { tx };
     if (checkinReset) out.checkinReset = true;
     if (triggerWarning) out.triggerWarning = triggerWarning;
@@ -3414,16 +3503,28 @@ async function handleApi(req, res, pathname) {
         }
       } catch (e) { /* best-effort: the import proceeds without the warning */ }
     }
-    state.bitcoin.txs.push(tx);
     // (0.7.22, scoped 0.8.0) The import path arms by default too —
     // same reset as the paste path when the clock is in the danger
-    // zone, and only for a check-in rule.
+    // zone, and only for a check-in rule. (0.8.1, audit finding 4)
+    // The push + the reset ride into FRESH state (see the paste
+    // path above): the fee and trigger checks awaited the network.
     let checkinReset = false;
-    if (trig.trigger.type === 'checkin' && inDangerZone(state, now, trig.trigger.params.thresholdDays)) {
-      resetCheckin(state, now, 'add-reset');
-      checkinReset = true;
+    let dupTx = null;
+    const fresh = saveMutation((f) => {
+      const txs = f.bitcoin.txs || [];
+      const dup = txs.find((t) => t.txid === tx.txid);
+      if (dup) { dupTx = dup; return false; }
+      if (txs.some((t) => t.id === tx.id)) return false;
+      txs.push(tx);
+      if (trig.trigger.type === 'checkin' && inDangerZone(f, now, trig.trigger.params.thresholdDays)) {
+        resetCheckin(f, now, 'add-reset');
+        checkinReset = true;
+      }
+    });
+    if (!fresh) {
+      if (dupTx) return sendError(res, 400, "This transaction is already stored as '" + (dupTx.label || dupTx.id) + "'");
+      return sendError(res, 400, 'could not save the transaction — try again');
     }
-    store.saveState(DATA_DIR, state);
     const out = { tx };
     if (checkinReset) out.checkinReset = true;
     if (triggerWarning) out.triggerWarning = triggerWarning;
@@ -3432,9 +3533,20 @@ async function handleApi(req, res, pathname) {
   if (txsMatch && (req.method === 'PUT' || req.method === 'DELETE')) {
     const tx = (state.bitcoin.txs || []).find((t) => t.id === txsMatch[1]);
     if (!tx) return sendError(res, 404, 'no such transaction');
+    // (0.8.1, audit finding 4) Snapshot for the fresh-state merge
+    // below: only the fields this edit changes are copied into
+    // fresh state at save time. (Shallow: the handler replaces
+    // trigger/release/broadcasted, never mutates them in place.)
+    const orig = { ...tx };
     if (req.method === 'DELETE') {
-      state.bitcoin.txs = state.bitcoin.txs.filter((t) => t.id !== tx.id);
-      store.saveState(DATA_DIR, state);
+      // (0.8.1, audit finding 4) The removal rides into FRESH
+      // state: the request body was awaited above, so a second
+      // request may have saved in between.
+      const fresh = saveMutation((f) => {
+        if (!(f.bitcoin.txs || []).some((t) => t.id === tx.id)) return false;
+        f.bitcoin.txs = (f.bitcoin.txs || []).filter((t) => t.id !== tx.id);
+      });
+      if (!fresh) return sendError(res, 404, 'no such transaction');
       return sendJson(res, 200, { ok: true, removed: tx.id });
     }
     const body = await readBody(req);
@@ -3550,7 +3662,6 @@ async function handleApi(req, res, pathname) {
     // outside the zone, and arming a broadcasted / stale tx leave
     // the clock untouched. The zone is measured against the tx's
     // own threshold (after a trigger change above, the new one).
-    const wasEnabled = tx.enabled;
     if (typeof body.enabled === 'boolean') tx.enabled = body.enabled;
     // The route toggle on the card (0.7.16): switching the route
     // applies to the NEXT broadcast attempt — a transaction already
@@ -3566,23 +3677,56 @@ async function handleApi(req, res, pathname) {
     // fallbackDeadline), so no clock is restarted here.
     if (body.publicFallbackDays !== undefined) tx.publicFallbackDays = validPublicFallbackDays(body.publicFallbackDays);
     let checkinReset = false;
-    const txTrigger = store.triggerOf(tx);
-    // The freeze (0.8.0): the danger zone is measured from the
-    // EFFECTIVE last check-in — the tx's live frozen time — so a
-    // frozen clock is never in the danger zone for time that never
-    // counted. The freeze is re-synced after the toggle: disarming
-    // starts an inactive period, re-arming banks it.
-    const liveOff = checkinLiveOffsetMs(tx, now);
-    if (body.enabled === true && wasEnabled === false
-        && txTrigger.type === 'checkin'
-        && inDangerZone(state, now, txTrigger.params.thresholdDays, liveOff)
-        && !tx.broadcasted && !(tx.release && tx.release.status === 'stale')) {
-      resetCheckin(state, now, 'arm-reset');
-      checkinReset = true;
+    // (0.8.1, audit finding 4) The edit's field changes were
+    // computed on the request's snapshot while the fee and trigger
+    // checks awaited the network — only the fields this edit
+    // actually changed ride into FRESH state, so a concurrent save
+    // is not clobbered. The locks are re-checked on the fresh tx:
+    // a tx broadcast in the meantime must not have its hex or
+    // trigger rewritten. The freeze and the danger-zone reset are
+    // re-evaluated on fresh state too.
+    let editError = null;
+    let dupTx = null;
+    const fresh = saveMutation((f) => {
+      const ftx = (f.bitcoin.txs || []).find((t) => t.id === tx.id);
+      if (!ftx) { editError = 'gone'; return false; }
+      const freshLocked = !!(ftx.broadcasted || (ftx.release
+        && (ftx.release.status === 'submitted-slipstream' || ftx.release.status === 'stale' || ftx.release.status === 'broadcast')));
+      if (orig.hex !== tx.hex && freshLocked && tx.txid !== ftx.txid) { editError = 'locked-hex'; return false; }
+      if (JSON.stringify(orig.trigger) !== JSON.stringify(tx.trigger) && freshLocked
+          && JSON.stringify(tx.trigger) !== JSON.stringify(store.triggerOf(ftx))) { editError = 'locked-trigger'; return false; }
+      if (orig.txid !== tx.txid) {
+        const dup = (f.bitcoin.txs || []).find((t) => t.id !== tx.id && t.txid === tx.txid);
+        if (dup) { dupTx = dup; editError = 'duplicate'; return false; }
+      }
+      const freshWasEnabled = ftx.enabled;
+      for (const k of ['hex', 'txid', 'inputs', 'outputs', 'totalOutSats', 'locktime', 'segwit', 'feeSats', 'feeRateSatVb', 'release', 'broadcasted', 'label', 'notes', 'trigger', 'triggerState', 'enabled', 'broadcastVia', 'publicFallbackDays']) {
+        if (JSON.stringify(tx[k]) !== JSON.stringify(orig[k])) ftx[k] = tx[k];
+      }
+      // The freeze (0.8.0): the danger zone is measured from the
+      // EFFECTIVE last check-in — the tx's live frozen time — so a
+      // frozen clock is never in the danger zone for time that never
+      // counted. The freeze is re-synced after the toggle: disarming
+      // starts an inactive period, re-arming banks it.
+      syncCheckinFreeze(ftx, f, now);
+      const ftxTrigger = store.triggerOf(ftx);
+      if (body.enabled === true && freshWasEnabled === false
+          && ftxTrigger.type === 'checkin'
+          && inDangerZone(f, now, ftxTrigger.params.thresholdDays, checkinLiveOffsetMs(ftx, now))
+          && !ftx.broadcasted && !(ftx.release && ftx.release.status === 'stale')) {
+        resetCheckin(f, now, 'arm-reset');
+        checkinReset = true;
+      }
+    });
+    if (!fresh) {
+      if (editError === 'gone') return sendError(res, 404, 'no such transaction');
+      if (editError === 'locked-hex') return sendError(res, 400, 'the transaction hex cannot be changed once it has been broadcast');
+      if (editError === 'locked-trigger') return sendError(res, 400, 'the trigger cannot be changed once the transaction has been broadcast');
+      if (editError === 'duplicate') return sendError(res, 400, "This transaction is already stored as '" + (dupTx.label || dupTx.id) + "'");
+      return sendError(res, 400, 'could not save the edit — try again');
     }
-    syncCheckinFreeze(tx, state, now);
-    store.saveState(DATA_DIR, state);
-    const out = { tx };
+    const outTx = (fresh.bitcoin.txs || []).find((t) => t.id === tx.id);
+    const out = { tx: outTx };
     if (checkinReset) out.checkinReset = true;
     if (triggerWarning) out.triggerWarning = triggerWarning;
     return sendJson(res, 200, out);
@@ -3603,27 +3747,31 @@ async function handleApi(req, res, pathname) {
   if (req.method === 'POST' && pathname === '/api/bitcoin/txs/arm-all') {
     const body = await readBody(req).catch(() => ({}));
     if (typeof body.enabled !== 'boolean') return sendError(res, 400, 'enabled must be true or false');
-    const txs = state.bitcoin.txs || [];
-    const newlyArmed = [];
-    for (const t of txs) {
-      const wasEnabled = t.enabled;
-      t.enabled = body.enabled;
-      syncCheckinFreeze(t, state, now);
-      if (body.enabled === true && wasEnabled === false) newlyArmed.push(t);
-    }
+    // (0.8.1, audit finding 4) The toggle + freeze sync + reset
+    // ride into FRESH state: the request body was awaited above.
     let checkinReset = false;
-    for (const t of newlyArmed) {
-      const trg = store.triggerOf(t);
-      if (trg.type !== 'checkin') continue;
-      if (t.broadcasted || (t.release && t.release.status === 'stale')) continue;
-      if (inDangerZone(state, now, trg.params.thresholdDays, checkinLiveOffsetMs(t, now))) {
-        resetCheckin(state, now, 'arm-all-reset');
-        checkinReset = true;
-        break;
+    const fresh = saveMutation((f) => {
+      const txs = f.bitcoin.txs || [];
+      const newlyArmed = [];
+      for (const t of txs) {
+        const wasEnabled = t.enabled;
+        t.enabled = body.enabled;
+        syncCheckinFreeze(t, f, now);
+        if (body.enabled === true && wasEnabled === false) newlyArmed.push(t);
       }
-    }
-    store.saveState(DATA_DIR, state);
-    return sendJson(res, 200, { ok: true, enabled: body.enabled, count: txs.length, checkinReset, txs });
+      for (const t of newlyArmed) {
+        const trg = store.triggerOf(t);
+        if (trg.type !== 'checkin') continue;
+        if (t.broadcasted || (t.release && t.release.status === 'stale')) continue;
+        if (inDangerZone(f, now, trg.params.thresholdDays, checkinLiveOffsetMs(t, now))) {
+          resetCheckin(f, now, 'arm-all-reset');
+          checkinReset = true;
+          break;
+        }
+      }
+    });
+    const freshTxs = fresh.bitcoin.txs || [];
+    return sendJson(res, 200, { ok: true, enabled: body.enabled, count: freshTxs.length, checkinReset, txs: freshTxs });
   }
 
   // POST /api/bitcoin/txs/:id/broadcast — MANUAL broadcast, now. Same
@@ -3889,7 +4037,11 @@ async function handleApi(req, res, pathname) {
       // believed when its txid is that txid. Anything else rejects
       // the WHOLE restore — a corrupt or hand-edited backup must not
       // silently mark a transaction stale, or resurrect a broadcast
-      // that never happened. A record the app wrote always passes:
+      // that never happened. (0.8.1, audit finding: even a
+      // txid-matching broadcast/stale claim is not believed — it is
+      // dropped when the restored tx is built below, and the network
+      // re-derives it. The check here still rejects a malformed or
+      // mismatched record outright.) A record the app wrote always passes:
       // every writer carries txid = the tx's txid (broadcastOneInner
       // paths, dry-run verdict writes) and kind in RELEASE_KINDS,
       // and the 0.4.0 migration guarantees txid on older records.
@@ -3961,8 +4113,20 @@ async function handleApi(req, res, pathname) {
         // evaluation anyway).
         trigger: store.triggerOf(t),
         triggerState: (t.triggerState && typeof t.triggerState === 'object' && !Array.isArray(t.triggerState)) ? t.triggerState : null,
-        release: t.release ? t.release : null,
-        broadcasted: t.broadcasted ? t.broadcasted : null,
+        // (0.8.1, audit finding: restored `broadcasted` records)
+        // A broadcasted fact — or a release record claiming the tx
+        // already went out ('broadcast') or is spent ('stale') — is
+        // NOT believed from a backup on txid match alone: a
+        // hand-edited backup could falsely mark a transaction
+        // broadcast, or permanently disable one as stale. Both are
+        // re-derived from the network on the next evaluation (the
+        // freshness gate recognises a tx already out there, and
+        // marks spent inputs stale), so the restore drops them and
+        // the tx comes back active. 'failed', 'conflict', and
+        // 'submitted-slipstream' records are transient and
+        // self-correcting, so they ride along.
+        release: (t.release && (t.release.status === 'broadcast' || t.release.status === 'stale')) ? null : (t.release ? t.release : null),
+        broadcasted: null,
       });
     }
     const bsCheckin = (bs.checkin && typeof bs.checkin === 'object') ? bs.checkin : {};
@@ -4098,8 +4262,10 @@ async function handleApi(req, res, pathname) {
   // either one answers (the other is the backup).
   if (req.method === 'POST' && pathname === '/api/bitcoin/connection/test') {
     const r = await bitcoin.testConnection(bitcoin.endpointsFor(state.settings));
-    state.bitcoin.connection = { ok: r.ok, checkedAt: now.toISOString(), detail: r.detail, results: r.results };
-    store.saveState(DATA_DIR, state);
+    const conn = { ok: r.ok, checkedAt: now.toISOString(), detail: r.detail, results: r.results };
+    // (0.8.1, audit finding 4) The node test awaited the network —
+    // only the connection result rides into FRESH state.
+    saveMutation((f) => { f.bitcoin.connection = conn; });
     return sendJson(res, 200, { ok: r.ok, detail: r.detail, results: r.results });
   }
 
@@ -4179,11 +4345,14 @@ async function handleApi(req, res, pathname) {
     // confirmed spend turns it stale. The dry-run log entry (written
     // by bitcoin.dryRun) already records the run itself, so no second
     // log entry is written here.
-    let verdictRecorded = false;
-    let feeBackfilled = false;
+    // (0.8.1, audit finding 4) The verdicts are network facts
+    // collected above; only the per-tx updates ride into FRESH
+    // state, with the same guards re-evaluated there — a tx
+    // broadcast or deleted while the run was on the network must
+    // not have its record rewritten from this stale snapshot.
+    const actions = [];
     for (const r of results) {
-      const tx = txs.find((t) => t.id === r.id);
-      if (!tx || tx.broadcasted) continue;
+      const a = { id: r.id };
       // The fee (0.7.18): a dry-run OVERWRITES the stored fee with
       // the freshly computed one — the input values were fetched
       // from the node for the freshness check anyway. A fee stored
@@ -4192,54 +4361,63 @@ async function handleApi(req, res, pathname) {
       // lingering; a null result (the node could not answer) leaves
       // the stored fee alone.
       if (r.fee && typeof r.fee.feeSats === 'number') {
-        if (tx.feeSats !== r.fee.feeSats || tx.feeRateSatVb !== r.fee.feeRateSatVb) feeBackfilled = true;
-        tx.feeSats = r.fee.feeSats;
-        tx.feeRateSatVb = (typeof r.fee.feeRateSatVb === 'number') ? r.fee.feeRateSatVb : null;
+        a.fee = { feeSats: r.fee.feeSats, feeRateSatVb: (typeof r.fee.feeRateSatVb === 'number') ? r.fee.feeRateSatVb : null };
       }
       if (r.spent && r.spent.length) {
-        if (tx.release && tx.release.status === 'stale') continue;
-        const spentDesc = r.spent.map((i) => String(i.prevTxid || '').slice(0, 12) + ':' + i.prevVout).join(', ');
-        tx.release = { status: 'stale', kind: 'dryrun', trigger: releaseTriggerFor(state, tx), txid: tx.txid, method: r.checkedVia, lastAttemptAt: now.toISOString(), error: 'inputs spent: ' + spentDesc };
-        verdictRecorded = true;
-        continue;
+        a.stale = { method: r.checkedVia, error: 'inputs spent: ' + r.spent.map((i) => String(i.prevTxid || '').slice(0, 12) + ':' + i.prevVout).join(', ') };
+      } else if (r.own && r.own.length) {
+        a.own = { method: r.checkedVia, blockHeight: r.own[0].blockHeight != null ? r.own[0].blockHeight : null };
+      } else if (r.conflict && r.conflict.length) {
+        a.conflict = { method: r.checkedVia, error: 'inputs spent by an unconfirmed transaction: ' + r.conflict.map((i) => String(i.prevTxid || '').slice(0, 12) + ':' + i.prevVout).join(', ') };
+      } else if (r.verdict === 'ready') {
+        // A clean verdict re-derives the warning away: the unconfirmed
+        // spend was evicted, so the transaction is ready again. Only a
+        // 'ready' verdict clears — an 'unknown' verdict cannot prove
+        // the input unspent, so the warning stands on ambiguous data.
+        a.clearConflict = true;
       }
-      if (r.own && r.own.length) {
-        // Repair, don't overwrite: a release that already went out
-        // keeps its kind ('release'); a broadcasted fact keeps the
-        // confirmations it already has. A restore could have left
-        // one half of the pair behind — the check that just proved
-        // the tx is out there fills in the missing half.
-        const own = r.own[0];
-        if (!tx.broadcasted) {
-          tx.broadcasted = {
-            txid: tx.txid, broadcastedAt: now.toISOString(), method: r.checkedVia,
-            confirmations: null, blockHeight: own.blockHeight != null ? own.blockHeight : null, found: true, checkedAt: now.toISOString(),
-          };
-          verdictRecorded = true;
-        }
-        if (!tx.release || tx.release.status !== 'broadcast') {
-          tx.release = { status: 'broadcast', kind: 'dryrun', trigger: releaseTriggerFor(state, tx), txid: tx.txid, method: r.checkedVia, broadcastedAt: now.toISOString() };
-          verdictRecorded = true;
-        }
-        continue;
-      }
-      if (r.conflict && r.conflict.length) {
-        if (tx.release && tx.release.status === 'stale') continue;
-        const conflictDesc = r.conflict.map((i) => String(i.prevTxid || '').slice(0, 12) + ':' + i.prevVout).join(', ');
-        tx.release = { status: 'conflict', kind: 'dryrun', trigger: releaseTriggerFor(state, tx), txid: tx.txid, method: r.checkedVia, lastAttemptAt: now.toISOString(), error: 'inputs spent by an unconfirmed transaction: ' + conflictDesc };
-        verdictRecorded = true;
-        continue;
-      }
-      // A clean verdict re-derives the warning away: the unconfirmed
-      // spend was evicted, so the transaction is ready again. Only a
-      // 'ready' verdict clears — an 'unknown' verdict cannot prove
-      // the input unspent, so the warning stands on ambiguous data.
-      if (r.verdict === 'ready' && tx.release && tx.release.status === 'conflict') {
-        tx.release = null;
-        verdictRecorded = true;
-      }
+      if (a.fee || a.stale || a.own || a.conflict || a.clearConflict) actions.push(a);
     }
-    if (verdictRecorded || feeBackfilled) store.saveState(DATA_DIR, state);
+    if (actions.length) {
+      saveMutation((f) => {
+        for (const a of actions) {
+          const ftx = (f.bitcoin.txs || []).find((t) => t.id === a.id);
+          if (!ftx || ftx.broadcasted) continue;
+          if (a.fee) {
+            ftx.feeSats = a.fee.feeSats;
+            ftx.feeRateSatVb = a.fee.feeRateSatVb;
+          }
+          if (a.stale) {
+            if (ftx.release && ftx.release.status === 'stale') continue;
+            ftx.release = { status: 'stale', kind: 'dryrun', trigger: releaseTriggerFor(f, ftx), txid: ftx.txid, method: a.stale.method, lastAttemptAt: now.toISOString(), error: a.stale.error };
+            continue;
+          }
+          if (a.own) {
+            // Repair, don't overwrite: a release that already went out
+            // keeps its kind ('release'); a broadcasted fact keeps the
+            // confirmations it already has. A restore could have left
+            // one half of the pair behind — the check that just proved
+            // the tx is out there fills in the missing half.
+            if (!ftx.broadcasted) {
+              ftx.broadcasted = {
+                txid: ftx.txid, broadcastedAt: now.toISOString(), method: a.own.method,
+                confirmations: null, blockHeight: a.own.blockHeight, found: true, checkedAt: now.toISOString(),
+              };
+            }
+            if (!ftx.release || ftx.release.status !== 'broadcast') {
+              ftx.release = { status: 'broadcast', kind: 'dryrun', trigger: releaseTriggerFor(f, ftx), txid: ftx.txid, method: a.own.method, broadcastedAt: now.toISOString() };
+            }
+            continue;
+          }
+          if (a.conflict) {
+            if (ftx.release && ftx.release.status === 'stale') continue;
+            ftx.release = { status: 'conflict', kind: 'dryrun', trigger: releaseTriggerFor(f, ftx), txid: ftx.txid, method: a.conflict.method, lastAttemptAt: now.toISOString(), error: a.conflict.error };
+            continue;
+          }
+          if (a.clearConflict && ftx.release && ftx.release.status === 'conflict') ftx.release = null;
+        }
+      });
+    }
     const armed = results.filter((r) => r.enabled);
     // 'would broadcast' counts the transactions that would actually
     // land: a timelocked transaction is attempted (its per-result

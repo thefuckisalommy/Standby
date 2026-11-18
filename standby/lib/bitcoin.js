@@ -1435,17 +1435,43 @@ async function checkInputsUnspentVia(parsed, apiBase) {
 // wins. A completed check is definitive — an endpoint that says an input
 // is spent is a chain fact, not a reason to ask the other endpoint as
 // well. Only a failed check (endpoint down) falls through to the next one.
+// (0.8.1, audit finding 2) A 404 for one input is NOT a completed
+// check for that input — the endpoint is saying it does not know the
+// parent transaction, which proves nothing about spent or unspent.
+// So an input the first endpoint 404s is re-asked on the next
+// endpoint, and only an input no endpoint can say about stays
+// `unknown`. Without this, a primary that had never seen the parent
+// would hide a spend the secondary knows about.
 async function checkInputsUnspent(parsed, endpoints) {
   const errors = [];
+  let acc = null;
+  let remaining = parsed.inputs;
   for (const ep of endpoints) {
+    if (!remaining.length) break;
     try {
-      const result = await checkInputsUnspentVia(parsed, ep.base);
-      return { ...result, checkedVia: ep.label, checkedBase: ep.base };
+      const result = await checkInputsUnspentVia({ ...parsed, inputs: remaining }, ep.base);
+      if (!acc) {
+        acc = { checked: parsed.inputs.length, unspent: [], spent: [], conflict: [], own: [], unknown: [], checkedVia: ep.label, checkedBase: ep.base };
+      }
+      acc.unspent.push(...result.unspent);
+      acc.spent.push(...result.spent);
+      acc.conflict.push(...result.conflict);
+      acc.own.push(...result.own);
+      // checkedVia names the last endpoint that resolved anything —
+      // 'primary' when everything resolved there, 'secondary' when
+      // any input needed the fallback.
+      if (result.unspent.length || result.spent.length || result.conflict.length || result.own.length) {
+        acc.checkedVia = ep.label;
+        acc.checkedBase = ep.base;
+      }
+      remaining = result.unknown;
     } catch (e) {
       errors.push(ep.label + ' (' + mempoolHostLabel(ep.base) + '): ' + e.message);
     }
   }
-  throw new Error('could not verify inputs (' + errors.join('; ') + ')');
+  if (!acc) throw new Error('could not verify inputs (' + errors.join('; ') + ')');
+  acc.unknown = remaining;
+  return acc;
 }
 
 // ---------------------------------------------------------------------------
@@ -1455,11 +1481,13 @@ async function checkInputsUnspent(parsed, endpoints) {
 // WATCHED outpoint that is not necessarily one of our inputs.
 // Returns { outpoint, spent, confirmed, txid, blockHeight, unknown,
 // checkedVia, checkedBase, error? }. `unknown` is true when no
-// endpoint could say — the parent tx is unknown to the node that
+// endpoint could say — the parent tx is unknown to every node that
 // answered (404), or no endpoint answered at all — and the trigger
-// must not fire on it. A 404 is a completed check (the endpoint
-// answered), so it does not fall through to the next endpoint — the
-// same rule as the input check — it just reports unknown.
+// must not fire on it. (0.8.1, audit finding 2) A 404 from one
+// endpoint is inconclusive, not a completed check: the endpoint does
+// not know the parent, so the next endpoint is asked — the same rule
+// as the input check. Only when every endpoint 404s (or fails) does
+// the answer come back unknown.
 // `blockHeight` is the spending tx's block height (from
 // out.status.block_height) when the spend is confirmed, so the
 // caller can count confirmations; null otherwise. A spent outpoint
@@ -1472,11 +1500,13 @@ async function checkOutspend(outpoint, endpoints) {
   const prevTxid = parts[0] || '';
   const prevVout = parseInt(parts[1], 10);
   const errors = [];
+  let first404 = null;
   for (const ep of endpoints) {
     try {
       const out = await mempoolOutspend(prevTxid, prevVout, ep.base);
       if (out === null) {
-        return { outpoint, spent: false, confirmed: false, txid: null, blockHeight: null, unknown: true, checkedVia: ep.label, checkedBase: ep.base };
+        if (!first404) first404 = ep;
+        continue;
       }
       const spent = !!out.spent;
       const confirmed = !!(out.status && out.status.confirmed === true);
@@ -1485,6 +1515,9 @@ async function checkOutspend(outpoint, endpoints) {
     } catch (e) {
       errors.push(ep.label + ' (' + mempoolHostLabel(ep.base) + '): ' + e.message);
     }
+  }
+  if (first404) {
+    return { outpoint, spent: false, confirmed: false, txid: null, blockHeight: null, unknown: true, checkedVia: first404.label, checkedBase: first404.base };
   }
   return { outpoint, spent: false, confirmed: false, txid: null, blockHeight: null, unknown: true, checkedVia: null, checkedBase: null, error: errors.join('; ') };
 }
