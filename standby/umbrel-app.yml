@@ -1,5 +1,5 @@
 # Standby — Umbrel app manifest
-# Lives in its own community store (thefuckisalommy/Standby-on-Umbrel),
+# Lives in its own community store (thefuckisalommy/Standby),
 # App id `standby`, port 3100.
 manifestVersion: 1
 id: standby
@@ -41,14 +41,14 @@ description: |-
 
   Standby. Ready when you need it.
 developer: Lommy
-website: https://github.com/thefuckisalommy/Standby-on-Umbrel
+website: https://github.com/thefuckisalommy/Standby
 dependencies: []
-repo: https://github.com/thefuckisalommy/Standby-on-Umbrel
-support: https://github.com/thefuckisalommy/Standby-on-Umbrel/issues
+repo: https://github.com/thefuckisalommy/Standby
+support: https://github.com/thefuckisalommy/Standby/issues
 port: 3100
 torOnly: false
-icon: https://raw.githubusercontent.com/thefuckisalommy/Standby-on-Umbrel/main/standby/icon.jpg
+icon: https://raw.githubusercontent.com/thefuckisalommy/Standby/main/standby/icon.jpg
 gallery:
-  - https://raw.githubusercontent.com/thefuckisalommy/Standby-on-Umbrel/main/standby/1.jpg
-  - https://raw.githubusercontent.com/thefuckisalommy/Standby-on-Umbrel/main/standby/2.jpg
-  - https://raw.githubusercontent.com/thefuckisalommy/Standby-on-Umbrel/main/standby/3.jpg
+  - https://raw.githubusercontent.com/thefuckisalommy/Standby/main/standby/1.jpg
+  - https://raw.githubusercontent.com/thefuckisalommy/Standby/main/standby/2.jpg
+  - https://raw.githubusercontent.com/thefuckisalommy/Standby/main/standby/3.jpg

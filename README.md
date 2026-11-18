@@ -1,6 +1,6 @@
-# Standby on Umbrel
+# Standby
 
-Community app store for [Standby](https://github.com/thefuckisalommy/Standby-on-Umbrel) — presigned Bitcoin transactions, ready when they're needed.
+Community app store for [Standby](https://github.com/thefuckisalommy/Standby) — presigned Bitcoin transactions, ready when they're needed.
 
 Standby is a transaction broadcasting tool: you prepare Bitcoin transactions in advance, and each one carries its own trigger — the rule that fires it. Whether you're planning for the unexpected, creating a Bitcoin inheritance plan, watching a price, or keeping a transaction ready for a UTXO to move, Standby gives you a way to prepare today without needing to act today.
 
@@ -44,7 +44,7 @@ Standby is a transaction broadcasting tool: you prepare Bitcoin transactions in 
 In Umbrel: App Store → Community App Stores → add this repo's URL:
 
 ```
-https://github.com/thefuckisalommy/Standby-on-Umbrel
+https://github.com/thefuckisalommy/Standby
 ```
 
 Then install Standby from the store. The app's Docker image is built for arm64 and amd64 by GitHub Actions on every push to main and published to GHCR, so installing just pulls it.
@@ -60,7 +60,7 @@ No Umbrel needed. Standby is a plain Docker image (`ghcr.io/thefuckisalommy/stan
 **Start it:**
 ```sh
 mkdir standby && cd standby
-curl -O https://raw.githubusercontent.com/thefuckisalommy/Standby-on-Umbrel/main/docker-compose.yml
+curl -O https://raw.githubusercontent.com/thefuckisalommy/Standby/main/docker-compose.yml
 docker compose up -d
 # open http://localhost:3100
 ```
@@ -93,13 +93,13 @@ docker run -d --name standby-checkin --restart on-failure -p 3101:3101 -v "$PWD/
 
 **Build it yourself / run from source:**
 ```sh
-git clone https://github.com/thefuckisalommy/Standby-on-Umbrel.git
-docker build -t standby Standby-on-Umbrel/standby
+git clone https://github.com/thefuckisalommy/Standby.git
+docker build -t standby Standby/standby
 docker run --rm -p 127.0.0.1:3100:3100 -v "$PWD/data:/data" -v "$PWD/checkin:/checkin" standby
 # open http://localhost:3100
 ```
 
-Or plain Node 24+ (no Docker): `cd Standby-on-Umbrel/standby && node server.js` — same port, data in `./data` next to the server.
+Or plain Node 24+ (no Docker): `cd Standby/standby && node server.js` — same port, data in `./data` next to the server.
 
 ## Check-in API keys
 
