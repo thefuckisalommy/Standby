@@ -943,7 +943,7 @@ function checkinStatus(state, now) {
 // latchedTarget }: the rule's stored slice (the price jump guard's
 // baseline, the block-height latch), the tx's frozen time (check-in
 // rules only), and a latched block height for the gate.
-// evaluateTrigger(state, tx, now, onlyTypes) evaluates each rule
+// evaluateTrigger(state, tx, now) evaluates each rule
 // and combines by the set's op (see combineOutcomes). triggerStatusFor
 // (state, tx, now) is the UI-facing status, computed from the STORED
 // triggerState (no network) — except the check-in trigger, whose
@@ -1655,11 +1655,12 @@ async function evaluateRule(state, tx, ruleIndex, now) {
 // outcome class: 'satisfied' (the rule fired), 'not' (it did not,
 // and was read), 'unknown' (it could not be read — fail-safe), or
 // 'held' (grace / vacation / offline-hold — read, but held back).
-// `skipped` means the rule was not evaluated this tick (a filtered
-// tick — see evaluateTrigger's onlyTypes): a skipped rule is not
-// satisfied, so an AND set cannot fire on a tick that did not
-// evaluate all of it, while an OR set only needs one evaluated
-// rule to fire.
+// `skipped` means the rule was not evaluated this tick. No caller
+// skips any more (0.8.2 — the type filter is gone, the full tick
+// evaluates everything); the class is kept as a defensive reading:
+// a skipped rule is not satisfied, so an AND set cannot fire on a
+// tick that did not evaluate all of it, while an OR set only needs
+// one evaluated rule to fire.
 //   OR: fire iff any evaluated rule is SATISFIED; unknowns are
 //     ignored — a setdate rule still fires while its sibling price
 //     rule cannot be read.
@@ -1723,25 +1724,18 @@ function outcomeClass(r) {
 
 // Evaluate a tx's whole rule set (0.8.2). Returns { fire, status,
 // reason, ruleResults, firedIndexes } and writes each evaluated
-// rule's triggerState slice (the caller saves). `onlyTypes`
-// restricts the evaluation to those rule types — the fast tick
-// passes the fast types, the hourly tick ['checkin'], the manual
-// release check passes nothing (all types). A rule outside
-// onlyTypes is SKIPPED: its slice is untouched, and it does not
-// participate in the combine — so an AND set spanning the fast and
-// hourly domains (e.g. check-in AND price) can only fire on a
-// full evaluation (the manual release check), never on a partial
-// tick. That is the fail-safe reading of "all at once": a tick
-// that did not evaluate a rule cannot claim it held.
-async function evaluateTrigger(state, tx, now, onlyTypes) {
+// rule's triggerState slice (the caller saves). Every rule is
+// evaluated, every time — there is no type filter any more
+// (0.8.2): the full tick judges all types together, so an AND
+// set spanning domains (check-in AND price) fires on the tick,
+// not only on a manual check. That is what "all at once" needs:
+// a tick that did not evaluate a rule cannot claim it held, and
+// now every tick evaluates every rule.
+async function evaluateTrigger(state, tx, now) {
   const set = store.triggerOf(tx);
   const ruleResults = [];
   for (let i = 0; i < set.rules.length; i++) {
     const rule = set.rules[i];
-    if (onlyTypes && !onlyTypes.includes(rule.type)) {
-      ruleResults.push({ index: i, rule, fire: false, status: 'skipped', reason: '', held: null, skipped: true, cls: 'not' });
-      continue;
-    }
     const r = await evaluateRule(state, tx, i, now);
     ruleResults.push({ index: i, rule, fire: r.fire, status: r.status, reason: r.reason, held: r.held, skipped: false, cls: outcomeClass(r), slice: r.slice });
   }
@@ -2355,23 +2349,31 @@ function recordRelease(state, tx, record, logEntry) {
 // record, and the broadcasted fact keeps the card showing it.
 // ---------------------------------------------------------------------------
 // Single-flight: only one release evaluation runs at a time. The
-// hourly tick and the manual release-check API both call
+// full tick and the manual release-check API both call
 // evaluateRelease(); without this they can overlap, and two
 // evaluations can broadcast the same transaction. A second caller gets
 // a plain 'already in progress' skip. The flag is set and cleared
 // synchronously around the awaited work, in a finally, so it can never
 // stick — and Node's single thread makes the check-and-set atomic.
 let releaseEvaluationInFlight = false;
-// `options.onlyTypes` (optional) restricts which trigger types this
-// evaluation covers — the fast tick passes ['price', 'utxo',
-// 'blockheight', 'setdate', 'feemarket'], the hourly tick
-// ['checkin'], the manual release check passes nothing (all types).
-// The check-in merge below is only a gate when the evaluation
-// includes check-in triggers: a fast-tick-only evaluation must not
-// be blocked by a check-in receiver problem.
+// Broadcast backoff (0.8.2): an automatic evaluation does not
+// re-attempt a broadcast for a tx within an hour of its last
+// failed broadcast attempt (see the guard in
+// evaluateReleaseInner). One hour, hard-coded — the retry
+// cadence is a safety property, not a user setting.
+const BROADCAST_BACKOFF_MS = 60 * 60 * 1000;
+// `options.automatic` (optional) marks a tick-driven evaluation —
+// the full tick passes { automatic: true }; the manual release
+// check passes nothing. The backoff guard in evaluateReleaseInner
+// applies only to automatic evaluations (a manual check or
+// broadcast is explicit user action and always attempts).
+// There is no type filter any more (0.8.2): the full tick
+// evaluates every rule type together, so the check-in merge below
+// is always a gate — an unreadable receiver state withholds the
+// whole evaluation, because the clock may hold a check-in that
+// would clear a due state.
 async function evaluateRelease(options) {
-  const onlyTypes = (options && Array.isArray(options.onlyTypes)) ? options.onlyTypes : null;
-  const includeCheckin = !onlyTypes || onlyTypes.includes('checkin');
+  const automatic = !!(options && options.automatic);
   if (releaseEvaluationInFlight) {
     return { action: 'skipped', reason: 'release evaluation already in progress', results: [] };
   }
@@ -2399,15 +2401,8 @@ async function evaluateRelease(options) {
     try { merged = mergeExternalCheckin(store.loadState(DATA_DIR), new Date()); }
     catch (e) { console.error('external check-in merge failed:', e); merged = 'error'; }
     if (merged === 'error') {
-      if (!includeCheckin) {
-        // Price/UTXO-only evaluation: the check-in clock is
-        // irrelevant here, so an unreadable receiver state must
-        // not block it — continue without the merge.
-        console.error('check-in state unreadable — continuing price/UTXO-only evaluation without the check-in merge');
-      } else {
-        console.error('release withheld: external check-in state is unreadable — not broadcasting until it can be read (see GET /api/status checkinReadError)');
-        return { action: 'skipped', reason: 'check-in state unreadable', results: [] };
-      }
+      console.error('release withheld: external check-in state is unreadable — not broadcasting until it can be read (see GET /api/status checkinReadError)');
+      return { action: 'skipped', reason: 'check-in state unreadable', results: [] };
     }
     // Offline-gap grace (0.7.22): judged on the stored "I was
     // online" stamp (the tick refreshes it; a manual release check
@@ -2423,7 +2418,7 @@ async function evaluateRelease(options) {
       if (expireVacation(stH, new Date())) changed = true;
       if (changed) store.saveState(DATA_DIR, stH);
     } catch (e) { console.error('offline-hold apply failed:', e); }
-    return await evaluateReleaseInner(onlyTypes);
+    return await evaluateReleaseInner(automatic);
   } finally {
     releaseEvaluationInFlight = false;
   }
@@ -2450,18 +2445,16 @@ function storedCombinedDue(tx) {
   return combineOutcomes(store.triggerOf(tx), storedRuleOutcomes(tx)).fire;
 }
 
-async function evaluateReleaseInner(onlyTypes) {
+async function evaluateReleaseInner(automatic) {
   const state = store.loadState(DATA_DIR);
   const now = new Date();
   const s = state.settings;
-  // `onlyTypes` (optional) restricts the evaluation to those trigger
-  // types — the fast tick passes ['price', 'utxo', 'blockheight',
-  // 'setdate', 'feemarket'], the hourly tick ['checkin'], the manual
-  // check passes nothing (all types). A filtered run that finds no
-  // armed tx of its types is a skip, and it must not touch the other
-  // types' triggerState.
+  // `automatic` marks a tick-driven evaluation (the full tick
+  // passes true; the manual release check passes nothing). It
+  // only changes one thing: the broadcast backoff guard in the
+  // firing loop below. Every rule type is evaluated, every time —
+  // there is no type filter any more (0.8.2, the full tick).
   let armed = (state.bitcoin.txs || []).filter((t) => t.enabled);
-  if (onlyTypes) armed = armed.filter((t) => store.triggerTypesOf(t).some((ty) => onlyTypes.includes(ty)));
   if (!armed.length) return { action: 'skipped', reason: 'no armed transactions', results: [] };
 
   // Endpoints: the primary node first, the secondary if the primary
@@ -2495,16 +2488,15 @@ async function evaluateReleaseInner(onlyTypes) {
   for (const tx of armed) {
     wasDueById.set(tx.id, storedCombinedDue(tx));
     let ev;
-    try { ev = await evaluateTrigger(state, tx, now, onlyTypes); }
+    try { ev = await evaluateTrigger(state, tx, now); }
     catch (e) {
       // An evaluator must never take the whole run down with it:
       // a throw is the same as 'unknown' — do not fire, and say so.
-      // Every rule this tick was meant to evaluate gets an unknown
-      // slice (the ones already evaluated keep theirs).
+      // Every rule gets an unknown slice (the ones already
+      // evaluated keep theirs).
       console.error('trigger evaluation failed for ' + (tx.label || tx.id) + ':', e);
       const set = store.triggerOf(tx);
       set.rules.forEach((rule, i) => {
-        if (onlyTypes && !onlyTypes.includes(rule.type)) return;
         setRuleTriggerState(tx, i, { ...freshTriggerState(now, 'unknown', 'evaluation failed — will retry'), lastError: e.message });
       });
       ev = { fire: false, status: 'unknown', reason: 'evaluation failed — will retry', ruleResults: [], firedIndexes: [], firedRuleTypes: [] };
@@ -2517,6 +2509,10 @@ async function evaluateReleaseInner(onlyTypes) {
     firing.push(tx);
   }
   const firingIds = new Set(firing.map((f) => f.id));
+  // (0.8.2) Whether any firing tx was held back by the broadcast
+  // backoff below — so the top-level reason says so instead of
+  // 'no trigger fired' when nothing else happened.
+  let backedOff = false;
   // Persist the triggerState updates by merging them into FRESH
   // state (see refreshConfirmations): the evaluations waited on the
   // network, so a user edit landing mid-loop — disable, delete, or
@@ -2563,6 +2559,34 @@ async function evaluateReleaseInner(onlyTypes) {
       results.push({ id: tx.id, txid: tx.txid, label: tx.label || '', action: 'skipped', reason: 'submitted to Slipstream — waiting on MARA' });
       continue;
     }
+    // (0.8.2) Broadcast backoff — automatic evaluations only. A
+    // tx whose last broadcast attempt failed is not re-attempted
+    // until an hour has passed since that attempt. The timestamp
+    // is the release record's lastAttemptAt, written by
+    // broadcastOneInner on every failed attempt (either route,
+    // and the input-check failure too — and by refreshMaraWaiting
+    // when MARA drops a submission). The tx stays due — the next
+    // automatic attempt waits out the hour — and the guard never
+    // re-logs 'fired' (that event fired once, on the transition
+    // into due). Manual broadcasts bypass it: they call
+    // broadcastOne directly, never through this loop. The record
+    // is read from the snapshot loaded at the start of this
+    // evaluation (the same snapshot the already-broadcast /
+    // stale checks above read) — a manual failure landing
+    // mid-evaluation is caught on the next tick at the latest,
+    // so the worst case is one extra attempt, never a skipped
+    // first one. A missing or unparseable lastAttemptAt means no
+    // backoff (the pre-0.8.2 behaviour): a timestamp that cannot
+    // be read cannot prove recency.
+    if (automatic && tx.release && tx.release.status === 'failed'
+        && typeof tx.release.lastAttemptAt === 'string') {
+      const last = Date.parse(tx.release.lastAttemptAt);
+      if (Number.isFinite(last) && (now - last) < BROADCAST_BACKOFF_MS) {
+        backedOff = true;
+        results.push({ id: tx.id, txid: tx.txid, label: tx.label || '', action: 'skipped', reason: 'broadcast backoff — last failed attempt was less than an hour ago' });
+        continue;
+      }
+    }
     // The release decision was made once, above — a check-in landing
     // mid-run is recorded but does not stop the remaining
     // transactions (all-or-none, 0.7.10). The fired rules ride along
@@ -2577,7 +2601,7 @@ async function evaluateReleaseInner(onlyTypes) {
     : results.some((r) => r.action === 'failed') ? 'failed'
     : results.some((r) => r.action === 'stale') ? 'stale' : 'skipped';
   const out = { action, results };
-  if (action === 'skipped') out.reason = 'no trigger fired';
+  if (action === 'skipped') out.reason = backedOff ? 'broadcast backoff — retry after an hour' : 'no trigger fired';
   return out;
 }
 
@@ -2936,7 +2960,33 @@ function feePeakForState() {
   return { peak: feePeakCache.peak, fetchedAt: new Date(feePeakCache.fetchedAt).toISOString() };
 }
 
-async function runReleaseTick() {
+// The full-evaluation tick (0.8.2): ONE tick evaluates every rule
+// type together, on the check cadence (Settings: Check cadence,
+// default 60 s). It replaces the two-tick split (an hourly tick
+// for check-in only, a fast tick for the five fast types): an AND
+// set spanning the two domains — check-in AND price, say — can
+// only fire when both rules are judged at the same tick, and the
+// split ticks never did that (only a manual release check did).
+// The cadence is a fast-trigger cadence: a setup with no armed
+// non-manual rule never runs this tick, so a manual-only setup
+// makes no extra API calls, and a check-in-only setup costs only
+// the clock math (a timestamp compare — no network). The
+// evaluation is the same single-flight evaluateRelease() the
+// manual check uses, with no type filter — so every rule is
+// judged together, every tick.
+//   The stamp block (offline hold, grace, vacation expiry, the
+//   "I was online" stamp) runs here, before the evaluation, on
+//   the same reasoning as before: the hold is judged on the stamp
+//   as it stands BEFORE this tick refreshes it. Refreshing it
+//   every minute instead of hourly changes nothing — while the
+//   app runs the stamp stays fresh, and only real downtime
+//   grows the gap. A dated vacation now expires within a minute
+//   of its end instead of within an hour.
+//   Housekeeping (node tests, confirmation / MARA / fallback
+//   refreshes, fee caches) is NOT here — it stays hourly in
+//   runHourlyTick below, on its own cadence, so the merge does
+//   not re-time it.
+async function runFullTick() {
   const now = new Date();
   // Offline-gap grace (0.7.22): the hold is judged on the "I was
   // online" stamp as it stands BEFORE this tick refreshes it —
@@ -2951,7 +3001,7 @@ async function runReleaseTick() {
     applyGrace(st0, now); // the grace for price/UTXO triggers (0.8.0) — judged on the same stale stamp, before it is refreshed; the unconditional save below persists it
     // Vacation expiry (0.8.0): a dated vacation ends at the end
     // of its last day — the clock resumes from its frozen count.
-    // Judged here on the hourly tick (and on every release
+    // Judged here on the full tick (and on every release
     // evaluation, see evaluateRelease), so a lapsed vacation
     // never lingers past the next tick.
     expireVacation(st0, now);
@@ -2961,15 +3011,34 @@ async function runReleaseTick() {
   // A receiver check-in lands in the clock before the release is
   // evaluated, so a check-in that arrived between ticks is honoured
   // even if nobody opened the app.
-  // The hourly tick handles the check-in trigger (plus the
-  // housekeeping below) — price/UTXO rules are the fast tick's job.
+  // The price cache refresh runs first, so the price rule's
+  // "currently $X" line stays fresh even while its trigger is held
+  // by a grace.
   try {
-    const r = await evaluateRelease({ onlyTypes: ['checkin'] });
+    await refreshPriceIfStale();
+    const st = store.loadState(DATA_DIR);
+    const hasArmed = (st.bitcoin.txs || []).some((t) => {
+      if (!t.enabled) return false;
+      return store.triggerTypesOf(t).some((ty) => ty !== 'manual');
+    });
+    if (!hasArmed) return;
+    const r = await evaluateRelease({ automatic: true });
     if (r.action !== 'skipped') {
       const sum = (r.results || []).map((x) => x.action + ':' + (x.txid || '').slice(0, 8)).join(', ');
-      console.log('release tick:', r.action, sum || r.reason || '');
+      console.log('full tick:', r.action, sum || r.reason || '');
     }
-  } catch (e) { console.error('release tick failed:', e); }
+  } catch (e) { console.error('full tick failed:', e); }
+}
+
+// The hourly tick (0.8.2): housekeeping only. It used to be the
+// release tick (check-in evaluation + this housekeeping); the
+// evaluation moved to runFullTick above, and this tick keeps the
+// hourly cadence for the work that is genuinely hourly — node
+// capability tests, confirmation counts, MARA-waiting and public
+// fallback refreshes, the fee-peak / current-fee caches (each
+// with its own TTL, so they refresh at most once per their own
+// period). Nothing here broadcasts.
+async function runHourlyTick() {
   try {
     await testNodes();
   } catch (e) { console.error('node check failed:', e); }
@@ -2979,9 +3048,8 @@ async function runReleaseTick() {
   } catch (e) { console.error('confirmations refresh failed:', e); }
   // MARA-waiting transactions (0.7.16): a Slipstream submission
   // that is not yet visible publicly needs its status kept current
-  // even while the clock is on-track — the refresh runs after the
-  // evaluation (so a tx MARA just dropped is retried on the NEXT
-  // tick, not in this one) and regardless of the clock.
+  // even while the clock is on-track — the refresh runs regardless
+  // of the clock.
   try {
     const st = store.loadState(DATA_DIR);
     await refreshMaraWaiting(st);
@@ -2989,8 +3057,8 @@ async function runReleaseTick() {
   // Public fallback (0.7.17): a Slipstream transaction whose
   // fallback deadline has passed goes public — after the MARA
   // refresh above, so a tx MARA just confirmed as visible is not
-  // also fallback-broadcast. Runs regardless of the clock, like the
-  // MARA refresh.
+  // also fallback-broadcast. Runs regardless of the clock, like
+  // the MARA refresh.
   try {
     const st = store.loadState(DATA_DIR);
     await refreshPublicFallbacks(st);
@@ -3005,42 +3073,6 @@ async function runReleaseTick() {
   // refresh never breaks the tick (the Critical check is skipped
   // until the fees come back).
   try { await refreshCurrentFeesIfStale(); } catch (e) { console.error('current-fees refresh failed:', e); }
-}
-
-// The fast tick (0.8.0, extended 0.8.1): every minute, while a price,
-// UTXO, block-height, set-date, or fee-market rule is armed, run a
-// release evaluation for those trigger types only. The hourly tick
-// samples them once an hour — too coarse: an unconfirmed UTXO
-// trigger must be caught well within one block time (~10 min), a
-// price that holds for an hour should fire within a minute of the
-// hour being up, not up to an hour later, and a set date or block
-// height should fire within a minute of its moment, not up to an
-// hour later. The 1-minute cadence is a fast-trigger cadence: a
-// setup with no armed fast rule never runs this tick, so a
-// check-in-only setup keeps the pure hourly cadence and makes no
-// extra API calls. The evaluation is the same single-flight
-// evaluateRelease() the hourly tick and the manual check use,
-// restricted to the fast types — so a check-in rule is never
-// evaluated (and never broadcast) by this tick; the hourly tick
-// owns check-in. The cache refresh runs first, so the price rule's
-// "currently $X" line stays fresh even while its trigger is held
-// by a grace.
-async function runFastTick() {
-  try {
-    await refreshPriceIfStale();
-    const st = store.loadState(DATA_DIR);
-    const hasFast = (st.bitcoin.txs || []).some((t) => {
-      if (!t.enabled) return false;
-      const types = store.triggerTypesOf(t);
-      return types.includes('price') || types.includes('utxo') || types.includes('blockheight') || types.includes('setdate') || types.includes('feemarket');
-    });
-    if (!hasFast) return;
-    const r = await evaluateRelease({ onlyTypes: ['price', 'utxo', 'blockheight', 'setdate', 'feemarket'] });
-    if (r.action !== 'skipped') {
-      const sum = (r.results || []).map((x) => x.action + ':' + (x.txid || '').slice(0, 8)).join(', ');
-      console.log('fast tick:', r.action, sum || r.reason || '');
-    }
-  } catch (e) { console.error('fast tick failed:', e); }
 }
 
 // Test both nodes and save the per-endpoint results, so the Dashboard
@@ -3299,7 +3331,7 @@ async function handleApi(req, res, pathname) {
     return sendJson(res, 200, store.readBroadcastLog(DATA_DIR, 50).reverse());
   }
 
-  // POST /api/release/check — run the release evaluation now (also runs hourly).
+  // POST /api/release/check — run the release evaluation now (the full tick runs the same evaluation on the cadence).
   // A receiver check-in is merged inside evaluateRelease first (0.7.12),
   // so a check-in that arrived since the last read is honoured here too.
   if (req.method === 'POST' && pathname === '/api/release/check') {
@@ -3662,7 +3694,7 @@ async function handleApi(req, res, pathname) {
     if (!fresh) return sendError(res, 400, 'feeLowMultiplier must be greater than feeMediumMultiplier');
     // A new cadence takes effect immediately — the running fast
     // tick is cleared and restarted with the new delay.
-    if (cadenceChanged) rearmFastTick();
+    if (cadenceChanged) rearmFullTick();
     return sendJson(res, 200, sanitizeState(fresh).settings);
   }
 
@@ -4762,7 +4794,7 @@ async function handleApi(req, res, pathname) {
     store.saveState(DATA_DIR, restored);
     // A restored cadence takes effect immediately — the running
     // fast tick is cleared and restarted with it.
-    rearmFastTick();
+    rearmFullTick();
     // The receiver's key list matches the restored state from now on.
     writeReceiverKeys(restored);
     if (Array.isArray(body.checkins)) store.writeCheckins(DATA_DIR, body.checkins.slice(-200));
@@ -5054,27 +5086,30 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`Standby ${VERSION} listening on :${PORT} (data: ${DATA_DIR})`);
 });
 
-// Release-evaluation timer: hourly, plus once shortly after startup.
-// The startup fee recompute runs on the same schedule (once, shortly
-// after startup) — see recomputeStoredFees. The fee peak is fetched
-// once shortly after startup too (the hourly tick refreshes it daily
-// after that) — see refreshFeePeakIfStale.
-setTimeout(runReleaseTick, 5000);
+// Release-evaluation timers (0.8.2): the full tick runs once
+// shortly after startup and then every checkCadenceSeconds; the
+// hourly tick runs once shortly after startup and then hourly.
+// The startup fee recompute runs once shortly after startup too
+// — see recomputeStoredFees. The fee peak is fetched once shortly
+// after startup (the hourly tick refreshes it daily after that)
+// — see refreshFeePeakIfStale.
+setTimeout(runFullTick, 5000);
+setTimeout(runHourlyTick, 5000);
 setTimeout(recomputeStoredFees, 5000);
 setTimeout(refreshFeePeakIfStale, 2000);
 setTimeout(refreshCurrentFeesIfStale, 2000);
 setTimeout(refreshPriceIfStale, 2000); // 0.8.0: a price rule's "currently $X" line is live on first load
-setInterval(runReleaseTick, 60 * 60 * 1000);
-// The fast tick (0.8.0): price + UTXO rules are evaluated every
+setInterval(runHourlyTick, 60 * 60 * 1000);
+// The full tick (0.8.2): every rule type is evaluated every
 // checkCadenceSeconds (Settings: Check cadence; default 60) while
-// one is armed. The interval is re-armed from the saved setting
-// whenever the setting changes (PUT /api/settings, restore), so a
-// new cadence takes effect without a restart — the old interval
-// is cleared first, so there is never more than one fast tick
-// running. The hourly check-in tick above is unchanged.
-let fastTickTimer = null;
-function rearmFastTick() {
-  if (fastTickTimer) clearInterval(fastTickTimer);
-  fastTickTimer = setInterval(runFastTick, checkCadenceSecondsOf(store.loadState(DATA_DIR).settings) * 1000);
+// one non-manual rule is armed. The interval is re-armed from the
+// saved setting whenever the setting changes (PUT /api/settings,
+// restore), so a new cadence takes effect without a restart — the
+// old interval is cleared first, so there is never more than one
+// full tick running.
+let fullTickTimer = null;
+function rearmFullTick() {
+  if (fullTickTimer) clearInterval(fullTickTimer);
+  fullTickTimer = setInterval(runFullTick, checkCadenceSecondsOf(store.loadState(DATA_DIR).settings) * 1000);
 }
-rearmFastTick();
+rearmFullTick();
