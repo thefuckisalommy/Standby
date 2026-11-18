@@ -1,24 +1,27 @@
 # Standby — Umbrel app manifest
-# Lives in its own community store (thefuckisalommy/Standby-on-Umbrel),
+# Lives in its own community store (thefuckisalommy/Standby),
 # App id `standby`, port 3100.
 manifestVersion: 1
 id: standby
 category: automation
 name: Standby
-version: "0.8.0"
+version: "0.8.1"
 releaseNotes: |-
-  0.8.0 — Standby is now a general broadcast engine: each transaction carries its own trigger, the rule that fires it.
+  0.8.1 — Three more triggers join the broadcast engine.
 
-  - **Check-in:** fire after N days of silence. Existing transactions keep the 35-day default; the threshold is now set per transaction.
-  - **BTC price:** fire as soon as the price is at or above, or at or below, a value you set. Two feeds you pick in Settings (CoinGecko and Coinbase by default, no key needed) must agree within 5% — a single bad feed never fires; if they disagree, or a feed fails, the rule waits.
-  - **UTXO moved:** fire when a named outpoint is spent — on any spend, or once it reaches N confirmations (you choose).
-  - **Manual only:** never fires on its own.
+  - **Block height:** fire when the chain reaches a block height you set. Deterministic — the height comes from your node's own chain, and a reorg can't un-fire it.
+  - **Set date:** fire at a date and time you set, whether or not you check in. A pure deadline — checking in does not snooze it.
+  - **Fee market:** fire when the economy fee crosses a rate you set (sat/vB) — falls to or below it, or rises to or above it.
+  - **Custom price source:** pick Custom for either price source and point Standby at your own endpoint — a URL plus the JSON path to the price (for example, `data.amount`).
 
-  A price or UTXO fire never resets the check-in clock, and a check-in never clears a price or UTXO rule. The readiness card lists one row per armed rule, naming its type and current state; each transaction card shows its rule in a three-line Trigger box. Check-in rules are evaluated hourly; price and UTXO rules about once a minute (adjustable in Settings).
+  Block-height, set-date, and fee-market rules are evaluated about once a minute, alongside price and UTXO rules; check-in rules stay hourly. A rule whose condition is already met when you add or edit it is blocked unless you confirm it — so a height already reached, a date already passed, or a fee already past your threshold does not fire the moment you save it. The grace period and vacation freeze still apply only to price and UTXO triggers (grace) and check-in triggers (vacation) — the new triggers are not held by either.
 
-  **Safety:** if the app was offline, price and UTXO triggers are held during a grace period (7 days by default) instead of firing on stale data. And inactive time no longer counts toward the check-in countdown — disarming a transaction, or turning on vacation, freezes its clock; re-arming resumes it where it left off.
+  Also in 0.8.1:
 
-  **Also in this release:** the Add form is now a popup; Broadcast All is removed (Broadcast Armed remains); a Getting Started card when you have no staged transactions; a Settings filter and per-card help; the installed version shown in Settings; and a fee-verdict zone bar showing the Low/Medium/High risk bands.
+  - **Node capability test:** Test connection now reports each node's Broadcast, Fee estimates, and Block height readiness, with the measured value beside it — and each node is one row, with the checks in a drop-down.
+  - **Per-transaction history:** each transaction card now has a History section, nested inside Details — a timeline of what happened to it, oldest first: added, trigger fired, broadcast sent, confirmed, went stale, edits, and arm/disarm changes. Older transactions get their history filled in from what Standby already knows (a broadcast that confirmed shows added, broadcast, confirmed).
+  - **Primary first:** prices, fees, and block height all come from the primary source or node; the secondary is only a fallback if the primary is down.
+  - **Readiness card:** transactions read as separate tiles, node and exchange status sit in their own sub-card, and the price sits next to each source's status.
 tagline: Presigned Bitcoin transactions, ready when they're needed.
 description: |-
   Standby helps you prepare Bitcoin transactions in advance and keep them ready for whenever the time comes to use them.
@@ -29,7 +32,7 @@ description: |-
 
   - Prepare: Store presigned Bitcoin transactions for future use.
   - Broadcast manually: Send a prepared transaction whenever you decide it's time.
-  - Automate: Each transaction carries its own trigger — the rule that fires it. Check-in (fire after N days of silence), BTC price (fire when the price crosses a value you set), UTXO moved (fire when a named outpoint is spent), or Manual only (never fires on its own).
+  - Automate: Each transaction carries its own trigger — the rule that fires it. Check-in (fire after N days of silence), BTC price (fire when the price crosses a value you set), UTXO moved (fire when a named outpoint is spent), Block height (fire when the chain reaches a height), Set date (fire at a date and time), Fee market (fire when the economy fee crosses a rate you set, up or down), or Manual only (never fires on its own).
 
   Why Standby?
 
@@ -39,14 +42,14 @@ description: |-
 
   Standby. Ready when you need it.
 developer: Lommy
-website: https://github.com/thefuckisalommy/Standby-on-Umbrel
+website: https://github.com/thefuckisalommy/Standby
 dependencies: []
-repo: https://github.com/thefuckisalommy/Standby-on-Umbrel
-support: https://github.com/thefuckisalommy/Standby-on-Umbrel/issues
+repo: https://github.com/thefuckisalommy/Standby
+support: https://github.com/thefuckisalommy/Standby/issues
 port: 3100
 torOnly: false
-icon: https://raw.githubusercontent.com/thefuckisalommy/Standby-on-Umbrel/main/standby/icon.jpg
+icon: https://raw.githubusercontent.com/thefuckisalommy/Standby/main/standby/icon.jpg
 gallery:
-  - https://raw.githubusercontent.com/thefuckisalommy/Standby-on-Umbrel/main/standby/1.jpg
-  - https://raw.githubusercontent.com/thefuckisalommy/Standby-on-Umbrel/main/standby/2.jpg
-  - https://raw.githubusercontent.com/thefuckisalommy/Standby-on-Umbrel/main/standby/3.jpg
+  - https://raw.githubusercontent.com/thefuckisalommy/Standby/main/standby/1.jpg
+  - https://raw.githubusercontent.com/thefuckisalommy/Standby/main/standby/2.jpg
+  - https://raw.githubusercontent.com/thefuckisalommy/Standby/main/standby/3.jpg

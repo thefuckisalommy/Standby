@@ -7,7 +7,7 @@
 // broadcast the owner's pre-signed Bitcoin transactions if they stop
 // checking in past the broadcast threshold — or immediately, on the
 // owner's say-so (Broadcast Now on a transaction's own card, or
-// Broadcast All). There is no message delivery any more: no Part 1 /
+// Broadcast Armed for the armed ones). There is no message delivery any more: no Part 1 /
 // Part 2, no recipient, no channels, no reminders. Each transaction is
 // signed in the owner's own wallet and pasted as raw hex; the app never
 // sees keys. Each has its own enable toggle and its own release
@@ -28,8 +28,8 @@
 // moment a transaction is edited away from the shared input.
 // The check-in status turns 'broadcasted' once a release has gone
 // out (a manual broadcast does not count) and a check-in resets it
-// to 'on-track'. Broadcast All only attempts the transactions that
-// are not archived (broadcasted or stale).
+// to 'on-track'. Broadcast Armed only attempts the armed transactions
+// that are not archived (broadcasted or stale).
 // 0.6.6 adds check-in API keys: a key lets a service or app check in
 // for the owner, and it can only record a check-in — it cannot read
 // transactions or broadcast. Each service gets its own labelled key
@@ -59,7 +59,7 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 // (last.json). Absent on a plain `node server.js` run — the key
 // feature is dormant then; every file access is guarded.
 const CHECKIN_DIR = process.env.CHECKIN_DIR || '/checkin';
-const VERSION = '0.8.0';
+const VERSION = '0.8.1';
 const MAX_BODY = 1024 * 1024; // 1 MB
 
 const MIME = {
@@ -179,13 +179,16 @@ function triggerLabel(trigger) {
     case 'price': return 'BTC price';
     case 'utxo': return 'UTXO';
     case 'manual': return 'Manual';
+    case 'blockheight': return 'Block height';
+    case 'setdate': return 'Set date';
+    case 'feemarket': return 'Fee market';
     default: return 'Check-in';
   }
 }
 
 // The condition in plain words, as shown in the trigger subcard:
-// "Fired when you don't check in for 35 days",
-// "Fired when BTC price ≥ $150,000", "Fired when UTXO 4a74…:0 is spent",
+// "Fires when you don't check in for 35 days",
+// "Fires when BTC price ≥ $150,000", "Fires when UTXO 4a74…:0 is spent",
 // "Never fires — manual only". `trigger` is normalized (see
 // triggerOf) — the callers pass the normalized one; a missing one
 // falls back to the check-in default.
@@ -193,9 +196,9 @@ function triggerConditionText(trigger) {
   const t = (trigger && trigger.type) ? trigger : store.defaultTrigger(35);
   switch (t.type) {
     case 'checkin':
-      return "Fired when you don't check in for " + t.params.thresholdDays + (t.params.thresholdDays === 1 ? ' day' : ' days');
+      return "Fires when you don't check in for " + t.params.thresholdDays + (t.params.thresholdDays === 1 ? ' day' : ' days');
     case 'price':
-      return 'Fired when BTC price ' + (t.params.op === '>=' ? '≥' : '≤') + ' $' + t.params.value.toLocaleString('en-US');
+      return 'Fires when BTC price ' + (t.params.op === '>=' ? '≥' : '≤') + ' $' + t.params.value.toLocaleString('en-US');
     case 'utxo': {
       const parts = String(t.params.outpoint || '').split(':');
       // (0.8.0) The confirmation mode rides on the condition:
@@ -204,10 +207,19 @@ function triggerConditionText(trigger) {
       // so explicitly, so the subcard names the rule.
       const confs = (t.params.confirmations === 0) ? 0 : (t.params.confirmations || 1);
       const suffix = confs === 0 ? ' (unconfirmed)' : (confs === 1 ? '' : ' (' + confs + ' confirmations)');
-      return 'Fired when UTXO ' + (parts[0] || '').slice(0, 4) + '…:' + (parts[1] || '') + ' is spent' + suffix;
+      return 'Fires when UTXO ' + (parts[0] || '').slice(0, 4) + '…:' + (parts[1] || '') + ' is spent' + suffix;
     }
     case 'manual':
       return 'Never fires — manual only';
+    case 'blockheight':
+      return 'Fires when the chain reaches block ' + Number(t.params.targetHeight).toLocaleString('en-US');
+    case 'setdate': {
+      const d = new Date(t.params.fireAt);
+      const shown = Number.isFinite(d.getTime()) ? d.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : String(t.params.fireAt);
+      return 'Fires on ' + shown;
+    }
+    case 'feemarket':
+      return 'Fires when tx fees are ' + (t.params.direction === 'above' ? '>= ' : '<= ') + Number(t.params.maxFeeRate).toLocaleString('en-US') + ' sat/vB';
     default:
       return '';
   }
@@ -831,16 +843,28 @@ function checkinStatus(state, now) {
 const PRICE_JUMP_WINDOW_MS = 60 * 60 * 1000; // the 10x-jump guard (below) only applies when the last good reading is recent — over a longer gap a real 10x move is possible
 
 // The configured price sources (Settings: priceSources
-// {source1, source2}), defaulting to CoinGecko + Coinbase. An
-// unknown id or identical sources fall back to the defaults —
-// the settings validator (PUT /api/settings) rejects those, but
-// a hand-edited or restored state must never break the fetch.
+// {source1, source2}). Each slot is either a provider id string
+// ('kraken', ...) or a custom object { id: 'custom', url, path }
+// (0.8.1). An unusable value or two identical sources fall back
+// to the defaults — the settings validator (PUT /api/settings)
+// rejects those, but a hand-edited or restored state must never
+// break the fetch.
 function priceSourcesOf(settings) {
   const s = (settings && settings.priceSources && typeof settings.priceSources === 'object') ? settings.priceSources : {};
-  const s1 = (typeof s.source1 === 'string' && bitcoin.priceProviderById(s.source1)) ? s.source1 : 'coingecko';
-  const s2 = (typeof s.source2 === 'string' && bitcoin.priceProviderById(s.source2)) ? s.source2 : 'coinbase';
-  if (s1 === s2) return { source1: 'coingecko', source2: 'coinbase' };
-  return { source1: s1, source2: s2 };
+  const s1 = bitcoin.normalizePriceSourceValue(s.source1);
+  const s2 = bitcoin.normalizePriceSourceValue(s.source2);
+  const v1 = (s1 === null) ? 'coingecko' : s1;
+  const v2 = (s2 === null) ? 'coinbase' : s2;
+  if (bitcoin.priceSourceKey(v1) === bitcoin.priceSourceKey(v2)) return { source1: 'coingecko', source2: 'coinbase' };
+  return { source1: v1, source2: v2 };
+}
+
+// The 400 message for a price-source value the validator
+// rejects: an unknown provider id, or a custom object without a
+// valid http(s) URL and a well-formed JSON path.
+function priceSourceError(v) {
+  if (v && typeof v === 'object') return 'custom price source needs a valid http(s) URL and a JSON path to the price (e.g. data.amount)';
+  return 'unknown price provider: ' + v;
 }
 
 // The user controls (0.8.0), read defensively like
@@ -881,22 +905,59 @@ async function fetchPriceCached(sources, cadenceSeconds) {
   const src = (sources && sources.source1 && sources.source2) ? sources : { source1: 'coingecko', source2: 'coinbase' };
   const ttlMs = ((typeof cadenceSeconds === 'number' && Number.isFinite(cadenceSeconds) && cadenceSeconds > 0) ? cadenceSeconds : CHECK_CADENCE_SECONDS_DEFAULT) * 1000;
   const nowMs = Date.now();
-  if (priceCache.fetchedAt && priceCache.source1 === src.source1 && priceCache.source2 === src.source2
+  const k1 = bitcoin.priceSourceKey(src.source1), k2 = bitcoin.priceSourceKey(src.source2);
+  if (priceCache.fetchedAt && priceCache.source1Key === k1 && priceCache.source2Key === k2
       && priceCache.readings && Object.keys(priceCache.readings).length
       && (nowMs - new Date(priceCache.fetchedAt).getTime()) < ttlMs) {
     return priceCache.readings;
   }
   const readings = await bitcoin.fetchPriceReadings(src.source1, src.source2);
-  priceCache = { readings, fetchedAt: new Date(nowMs).toISOString(), source1: src.source1, source2: src.source2 };
+  priceCache = { readings, fetchedAt: new Date(nowMs).toISOString(), source1: src.source1, source2: src.source2, source1Key: k1, source2Key: k2 };
+  return readings;
+}
+
+// The fee cache for the fee-market trigger (0.8.1): the economy
+// fee from BOTH configured nodes (per endpoint, TTL = the check
+// cadence — Settings: Check cadence, default 60 seconds) — the
+// same cadence as the price cache, so the fee trigger is
+// evaluated on data no older than one tick. This is separate
+// from the hourly currentFeesCache (used by the fee verdict):
+// the verdict only needs an hourly fee, but a trigger that
+// should fire when fees drop needs to see the drop within a
+// tick. The cache is keyed by the endpoint URLs — a settings
+// change makes it stale, so the next read fetches the new nodes
+// instead of serving the old ones. readings is
+// { [label]: { endpoint, fee|null, source|null, error|null } }.
+// A failed fetch does NOT throw — the readings carry the error
+// per node, and the caller combines them (the primary node's
+// fee decides, the secondary is only a fallback) via
+// bitcoin.combineFeeReadings; no usable reading means 'unknown',
+// never a fire.
+let nodeFeeCache = { readings: null, fetchedAt: null, primary: null, secondary: null };
+
+async function fetchNodeFeesCached(endpoints, cadenceSeconds) {
+  const eps = (endpoints && endpoints.length) ? endpoints : bitcoin.endpointsFor({ primaryApiUrl: 'https://mempool.space', secondaryApiUrl: 'https://blockstream.info/api' });
+  const primary = eps[0] ? eps[0].base : null;
+  const secondary = eps[1] ? eps[1].base : null;
+  const ttlMs = ((typeof cadenceSeconds === 'number' && Number.isFinite(cadenceSeconds) && cadenceSeconds > 0) ? cadenceSeconds : CHECK_CADENCE_SECONDS_DEFAULT) * 1000;
+  const nowMs = Date.now();
+  if (nodeFeeCache.fetchedAt && nodeFeeCache.primary === primary && nodeFeeCache.secondary === secondary
+      && nodeFeeCache.readings && Object.keys(nodeFeeCache.readings).length
+      && (nowMs - new Date(nodeFeeCache.fetchedAt).getTime()) < ttlMs) {
+    return nodeFeeCache.readings;
+  }
+  const readings = await bitcoin.fetchNodeFeeReadings(eps);
+  nodeFeeCache = { readings, fetchedAt: new Date(nowMs).toISOString(), primary, secondary };
   return readings;
 }
 
 // The cached prices as served to the UI (GET /api/state) — the
 // per-source readings, the consensus price (a single display
-// number: the average of two agreeing readings, the single valid
-// one, or null), and the fetched-at timestamp. `agreementPct`
-// is the configured agreement (Settings: Price agreement), so
-// the displayed consensus uses the same rule as the trigger.
+// number: the primary exchange's price when the two agree, the
+// single valid one, or null), and the fetched-at timestamp.
+// `agreementPct` is the configured agreement (Settings: Price
+// agreement), so the displayed consensus uses the same rule as
+// the trigger.
 function priceCacheForState(agreementPct) {
   return {
     price: bitcoin.priceConsensus(priceCache.readings || {}, agreementPct),
@@ -921,24 +982,30 @@ function priceCacheForState(agreementPct) {
 // like the node rows. `pc` is the priceCacheForState() shape.
 function exchangeStatusFor(pc, sources, agreementPct) {
   const ok = pc && pc.prices && Object.keys(pc.prices).length
-    && pc.source1 === sources.source1 && pc.source2 === sources.source2;
+    && bitcoin.priceSourceKey(pc.source1) === bitcoin.priceSourceKey(sources.source1)
+    && bitcoin.priceSourceKey(pc.source2) === bitcoin.priceSourceKey(sources.source2);
   // One row per configured price source (in configured order).
   // A row is 'ok' when it has a price, 'error' when it has an
   // error (or no reading at all), and 'not-tested' while the
-  // cache is cold or for different sources.
-  const rows = [sources.source1, sources.source2].map((pid) => {
-    const prov = bitcoin.PRICE_PROVIDERS.find((p) => p.id === pid);
-    const label = prov ? prov.label : pid;
-    if (!ok) return { provider: pid, label, price: null, error: null, status: 'not-tested' };
-    const r = pc.prices[pid] || null;
-    if (!r) return { provider: pid, label, price: null, error: 'No reading', status: 'error' };
+  // cache is cold or for different sources. Readings are keyed
+  // by slot (source1/source2), and a custom source's label is
+  // 'Custom' — the URL itself is never shown on the readiness
+  // card.
+  const rows = ['source1', 'source2'].map((slot) => {
+    const src = sources[slot];
+    const isCustom = src && typeof src === 'object' && src.id === 'custom';
+    const label = isCustom ? 'Custom' : (bitcoin.priceProviderById(src) ? bitcoin.priceProviderById(src).label : String(src));
+    const provider = isCustom ? 'custom' : String(src);
+    if (!ok) return { provider, label, price: null, error: null, status: 'not-tested' };
+    const r = pc.prices[slot] || null;
+    if (!r) return { provider, label, price: null, error: 'No reading', status: 'error' };
     const price = typeof r.price === 'number' ? r.price : null;
     const error = r.error ? String(r.error) : null;
-    return { provider: pid, label, price, error, status: price != null ? 'ok' : 'error' };
+    return { provider, label, price, error, status: price != null ? 'ok' : 'error' };
   });
   if (!ok) return { status: 'not-tested', detail: 'No price readings yet', sources: rows };
   const agree = (typeof agreementPct === 'number' && Number.isFinite(agreementPct) && agreementPct > 0) ? agreementPct : PRICE_AGREEMENT_PCT_DEFAULT;
-  const comb = bitcoin.combinePriceReadings(pc.prices, '>=', agree);
+  const comb = bitcoin.combinePriceReadings(pc.prices, agree);
   if (comb.mode === 'dual') return { status: 'ok', detail: 'Both price sources agree', sources: rows };
   if (comb.mode === 'single') return { status: 'degraded', detail: 'One price source down — running on a single source', sources: rows };
   if (comb.mode === 'disagree') return { status: 'error', detail: 'Price sources disagree by more than ' + agree + '%', sources: rows };
@@ -1013,9 +1080,10 @@ function evaluateCheckinTrigger(state, tx, now) {
 // from TWO providers (Settings: priceSources) and combined by
 // bitcoin.combinePriceReadings: the reading is only trusted when
 // the two agree within the configured agreement (Settings: Price
-// agreement); a rule that fires above a price uses the HIGHER of
-// the two, below uses the LOWER; when only one source answers,
-// that price is used alone (no agreement check).
+// agreement); when they agree, the PRIMARY exchange's price is
+// the one that decides (the secondary is only a fallback); when
+// only one source answers, that price is used alone (no
+// agreement check).
 // Guards, in order:
 //   (a) Immediate fire: the EFFECTIVE price crossing the
 //       threshold (at/above, or at/below) fires at once — no
@@ -1057,7 +1125,7 @@ async function evaluatePriceTrigger(state, tx, now) {
     };
     return { fire: false, status: 'unknown', reason: 'price unavailable — will retry' };
   }
-  const comb = bitcoin.combinePriceReadings(readings, p.op, priceAgreementPctOf(state.settings));
+  const comb = bitcoin.combinePriceReadings(readings, priceAgreementPctOf(state.settings));
   if (!comb.valid) {
     tx.triggerState = {
       ...freshTriggerState(now, 'unknown', comb.reason),
@@ -1177,6 +1245,136 @@ async function evaluateUtxoTrigger(state, tx, now) {
   return { fire: false, status: 'watching', reason: 'spent — ' + confs + ' of ' + needConfs + ' confirmations' };
 }
 
+// The block-height trigger (0.8.1). Fires when the chain tip
+// reaches params.targetHeight — the PRIMARY node's tip is the one
+// that counts (the secondary is only a fallback if the primary
+// does not answer; a node a block or two ahead is normal
+// propagation lag). Deterministic: the tip height comes from
+// the nodes' own chains, and a reorg cannot un-fire it — once the
+// tip has reached the height, the rule has fired (the release is
+// one-shot; a later reorg does not retract a broadcast). Fail-safe:
+// if neither node answers, the trigger is 'unknown' — it never
+// fires on data it cannot read. No grace period: the tip height is
+// the chain's own state, not a feed that can go stale — an offline
+// gap that ends past the height means the height was genuinely reached.
+async function evaluateBlockHeightTrigger(state, tx, now) {
+  const trg = store.triggerOf(tx);
+  const target = trg.params.targetHeight;
+  // (0.8.1, audit finding 1) One-way latch: once the chain has been
+  // observed at or past the target, the rule has fired — a later
+  // reorg that drops the tip below the target, or a node outage,
+  // cannot un-fire it. Without this, a broadcast that failed while
+  // the tip was past the target would never be retried after a
+  // reorg, because the next evaluation would say 'watching'. The
+  // latch is keyed to the target height, so editing the rule to a
+  // different height starts fresh (the edit path also clears
+  // triggerState on a trigger change).
+  const prev = (tx.triggerState && typeof tx.triggerState === 'object') ? tx.triggerState : {};
+  if (prev.heightReachedFor === target) {
+    tx.triggerState = { ...freshTriggerState(now, 'due', 'block ' + target.toLocaleString('en-US') + ' reached — firing'), lastTipHeight: (typeof prev.lastTipHeight === 'number' ? prev.lastTipHeight : target), lastError: null, heightReachedFor: target };
+    return { fire: true, status: 'due', reason: 'block ' + target.toLocaleString('en-US') + ' reached — firing' };
+  }
+  const endpoints = bitcoin.endpointsFor(state.settings);
+  let comb;
+  try { comb = bitcoin.combineTipHeights(await bitcoin.fetchTipHeights(endpoints)); }
+  catch (e) {
+    tx.triggerState = { ...freshTriggerState(now, 'unknown', 'could not fetch the tip height — will retry'), lastError: e.message };
+    return { fire: false, status: 'unknown', reason: 'could not fetch the tip height — will retry' };
+  }
+  if (!comb.valid) {
+    tx.triggerState = { ...freshTriggerState(now, 'unknown', comb.reason), lastError: comb.reason };
+    return { fire: false, status: 'unknown', reason: comb.reason };
+  }
+  const tip = comb.tip;
+  if (typeof tip !== 'number' || !Number.isFinite(tip) || tip < 0) {
+    tx.triggerState = { ...freshTriggerState(now, 'unknown', 'tip height unreadable — will retry'), lastError: 'tip height is not a number: ' + String(tip) };
+    return { fire: false, status: 'unknown', reason: 'tip height unreadable — will retry' };
+  }
+  if (tip >= target) {
+    tx.triggerState = { ...freshTriggerState(now, 'due', 'block ' + tip.toLocaleString('en-US') + ' reached — firing'), lastTipHeight: tip, lastError: null, heightReachedFor: target };
+    return { fire: true, status: 'due', reason: 'block ' + tip.toLocaleString('en-US') + ' reached — firing' };
+  }
+  tx.triggerState = { ...freshTriggerState(now, 'watching', 'block ' + tip.toLocaleString('en-US') + ' of ' + target.toLocaleString('en-US')), lastTipHeight: tip, lastError: null };
+  return { fire: false, status: 'watching', reason: 'block ' + tip.toLocaleString('en-US') + ' of ' + target.toLocaleString('en-US') };
+}
+
+// The set-date trigger (0.8.1). Fires when the wall clock
+// reaches params.fireAt — a pure deadline, regardless of
+// check-ins. No network call, so it cannot be 'unknown' except
+// on a malformed date (which validation prevents). No grace
+// period: the clock is the clock — an offline gap that ends
+// past the date means the date genuinely passed. The
+// "fire unless I check in" snooze variant is a later addition,
+// not this rule.
+function evaluateSetDateTrigger(state, tx, now) {
+  const trg = store.triggerOf(tx);
+  const fireMs = Date.parse(trg.params.fireAt);
+  if (!Number.isFinite(fireMs)) {
+    tx.triggerState = { ...freshTriggerState(now, 'unknown', 'set date is not a valid date — will retry'), lastError: 'fireAt is not a valid date: ' + String(trg.params.fireAt) };
+    return { fire: false, status: 'unknown', reason: 'set date is not a valid date — will retry' };
+  }
+  if (now.getTime() >= fireMs) {
+    tx.triggerState = { ...freshTriggerState(now, 'due', 'date reached — firing'), lastError: null };
+    return { fire: true, status: 'due', reason: 'date reached — firing' };
+  }
+  const d = new Date(fireMs);
+  const shown = d.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
+  tx.triggerState = { ...freshTriggerState(now, 'watching', 'fires on ' + shown), lastError: null };
+  return { fire: false, status: 'watching', reason: 'fires on ' + shown };
+}
+
+// The fee-market trigger (0.8.1). Fires when the economy fee
+// rate crosses params.maxFeeRate (sat/vB) in the direction the
+// owner chose: 'below' fires when the fee falls to or below it,
+// 'above' fires when it rises to or above it. The threshold is
+// user-set; the tx's own fee rate is not consulted — the rule
+// fires on the market rate alone. The fee comes from BOTH
+// configured nodes (combineFeeReadings) but NO agreement check:
+// the PRIMARY node's fee is the one that counts — the secondary
+// is only a fallback if the primary is down. One node down means
+// the other is used alone, with no agreement check. No 10x-jump
+// guard: fee spikes are real and are exactly what an 'above' rule
+// is for — the guard would block the trigger from doing its job.
+// The fee comes from the cached fetch (TTL = the check cadence),
+// so the trigger sees a move within a tick. Fail-safe: if no
+// usable fee can be read, the trigger is 'unknown' — it never
+// fires on data it cannot read. No grace period: the fee is a
+// live market reading, not a feed that can go stale in the
+// price-trigger sense — an offline gap that ends in a low-fee
+// market means fees genuinely are low.
+async function evaluateFeeMarketTrigger(state, tx, now) {
+  const trg = store.triggerOf(tx);
+  const maxRate = trg.params.maxFeeRate;
+  const dir = trg.params.direction === 'above' ? 'above' : 'below';
+  const prev = (tx.triggerState && typeof tx.triggerState === 'object') ? tx.triggerState : {};
+  // The last GOOD fee, kept across unknown readings (fail-safe):
+  // a disagreement or outage never fires the rule, and the
+  // subcard keeps showing the last fee it could trust.
+  const keepGood = {
+    lastEconomyFee: (typeof prev.lastEconomyFee === 'number' && Number.isFinite(prev.lastEconomyFee)) ? prev.lastEconomyFee : null,
+  };
+  let readings;
+  try { readings = await fetchNodeFeesCached(bitcoin.endpointsFor(state.settings), checkCadenceSecondsOf(state.settings)); }
+  catch (e) {
+    tx.triggerState = { ...freshTriggerState(now, 'unknown', 'fee unavailable — will retry'), ...keepGood, lastError: e.message, feeMode: 'none', feeNote: '' };
+    return { fire: false, status: 'unknown', reason: 'fee unavailable — will retry' };
+  }
+  const comb = bitcoin.combineFeeReadings(readings);
+  if (!comb.valid) {
+    tx.triggerState = { ...freshTriggerState(now, 'unknown', comb.reason), ...keepGood, lastError: comb.reason, feeMode: comb.mode, feeNote: '' };
+    return { fire: false, status: 'unknown', reason: comb.reason };
+  }
+  const econ = comb.fee;
+  const fired = dir === 'above' ? econ >= maxRate : econ <= maxRate;
+  if (fired) {
+    tx.triggerState = { ...freshTriggerState(now, 'due', 'economy fee ' + econ + ' sat/vB — firing'), lastEconomyFee: econ, lastError: null, feeMode: comb.mode, feeNote: comb.note };
+    return { fire: true, status: 'due', reason: 'economy fee ' + econ + ' sat/vB — firing' };
+  }
+  const side = dir === 'above' ? 'below ' : 'above ';
+  tx.triggerState = { ...freshTriggerState(now, 'watching', 'economy fee ' + econ + ' sat/vB (' + side + maxRate + ')'), lastEconomyFee: econ, lastError: null, feeMode: comb.mode, feeNote: comb.note };
+  return { fire: false, status: 'watching', reason: 'economy fee ' + econ + ' sat/vB (' + side + maxRate + ')' };
+}
+
 // Dispatch by trigger type. Returns { fire, status, reason } and
 // writes the tx's triggerState (the caller saves). The manual
 // trigger never fires — the owner broadcasts it by hand.
@@ -1198,6 +1396,9 @@ async function evaluateTrigger(state, tx, now) {
     case 'checkin': return evaluateCheckinTrigger(state, tx, now);
     case 'price': return await evaluatePriceTrigger(state, tx, now);
     case 'utxo': return await evaluateUtxoTrigger(state, tx, now);
+    case 'blockheight': return await evaluateBlockHeightTrigger(state, tx, now);
+    case 'setdate': return evaluateSetDateTrigger(state, tx, now);
+    case 'feemarket': return await evaluateFeeMarketTrigger(state, tx, now);
     case 'manual': {
       tx.triggerState = freshTriggerState(now, 'manual', 'Waiting for manual broadcast');
       return { fire: false, status: 'manual', reason: 'Waiting for manual broadcast' };
@@ -1236,10 +1437,10 @@ function triggerStatusFor(state, tx, now) {
     // price and its note.
     const src = priceSourcesOf(state.settings);
     const cacheOk = priceCache.readings && Object.keys(priceCache.readings).length
-      && priceCache.source1 === src.source1 && priceCache.source2 === src.source2;
+      && priceCache.source1Key === bitcoin.priceSourceKey(src.source1) && priceCache.source2Key === bitcoin.priceSourceKey(src.source2);
     let price = null, note = '', mode = null;
     if (cacheOk) {
-      const comb = bitcoin.combinePriceReadings(priceCache.readings, trg.params.op, priceAgreementPctOf(state.settings));
+      const comb = bitcoin.combinePriceReadings(priceCache.readings, priceAgreementPctOf(state.settings));
       if (comb.valid) { price = comb.price; note = comb.note; mode = comb.mode; }
       else {
         // The latest fetch says the reading is not valid (the
@@ -1275,6 +1476,18 @@ function triggerStatusFor(state, tx, now) {
     if (!st) return { ...base, status: 'not-evaluated', reason: 'Not evaluated yet', lastOutspend: null };
     return { ...base, status: st.status || 'watching', reason: st.reason || 'still unspent', lastOutspend: st.lastOutspend || null };
   }
+  if (trg.type === 'blockheight') {
+    if (!st) return { ...base, status: 'not-evaluated', reason: 'Not evaluated yet', lastTipHeight: null };
+    return { ...base, status: st.status || 'watching', reason: st.reason || 'waiting for the height', lastTipHeight: (typeof st.lastTipHeight === 'number' ? st.lastTipHeight : null) };
+  }
+  if (trg.type === 'setdate') {
+    if (!st) return { ...base, status: 'not-evaluated', reason: 'Not evaluated yet' };
+    return { ...base, status: st.status || 'watching', reason: st.reason || 'waiting for the date' };
+  }
+  if (trg.type === 'feemarket') {
+    if (!st) return { ...base, status: 'not-evaluated', reason: 'Not evaluated yet', lastEconomyFee: null };
+    return { ...base, status: st.status || 'watching', reason: st.reason || 'waiting for fees to fall', lastEconomyFee: (typeof st.lastEconomyFee === 'number' ? st.lastEconomyFee : null) };
+  }
   return { ...base, status: 'not-evaluated', reason: 'Not evaluated yet' };
 }
 
@@ -1290,8 +1503,12 @@ function triggerStatusFor(state, tx, now) {
 // sustained wait, so a single live sample that both sources
 // agree on proves the condition. The 10x-jump guard does not
 // apply here (it needs a stored baseline — the evaluator owns
-// it); only the absolute bounds are checked.
-async function checkTriggerNow(trg, state, now, liveOffsetMs) {
+// it); only the absolute bounds are checked. `latchedTarget`
+// (0.8.1, audit finding 1) is a block-height target the chain
+// has already been observed at or past — a latched rule fires
+// even if the tip has since reorged below it; the add/edit
+// gates pass nothing (a new rule has no latch).
+async function checkTriggerNow(trg, state, now, liveOffsetMs, latchedTarget) {
   if (trg.type === 'checkin') {
     // (0.8.0) liveOffsetMs is the tx's frozen time (disarmed /
     // vacation) — the same effective clock the evaluator uses.
@@ -1312,7 +1529,7 @@ async function checkTriggerNow(trg, state, now, liveOffsetMs) {
     let readings;
     try { readings = await fetchPriceCached(priceSourcesOf(state.settings), checkCadenceSecondsOf(state.settings)); }
     catch (e) { return { valid: true, fire: false, status: 'unknown', reason: 'price unavailable — will retry', warning: null, detail: { error: e.message } }; }
-    const comb = bitcoin.combinePriceReadings(readings, trg.params.op, priceAgreementPctOf(state.settings));
+    const comb = bitcoin.combinePriceReadings(readings, priceAgreementPctOf(state.settings));
     if (!comb.valid) {
       return { valid: true, fire: false, status: 'unknown', reason: comb.reason, warning: null, detail: { mode: comb.mode, readings: comb.readings } };
     }
@@ -1360,6 +1577,57 @@ async function checkTriggerNow(trg, state, now, liveOffsetMs) {
     // the spend reaches N confirmations.
     return { valid: true, fire: false, status: 'watching', reason: 'spent — ' + confs + ' of ' + needConfs + ' confirmations', warning: null, detail: { spent: true, confirmed: true, txid: res.txid, confirmations: confs, blockHeight: res.blockHeight } };
   }
+  if (trg.type === 'blockheight') {
+    // A latched rule (0.8.1, audit finding 1): the height was
+    // already observed — it fires without consulting the tip.
+    if (latchedTarget === trg.params.targetHeight) {
+      return { valid: true, fire: true, status: 'due', reason: 'block ' + trg.params.targetHeight.toLocaleString('en-US') + ' reached — firing', warning: 'This height has already been reached — it would fire on the next evaluation.', detail: { tip: null, targetHeight: trg.params.targetHeight, latched: true } };
+    }
+    const endpoints = bitcoin.endpointsFor(state.settings);
+    let comb;
+    try { comb = bitcoin.combineTipHeights(await bitcoin.fetchTipHeights(endpoints)); }
+    catch (e) { return { valid: true, fire: false, status: 'unknown', reason: 'could not fetch the tip height — will retry', warning: null, detail: { error: e.message } }; }
+    if (!comb.valid) {
+      return { valid: true, fire: false, status: 'unknown', reason: comb.reason, warning: null, detail: { error: comb.reason } };
+    }
+    const tip = comb.tip;
+    if (typeof tip !== 'number' || !Number.isFinite(tip) || tip < 0) {
+      return { valid: true, fire: false, status: 'unknown', reason: 'tip height unreadable — will retry', warning: null, detail: { tip: String(tip) } };
+    }
+    if (tip >= trg.params.targetHeight) {
+      return { valid: true, fire: true, status: 'due', reason: 'block ' + tip.toLocaleString('en-US') + ' reached — firing', warning: 'This height has already been reached — it would fire on the next evaluation.', detail: { tip, targetHeight: trg.params.targetHeight } };
+    }
+    return { valid: true, fire: false, status: 'watching', reason: 'block ' + tip.toLocaleString('en-US') + ' of ' + trg.params.targetHeight.toLocaleString('en-US'), warning: null, detail: { tip, targetHeight: trg.params.targetHeight } };
+  }
+  if (trg.type === 'setdate') {
+    const fireMs = Date.parse(trg.params.fireAt);
+    if (!Number.isFinite(fireMs)) {
+      return { valid: true, fire: false, status: 'unknown', reason: 'set date is not a valid date — will retry', warning: null, detail: { fireAt: String(trg.params.fireAt) } };
+    }
+    if (now.getTime() >= fireMs) {
+      return { valid: true, fire: true, status: 'due', reason: 'date reached — firing', warning: 'This date has already passed — it would fire on the next evaluation.', detail: { fireAt: trg.params.fireAt } };
+    }
+    const d = new Date(fireMs);
+    const shown = d.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
+    return { valid: true, fire: false, status: 'watching', reason: 'fires on ' + shown, warning: null, detail: { fireAt: trg.params.fireAt } };
+  }
+  if (trg.type === 'feemarket') {
+    let readings;
+    try { readings = await fetchNodeFeesCached(bitcoin.endpointsFor(state.settings), checkCadenceSecondsOf(state.settings)); }
+    catch (e) { return { valid: true, fire: false, status: 'unknown', reason: 'fee unavailable — will retry', warning: null, detail: { error: e.message } }; }
+    const dir = trg.params.direction === 'above' ? 'above' : 'below';
+    const comb = bitcoin.combineFeeReadings(readings);
+    if (!comb.valid) {
+      return { valid: true, fire: false, status: 'unknown', reason: comb.reason, warning: null, detail: { mode: comb.mode, error: comb.reason } };
+    }
+    const econ = comb.fee;
+    const fired = dir === 'above' ? econ >= trg.params.maxFeeRate : econ <= trg.params.maxFeeRate;
+    if (fired) {
+      return { valid: true, fire: true, status: 'due', reason: 'economy fee ' + econ + ' sat/vB — firing', warning: 'The economy fee is already at or ' + dir + ' your threshold — it would fire on the next evaluation.', detail: { economyFee: econ, maxFeeRate: trg.params.maxFeeRate, direction: dir } };
+    }
+    const side = dir === 'above' ? 'below ' : 'above ';
+    return { valid: true, fire: false, status: 'watching', reason: 'economy fee ' + econ + ' sat/vB (' + side + trg.params.maxFeeRate + ')', warning: null, detail: { economyFee: econ, maxFeeRate: trg.params.maxFeeRate, direction: dir } };
+  }
   return { valid: true, fire: false, status: 'manual', reason: 'Waiting for manual broadcast', warning: null, detail: {} };
 }
 
@@ -1382,10 +1650,10 @@ function days(from, to) {
 // itself is NOT written to this snapshot: broadcastOne reloads fresh
 // state again after the network call and merges only the record in
 // (see below), so a check-in that lands mid-broadcast survives.
-// `opts.releaseRun` (set by the release evaluation) skips the clock
-// re-check inside an already-decided release run — all-or-none,
-// 0.7.10 — while the other guards above still apply.
-function preBroadcastCheck(tx, logKind, now, opts) {
+// The clock is NOT re-checked here: the release decision was made
+// once, above — all-or-none, 0.7.10 — while the other guards
+// above still apply.
+function preBroadcastCheck(tx, logKind, opts) {
   const fresh = store.loadState(DATA_DIR);
   const ftx = (fresh.bitcoin.txs || []).find((t) => t.id === tx.id);
   if (!ftx) return { ok: false, reason: 'transaction was deleted' };
@@ -1418,21 +1686,13 @@ function preBroadcastCheck(tx, logKind, now, opts) {
     // NOT re-checked here; the guards above (disabled, vacation)
     // still apply, because those are explicit owner actions on the
     // transaction or the switch, not the clock.
-    // Outside a decided run, the clock must still be due, and
-    // 'broadcasted' counts as still due: it only means a release
-    // already went out in this cycle, and the remaining armed txs
-    // must still broadcast.
-    if (!opts || !opts.releaseRun) {
-      const st = checkinStatus(fresh, now).state;
-      if (st !== 'release-due' && st !== 'broadcasted') return { ok: false, reason: 'no longer release-due' };
-    }
   }
   return { ok: true, state: fresh, tx: ftx };
 }
 
 // ---------------------------------------------------------------------------
 // Broadcast ONE transaction for real — the shared path the release and
-// the manual buttons (Broadcast Now, Broadcast All) both use.
+// the manual buttons (Broadcast Now, Broadcast Armed) both use.
 //   1. Freshness gate: re-check every input right before broadcasting.
 //      A spent input is three things (0.7.12, third-audit finding 1):
 //      our OWN txid as the spender means the transaction is already
@@ -1467,7 +1727,7 @@ function preBroadcastCheck(tx, logKind, now, opts) {
 // Callers skip already-broadcast and stale txs themselves.
 // ---------------------------------------------------------------------------
 // Broadcasts in flight, by transaction id — a manual Broadcast Now /
-// Broadcast All and the automatic release must never broadcast the
+// Broadcast Armed and the automatic release must never broadcast the
 // same transaction twice at once (audit finding 6). Only the release
 // evaluation has a single-flight lock (0.7.6); the manual endpoints
 // call broadcastOne directly, so a double-click or a manual call
@@ -1512,6 +1772,7 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
       const fresh = store.loadState(DATA_DIR);
       const ftx = (fresh.bitcoin.txs || []).find((t) => t.id === tx.id);
       if (ftx && ftx.hex === tx.hex) {
+        pushHistory(ftx, 'failed', ('input check failed: ' + e.message).slice(0, 120));
         recordRelease(fresh, ftx, record, {
           ts: now.toISOString(), kind: logKind, status: 'failed', method: 'primary', txid: tx.txid,
           hexPreview: tx.hex.slice(0, 64), note: failNote + e.message,
@@ -1538,6 +1799,10 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
         txid: tx.txid, broadcastedAt: now.toISOString(), method: check.checkedVia,
         confirmations: null, blockHeight: own.blockHeight != null ? own.blockHeight : null, found: true, checkedAt: now.toISOString(),
       };
+      // (0.8.2) The tx is out there — log the broadcast, and the
+      // confirmation too when the outspend already names the block.
+      pushHistory(ftx, 'broadcast', 'txid ' + shortTxid(tx.txid));
+      if (own.blockHeight != null) pushHistory(ftx, 'confirmed', 'Block ' + own.blockHeight.toLocaleString('en-US'));
       recordRelease(fresh, ftx, record, {
         ts: now.toISOString(), kind: logKind, status: 'broadcast', method: check.checkedVia, txid: tx.txid,
         hexPreview: tx.hex.slice(0, 64), note: 'Transaction is already out there — the node reports its own txid as the spending transaction. Recorded as broadcast; nothing was sent.',
@@ -1557,6 +1822,7 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
     const fresh = store.loadState(DATA_DIR);
     const ftx = (fresh.bitcoin.txs || []).find((t) => t.id === tx.id);
     if (ftx && ftx.hex === tx.hex) {
+      pushHistory(ftx, 'stale', record.error);
       recordRelease(fresh, ftx, record, {
         ts: now.toISOString(), kind: logKind, status: 'stale', method: check.checkedVia, txid: tx.txid,
         hexPreview: tx.hex.slice(0, 64), note: 'Transaction is stale (inputs spent: ' + spentDesc + ') — broadcast not attempted.',
@@ -1576,7 +1842,7 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
   // evaluation retries that same route. The manual "Broadcast
   // publicly" escape hatch (opts.forcePublic) overrides the route:
   // it always goes public, whatever the stored route says.
-  const pre = preBroadcastCheck(tx, logKind, now, opts);
+  const pre = preBroadcastCheck(tx, logKind, opts);
   if (!pre.ok) {
     return { id: tx.id, txid: tx.txid, label: tx.label || '', action: 'skipped', reason: pre.reason };
   }
@@ -1618,6 +1884,7 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
       const ftx = (fresh.bitcoin.txs || []).find((t) => t.id === tx.id);
       if (ftx && ftx.hex === tx.hex) {
         ftx.release = record;
+        pushHistory(ftx, 'slipstream', 'txid ' + shortTxid(out.txid));
         store.saveState(DATA_DIR, fresh);
       }
       store.appendBroadcastLog(DATA_DIR, {
@@ -1652,6 +1919,7 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
         txid: out.txid, broadcastedAt: now.toISOString(), method: out.method,
         confirmations: null, blockHeight: null, found: true, checkedAt: null,
       };
+      pushHistory(ftx, 'broadcast', 'txid ' + shortTxid(out.txid));
       store.saveState(DATA_DIR, fresh);
     }
     return { id: tx.id, txid: out.txid, label: tx.label || '', action: 'broadcast', method: out.method };
@@ -1671,10 +1939,51 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
     if (!(opts && opts.forcePublic)) {
       const fresh = store.loadState(DATA_DIR);
       const ftx = (fresh.bitcoin.txs || []).find((t) => t.id === tx.id);
-      if (ftx && ftx.hex === tx.hex) recordRelease(fresh, ftx, record, null); // broadcastTx already logged the failure
+      if (ftx && ftx.hex === tx.hex) {
+        pushHistory(ftx, 'failed', String(e.message || '').slice(0, 120));
+        recordRelease(fresh, ftx, record, null); // broadcastTx already logged the failure
+      }
     }
     return { id: tx.id, txid: tx.txid, label: tx.label || '', action: 'failed', error: e.message };
   }
+}
+
+// Per-transaction history (0.8.2): the tx's own event trail —
+// [{ ts, type, detail }], oldest first, capped at 50. Only
+// transitions are recorded (added, fired, broadcast, confirmed,
+// stale, failed, conflict, edited, armed, disarmed, slipstream)
+// — never the hourly release checks, or a busy tx would flood.
+// pushHistory REPLACES tx.history with a new array (it never
+// pushes in place): the edit handler diffs tx against its
+// snapshot, so an in-place push would be invisible to it.
+// Callers pass the tx they are already saving — the event rides
+// on the same save as the record that caused it, so a history
+// entry can never land without its transition (and a concurrent
+// save can never lose one to a stale snapshot, since every site
+// below writes to fresh state).
+const HISTORY_MAX = 50;
+function pushHistory(tx, type, detail, ts) {
+  const prev = Array.isArray(tx.history) ? tx.history : [];
+  const ev = { ts: (typeof ts === 'string' && ts) ? ts : new Date().toISOString(), type, detail: (typeof detail === 'string' ? detail : '') };
+  tx.history = prev.concat([ev]).slice(-HISTORY_MAX);
+  return tx.history;
+}
+function shortTxid(txid) {
+  const s = String(txid || '');
+  return s.slice(0, 8) + '…' + s.slice(-4);
+}
+// The 'fired' event's detail: what the rule saw when it fired.
+// The evaluator's reason alone is too thin for price ('past
+// threshold') — name the reading and the threshold. Every other
+// type's reason already says it ('block 976,435 reached',
+// 'spent — 1 confirmation', 'economy fee 1 sat/vB', 'Release
+// due'), with the trailing ' — firing' stripped.
+function firedDetail(trigger, reason, triggerState) {
+  if (trigger && trigger.type === 'price' && triggerState && typeof triggerState.lastPrice === 'number') {
+    const op = trigger.params.op === '>=' ? '≥' : '≤';
+    return 'BTC $' + triggerState.lastPrice.toLocaleString('en-US') + ' ' + op + ' $' + Number(trigger.params.value).toLocaleString('en-US');
+  }
+  return (typeof reason === 'string' ? reason : '').replace(/ — firing$/, '');
 }
 
 function recordRelease(state, tx, record, logEntry) {
@@ -1729,11 +2038,12 @@ function recordRelease(state, tx, record, logEntry) {
 // stick — and Node's single thread makes the check-and-set atomic.
 let releaseEvaluationInFlight = false;
 // `options.onlyTypes` (optional) restricts which trigger types this
-// evaluation covers — the fast tick passes ['price', 'utxo'], the
-// hourly tick ['checkin'], the manual release check passes nothing
-// (all types). The check-in merge below is only a gate when the
-// evaluation includes check-in triggers: a price/UTXO-only fast
-// tick must not be blocked by a check-in receiver problem.
+// evaluation covers — the fast tick passes ['price', 'utxo',
+// 'blockheight', 'setdate', 'feemarket'], the hourly tick
+// ['checkin'], the manual release check passes nothing (all types).
+// The check-in merge below is only a gate when the evaluation
+// includes check-in triggers: a fast-tick-only evaluation must not
+// be blocked by a check-in receiver problem.
 async function evaluateRelease(options) {
   const onlyTypes = (options && Array.isArray(options.onlyTypes)) ? options.onlyTypes : null;
   const includeCheckin = !onlyTypes || onlyTypes.includes('checkin');
@@ -1799,10 +2109,11 @@ async function evaluateReleaseInner(onlyTypes) {
   const now = new Date();
   const s = state.settings;
   // `onlyTypes` (optional) restricts the evaluation to those trigger
-  // types — the fast tick passes ['price', 'utxo'], the hourly tick
-  // ['checkin'], the manual check passes nothing (all types). A
-  // filtered run that finds no armed tx of its types is a skip, and
-  // it must not touch the other types' triggerState.
+  // types — the fast tick passes ['price', 'utxo', 'blockheight',
+  // 'setdate', 'feemarket'], the hourly tick ['checkin'], the manual
+  // check passes nothing (all types). A filtered run that finds no
+  // armed tx of its types is a skip, and it must not touch the other
+  // types' triggerState.
   let armed = (state.bitcoin.txs || []).filter((t) => t.enabled);
   if (onlyTypes) armed = armed.filter((t) => onlyTypes.includes(store.triggerOf(t).type));
   if (!armed.length) return { action: 'skipped', reason: 'no armed transactions', results: [] };
@@ -1825,7 +2136,13 @@ async function evaluateReleaseInner(onlyTypes) {
   // last outspend live in triggerState, and the next evaluation
   // builds on them.
   const firing = [];
+  // (0.8.2) The 'fired' history event is logged once, on the
+  // transition into due — so each evaluation records whether the
+  // trigger was already due before it ran, and the reason it fired.
+  const wasDueById = new Map();
+  const reasonById = new Map();
   for (const tx of armed) {
+    wasDueById.set(tx.id, !!(tx.triggerState && tx.triggerState.status === 'due'));
     let ev;
     try { ev = await evaluateTrigger(state, tx, now); }
     catch (e) {
@@ -1835,12 +2152,14 @@ async function evaluateReleaseInner(onlyTypes) {
       tx.triggerState = { ...freshTriggerState(now, 'unknown', 'evaluation failed — will retry'), lastError: e.message };
       ev = { fire: false, status: 'unknown', reason: 'evaluation failed — will retry' };
     }
+    reasonById.set(tx.id, ev.reason);
     if (!ev.fire) {
       results.push({ id: tx.id, txid: tx.txid, label: tx.label || '', action: 'skipped', reason: ev.reason, trigger: store.triggerOf(tx).type, triggerStatus: ev.status });
       continue;
     }
     firing.push(tx);
   }
+  const firingIds = new Set(firing.map((f) => f.id));
   // Persist the triggerState updates by merging them into FRESH
   // state (see refreshConfirmations): the evaluations waited on the
   // network, so a user edit landing mid-loop — disable, delete, or
@@ -1853,6 +2172,13 @@ async function evaluateReleaseInner(onlyTypes) {
     for (const tx of armed) {
       const ftx = (fresh.bitcoin.txs || []).find((t) => t.id === tx.id);
       if (ftx && tx.triggerState) ftx.triggerState = tx.triggerState;
+      // (0.8.2) The 'fired' history event, on the transition into
+      // due only (see wasDueById above) — it rides on this same
+      // save as the triggerState, so the event and the state that
+      // caused it can never part ways.
+      if (ftx && firingIds.has(tx.id) && !wasDueById.get(tx.id)) {
+        pushHistory(ftx, 'fired', firedDetail(store.triggerOf(tx), reasonById.get(tx.id), tx.triggerState));
+      }
     }
     store.saveState(DATA_DIR, fresh);
   } catch (e) { console.error('trigger state save failed:', e); }
@@ -1879,10 +2205,10 @@ async function evaluateReleaseInner(onlyTypes) {
       results.push({ id: tx.id, txid: tx.txid, label: tx.label || '', action: 'skipped', reason: 'submitted to Slipstream — waiting on MARA' });
       continue;
     }
-    // releaseRun: the release decision was made once, above — a
-    // check-in landing mid-run is recorded but does not stop the
-    // remaining transactions (all-or-none, 0.7.10).
-    results.push(await broadcastOne(state, tx, endpoints, now, 'release', { releaseRun: true }));
+    // The release decision was made once, above — a check-in landing
+    // mid-run is recorded but does not stop the remaining
+    // transactions (all-or-none, 0.7.10).
+    results.push(await broadcastOne(state, tx, endpoints, now, 'release'));
   }
 
   const action = results.some((r) => r.action === 'broadcast') ? 'broadcast'
@@ -1936,6 +2262,20 @@ async function refreshConfirmations(state, maxAgeSec) {
       // tx deleted or replaced in the meantime gets no update.
       const tx = (fresh.bitcoin.txs || []).find((t) => t.id === u.id && t.broadcasted && t.broadcasted.txid === u.txid);
       if (tx) {
+        // (0.8.2) The confirmation is a transition — log it once,
+        // on the crossing into confirmed. A tx already confirmed
+        // (by the already-out path's block height, or an earlier
+        // refresh) does not re-log. Confirmed means the node reports
+        // it in a block (a count, or a height) — or confirmed with
+        // the height unknown (confirmations null + found). An
+        // unconfirmed tx reports a count of 0; a missing tx
+        // reports found === false.
+        const wasConfirmed = (typeof tx.broadcasted.confirmations === 'number' && tx.broadcasted.confirmations >= 1)
+          || (typeof tx.broadcasted.blockHeight === 'number');
+        const nowConfirmed = !!u.found && (u.confirmations === null || (typeof u.confirmations === 'number' && u.confirmations >= 1));
+        if (!wasConfirmed && nowConfirmed) {
+          pushHistory(tx, 'confirmed', (typeof u.blockHeight === 'number') ? 'Block ' + u.blockHeight.toLocaleString('en-US') : 'Confirmed');
+        }
         tx.broadcasted.confirmations = u.confirmations;
         tx.broadcasted.blockHeight = u.blockHeight;
         tx.broadcasted.found = u.found;
@@ -2032,6 +2372,12 @@ async function refreshMaraWaiting(state) {
           txid: u.txid, broadcastedAt: now.toISOString(), method: 'slipstream',
           confirmations: u.confirmations, blockHeight: u.blockHeight, found: true, checkedAt: u.checkedAt,
         };
+        // (0.8.2) MARA's tx is out there now — log the broadcast,
+        // and the confirmation when it is already in a block.
+        pushHistory(tx, 'broadcast', 'txid ' + shortTxid(u.txid));
+        if ((typeof u.confirmations === 'number' && u.confirmations >= 1) || (typeof u.blockHeight === 'number')) {
+          pushHistory(tx, 'confirmed', (typeof u.blockHeight === 'number') ? 'Block ' + u.blockHeight.toLocaleString('en-US') : 'Confirmed');
+        }
         store.appendBroadcastLog(DATA_DIR, {
           ts: now.toISOString(), kind: 'release', status: 'broadcast', method: 'slipstream', txid: u.txid,
           hexPreview: tx.hex.slice(0, 64),
@@ -2040,6 +2386,7 @@ async function refreshMaraWaiting(state) {
         changed = true;
       } else if (u.kind === 'failed') {
         tx.release = { status: 'failed', kind: tx.release.kind || 'release', trigger: releaseTriggerFor(fresh, tx), txid: u.txid, method: 'slipstream', lastAttemptAt: now.toISOString(), error: u.error };
+        pushHistory(tx, 'failed', String(u.error || '').slice(0, 120));
         store.appendBroadcastLog(DATA_DIR, {
           ts: now.toISOString(), kind: 'release', status: 'failed', method: 'slipstream', txid: u.txid,
           hexPreview: tx.hex.slice(0, 64),
@@ -2095,7 +2442,7 @@ async function refreshMaraWaiting(state) {
 // the tx goes public even when nobody is watching.
 // Runs on the hourly tick and on the manual release check, AFTER
 // refreshMaraWaiting, so a tx MARA just confirmed as visible is not
-// also fallback-broadcast. It is NOT reachable from Broadcast All
+// also fallback-broadcast. It is NOT reachable from Broadcast Armed
 // (that path never calls it) and NOT triggered by the manual escape
 // hatch (a separate, immediate path). Returns [{ id, txid, action,
 // ... }] — 'broadcast', 'failed', or 'stale' per tx.
@@ -2139,13 +2486,12 @@ async function refreshPublicFallbacks(state) {
       out.push({ id: tx.id, txid: tx.txid, action: 'broadcast', alreadyVisible: true });
       continue;
     }
-    // Not visible: broadcast it publicly. releaseRun skips the clock
-    // re-check in preBroadcastCheck (the fallback's own deadline is
-    // the trigger, not the check-in clock); forcePublic forces the
+    // Not visible: broadcast it publicly. The fallback's own deadline
+    // is the trigger, not the check-in clock; forcePublic forces the
     // public route past the 'submitted-slipstream' block, sets the
     // stored route to 'public' on success, and skips the 'failed'
     // record on failure. fallbackDays marks the log entry.
-    const r = await broadcastOne(state, tx, endpoints, now, 'release', { releaseRun: true, forcePublic: true, fallbackDays: tx.publicFallbackDays });
+    const r = await broadcastOne(state, tx, endpoints, now, 'release', { forcePublic: true, fallbackDays: tx.publicFallbackDays });
     out.push({ id: tx.id, txid: tx.txid, action: r.action, method: r.method, error: r.error, reason: r.reason });
   }
   return out;
@@ -2299,21 +2645,24 @@ async function runReleaseTick() {
   try { await refreshCurrentFeesIfStale(); } catch (e) { console.error('current-fees refresh failed:', e); }
 }
 
-// The fast tick (0.8.0): every minute, while a price or UTXO rule
-// is armed, run a release evaluation for those trigger types only.
-// The hourly tick samples them once an hour — too coarse: an
-// unconfirmed UTXO trigger must be caught well within one block
-// time (~10 min), and a price that holds for an hour should fire
-// within a minute of the hour being up, not up to an hour later.
-// The 1-minute cadence is a price/UTXO cadence: a setup with no
-// armed price or UTXO rule never runs this tick, so a check-in-only
-// setup keeps the pure hourly cadence and makes no extra API calls.
-// The evaluation is the same single-flight evaluateRelease() the
-// hourly tick and the manual check use, restricted to ['price',
-// 'utxo'] — so a check-in rule is never evaluated (and never
-// broadcast) by this tick; the hourly tick owns check-in. The
-// cache refresh runs first, so the price rule's "currently $X"
-// line stays fresh even while its trigger is held by a grace.
+// The fast tick (0.8.0, extended 0.8.1): every minute, while a price,
+// UTXO, block-height, set-date, or fee-market rule is armed, run a
+// release evaluation for those trigger types only. The hourly tick
+// samples them once an hour — too coarse: an unconfirmed UTXO
+// trigger must be caught well within one block time (~10 min), a
+// price that holds for an hour should fire within a minute of the
+// hour being up, not up to an hour later, and a set date or block
+// height should fire within a minute of its moment, not up to an
+// hour later. The 1-minute cadence is a fast-trigger cadence: a
+// setup with no armed fast rule never runs this tick, so a
+// check-in-only setup keeps the pure hourly cadence and makes no
+// extra API calls. The evaluation is the same single-flight
+// evaluateRelease() the hourly tick and the manual check use,
+// restricted to the fast types — so a check-in rule is never
+// evaluated (and never broadcast) by this tick; the hourly tick
+// owns check-in. The cache refresh runs first, so the price rule's
+// "currently $X" line stays fresh even while its trigger is held
+// by a grace.
 async function runFastTick() {
   try {
     await refreshPriceIfStale();
@@ -2321,10 +2670,10 @@ async function runFastTick() {
     const hasFast = (st.bitcoin.txs || []).some((t) => {
       if (!t.enabled) return false;
       const type = store.triggerOf(t).type;
-      return type === 'price' || type === 'utxo';
+      return type === 'price' || type === 'utxo' || type === 'blockheight' || type === 'setdate' || type === 'feemarket';
     });
     if (!hasFast) return;
-    const r = await evaluateRelease({ onlyTypes: ['price', 'utxo'] });
+    const r = await evaluateRelease({ onlyTypes: ['price', 'utxo', 'blockheight', 'setdate', 'feemarket'] });
     if (r.action !== 'skipped') {
       const sum = (r.results || []).map((x) => x.action + ':' + (x.txid || '').slice(0, 8)).join(', ');
       console.log('fast tick:', r.action, sum || r.reason || '');
@@ -2422,6 +2771,27 @@ const RELEASE_STATUSES = new Set(['stale', 'failed', 'broadcast', 'conflict', 's
 // dry-run verdict. Used by the restore validation (0.7.13).
 const RELEASE_KINDS = new Set(['release', 'broadcast', 'dryrun']);
 
+// (0.8.1, audit finding 4) A mutating API handler loads state once at
+// the top of handleApi, then awaits the network (fee lookups, trigger
+// checks, node tests) — or just the request body — before saving. A
+// second request, or the tick, may have saved newer state in between,
+// and saving this stale snapshot would clobber it — a lost check-in,
+// a lost disarm, a lost edit. So a handler NEVER saves its own
+// snapshot after an await: it applies its change to FRESH state,
+// synchronously, through saveMutation. The load, the mutation, and
+// the save run with no await between them, so no other writer can
+// interleave — the same pattern the background refreshes already use
+// (see refreshConfirmations). The mutator gets the fresh state and
+// returns false to decline the save (the tx or key it named is gone,
+// or a fresh-state validation failed); anything else means save.
+// Returns the fresh state, or null when the mutator declined.
+function saveMutation(mutator) {
+  const fresh = store.loadState(DATA_DIR);
+  if (mutator(fresh) === false) return null;
+  store.saveState(DATA_DIR, fresh);
+  return fresh;
+}
+
 async function handleApi(req, res, pathname) {
   const now = new Date();
   // CSRF gate (0.7.12): state-changing requests must come from the
@@ -2490,7 +2860,7 @@ async function handleApi(req, res, pathname) {
     served.bitcoin.currentPrice = pc.price;
     served.bitcoin.currentPriceAt = pc.fetchedAt;
     served.bitcoin.currentPrices = pc.prices;
-    served.bitcoin.priceProviders = bitcoin.PRICE_PROVIDERS.map((p) => ({ id: p.id, label: p.label }));
+    served.bitcoin.priceProviders = bitcoin.PRICE_PROVIDERS.map((p) => ({ id: p.id, label: p.label })).concat([{ id: 'custom', label: 'Custom' }]);
     // The consolidated exchange status (0.8.0): one status for
     // the configured price sources, shown once on the readiness
     // card (like Node Status) instead of repeated per price tx.
@@ -2608,13 +2978,21 @@ async function handleApi(req, res, pathname) {
     // The frozen time for the tx being edited, if any — only a
     // check-in rule reads it (checkTriggerNow takes it as the
     // clock's live offset); a price or UTXO rule ignores it.
+    // A latched block-height rule (0.8.1, audit finding 1) is
+    // passed the same way, so the check answers what the
+    // evaluator would answer for this tx.
     let liveOff = 0;
+    let latchedTarget = null;
     if (typeof body.txId === 'string' && body.txId) {
       const etx = (state.bitcoin.txs || []).find((t) => t.id === body.txId);
-      if (etx) liveOff = checkinLiveOffsetMs(etx, now);
+      if (etx) {
+        liveOff = checkinLiveOffsetMs(etx, now);
+        const ets = (etx.triggerState && typeof etx.triggerState === 'object') ? etx.triggerState : {};
+        if (typeof ets.heightReachedFor === 'number') latchedTarget = ets.heightReachedFor;
+      }
     }
     try {
-      const r = await checkTriggerNow(v.trigger, state, now, liveOff);
+      const r = await checkTriggerNow(v.trigger, state, now, liveOff, latchedTarget);
       return sendJson(res, 200, { ...r, trigger: v.trigger });
     } catch (e) {
       // Belt-and-braces: checkTriggerNow already answers 'unknown'
@@ -2641,28 +3019,29 @@ async function handleApi(req, res, pathname) {
   if (req.method === 'POST' && pathname === '/api/checkin') {
     const body = await readBody(req).catch(() => ({}));
     const method = body.method === 'telegram' ? 'telegram' : 'app';
-    state.checkin.lastCheckinAt = now.toISOString();
-    state.checkin.totalCheckins += 1;
-    // A check-in clears an offline-gap hold (0.7.22): the owner is
-    // alive, the clock resets, and there is nothing to hold back.
-    state.checkin.heldUntil = null;
-    for (const t of (state.bitcoin.txs || [])) {
-      if (store.triggerOf(t).type !== 'checkin') continue;
-      if (t.release && t.release.status === 'stale') continue;
-      t.release = null;
-      // The clock restarts at this check-in: any frozen time is
-      // wiped, then a tx that is still inactive (disarmed, or on
-      // vacation) is re-marked inactive from now — it stays frozen
-      // at 0 instead of counting while inactive. Checking in does
-      // NOT re-arm anything: there is no global pause to
-      // auto-resume any more (0.8.0, Global Arm/Disarm).
-      t.checkinOffsetMs = 0;
-      t.checkinInactiveSince = null;
-    }
-    for (const t of (state.bitcoin.txs || [])) syncCheckinFreeze(t, state, now);
-    store.saveState(DATA_DIR, state);
+    const fresh = saveMutation((f) => {
+      f.checkin.lastCheckinAt = now.toISOString();
+      f.checkin.totalCheckins += 1;
+      // A check-in clears an offline-gap hold (0.7.22): the owner is
+      // alive, the clock resets, and there is nothing to hold back.
+      f.checkin.heldUntil = null;
+      for (const t of (f.bitcoin.txs || [])) {
+        if (store.triggerOf(t).type !== 'checkin') continue;
+        if (t.release && t.release.status === 'stale') continue;
+        t.release = null;
+        // The clock restarts at this check-in: any frozen time is
+        // wiped, then a tx that is still inactive (disarmed, or on
+        // vacation) is re-marked inactive from now — it stays frozen
+        // at 0 instead of counting while inactive. Checking in does
+        // NOT re-arm anything: there is no global pause to
+        // auto-resume any more (0.8.0, Global Arm/Disarm).
+        t.checkinOffsetMs = 0;
+        t.checkinInactiveSince = null;
+      }
+      for (const t of (f.bitcoin.txs || [])) syncCheckinFreeze(t, f, now);
+    });
     store.appendCheckin(DATA_DIR, { ts: now.toISOString(), method });
-    return sendJson(res, 200, { ok: true, status: checkinStatus(state, now) });
+    return sendJson(res, 200, { ok: true, status: checkinStatus(fresh, now) });
   }
 
   // POST /api/grace/resume — end the price/UTXO grace period
@@ -2682,10 +3061,11 @@ async function handleApi(req, res, pathname) {
   // cleared by a check-in — it only stops a NEW hold or grace
   // being set on a gap the owner has already resumed from.
   if (req.method === 'POST' && pathname === '/api/grace/resume') {
-    state.grace = { graceUntil: null, triggeredAt: null, offlineGapDays: null };
-    state.checkin.lastOnlineAt = now.toISOString();
-    store.saveState(DATA_DIR, state);
-    return sendJson(res, 200, { ok: true, grace: graceStatus(state, now) });
+    const fresh = saveMutation((f) => {
+      f.grace = { graceUntil: null, triggeredAt: null, offlineGapDays: null };
+      f.checkin.lastOnlineAt = now.toISOString();
+    });
+    return sendJson(res, 200, { ok: true, grace: graceStatus(fresh, now) });
   }
 
   // Check-in API keys (0.6.6) — managed here, used by the check-in
@@ -2711,20 +3091,23 @@ async function handleApi(req, res, pathname) {
       id: newCheckinKeyId(), label, hash: hashCheckinKey(plain),
       createdAt: now.toISOString(), lastUsedAt: null,
     };
-    state.checkinKeys = state.checkinKeys || [];
-    state.checkinKeys.push(key);
-    store.saveState(DATA_DIR, state);
-    writeReceiverKeys(state);
+    const fresh = saveMutation((f) => {
+      f.checkinKeys = f.checkinKeys || [];
+      f.checkinKeys.push(key);
+    });
+    writeReceiverKeys(fresh);
     return sendJson(res, 201, { key: publicCheckinKey(key), plain });
   }
   const keyMatch = pathname.match(/^\/api\/checkin-keys\/([^/]+)$/);
   if (req.method === 'DELETE' && keyMatch) {
-    const keys = state.checkinKeys || [];
-    const idx = keys.findIndex((k) => k.id === keyMatch[1]);
-    if (idx === -1) return sendError(res, 404, 'no such key');
-    keys.splice(idx, 1);
-    store.saveState(DATA_DIR, state);
-    writeReceiverKeys(state);
+    const fresh = saveMutation((f) => {
+      const keys = f.checkinKeys || [];
+      const idx = keys.findIndex((k) => k.id === keyMatch[1]);
+      if (idx === -1) return false;
+      keys.splice(idx, 1);
+    });
+    if (!fresh) return sendError(res, 404, 'no such key');
+    writeReceiverKeys(fresh);
     return sendJson(res, 200, { ok: true, removed: keyMatch[1] });
   }
 
@@ -2750,29 +3133,33 @@ async function handleApi(req, res, pathname) {
     }
   }
 
-  // POST /api/settings/price-sources/test-all {providers: [id, ...]} (0.8.0):
-  // tests several providers at once with FRESH fetches
+  // POST /api/settings/price-sources/test-all {providers: [...]} (0.8.0):
+  // tests several sources at once with FRESH fetches
   // (bypasses the price cache) and returns
-  // {results: [{provider, price, error}, ...]} in the order
-  // requested. A provider that fails answers with price null
-  // and the error (the test itself worked — the provider is
-  // down); only a missing/empty providers array is a 400, and
-  // an unknown id inside the list is reported per-result, not
-  // as a whole-call failure. Never changes the configured
-  // sources or the cache — the Settings "Test connection"
-  // button uses this to check both sources in one call.
+  // {results: [{provider, label, price, error}, ...]} in the order
+  // requested. Each entry is a provider id string or a custom
+  // { id: 'custom', url, path } object (0.8.1). A source that
+  // fails answers with price null and the error (the test itself
+  // worked — the source is down); only a missing/empty providers
+  // array is a 400, and an unknown id inside the list is reported
+  // per-result, not as a whole-call failure. Never changes the
+  // configured sources or the cache — the Settings "Test
+  // connection" button uses this to check both sources in one call.
   if (req.method === 'POST' && pathname === '/api/settings/price-sources/test-all') {
     const body = await readBody(req);
     const ids = (body && Array.isArray(body.providers)) ? body.providers : [];
     if (!ids.length) return sendError(res, 400, 'providers must be a non-empty array');
-    const results = await Promise.all(ids.map(async (id) => {
-      const prov = bitcoin.priceProviderById(id);
-      if (!prov) return { provider: String(id), price: null, error: 'unknown price provider: ' + id };
+    const results = await Promise.all(ids.map(async (src) => {
+      const prov = bitcoin.resolvePriceSource(src);
+      if (!prov) {
+        const id = (typeof src === 'string') ? src : 'custom';
+        return { provider: id, label: (typeof src === 'string') ? src : 'Custom', price: null, error: 'unknown price provider: ' + id };
+      }
       try {
         const price = await bitcoin.fetchPriceFromProvider(prov);
-        return { provider: prov.id, price, error: null };
+        return { provider: prov.id, label: prov.label, price, error: null };
       } catch (e) {
-        return { provider: prov.id, price: null, error: e.message };
+        return { provider: prov.id, label: prov.label, price: null, error: e.message };
       }
     }));
     return sendJson(res, 200, { results });
@@ -2790,6 +3177,10 @@ async function handleApi(req, res, pathname) {
   if (req.method === 'PUT' && pathname === '/api/settings') {
     const body = await readBody(req);
     const s = state.settings;
+    // (0.8.1, audit finding 4) Snapshot for the fresh-state merge
+    // below: only the settings this request changed are copied
+    // into fresh state at save time.
+    const origSettings = { ...s };
     if (body.thresholdDays !== undefined) {
       return sendError(res, 400, 'thresholdDays is no longer a setting — set "Days of silence" on each check-in transaction instead');
     }
@@ -2811,10 +3202,11 @@ async function handleApi(req, res, pathname) {
     if (body.priceSources !== undefined) {
       const ps = body.priceSources;
       if (!ps || typeof ps !== 'object') return sendError(res, 400, 'priceSources must be {source1, source2}');
-      const s1 = ps.source1, s2 = ps.source2;
-      if (typeof s1 !== 'string' || !bitcoin.priceProviderById(s1)) return sendError(res, 400, 'unknown price provider: ' + s1);
-      if (typeof s2 !== 'string' || !bitcoin.priceProviderById(s2)) return sendError(res, 400, 'unknown price provider: ' + s2);
-      if (s1 === s2) return sendError(res, 400, 'price sources must be different');
+      const s1 = bitcoin.normalizePriceSourceValue(ps.source1);
+      const s2 = bitcoin.normalizePriceSourceValue(ps.source2);
+      if (s1 === null) return sendError(res, 400, priceSourceError(ps.source1));
+      if (s2 === null) return sendError(res, 400, priceSourceError(ps.source2));
+      if (bitcoin.priceSourceKey(s1) === bitcoin.priceSourceKey(s2)) return sendError(res, 400, 'price sources must be different');
       s.priceSources = { source1: s1, source2: s2 };
     }
     // Grace period (0.8.0): the offline gap that triggers a
@@ -2878,14 +3270,26 @@ async function handleApi(req, res, pathname) {
     if (body.vacationMode !== undefined) s.vacationMode = !!body.vacationMode;
     if (body.vacationUntil === null) s.vacationUntil = null;
     else if (body.vacationUntil !== undefined) s.vacationUntil = asStr(body.vacationUntil, 10) || null;
-    if (body.vacationMode !== undefined) {
-      for (const t of (state.bitcoin.txs || [])) syncCheckinFreeze(t, state, now);
-    }
-    store.saveState(DATA_DIR, state);
+    // (0.8.1, audit finding 4) The assignments above mutated the
+    // request's snapshot; only the CHANGED settings ride into fresh
+    // state, so a concurrent save is not clobbered. The fee pair is
+    // re-checked on the fresh values when this request touched it
+    // (a concurrent save could have moved the half it did not set).
+    const fresh = saveMutation((f) => {
+      for (const k of Object.keys(s)) {
+        if (JSON.stringify(s[k]) !== JSON.stringify(origSettings[k])) f.settings[k] = s[k];
+      }
+      if ((body.feeLowMultiplier !== undefined || body.feeMediumMultiplier !== undefined)
+          && !(f.settings.feeLowMultiplier > f.settings.feeMediumMultiplier)) return false;
+      if (body.vacationMode !== undefined) {
+        for (const t of (f.bitcoin.txs || [])) syncCheckinFreeze(t, f, now);
+      }
+    });
+    if (!fresh) return sendError(res, 400, 'feeLowMultiplier must be greater than feeMediumMultiplier');
     // A new cadence takes effect immediately — the running fast
     // tick is cleared and restarted with the new delay.
     if (cadenceChanged) rearmFastTick();
-    return sendJson(res, 200, sanitizeState(state).settings);
+    return sendJson(res, 200, sanitizeState(fresh).settings);
   }
 
   // (0.8.0) POST /api/pause and POST /api/resume are gone with
@@ -2954,6 +3358,9 @@ async function handleApi(req, res, pathname) {
       // the release has evaluated it once.
       trigger,
       triggerState: null,
+      // The event trail (0.8.2): starts with the add itself —
+      // the rule that was set, in its own words.
+      history: [{ ts: now.toISOString(), type: 'added', detail: triggerConditionText(trigger) }],
       release: null,
       // broadcasted is set by broadcastOne() (release or manual) and
       // survives check-ins: { txid, broadcastedAt, method,
@@ -3014,25 +3421,29 @@ async function handleApi(req, res, pathname) {
     const tx = newTxRecord(parsed, hex, body.label, body.notes, body.broadcastVia, body.publicFallbackDays, trig.trigger);
     const fee = await feeFor(parsed);
     if (fee) { tx.feeSats = fee.feeSats; tx.feeRateSatVb = fee.feeRateSatVb; }
-    // (0.8.0) The already-satisfied check for a price or UTXO
-    // rule: a condition that is ALREADY met would fire on the
-    // next evaluation, so adding it is a mistake unless the
-    // owner confirms it (triggerConfirmed: true). What "met" means
+    // (0.8.0, extended 0.8.1) The already-satisfied check for a
+    // price, UTXO, block-height, set-date, or fee-market rule: a
+    // condition that is ALREADY met would fire on the next
+    // evaluation, so adding it is a mistake unless the owner
+    // confirms it (triggerConfirmed: true). What "met" means
     // depends on the rule: for a price rule both sources must
     // agree the price is past the threshold — a single-source or
     // disagreeing reading is not a fire (checkTriggerNow answers
     // fire: false), so it never blocks the add; for a UTXO rule
     // it depends on the confirmation mode: any spend in
     // unconfirmed mode (0), or a spend with at least N
-    // confirmations in N-confirmation mode. The check is
-    // best-effort — a reading no source can say about (unknown)
-    // does not block the add; the tick will evaluate it. A UTXO
-    // spend that is unconfirmed, or confirmed but below N, is a
-    // warning at most, not a block. The warning still rides on
-    // the response when the condition is NOT already satisfied,
-    // so the UI can say what it found.
+    // confirmations in N-confirmation mode. For a block-height
+    // rule the tip is already at or past the height; for a
+    // set-date rule the date has already passed; for a fee-market
+    // rule the economy fee is already at or below the threshold.
+    // The check is best-effort — a reading no source can say
+    // about (unknown) does not block the add; the tick will
+    // evaluate it. A UTXO spend that is unconfirmed, or confirmed
+    // but below N, is a warning at most, not a block. The warning
+    // still rides on the response when the condition is NOT
+    // already satisfied, so the UI can say what it found.
     let triggerWarning = null;
-    if (trig.trigger.type === 'utxo' || trig.trigger.type === 'price') {
+    if (trig.trigger.type === 'utxo' || trig.trigger.type === 'price' || trig.trigger.type === 'blockheight' || trig.trigger.type === 'setdate' || trig.trigger.type === 'feemarket') {
       try {
         const chk = await checkTriggerNow(trig.trigger, state, now);
         if (chk.warning) triggerWarning = chk.warning;
@@ -3043,9 +3454,17 @@ async function handleApi(req, res, pathname) {
           const dir = trig.trigger.params.op === '>=' ? 'above' : 'below';
           return sendError(res, 400, 'The price is already ' + dir + ' $' + Number(trig.trigger.params.value).toLocaleString('en-US') + ' — this rule would fire on the next evaluation. Add it with triggerConfirmed to add it anyway.');
         }
+        if (trig.trigger.type === 'blockheight' && chk.fire && body.triggerConfirmed !== true) {
+          return sendError(res, 400, 'That block height has already been reached — this rule would fire on the next evaluation. Add it with triggerConfirmed to add it anyway.');
+        }
+        if (trig.trigger.type === 'setdate' && chk.fire && body.triggerConfirmed !== true) {
+          return sendError(res, 400, 'That date has already passed — this rule would fire on the next evaluation. Add it with triggerConfirmed to add it anyway.');
+        }
+        if (trig.trigger.type === 'feemarket' && chk.fire && body.triggerConfirmed !== true) {
+          const fdir = trig.trigger.params.direction === 'above' ? 'at or above' : 'at or below'; return sendError(res, 400, 'The economy fee is already ' + fdir + ' ' + Number(trig.trigger.params.maxFeeRate).toLocaleString('en-US') + ' sat/vB — this rule would fire on the next evaluation. Add it with triggerConfirmed to add it anyway.');
+        }
       } catch (e) { /* best-effort: the add proceeds without the warning */ }
     }
-    state.bitcoin.txs.push(tx);
     // (0.7.22, scoped 0.8.0) A new tx is armed by default — adding
     // a CHECK-IN rule while the clock is in the danger zone (the
     // last 25% of ITS window, including already past due) would
@@ -3055,12 +3474,29 @@ async function handleApi(req, res, pathname) {
     // not touch the check-in clock. The zone is measured against
     // the new rule's own threshold, not the global one. Adding
     // with more than 25% of the window left does not reset.
+    // (0.8.1, audit finding 4) The push + the reset ride into
+    // FRESH state: the fee and trigger checks above awaited the
+    // network, so a second request may have saved in between. The
+    // duplicate-txid check is re-run on fresh state too — a
+    // concurrent add of the same txid would otherwise slip past
+    // the stale-side check.
     let checkinReset = false;
-    if (trig.trigger.type === 'checkin' && inDangerZone(state, now, trig.trigger.params.thresholdDays)) {
-      resetCheckin(state, now, 'add-reset');
-      checkinReset = true;
+    let dupTx = null;
+    const fresh = saveMutation((f) => {
+      const txs = f.bitcoin.txs || [];
+      const dup = txs.find((t) => t.txid === tx.txid);
+      if (dup) { dupTx = dup; return false; }
+      if (txs.some((t) => t.id === tx.id)) return false;
+      txs.push(tx);
+      if (trig.trigger.type === 'checkin' && inDangerZone(f, now, trig.trigger.params.thresholdDays)) {
+        resetCheckin(f, now, 'add-reset');
+        checkinReset = true;
+      }
+    });
+    if (!fresh) {
+      if (dupTx) return sendError(res, 400, "This transaction is already stored as '" + (dupTx.label || dupTx.id) + "'");
+      return sendError(res, 400, 'could not save the transaction — try again');
     }
-    store.saveState(DATA_DIR, state);
     const out = { tx };
     if (checkinReset) out.checkinReset = true;
     if (triggerWarning) out.triggerWarning = triggerWarning;
@@ -3133,7 +3569,7 @@ async function handleApi(req, res, pathname) {
     const fee = await feeFor(parsed);
     if (fee) { tx.feeSats = fee.feeSats; tx.feeRateSatVb = fee.feeRateSatVb; }
     let triggerWarning = null;
-    if (trig.trigger.type === 'utxo' || trig.trigger.type === 'price') {
+    if (trig.trigger.type === 'utxo' || trig.trigger.type === 'price' || trig.trigger.type === 'blockheight' || trig.trigger.type === 'setdate' || trig.trigger.type === 'feemarket') {
       try {
         const chk = await checkTriggerNow(trig.trigger, state, now);
         if (chk.warning) triggerWarning = chk.warning;
@@ -3144,18 +3580,39 @@ async function handleApi(req, res, pathname) {
           const dir = trig.trigger.params.op === '>=' ? 'above' : 'below';
           return sendError(res, 400, 'The price is already ' + dir + ' $' + Number(trig.trigger.params.value).toLocaleString('en-US') + ' — this rule would fire on the next evaluation. Import it with triggerConfirmed to import it anyway.');
         }
+        if (trig.trigger.type === 'blockheight' && chk.fire && body.triggerConfirmed !== true) {
+          return sendError(res, 400, 'That block height has already been reached — this rule would fire on the next evaluation. Import it with triggerConfirmed to import it anyway.');
+        }
+        if (trig.trigger.type === 'setdate' && chk.fire && body.triggerConfirmed !== true) {
+          return sendError(res, 400, 'That date has already passed — this rule would fire on the next evaluation. Import it with triggerConfirmed to import it anyway.');
+        }
+        if (trig.trigger.type === 'feemarket' && chk.fire && body.triggerConfirmed !== true) {
+          const fdir = trig.trigger.params.direction === 'above' ? 'at or above' : 'at or below'; return sendError(res, 400, 'The economy fee is already ' + fdir + ' ' + Number(trig.trigger.params.maxFeeRate).toLocaleString('en-US') + ' sat/vB — this rule would fire on the next evaluation. Import it with triggerConfirmed to import it anyway.');
+        }
       } catch (e) { /* best-effort: the import proceeds without the warning */ }
     }
-    state.bitcoin.txs.push(tx);
     // (0.7.22, scoped 0.8.0) The import path arms by default too —
     // same reset as the paste path when the clock is in the danger
-    // zone, and only for a check-in rule.
+    // zone, and only for a check-in rule. (0.8.1, audit finding 4)
+    // The push + the reset ride into FRESH state (see the paste
+    // path above): the fee and trigger checks awaited the network.
     let checkinReset = false;
-    if (trig.trigger.type === 'checkin' && inDangerZone(state, now, trig.trigger.params.thresholdDays)) {
-      resetCheckin(state, now, 'add-reset');
-      checkinReset = true;
+    let dupTx = null;
+    const fresh = saveMutation((f) => {
+      const txs = f.bitcoin.txs || [];
+      const dup = txs.find((t) => t.txid === tx.txid);
+      if (dup) { dupTx = dup; return false; }
+      if (txs.some((t) => t.id === tx.id)) return false;
+      txs.push(tx);
+      if (trig.trigger.type === 'checkin' && inDangerZone(f, now, trig.trigger.params.thresholdDays)) {
+        resetCheckin(f, now, 'add-reset');
+        checkinReset = true;
+      }
+    });
+    if (!fresh) {
+      if (dupTx) return sendError(res, 400, "This transaction is already stored as '" + (dupTx.label || dupTx.id) + "'");
+      return sendError(res, 400, 'could not save the transaction — try again');
     }
-    store.saveState(DATA_DIR, state);
     const out = { tx };
     if (checkinReset) out.checkinReset = true;
     if (triggerWarning) out.triggerWarning = triggerWarning;
@@ -3164,9 +3621,20 @@ async function handleApi(req, res, pathname) {
   if (txsMatch && (req.method === 'PUT' || req.method === 'DELETE')) {
     const tx = (state.bitcoin.txs || []).find((t) => t.id === txsMatch[1]);
     if (!tx) return sendError(res, 404, 'no such transaction');
+    // (0.8.1, audit finding 4) Snapshot for the fresh-state merge
+    // below: only the fields this edit changes are copied into
+    // fresh state at save time. (Shallow: the handler replaces
+    // trigger/release/broadcasted, never mutates them in place.)
+    const orig = { ...tx };
     if (req.method === 'DELETE') {
-      state.bitcoin.txs = state.bitcoin.txs.filter((t) => t.id !== tx.id);
-      store.saveState(DATA_DIR, state);
+      // (0.8.1, audit finding 4) The removal rides into FRESH
+      // state: the request body was awaited above, so a second
+      // request may have saved in between.
+      const fresh = saveMutation((f) => {
+        if (!(f.bitcoin.txs || []).some((t) => t.id === tx.id)) return false;
+        f.bitcoin.txs = (f.bitcoin.txs || []).filter((t) => t.id !== tx.id);
+      });
+      if (!fresh) return sendError(res, 404, 'no such transaction');
       return sendJson(res, 200, { ok: true, removed: tx.id });
     }
     const body = await readBody(req);
@@ -3243,13 +3711,22 @@ async function handleApi(req, res, pathname) {
       if (triggerLocked && JSON.stringify(v.trigger) !== JSON.stringify(store.triggerOf(tx))) {
         return sendError(res, 400, 'the trigger cannot be changed once the transaction has been broadcast');
       }
-      if (v.trigger.type === 'utxo' || v.trigger.type === 'price') {
+      if (v.trigger.type === 'utxo' || v.trigger.type === 'price' || v.trigger.type === 'blockheight' || v.trigger.type === 'setdate' || v.trigger.type === 'feemarket') {
         try {
           const chk = await checkTriggerNow(v.trigger, state, now);
           if (chk.warning) triggerWarning = chk.warning;
           if (chk.fire && body.triggerConfirmed !== true) {
             if (v.trigger.type === 'utxo') {
               return sendError(res, 400, 'That UTXO is already spent — this rule would fire on the next evaluation. Save it with triggerConfirmed to save it anyway.');
+            }
+            if (v.trigger.type === 'blockheight') {
+              return sendError(res, 400, 'That block height has already been reached — this rule would fire on the next evaluation. Save it with triggerConfirmed to save it anyway.');
+            }
+            if (v.trigger.type === 'setdate') {
+              return sendError(res, 400, 'That date has already passed — this rule would fire on the next evaluation. Save it with triggerConfirmed to save it anyway.');
+            }
+            if (v.trigger.type === 'feemarket') {
+              const fdir = v.trigger.params.direction === 'above' ? 'at or above' : 'at or below'; return sendError(res, 400, 'The economy fee is already ' + fdir + ' ' + Number(v.trigger.params.maxFeeRate).toLocaleString('en-US') + ' sat/vB — this rule would fire on the next evaluation. Save it with triggerConfirmed to save it anyway.');
             }
             const dir = v.trigger.params.op === '>=' ? 'above' : 'below';
             return sendError(res, 400, 'The price is already ' + dir + ' $' + Number(v.trigger.params.value).toLocaleString('en-US') + ' — this rule would fire on the next evaluation. Save it with triggerConfirmed to save it anyway.');
@@ -3273,7 +3750,6 @@ async function handleApi(req, res, pathname) {
     // outside the zone, and arming a broadcasted / stale tx leave
     // the clock untouched. The zone is measured against the tx's
     // own threshold (after a trigger change above, the new one).
-    const wasEnabled = tx.enabled;
     if (typeof body.enabled === 'boolean') tx.enabled = body.enabled;
     // The route toggle on the card (0.7.16): switching the route
     // applies to the NEXT broadcast attempt — a transaction already
@@ -3288,24 +3764,74 @@ async function handleApi(req, res, pathname) {
     // computed from submittedAt at evaluation time (see
     // fallbackDeadline), so no clock is restarted here.
     if (body.publicFallbackDays !== undefined) tx.publicFallbackDays = validPublicFallbackDays(body.publicFallbackDays);
-    let checkinReset = false;
-    const txTrigger = store.triggerOf(tx);
-    // The freeze (0.8.0): the danger zone is measured from the
-    // EFFECTIVE last check-in — the tx's live frozen time — so a
-    // frozen clock is never in the danger zone for time that never
-    // counted. The freeze is re-synced after the toggle: disarming
-    // starts an inactive period, re-arming banks it.
-    const liveOff = checkinLiveOffsetMs(tx, now);
-    if (body.enabled === true && wasEnabled === false
-        && txTrigger.type === 'checkin'
-        && inDangerZone(state, now, txTrigger.params.thresholdDays, liveOff)
-        && !tx.broadcasted && !(tx.release && tx.release.status === 'stale')) {
-      resetCheckin(state, now, 'arm-reset');
-      checkinReset = true;
+    // (0.8.2) The history events for this edit: an arm/disarm
+    // flip logs on its own; any other field change logs as one
+    // 'edited' event naming what changed. The events are appended
+    // to tx.history here and ride into fresh state through the
+    // mutator's field list below ('history' is in it), so a
+    // rejected edit (a 400 above) leaves no event behind.
+    if (typeof body.enabled === 'boolean' && orig.enabled !== tx.enabled) {
+      pushHistory(tx, tx.enabled ? 'armed' : 'disarmed', '');
     }
-    syncCheckinFreeze(tx, state, now);
-    store.saveState(DATA_DIR, state);
-    const out = { tx };
+    const editChanges = [];
+    if (orig.label !== tx.label) editChanges.push('Label changed');
+    if (JSON.stringify(orig.trigger) !== JSON.stringify(tx.trigger)) editChanges.push('Trigger changed to ' + triggerConditionText(tx.trigger));
+    if (orig.hex !== tx.hex) editChanges.push('Transaction replaced');
+    if (orig.broadcastVia !== tx.broadcastVia) editChanges.push('Route changed to ' + (tx.broadcastVia === 'slipstream' ? 'Slipstream' : 'Public'));
+    if (orig.publicFallbackDays !== tx.publicFallbackDays) editChanges.push('Public fallback changed to ' + (tx.publicFallbackDays === null ? 'Never' : tx.publicFallbackDays + (tx.publicFallbackDays === 1 ? ' day' : ' days')));
+    if (orig.notes !== tx.notes) editChanges.push('Notes changed');
+    if (editChanges.length) pushHistory(tx, 'edited', editChanges.join('; '));
+    let checkinReset = false;
+    // (0.8.1, audit finding 4) The edit's field changes were
+    // computed on the request's snapshot while the fee and trigger
+    // checks awaited the network — only the fields this edit
+    // actually changed ride into FRESH state, so a concurrent save
+    // is not clobbered. The locks are re-checked on the fresh tx:
+    // a tx broadcast in the meantime must not have its hex or
+    // trigger rewritten. The freeze and the danger-zone reset are
+    // re-evaluated on fresh state too.
+    let editError = null;
+    let dupTx = null;
+    const fresh = saveMutation((f) => {
+      const ftx = (f.bitcoin.txs || []).find((t) => t.id === tx.id);
+      if (!ftx) { editError = 'gone'; return false; }
+      const freshLocked = !!(ftx.broadcasted || (ftx.release
+        && (ftx.release.status === 'submitted-slipstream' || ftx.release.status === 'stale' || ftx.release.status === 'broadcast')));
+      if (orig.hex !== tx.hex && freshLocked && tx.txid !== ftx.txid) { editError = 'locked-hex'; return false; }
+      if (JSON.stringify(orig.trigger) !== JSON.stringify(tx.trigger) && freshLocked
+          && JSON.stringify(tx.trigger) !== JSON.stringify(store.triggerOf(ftx))) { editError = 'locked-trigger'; return false; }
+      if (orig.txid !== tx.txid) {
+        const dup = (f.bitcoin.txs || []).find((t) => t.id !== tx.id && t.txid === tx.txid);
+        if (dup) { dupTx = dup; editError = 'duplicate'; return false; }
+      }
+      const freshWasEnabled = ftx.enabled;
+      for (const k of ['hex', 'txid', 'inputs', 'outputs', 'totalOutSats', 'locktime', 'segwit', 'feeSats', 'feeRateSatVb', 'release', 'broadcasted', 'label', 'notes', 'trigger', 'triggerState', 'enabled', 'broadcastVia', 'publicFallbackDays', 'history']) {
+        if (JSON.stringify(tx[k]) !== JSON.stringify(orig[k])) ftx[k] = tx[k];
+      }
+      // The freeze (0.8.0): the danger zone is measured from the
+      // EFFECTIVE last check-in — the tx's live frozen time — so a
+      // frozen clock is never in the danger zone for time that never
+      // counted. The freeze is re-synced after the toggle: disarming
+      // starts an inactive period, re-arming banks it.
+      syncCheckinFreeze(ftx, f, now);
+      const ftxTrigger = store.triggerOf(ftx);
+      if (body.enabled === true && freshWasEnabled === false
+          && ftxTrigger.type === 'checkin'
+          && inDangerZone(f, now, ftxTrigger.params.thresholdDays, checkinLiveOffsetMs(ftx, now))
+          && !ftx.broadcasted && !(ftx.release && ftx.release.status === 'stale')) {
+        resetCheckin(f, now, 'arm-reset');
+        checkinReset = true;
+      }
+    });
+    if (!fresh) {
+      if (editError === 'gone') return sendError(res, 404, 'no such transaction');
+      if (editError === 'locked-hex') return sendError(res, 400, 'the transaction hex cannot be changed once it has been broadcast');
+      if (editError === 'locked-trigger') return sendError(res, 400, 'the trigger cannot be changed once the transaction has been broadcast');
+      if (editError === 'duplicate') return sendError(res, 400, "This transaction is already stored as '" + (dupTx.label || dupTx.id) + "'");
+      return sendError(res, 400, 'could not save the edit — try again');
+    }
+    const outTx = (fresh.bitcoin.txs || []).find((t) => t.id === tx.id);
+    const out = { tx: outTx };
     if (checkinReset) out.checkinReset = true;
     if (triggerWarning) out.triggerWarning = triggerWarning;
     return sendJson(res, 200, out);
@@ -3326,27 +3852,34 @@ async function handleApi(req, res, pathname) {
   if (req.method === 'POST' && pathname === '/api/bitcoin/txs/arm-all') {
     const body = await readBody(req).catch(() => ({}));
     if (typeof body.enabled !== 'boolean') return sendError(res, 400, 'enabled must be true or false');
-    const txs = state.bitcoin.txs || [];
-    const newlyArmed = [];
-    for (const t of txs) {
-      const wasEnabled = t.enabled;
-      t.enabled = body.enabled;
-      syncCheckinFreeze(t, state, now);
-      if (body.enabled === true && wasEnabled === false) newlyArmed.push(t);
-    }
+    // (0.8.1, audit finding 4) The toggle + freeze sync + reset
+    // ride into FRESH state: the request body was awaited above.
     let checkinReset = false;
-    for (const t of newlyArmed) {
-      const trg = store.triggerOf(t);
-      if (trg.type !== 'checkin') continue;
-      if (t.broadcasted || (t.release && t.release.status === 'stale')) continue;
-      if (inDangerZone(state, now, trg.params.thresholdDays, checkinLiveOffsetMs(t, now))) {
-        resetCheckin(state, now, 'arm-all-reset');
-        checkinReset = true;
-        break;
+    const fresh = saveMutation((f) => {
+      const txs = f.bitcoin.txs || [];
+      const newlyArmed = [];
+      for (const t of txs) {
+        const wasEnabled = t.enabled;
+        t.enabled = body.enabled;
+        // (0.8.2) An arm/disarm flip logs on the tx it flipped —
+        // a no-op toggle (already in that state) logs nothing.
+        if (wasEnabled !== body.enabled) pushHistory(t, body.enabled ? 'armed' : 'disarmed', '');
+        syncCheckinFreeze(t, f, now);
+        if (body.enabled === true && wasEnabled === false) newlyArmed.push(t);
       }
-    }
-    store.saveState(DATA_DIR, state);
-    return sendJson(res, 200, { ok: true, enabled: body.enabled, count: txs.length, checkinReset, txs });
+      for (const t of newlyArmed) {
+        const trg = store.triggerOf(t);
+        if (trg.type !== 'checkin') continue;
+        if (t.broadcasted || (t.release && t.release.status === 'stale')) continue;
+        if (inDangerZone(f, now, trg.params.thresholdDays, checkinLiveOffsetMs(t, now))) {
+          resetCheckin(f, now, 'arm-all-reset');
+          checkinReset = true;
+          break;
+        }
+      }
+    });
+    const freshTxs = fresh.bitcoin.txs || [];
+    return sendJson(res, 200, { ok: true, enabled: body.enabled, count: freshTxs.length, checkinReset, txs: freshTxs });
   }
 
   // POST /api/bitcoin/txs/:id/broadcast — MANUAL broadcast, now. Same
@@ -3382,7 +3915,7 @@ async function handleApi(req, res, pathname) {
   // failure the error is surfaced and the tx STAYS Slipstream-pending
   // (no 'failed' record is written — MARA is still holding it).
   // MANUAL ONLY: it is not reachable from the release evaluation or
-  // Broadcast All — only this endpoint calls broadcastOne with
+  // Broadcast Armed — only this endpoint calls broadcastOne with
   // forcePublic, and only for the one tx named here.
   const txBroadcastPublicMatch = pathname.match(/^\/api\/bitcoin\/txs\/([^/]+)\/broadcast-public$/);
   if (req.method === 'POST' && txBroadcastPublicMatch) {
@@ -3517,10 +4050,11 @@ async function handleApi(req, res, pathname) {
     if (bsSettings.priceSources !== undefined && bsSettings.priceSources !== null) {
       const ps = bsSettings.priceSources;
       if (!ps || typeof ps !== 'object') return sendError(res, 400, 'backup priceSources must be {source1, source2}');
-      const s1 = ps.source1, s2 = ps.source2;
-      if (typeof s1 !== 'string' || !bitcoin.priceProviderById(s1)) return sendError(res, 400, 'backup unknown price provider: ' + s1);
-      if (typeof s2 !== 'string' || !bitcoin.priceProviderById(s2)) return sendError(res, 400, 'backup unknown price provider: ' + s2);
-      if (s1 === s2) return sendError(res, 400, 'backup price sources must be different');
+      const s1 = bitcoin.normalizePriceSourceValue(ps.source1);
+      const s2 = bitcoin.normalizePriceSourceValue(ps.source2);
+      if (s1 === null) return sendError(res, 400, 'backup ' + priceSourceError(ps.source1));
+      if (s2 === null) return sendError(res, 400, 'backup ' + priceSourceError(ps.source2));
+      if (bitcoin.priceSourceKey(s1) === bitcoin.priceSourceKey(s2)) return sendError(res, 400, 'backup price sources must be different');
       settings.priceSources = { source1: s1, source2: s2 };
     } else {
       settings.priceSources = { source1: 'coingecko', source2: 'coinbase' };
@@ -3611,7 +4145,11 @@ async function handleApi(req, res, pathname) {
       // believed when its txid is that txid. Anything else rejects
       // the WHOLE restore — a corrupt or hand-edited backup must not
       // silently mark a transaction stale, or resurrect a broadcast
-      // that never happened. A record the app wrote always passes:
+      // that never happened. (0.8.1, audit finding: even a
+      // txid-matching broadcast/stale claim is not believed — it is
+      // dropped when the restored tx is built below, and the network
+      // re-derives it. The check here still rejects a malformed or
+      // mismatched record outright.) A record the app wrote always passes:
       // every writer carries txid = the tx's txid (broadcastOneInner
       // paths, dry-run verdict writes) and kind in RELEASE_KINDS,
       // and the 0.4.0 migration guarantees txid on older records.
@@ -3683,8 +4221,35 @@ async function handleApi(req, res, pathname) {
         // evaluation anyway).
         trigger: store.triggerOf(t),
         triggerState: (t.triggerState && typeof t.triggerState === 'object' && !Array.isArray(t.triggerState)) ? t.triggerState : null,
-        release: t.release ? t.release : null,
-        broadcasted: t.broadcasted ? t.broadcasted : null,
+        // (0.8.1, audit finding: restored `broadcasted` records)
+        // A broadcasted fact — or a release record claiming the tx
+        // already went out ('broadcast') or is spent ('stale') — is
+        // NOT believed from a backup on txid match alone: a
+        // hand-edited backup could falsely mark a transaction
+        // broadcast, or permanently disable one as stale. Both are
+        // re-derived from the network on the next evaluation (the
+        // freshness gate recognises a tx already out there, and
+        // marks spent inputs stale), so the restore drops them and
+        // the tx comes back active. 'failed', 'conflict', and
+        // 'submitted-slipstream' records are transient and
+        // self-correcting, so they ride along.
+        release: (t.release && (t.release.status === 'broadcast' || t.release.status === 'stale')) ? null : (t.release ? t.release : null),
+        broadcasted: null,
+        // (0.8.2) The event trail rides along when it is well
+        // formed — display-only, so a hand-edited backup cannot
+        // hurt anything by forging it. The same distrust as the
+        // records above applies to its broadcast claims: a
+        // 'broadcast', 'confirmed', or 'stale' event from the
+        // backup is dropped with the record it describes, and the
+        // network re-derives it. A backup from before 0.8.2
+        // carries no history (null) — the load-time backfill seeds
+        // it from the restored facts on the next load.
+        history: Array.isArray(t.history)
+          ? t.history.filter((e) => e && typeof e === 'object' && store.HISTORY_TYPES.has(e.type)
+              && typeof e.ts === 'string' && !Number.isNaN(new Date(e.ts).getTime())
+              && typeof e.detail === 'string'
+              && e.type !== 'broadcast' && e.type !== 'confirmed' && e.type !== 'stale').slice(-HISTORY_MAX)
+          : null,
       });
     }
     const bsCheckin = (bs.checkin && typeof bs.checkin === 'object') ? bs.checkin : {};
@@ -3820,8 +4385,10 @@ async function handleApi(req, res, pathname) {
   // either one answers (the other is the backup).
   if (req.method === 'POST' && pathname === '/api/bitcoin/connection/test') {
     const r = await bitcoin.testConnection(bitcoin.endpointsFor(state.settings));
-    state.bitcoin.connection = { ok: r.ok, checkedAt: now.toISOString(), detail: r.detail, results: r.results };
-    store.saveState(DATA_DIR, state);
+    const conn = { ok: r.ok, checkedAt: now.toISOString(), detail: r.detail, results: r.results };
+    // (0.8.1, audit finding 4) The node test awaited the network —
+    // only the connection result rides into FRESH state.
+    saveMutation((f) => { f.bitcoin.connection = conn; });
     return sendJson(res, 200, { ok: r.ok, detail: r.detail, results: r.results });
   }
 
@@ -3873,7 +4440,7 @@ async function handleApi(req, res, pathname) {
         if (trg && trg.type === 'price') {
           try {
             const readings = await fetchPriceCached(priceSourcesOf(state.settings), checkCadenceSecondsOf(state.settings));
-            const comb = bitcoin.combinePriceReadings(readings, trg.params.op, priceAgreementPctOf(state.settings));
+            const comb = bitcoin.combinePriceReadings(readings, priceAgreementPctOf(state.settings));
             let srcDetail;
             if (comb.mode === 'disagree' || comb.mode === 'none') {
               srcDetail = comb.reason.charAt(0).toUpperCase() + comb.reason.slice(1);
@@ -3901,11 +4468,14 @@ async function handleApi(req, res, pathname) {
     // confirmed spend turns it stale. The dry-run log entry (written
     // by bitcoin.dryRun) already records the run itself, so no second
     // log entry is written here.
-    let verdictRecorded = false;
-    let feeBackfilled = false;
+    // (0.8.1, audit finding 4) The verdicts are network facts
+    // collected above; only the per-tx updates ride into FRESH
+    // state, with the same guards re-evaluated there — a tx
+    // broadcast or deleted while the run was on the network must
+    // not have its record rewritten from this stale snapshot.
+    const actions = [];
     for (const r of results) {
-      const tx = txs.find((t) => t.id === r.id);
-      if (!tx || tx.broadcasted) continue;
+      const a = { id: r.id };
       // The fee (0.7.18): a dry-run OVERWRITES the stored fee with
       // the freshly computed one — the input values were fetched
       // from the node for the freshness check anyway. A fee stored
@@ -3914,54 +4484,71 @@ async function handleApi(req, res, pathname) {
       // lingering; a null result (the node could not answer) leaves
       // the stored fee alone.
       if (r.fee && typeof r.fee.feeSats === 'number') {
-        if (tx.feeSats !== r.fee.feeSats || tx.feeRateSatVb !== r.fee.feeRateSatVb) feeBackfilled = true;
-        tx.feeSats = r.fee.feeSats;
-        tx.feeRateSatVb = (typeof r.fee.feeRateSatVb === 'number') ? r.fee.feeRateSatVb : null;
+        a.fee = { feeSats: r.fee.feeSats, feeRateSatVb: (typeof r.fee.feeRateSatVb === 'number') ? r.fee.feeRateSatVb : null };
       }
       if (r.spent && r.spent.length) {
-        if (tx.release && tx.release.status === 'stale') continue;
-        const spentDesc = r.spent.map((i) => String(i.prevTxid || '').slice(0, 12) + ':' + i.prevVout).join(', ');
-        tx.release = { status: 'stale', kind: 'dryrun', trigger: releaseTriggerFor(state, tx), txid: tx.txid, method: r.checkedVia, lastAttemptAt: now.toISOString(), error: 'inputs spent: ' + spentDesc };
-        verdictRecorded = true;
-        continue;
+        a.stale = { method: r.checkedVia, error: 'inputs spent: ' + r.spent.map((i) => String(i.prevTxid || '').slice(0, 12) + ':' + i.prevVout).join(', ') };
+      } else if (r.own && r.own.length) {
+        a.own = { method: r.checkedVia, blockHeight: r.own[0].blockHeight != null ? r.own[0].blockHeight : null };
+      } else if (r.conflict && r.conflict.length) {
+        a.conflict = { method: r.checkedVia, error: 'inputs spent by an unconfirmed transaction: ' + r.conflict.map((i) => String(i.prevTxid || '').slice(0, 12) + ':' + i.prevVout).join(', ') };
+      } else if (r.verdict === 'ready') {
+        // A clean verdict re-derives the warning away: the unconfirmed
+        // spend was evicted, so the transaction is ready again. Only a
+        // 'ready' verdict clears — an 'unknown' verdict cannot prove
+        // the input unspent, so the warning stands on ambiguous data.
+        a.clearConflict = true;
       }
-      if (r.own && r.own.length) {
-        // Repair, don't overwrite: a release that already went out
-        // keeps its kind ('release'); a broadcasted fact keeps the
-        // confirmations it already has. A restore could have left
-        // one half of the pair behind — the check that just proved
-        // the tx is out there fills in the missing half.
-        const own = r.own[0];
-        if (!tx.broadcasted) {
-          tx.broadcasted = {
-            txid: tx.txid, broadcastedAt: now.toISOString(), method: r.checkedVia,
-            confirmations: null, blockHeight: own.blockHeight != null ? own.blockHeight : null, found: true, checkedAt: now.toISOString(),
-          };
-          verdictRecorded = true;
-        }
-        if (!tx.release || tx.release.status !== 'broadcast') {
-          tx.release = { status: 'broadcast', kind: 'dryrun', trigger: releaseTriggerFor(state, tx), txid: tx.txid, method: r.checkedVia, broadcastedAt: now.toISOString() };
-          verdictRecorded = true;
-        }
-        continue;
-      }
-      if (r.conflict && r.conflict.length) {
-        if (tx.release && tx.release.status === 'stale') continue;
-        const conflictDesc = r.conflict.map((i) => String(i.prevTxid || '').slice(0, 12) + ':' + i.prevVout).join(', ');
-        tx.release = { status: 'conflict', kind: 'dryrun', trigger: releaseTriggerFor(state, tx), txid: tx.txid, method: r.checkedVia, lastAttemptAt: now.toISOString(), error: 'inputs spent by an unconfirmed transaction: ' + conflictDesc };
-        verdictRecorded = true;
-        continue;
-      }
-      // A clean verdict re-derives the warning away: the unconfirmed
-      // spend was evicted, so the transaction is ready again. Only a
-      // 'ready' verdict clears — an 'unknown' verdict cannot prove
-      // the input unspent, so the warning stands on ambiguous data.
-      if (r.verdict === 'ready' && tx.release && tx.release.status === 'conflict') {
-        tx.release = null;
-        verdictRecorded = true;
-      }
+      if (a.fee || a.stale || a.own || a.conflict || a.clearConflict) actions.push(a);
     }
-    if (verdictRecorded || feeBackfilled) store.saveState(DATA_DIR, state);
+    if (actions.length) {
+      saveMutation((f) => {
+        for (const a of actions) {
+          const ftx = (f.bitcoin.txs || []).find((t) => t.id === a.id);
+          if (!ftx || ftx.broadcasted) continue;
+          if (a.fee) {
+            ftx.feeSats = a.fee.feeSats;
+            ftx.feeRateSatVb = a.fee.feeRateSatVb;
+          }
+          if (a.stale) {
+            if (ftx.release && ftx.release.status === 'stale') continue;
+            ftx.release = { status: 'stale', kind: 'dryrun', trigger: releaseTriggerFor(f, ftx), txid: ftx.txid, method: a.stale.method, lastAttemptAt: now.toISOString(), error: a.stale.error };
+            // (0.8.2) The dry run discovered the staleness — the
+            // tx's history should say so, not just its card.
+            pushHistory(ftx, 'stale', a.stale.error);
+            continue;
+          }
+          if (a.own) {
+            // Repair, don't overwrite: a release that already went out
+            // keeps its kind ('release'); a broadcasted fact keeps the
+            // confirmations it already has. A restore could have left
+            // one half of the pair behind — the check that just proved
+            // the tx is out there fills in the missing half.
+            if (!ftx.broadcasted) {
+              ftx.broadcasted = {
+                txid: ftx.txid, broadcastedAt: now.toISOString(), method: a.own.method,
+                confirmations: null, blockHeight: a.own.blockHeight, found: true, checkedAt: now.toISOString(),
+              };
+              // (0.8.2) The dry run discovered the tx is out there.
+              pushHistory(ftx, 'broadcast', 'txid ' + shortTxid(ftx.txid));
+              if (a.own.blockHeight != null) pushHistory(ftx, 'confirmed', 'Block ' + a.own.blockHeight.toLocaleString('en-US'));
+            }
+            if (!ftx.release || ftx.release.status !== 'broadcast') {
+              ftx.release = { status: 'broadcast', kind: 'dryrun', trigger: releaseTriggerFor(f, ftx), txid: ftx.txid, method: a.own.method, broadcastedAt: now.toISOString() };
+            }
+            continue;
+          }
+          if (a.conflict) {
+            if (ftx.release && ftx.release.status === 'stale') continue;
+            ftx.release = { status: 'conflict', kind: 'dryrun', trigger: releaseTriggerFor(f, ftx), txid: ftx.txid, method: a.conflict.method, lastAttemptAt: now.toISOString(), error: a.conflict.error };
+            // (0.8.2) The warning on the card gets its history line.
+            pushHistory(ftx, 'conflict', a.conflict.error);
+            continue;
+          }
+          if (a.clearConflict && ftx.release && ftx.release.status === 'conflict') ftx.release = null;
+        }
+      });
+    }
     const armed = results.filter((r) => r.enabled);
     // 'would broadcast' counts the transactions that would actually
     // land: a timelocked transaction is attempted (its per-result

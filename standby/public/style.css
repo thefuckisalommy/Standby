@@ -102,10 +102,15 @@ section.tab.active { display: block; }
 /* Long unbreakable strings (a 64-hex txid in an add/edit success
    message) must wrap instead of spilling past the right edge. */
 label { display: block; font-size: 14px; font-weight: 600; margin: 12px 0 4px; }
+/* url + datetime-local belong here too: they were missing, so the
+   Custom endpoint URL box and the set-date box rendered with the
+   browser's default box instead of this one. color-scheme: dark
+   makes the datetime-local picker icon render for the dark theme. */
 input[type="text"], input[type="email"], input[type="number"], input[type="date"],
-input[type="password"], textarea, select {
+input[type="url"], input[type="datetime-local"], input[type="password"], textarea, select {
   width: 100%; padding: 9px 10px; font: inherit; font-size: 15px;
   border: 1px solid var(--line); border-radius: 6px; background: #0f1115; color: var(--ink);
+  color-scheme: dark;
 }
 /* A <select> must never be wider than its container. Its intrinsic
    width is the longest <option> ("Slipstream (MARA)"), and on a
@@ -254,6 +259,28 @@ button.btn-checkin-big { width: 100%; padding: 16px 20px; font-size: 19px; }
 }
 .readiness-item { margin: 12px 0; }
 .readiness-label { color: var(--muted); font-size: 13px; margin-bottom: 2px; }
+/* Node capability rows (0.8.1): the three per-node checks under a
+   Primary/Secondary row in the Settings nodes card — indented,
+   tighter, smaller labels. They appear only after a Test
+   connection has run for that endpoint. */
+.node-checks { margin: 2px 0 4px 16px; }
+/* Node capability details, variant C (0.8.1): each node is a
+   <details> — the summary row is the node name + status pill +
+   "N/3 · height", and the three checks open on tap as plain
+   label — value lines (no pills). A failed check's value is the
+   reason, in red. */
+.node-details summary { list-style: none; cursor: pointer; display: flex; align-items: baseline; gap: 8px; }
+.node-details summary::-webkit-details-marker { display: none; }
+.node-details summary::before { content: "▸"; color: var(--muted); font-size: 13px; flex-shrink: 0; }
+.node-details[open] summary::before { content: "▾"; }
+.node-check-line { display: flex; align-items: baseline; gap: 8px; margin: 6px 0; font-size: 13px; }
+.node-check-line .node-check-label { color: var(--muted); flex-shrink: 0; white-space: nowrap; }
+.node-checks .node-check-detail { color: var(--ink); font-weight: 600; white-space: normal; }
+.node-checks .node-check-detail.failed { color: var(--bad); }
+/* The measured value next to a capability pill (0.8.1) — e.g.
+   "Height 976,200" or "1 sat/vB" — muted, same size as the
+   surrounding text. */
+.node-check-detail { color: var(--muted); font-size: 13px; white-space: nowrap; }
 .node-lines > div + div { margin-top: 4px; }
 /* The per-transaction readiness list (0.7.19): one row per active
    transaction — label left, readiness-status pill right, thin divider
@@ -264,19 +291,32 @@ button.btn-checkin-big { width: 100%; padding: 16px 20px; font-size: 19px; }
 .tx-row + .tx-row { border-top: 1px solid var(--line); }
 .tx-row b { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; font-size: 15px; font-weight: 400; }
 .tx-row .pill { flex-shrink: 0; }
-/* The readiness list's per-transaction block (0.8.0): one block per
-   armed rule — the label + the status pill (and the fee pill) on
-   the first line, the trigger's level and current value on the
-   second line, so the dashboard reads as a list of RULES, not
-   just transactions. The first line never wraps: the label is
-   truncated with an ellipsis so a long label cannot push the
-   status pill onto a second line. */
-.readiness-tx { margin: 10px 0; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
-.readiness-tx:last-child { border-bottom: none; padding-bottom: 0; margin-bottom: 0; }
-.readiness-tx-row { display: flex; align-items: baseline; gap: 10px; flex-wrap: nowrap; }
+/* The readiness list's per-transaction block (0.8.0, sub-card 0.8.1):
+   one block per armed rule — the label + the status pill (and the
+   fee pill) on the first line, the trigger's level and current
+   value on the second line, so the dashboard reads as a list of
+   RULES, not just transactions. Each block is its own sub-card
+   (lighter than the card, full border, 8px radius) so the rows
+   stop blending into the card. The first line never wraps: the
+   label is truncated with an ellipsis so a long label cannot push
+   the status pill onto a second line. The 6px row gap (not 10px)
+   and 8px side padding are what keep the longest two-pill label
+   ("Blue wallet move" + Low Fee Risk) on one line at 390px. */
+.readiness-tx { background: #22252d; border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; margin: 10px 0; }
+.readiness-tx-row { display: flex; align-items: baseline; gap: 6px; flex-wrap: nowrap; }
 .readiness-tx-row b { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; font-weight: 400; }
 .readiness-tx-row .pill { flex-shrink: 0; }
 .readiness-tx-state { color: var(--muted); font-size: 13px; margin-top: 2px; overflow-wrap: anywhere; }
+/* The combined Node + Exchange Status block (0.8.1): one sub-card
+   holding both sections, in a cool blue-slate hue (#1f2a38) so it
+   reads as a different family from the neutral tx tiles (#22252d)
+   at the same lightness. Each section's "last checked" sits inline
+   on its label line, right-aligned (see fmtCheckedAt in app.js). */
+.readiness-status { background: #1f2a38; border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; margin: 10px 0; }
+.readiness-status .readiness-item { margin: 0; }
+.readiness-status .readiness-item + .readiness-item { margin-top: 10px; }
+.readiness-label-row { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.checked-inline { color: var(--muted); font-size: 13px; white-space: nowrap; }
 /* The guard note under a trigger picker (0.8.0): the rule's own
    safety guard, named where the rule is set — not on the card. */
 .guard-note {
@@ -305,6 +345,15 @@ button.btn-checkin-big { width: 100%; padding: 16px 20px; font-size: 19px; }
 #tab-dashboard .node-lines > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 #tab-dashboard .node-lines > div > span:first-child { min-width: 0; overflow-wrap: anywhere; }
 #tab-dashboard .node-lines .pill { flex-shrink: 0; }
+/* Exchange Status rows (0.8.1): label left, then the price in
+   small muted text, then the status pill pinned to the right
+   edge — the same right-aligned pill column as the Node Status
+   rows above them. The price span's margin-left: auto absorbs
+   the free space, so the label stays left and price + pill sit
+   right. This rule must stay AFTER the space-between rule above
+   (equal specificity, source order wins). */
+#readiness-exchange-item .node-lines > div { justify-content: flex-start; }
+#readiness-exchange-item .node-lines .node-check-detail { margin-left: auto; }
 a { color: #f59e0b; }
 
 /* Card header row: heading left, toggle right. */
@@ -478,6 +527,25 @@ p.inline-btns { display: flex; gap: 8px; flex-wrap: nowrap; align-items: center;
 .modal ul.plain-list li { margin: 4px 0; overflow-wrap: anywhere; }
 .tx-card .tx-details { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 6px; }
 .tx-card .tx-details summary { cursor: pointer; color: var(--muted); font-size: 14px; }
+/* The per-tx History (0.8.1): a collapsible of its own nested
+   inside Details, collapsed by default, in the same chrome — the
+   timeline inside is a vertical line with a dot per event
+   (green = confirmed, amber = fired / conflict, red = failed /
+   stale, grey = the rest), the event name bold with the time
+   floated right, the detail muted below it. Oldest first. */
+.tx-card .tx-history { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 6px; }
+.tx-card .tx-history summary { cursor: pointer; color: var(--muted); font-size: 14px; }
+.tx-card .timeline { margin: 10px 0 0; padding: 0; list-style: none; position: relative; }
+.tx-card .timeline::before { content: ""; position: absolute; left: 5px; top: 8px; bottom: 8px; width: 1px; background: var(--line); }
+.tx-card .timeline li { position: relative; padding: 0 0 12px 22px; }
+.tx-card .timeline li:last-child { padding-bottom: 2px; }
+.tx-card .timeline .dot { position: absolute; left: 0; top: 5px; width: 11px; height: 11px; border-radius: 50%; background: var(--muted); border: 2px solid var(--card); }
+.tx-card .timeline .dot.ok { background: var(--ok); }
+.tx-card .timeline .dot.warn { background: var(--warn); }
+.tx-card .timeline .dot.bad { background: var(--bad); }
+.tx-card .timeline .ev { font-size: 14px; font-weight: 600; }
+.tx-card .timeline .ev .t { float: right; color: var(--muted); font-size: 12px; font-weight: 400; margin-top: 2px; }
+.tx-card .timeline .det { color: var(--muted); font-size: 13px; margin-top: 1px; }
 /* The Inputs and Outputs drop-downs nested inside a card's
    Details: two separate <details>, one per side — each summary
    reads like the Details summary (14px, muted) — the header

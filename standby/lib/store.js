@@ -19,7 +19,7 @@ function defaultState() {
     settings: {
       primaryApiUrl: 'https://mempool.space', // the primary node: a mempool API endpoint (any mempool.space-compatible instance — another public one, or your own mempool on the LAN)
       secondaryApiUrl: 'https://blockstream.info/api', // the secondary node, tried only if the primary does not answer; blank = primary runs alone
-      priceSources: { source1: 'coingecko', source2: 'coinbase' }, // the two BTC price feeds for price rules (provider ids — see PRICE_PROVIDERS in lib/bitcoin.js); a reading is only trusted when the two agree within the configured agreement (Settings: Price agreement), and a rule that fires above a price uses the higher, below uses the lower
+      priceSources: { source1: 'coingecko', source2: 'coinbase' }, // the two BTC price feeds for price rules — each a provider id (see PRICE_PROVIDERS in lib/bitcoin.js) or a custom { id: 'custom', url, path } object (0.8.1); a reading is only trusted when the two agree within the configured agreement (Settings: Price agreement), and when they agree the primary source's price is the one that decides
       // Price agreement (0.8.0): the two BTC price sources must
       // agree within this % for a reading to count (Settings:
       // Price agreement; 1–20, default 5). Tighter is safer but
@@ -63,11 +63,16 @@ function defaultState() {
     // the server never sees keys.
     // tx = { id, txid, hex, label, notes, createdAt, inputs, outputs,
     //   totalOutSats, feeSats, feeRateSatVb, locktime, segwit, enabled, broadcastVia,
-    //   trigger, triggerState,
+    //   trigger, triggerState, history,
     //   release: null | { status: 'broadcast'|'failed'|'stale'|'submitted-slipstream', txid,
     //     method, broadcastedAt | lastAttemptAt, error?, mara? },
     //   broadcasted: null | { txid, broadcastedAt, method,
     //     confirmations, blockHeight, found, checkedAt } }
+    // history (0.8.2) is the tx's own event trail — [{ ts, type,
+    // detail }], oldest first, capped at 50 — only transitions
+    // (added, fired, broadcast, confirmed, stale, failed, conflict,
+    // edited, armed, disarmed, slipstream), never the hourly
+    // release checks.
     // trigger (0.8.0) is the rule that fires this transaction —
     // { type, params } — one of checkin / price / utxo / manual
     // (see normalizeTrigger below). triggerState is the trigger's
@@ -126,7 +131,15 @@ function newTxId() {
 // $999,999,999 is a typo, not a rule); the outpoint must be a
 // 64-hex txid, a colon, and an output index.
 // ---------------------------------------------------------------------------
-const TRIGGER_TYPES = ['checkin', 'price', 'utxo', 'manual'];
+const TRIGGER_TYPES = ['checkin', 'price', 'utxo', 'manual', 'blockheight', 'setdate', 'feemarket'];
+// (0.8.2) The per-transaction history event types — the only
+// types a history entry may carry (see server.js pushHistory and
+// the load-time backfill below). 'slipstream' is the MARA
+// submission; 'conflict' is the dry-run's unconfirmed-spend
+// warning. Only transitions are recorded — never the hourly
+// release checks.
+const HISTORY_TYPES = new Set(['added', 'fired', 'broadcast', 'slipstream', 'confirmed', 'stale', 'failed', 'conflict', 'edited', 'armed', 'disarmed']);
+const HISTORY_MAX = 50;
 // (0.8.0) The check-in fallback: there is no global broadcast
 // threshold any more — each check-in tx carries its own
 // thresholdDays ("Days of silence"). A tx with no usable trigger
@@ -189,6 +202,45 @@ function normalizeTrigger(input) {
     }
     case 'manual':
       return { trigger: { type: 'manual', params: {} } };
+    case 'blockheight': {
+      // (0.8.1) Fire when the chain tip reaches a height. The
+      // height is a positive integer; a reorg cannot un-fire it
+      // (once the tip has reached the height, the rule has fired).
+      const h = params.targetHeight;
+      if (typeof h !== 'number' || !Number.isInteger(h) || h < 1 || h > 10000000) {
+        return { error: 'block-height trigger targetHeight must be an integer block height from 1 to 10,000,000' };
+      }
+      return { trigger: { type: 'blockheight', params: { targetHeight: h } } };
+    }
+    case 'setdate': {
+      // (0.8.1) Fire at a date/time, regardless of check-ins (a
+      // pure deadline — the "fire unless I check in" snooze variant
+      // is a later addition). Stored normalized as an ISO string.
+      const raw = typeof params.fireAt === 'string' ? params.fireAt.trim() : '';
+      const ms = raw ? Date.parse(raw) : NaN;
+      if (!raw || !Number.isFinite(ms)) return { error: 'set-date trigger fireAt must be a valid date/time' };
+      return { trigger: { type: 'setdate', params: { fireAt: new Date(ms).toISOString() } } };
+    }
+    case 'feemarket': {
+      // (0.8.1) Fire when the economy fee rate crosses a threshold
+      // the owner sets (sat/vB), in the direction they choose:
+      // 'below' fires when the fee falls to or below it (cheap
+      // fees — the original rule), 'above' fires when the fee
+      // rises to or above it (expensive fees). The threshold is
+      // user-set (not per-tx) — the tx's own fee rate is not
+      // consulted; the rule fires on the market rate alone.
+      // Direction defaults to 'below' so existing rules keep
+      // their meaning.
+      const r = params.maxFeeRate;
+      if (typeof r !== 'number' || !Number.isFinite(r) || r < 0.1 || r > 10000) {
+        return { error: 'fee-market trigger maxFeeRate must be a number of sat/vB from 0.1 to 10,000' };
+      }
+      const dir = params.direction === undefined || params.direction === null ? 'below' : params.direction;
+      if (dir !== 'below' && dir !== 'above') {
+        return { error: 'fee-market trigger direction must be "below" or "above"' };
+      }
+      return { trigger: { type: 'feemarket', params: { maxFeeRate: r, direction: dir } } };
+    }
     default:
       return { error: 'unknown trigger type: ' + String(input.type) };
   }
@@ -325,10 +377,47 @@ function loadState(dataDir) {
       t.triggerState = null; triggerMigrated = true;
     }
   }
-  if (pruned || migrated || triggerMigrated) {
+  // 0.8.2 migration: every transaction carries its own event
+  // history — [{ ts, type, detail }], oldest first (see
+  // server.js pushHistory). A tx from before 0.8.2 carries none:
+  // seed it from the facts the state already holds — added at
+  // createdAt; broadcast / confirmed from the broadcasted fact;
+  // stale from a stale release record — so an old card's history
+  // starts true instead of empty. A present but malformed history
+  // (a hand-edited state file) is sanitized the same way the
+  // restore validates one: unknown types and unparseable entries
+  // dropped, capped at HISTORY_MAX. Idempotent — runs on every
+  // load, and a seeded history is never re-seeded.
+  let historySeeded = false;
+  for (const t of (state.bitcoin.txs || [])) {
+    if (!Array.isArray(t.history)) {
+      const seeded = [{ ts: (typeof t.createdAt === 'string' && t.createdAt) ? t.createdAt : state.updatedAt, type: 'added', detail: '' }];
+      const b = (t.broadcasted && typeof t.broadcasted === 'object') ? t.broadcasted : null;
+      if (b && typeof b.broadcastedAt === 'string' && b.broadcastedAt) {
+        const btx = String(b.txid || t.txid || '');
+        seeded.push({ ts: b.broadcastedAt, type: 'broadcast', detail: 'txid ' + btx.slice(0, 8) + '…' + btx.slice(-4) });
+      }
+      if (b && ((typeof b.confirmations === 'number' && b.confirmations >= 1) || (typeof b.blockHeight === 'number'))) {
+        seeded.push({ ts: (typeof b.checkedAt === 'string' && b.checkedAt) ? b.checkedAt : b.broadcastedAt, type: 'confirmed', detail: (typeof b.blockHeight === 'number') ? 'Block ' + b.blockHeight.toLocaleString('en-US') : 'Confirmed' });
+      }
+      if (t.release && t.release.status === 'stale') {
+        seeded.push({ ts: (typeof t.release.lastAttemptAt === 'string' && t.release.lastAttemptAt) ? t.release.lastAttemptAt : seeded[0].ts, type: 'stale', detail: (typeof t.release.error === 'string' ? t.release.error : '') });
+      }
+      seeded.sort((a, b2) => new Date(a.ts).getTime() - new Date(b2.ts).getTime());
+      t.history = seeded.slice(-HISTORY_MAX);
+      historySeeded = true;
+    } else {
+      const clean = t.history.filter((e) => e && typeof e === 'object' && HISTORY_TYPES.has(e.type)
+        && typeof e.ts === 'string' && !Number.isNaN(new Date(e.ts).getTime())
+        && typeof e.detail === 'string').slice(-HISTORY_MAX);
+      if (clean.length !== t.history.length) { t.history = clean; historySeeded = true; }
+    }
+  }
+  if (pruned || migrated || triggerMigrated || historySeeded) {
     if (migrated) console.log('Standby 0.4.0: migrated single transaction to the transactions list');
     if (pruned) console.log('Standby: pruned legacy state (recipient/channels/reminders/release)');
     if (triggerMigrated) console.log('Standby 0.8.0: migrated transactions to per-transaction triggers');
+    if (historySeeded) console.log('Standby 0.8.1: seeded per-transaction history');
     saveState(dataDir, state);
   }
   return state;
@@ -378,5 +467,5 @@ module.exports = {
   appendCheckin, readCheckins, writeCheckins,
   appendBroadcastLog, readBroadcastLog, writeBroadcastLog,
   normalizeTrigger, triggerOf, defaultTrigger, FALLBACK_THRESHOLD_DAYS,
-  TRIGGER_TYPES, PRICE_MIN_USD, PRICE_MAX_USD,
+  TRIGGER_TYPES, PRICE_MIN_USD, PRICE_MAX_USD, HISTORY_TYPES, HISTORY_MAX,
 };
