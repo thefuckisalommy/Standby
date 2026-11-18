@@ -55,6 +55,28 @@
     return fmtDateShort(iso);
   }
 
+  // The per-tx History (0.8.2): the event titles, the dot colour
+  // per type (green = confirmed, amber = fired / conflict, red =
+  // failed / stale, grey = the rest), and the short timestamp
+  // ("Nov 15, 6:55 PM") the timeline rows show.
+  var HIST_TITLES = {
+    added: 'Transaction added', fired: 'Trigger fired', broadcast: 'Broadcast sent',
+    slipstream: 'Submitted to Slipstream', confirmed: 'Confirmed', stale: 'Went stale',
+    failed: 'Broadcast failed', conflict: 'Conflict', edited: 'Transaction edited',
+    armed: 'Armed', disarmed: 'Disarmed',
+  };
+  function histTitle(type) { return HIST_TITLES[type] || 'Event'; }
+  function histDotCls(type) {
+    if (type === 'confirmed') return 'ok';
+    if (type === 'fired' || type === 'conflict') return 'warn';
+    if (type === 'failed' || type === 'stale') return 'bad';
+    return '';
+  }
+  function fmtHistTime(iso) {
+    if (!iso) return '—';
+    return new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  }
+
   // The check-in freeze (0.8.0): the live frozen time for a tx —
   // the banked offset plus the open inactive period, if any.
   // Mirrors server.js checkinLiveOffsetMs. A tx that was disarmed
@@ -1569,6 +1591,52 @@
         rel.textContent = txReleaseLine(tx);
         body.appendChild(rel);
         if (tx.broadcasted) sentLine = rel;
+      }
+      // The History (0.8.2): the tx's own event trail — added,
+      // fired, broadcast, confirmed, stale, failed, edited,
+      // armed, disarmed — oldest first, in a collapsible of its
+      // own below Details, collapsed by default. Only transitions
+      // are logged, never the hourly release checks. The open state
+      // is remembered like Details (txUiState). Hidden entirely
+      // when the tx has no history (a hand-edited state — every tx
+      // the app writes carries at least the 'added' event).
+      var hist = tx.history;
+      if (Array.isArray(hist) && hist.length) {
+        var histDet = document.createElement('details');
+        histDet.className = 'tx-history';
+        histDet.open = ui.historyOpen === true;
+        histDet.addEventListener('toggle', function () {
+          (txUiState[tx.id] = txUiState[tx.id] || {}).historyOpen = histDet.open;
+        });
+        var histSum = document.createElement('summary');
+        histSum.textContent = 'History';
+        histDet.appendChild(histSum);
+        var tl = document.createElement('ul');
+        tl.className = 'timeline';
+        hist.forEach(function (ev) {
+          var li = document.createElement('li');
+          var dot = document.createElement('span');
+          var dotCls = histDotCls(ev.type);
+          dot.className = 'dot' + (dotCls ? ' ' + dotCls : '');
+          li.appendChild(dot);
+          var evEl = document.createElement('div');
+          evEl.className = 'ev';
+          evEl.textContent = histTitle(ev.type);
+          var tEl = document.createElement('span');
+          tEl.className = 't';
+          tEl.textContent = fmtHistTime(ev.ts);
+          evEl.appendChild(tEl);
+          li.appendChild(evEl);
+          if (ev.detail) {
+            var det = document.createElement('div');
+            det.className = 'det';
+            det.textContent = ev.detail;
+            li.appendChild(det);
+          }
+          tl.appendChild(li);
+        });
+        histDet.appendChild(tl);
+        row.appendChild(histDet);
       }
       var actions = document.createElement('div');
       actions.className = 'tx-actions';

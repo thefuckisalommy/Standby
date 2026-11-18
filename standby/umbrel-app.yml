@@ -5,8 +5,12 @@ manifestVersion: 1
 id: standby
 category: automation
 name: Standby
-version: "0.8.1"
+version: "0.8.2"
 releaseNotes: |-
+  0.8.2 — Every transaction keeps its own history.
+
+  - **Per-transaction history:** each transaction card now has a History section — a timeline of what happened to it, oldest first: added, trigger fired, broadcast sent, confirmed, went stale, edits, and arm/disarm changes. Older transactions get their history filled in from what Standby already knows (a broadcast that confirmed shows added, broadcast, confirmed).
+
   0.8.1 — Three more triggers join the broadcast engine.
 
   - **Block height:** fire when the chain reaches a block height you set. Deterministic — the height comes from your node's own chain, and a reorg can't un-fire it.

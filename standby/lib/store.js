@@ -63,11 +63,16 @@ function defaultState() {
     // the server never sees keys.
     // tx = { id, txid, hex, label, notes, createdAt, inputs, outputs,
     //   totalOutSats, feeSats, feeRateSatVb, locktime, segwit, enabled, broadcastVia,
-    //   trigger, triggerState,
+    //   trigger, triggerState, history,
     //   release: null | { status: 'broadcast'|'failed'|'stale'|'submitted-slipstream', txid,
     //     method, broadcastedAt | lastAttemptAt, error?, mara? },
     //   broadcasted: null | { txid, broadcastedAt, method,
     //     confirmations, blockHeight, found, checkedAt } }
+    // history (0.8.2) is the tx's own event trail — [{ ts, type,
+    // detail }], oldest first, capped at 50 — only transitions
+    // (added, fired, broadcast, confirmed, stale, failed, conflict,
+    // edited, armed, disarmed, slipstream), never the hourly
+    // release checks.
     // trigger (0.8.0) is the rule that fires this transaction —
     // { type, params } — one of checkin / price / utxo / manual
     // (see normalizeTrigger below). triggerState is the trigger's
@@ -127,6 +132,14 @@ function newTxId() {
 // 64-hex txid, a colon, and an output index.
 // ---------------------------------------------------------------------------
 const TRIGGER_TYPES = ['checkin', 'price', 'utxo', 'manual', 'blockheight', 'setdate', 'feemarket'];
+// (0.8.2) The per-transaction history event types — the only
+// types a history entry may carry (see server.js pushHistory and
+// the load-time backfill below). 'slipstream' is the MARA
+// submission; 'conflict' is the dry-run's unconfirmed-spend
+// warning. Only transitions are recorded — never the hourly
+// release checks.
+const HISTORY_TYPES = new Set(['added', 'fired', 'broadcast', 'slipstream', 'confirmed', 'stale', 'failed', 'conflict', 'edited', 'armed', 'disarmed']);
+const HISTORY_MAX = 50;
 // (0.8.0) The check-in fallback: there is no global broadcast
 // threshold any more — each check-in tx carries its own
 // thresholdDays ("Days of silence"). A tx with no usable trigger
@@ -364,10 +377,47 @@ function loadState(dataDir) {
       t.triggerState = null; triggerMigrated = true;
     }
   }
-  if (pruned || migrated || triggerMigrated) {
+  // 0.8.2 migration: every transaction carries its own event
+  // history — [{ ts, type, detail }], oldest first (see
+  // server.js pushHistory). A tx from before 0.8.2 carries none:
+  // seed it from the facts the state already holds — added at
+  // createdAt; broadcast / confirmed from the broadcasted fact;
+  // stale from a stale release record — so an old card's history
+  // starts true instead of empty. A present but malformed history
+  // (a hand-edited state file) is sanitized the same way the
+  // restore validates one: unknown types and unparseable entries
+  // dropped, capped at HISTORY_MAX. Idempotent — runs on every
+  // load, and a seeded history is never re-seeded.
+  let historySeeded = false;
+  for (const t of (state.bitcoin.txs || [])) {
+    if (!Array.isArray(t.history)) {
+      const seeded = [{ ts: (typeof t.createdAt === 'string' && t.createdAt) ? t.createdAt : state.updatedAt, type: 'added', detail: '' }];
+      const b = (t.broadcasted && typeof t.broadcasted === 'object') ? t.broadcasted : null;
+      if (b && typeof b.broadcastedAt === 'string' && b.broadcastedAt) {
+        const btx = String(b.txid || t.txid || '');
+        seeded.push({ ts: b.broadcastedAt, type: 'broadcast', detail: 'txid ' + btx.slice(0, 8) + '…' + btx.slice(-4) });
+      }
+      if (b && ((typeof b.confirmations === 'number' && b.confirmations >= 1) || (typeof b.blockHeight === 'number'))) {
+        seeded.push({ ts: (typeof b.checkedAt === 'string' && b.checkedAt) ? b.checkedAt : b.broadcastedAt, type: 'confirmed', detail: (typeof b.blockHeight === 'number') ? 'Block ' + b.blockHeight.toLocaleString('en-US') : 'Confirmed' });
+      }
+      if (t.release && t.release.status === 'stale') {
+        seeded.push({ ts: (typeof t.release.lastAttemptAt === 'string' && t.release.lastAttemptAt) ? t.release.lastAttemptAt : seeded[0].ts, type: 'stale', detail: (typeof t.release.error === 'string' ? t.release.error : '') });
+      }
+      seeded.sort((a, b2) => new Date(a.ts).getTime() - new Date(b2.ts).getTime());
+      t.history = seeded.slice(-HISTORY_MAX);
+      historySeeded = true;
+    } else {
+      const clean = t.history.filter((e) => e && typeof e === 'object' && HISTORY_TYPES.has(e.type)
+        && typeof e.ts === 'string' && !Number.isNaN(new Date(e.ts).getTime())
+        && typeof e.detail === 'string').slice(-HISTORY_MAX);
+      if (clean.length !== t.history.length) { t.history = clean; historySeeded = true; }
+    }
+  }
+  if (pruned || migrated || triggerMigrated || historySeeded) {
     if (migrated) console.log('Standby 0.4.0: migrated single transaction to the transactions list');
     if (pruned) console.log('Standby: pruned legacy state (recipient/channels/reminders/release)');
     if (triggerMigrated) console.log('Standby 0.8.0: migrated transactions to per-transaction triggers');
+    if (historySeeded) console.log('Standby 0.8.2: seeded per-transaction history');
     saveState(dataDir, state);
   }
   return state;
@@ -417,5 +467,5 @@ module.exports = {
   appendCheckin, readCheckins, writeCheckins,
   appendBroadcastLog, readBroadcastLog, writeBroadcastLog,
   normalizeTrigger, triggerOf, defaultTrigger, FALLBACK_THRESHOLD_DAYS,
-  TRIGGER_TYPES, PRICE_MIN_USD, PRICE_MAX_USD,
+  TRIGGER_TYPES, PRICE_MIN_USD, PRICE_MAX_USD, HISTORY_TYPES, HISTORY_MAX,
 };

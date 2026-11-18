@@ -59,7 +59,7 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 // (last.json). Absent on a plain `node server.js` run — the key
 // feature is dormant then; every file access is guarded.
 const CHECKIN_DIR = process.env.CHECKIN_DIR || '/checkin';
-const VERSION = '0.8.1';
+const VERSION = '0.8.2';
 const MAX_BODY = 1024 * 1024; // 1 MB
 
 const MIME = {
@@ -1772,6 +1772,7 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
       const fresh = store.loadState(DATA_DIR);
       const ftx = (fresh.bitcoin.txs || []).find((t) => t.id === tx.id);
       if (ftx && ftx.hex === tx.hex) {
+        pushHistory(ftx, 'failed', ('input check failed: ' + e.message).slice(0, 120));
         recordRelease(fresh, ftx, record, {
           ts: now.toISOString(), kind: logKind, status: 'failed', method: 'primary', txid: tx.txid,
           hexPreview: tx.hex.slice(0, 64), note: failNote + e.message,
@@ -1798,6 +1799,10 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
         txid: tx.txid, broadcastedAt: now.toISOString(), method: check.checkedVia,
         confirmations: null, blockHeight: own.blockHeight != null ? own.blockHeight : null, found: true, checkedAt: now.toISOString(),
       };
+      // (0.8.2) The tx is out there — log the broadcast, and the
+      // confirmation too when the outspend already names the block.
+      pushHistory(ftx, 'broadcast', 'txid ' + shortTxid(tx.txid));
+      if (own.blockHeight != null) pushHistory(ftx, 'confirmed', 'Block ' + own.blockHeight.toLocaleString('en-US'));
       recordRelease(fresh, ftx, record, {
         ts: now.toISOString(), kind: logKind, status: 'broadcast', method: check.checkedVia, txid: tx.txid,
         hexPreview: tx.hex.slice(0, 64), note: 'Transaction is already out there — the node reports its own txid as the spending transaction. Recorded as broadcast; nothing was sent.',
@@ -1817,6 +1822,7 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
     const fresh = store.loadState(DATA_DIR);
     const ftx = (fresh.bitcoin.txs || []).find((t) => t.id === tx.id);
     if (ftx && ftx.hex === tx.hex) {
+      pushHistory(ftx, 'stale', record.error);
       recordRelease(fresh, ftx, record, {
         ts: now.toISOString(), kind: logKind, status: 'stale', method: check.checkedVia, txid: tx.txid,
         hexPreview: tx.hex.slice(0, 64), note: 'Transaction is stale (inputs spent: ' + spentDesc + ') — broadcast not attempted.',
@@ -1878,6 +1884,7 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
       const ftx = (fresh.bitcoin.txs || []).find((t) => t.id === tx.id);
       if (ftx && ftx.hex === tx.hex) {
         ftx.release = record;
+        pushHistory(ftx, 'slipstream', 'txid ' + shortTxid(out.txid));
         store.saveState(DATA_DIR, fresh);
       }
       store.appendBroadcastLog(DATA_DIR, {
@@ -1912,6 +1919,7 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
         txid: out.txid, broadcastedAt: now.toISOString(), method: out.method,
         confirmations: null, blockHeight: null, found: true, checkedAt: null,
       };
+      pushHistory(ftx, 'broadcast', 'txid ' + shortTxid(out.txid));
       store.saveState(DATA_DIR, fresh);
     }
     return { id: tx.id, txid: out.txid, label: tx.label || '', action: 'broadcast', method: out.method };
@@ -1931,10 +1939,51 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
     if (!(opts && opts.forcePublic)) {
       const fresh = store.loadState(DATA_DIR);
       const ftx = (fresh.bitcoin.txs || []).find((t) => t.id === tx.id);
-      if (ftx && ftx.hex === tx.hex) recordRelease(fresh, ftx, record, null); // broadcastTx already logged the failure
+      if (ftx && ftx.hex === tx.hex) {
+        pushHistory(ftx, 'failed', String(e.message || '').slice(0, 120));
+        recordRelease(fresh, ftx, record, null); // broadcastTx already logged the failure
+      }
     }
     return { id: tx.id, txid: tx.txid, label: tx.label || '', action: 'failed', error: e.message };
   }
+}
+
+// Per-transaction history (0.8.2): the tx's own event trail —
+// [{ ts, type, detail }], oldest first, capped at 50. Only
+// transitions are recorded (added, fired, broadcast, confirmed,
+// stale, failed, conflict, edited, armed, disarmed, slipstream)
+// — never the hourly release checks, or a busy tx would flood.
+// pushHistory REPLACES tx.history with a new array (it never
+// pushes in place): the edit handler diffs tx against its
+// snapshot, so an in-place push would be invisible to it.
+// Callers pass the tx they are already saving — the event rides
+// on the same save as the record that caused it, so a history
+// entry can never land without its transition (and a concurrent
+// save can never lose one to a stale snapshot, since every site
+// below writes to fresh state).
+const HISTORY_MAX = 50;
+function pushHistory(tx, type, detail, ts) {
+  const prev = Array.isArray(tx.history) ? tx.history : [];
+  const ev = { ts: (typeof ts === 'string' && ts) ? ts : new Date().toISOString(), type, detail: (typeof detail === 'string' ? detail : '') };
+  tx.history = prev.concat([ev]).slice(-HISTORY_MAX);
+  return tx.history;
+}
+function shortTxid(txid) {
+  const s = String(txid || '');
+  return s.slice(0, 8) + '…' + s.slice(-4);
+}
+// The 'fired' event's detail: what the rule saw when it fired.
+// The evaluator's reason alone is too thin for price ('past
+// threshold') — name the reading and the threshold. Every other
+// type's reason already says it ('block 976,435 reached',
+// 'spent — 1 confirmation', 'economy fee 1 sat/vB', 'Release
+// due'), with the trailing ' — firing' stripped.
+function firedDetail(trigger, reason, triggerState) {
+  if (trigger && trigger.type === 'price' && triggerState && typeof triggerState.lastPrice === 'number') {
+    const op = trigger.params.op === '>=' ? '≥' : '≤';
+    return 'BTC $' + triggerState.lastPrice.toLocaleString('en-US') + ' ' + op + ' $' + Number(trigger.params.value).toLocaleString('en-US');
+  }
+  return (typeof reason === 'string' ? reason : '').replace(/ — firing$/, '');
 }
 
 function recordRelease(state, tx, record, logEntry) {
@@ -2087,7 +2136,13 @@ async function evaluateReleaseInner(onlyTypes) {
   // last outspend live in triggerState, and the next evaluation
   // builds on them.
   const firing = [];
+  // (0.8.2) The 'fired' history event is logged once, on the
+  // transition into due — so each evaluation records whether the
+  // trigger was already due before it ran, and the reason it fired.
+  const wasDueById = new Map();
+  const reasonById = new Map();
   for (const tx of armed) {
+    wasDueById.set(tx.id, !!(tx.triggerState && tx.triggerState.status === 'due'));
     let ev;
     try { ev = await evaluateTrigger(state, tx, now); }
     catch (e) {
@@ -2097,12 +2152,14 @@ async function evaluateReleaseInner(onlyTypes) {
       tx.triggerState = { ...freshTriggerState(now, 'unknown', 'evaluation failed — will retry'), lastError: e.message };
       ev = { fire: false, status: 'unknown', reason: 'evaluation failed — will retry' };
     }
+    reasonById.set(tx.id, ev.reason);
     if (!ev.fire) {
       results.push({ id: tx.id, txid: tx.txid, label: tx.label || '', action: 'skipped', reason: ev.reason, trigger: store.triggerOf(tx).type, triggerStatus: ev.status });
       continue;
     }
     firing.push(tx);
   }
+  const firingIds = new Set(firing.map((f) => f.id));
   // Persist the triggerState updates by merging them into FRESH
   // state (see refreshConfirmations): the evaluations waited on the
   // network, so a user edit landing mid-loop — disable, delete, or
@@ -2115,6 +2172,13 @@ async function evaluateReleaseInner(onlyTypes) {
     for (const tx of armed) {
       const ftx = (fresh.bitcoin.txs || []).find((t) => t.id === tx.id);
       if (ftx && tx.triggerState) ftx.triggerState = tx.triggerState;
+      // (0.8.2) The 'fired' history event, on the transition into
+      // due only (see wasDueById above) — it rides on this same
+      // save as the triggerState, so the event and the state that
+      // caused it can never part ways.
+      if (ftx && firingIds.has(tx.id) && !wasDueById.get(tx.id)) {
+        pushHistory(ftx, 'fired', firedDetail(store.triggerOf(tx), reasonById.get(tx.id), tx.triggerState));
+      }
     }
     store.saveState(DATA_DIR, fresh);
   } catch (e) { console.error('trigger state save failed:', e); }
@@ -2198,6 +2262,20 @@ async function refreshConfirmations(state, maxAgeSec) {
       // tx deleted or replaced in the meantime gets no update.
       const tx = (fresh.bitcoin.txs || []).find((t) => t.id === u.id && t.broadcasted && t.broadcasted.txid === u.txid);
       if (tx) {
+        // (0.8.2) The confirmation is a transition — log it once,
+        // on the crossing into confirmed. A tx already confirmed
+        // (by the already-out path's block height, or an earlier
+        // refresh) does not re-log. Confirmed means the node reports
+        // it in a block (a count, or a height) — or confirmed with
+        // the height unknown (confirmations null + found). An
+        // unconfirmed tx reports a count of 0; a missing tx
+        // reports found === false.
+        const wasConfirmed = (typeof tx.broadcasted.confirmations === 'number' && tx.broadcasted.confirmations >= 1)
+          || (typeof tx.broadcasted.blockHeight === 'number');
+        const nowConfirmed = !!u.found && (u.confirmations === null || (typeof u.confirmations === 'number' && u.confirmations >= 1));
+        if (!wasConfirmed && nowConfirmed) {
+          pushHistory(tx, 'confirmed', (typeof u.blockHeight === 'number') ? 'Block ' + u.blockHeight.toLocaleString('en-US') : 'Confirmed');
+        }
         tx.broadcasted.confirmations = u.confirmations;
         tx.broadcasted.blockHeight = u.blockHeight;
         tx.broadcasted.found = u.found;
@@ -2294,6 +2372,12 @@ async function refreshMaraWaiting(state) {
           txid: u.txid, broadcastedAt: now.toISOString(), method: 'slipstream',
           confirmations: u.confirmations, blockHeight: u.blockHeight, found: true, checkedAt: u.checkedAt,
         };
+        // (0.8.2) MARA's tx is out there now — log the broadcast,
+        // and the confirmation when it is already in a block.
+        pushHistory(tx, 'broadcast', 'txid ' + shortTxid(u.txid));
+        if ((typeof u.confirmations === 'number' && u.confirmations >= 1) || (typeof u.blockHeight === 'number')) {
+          pushHistory(tx, 'confirmed', (typeof u.blockHeight === 'number') ? 'Block ' + u.blockHeight.toLocaleString('en-US') : 'Confirmed');
+        }
         store.appendBroadcastLog(DATA_DIR, {
           ts: now.toISOString(), kind: 'release', status: 'broadcast', method: 'slipstream', txid: u.txid,
           hexPreview: tx.hex.slice(0, 64),
@@ -2302,6 +2386,7 @@ async function refreshMaraWaiting(state) {
         changed = true;
       } else if (u.kind === 'failed') {
         tx.release = { status: 'failed', kind: tx.release.kind || 'release', trigger: releaseTriggerFor(fresh, tx), txid: u.txid, method: 'slipstream', lastAttemptAt: now.toISOString(), error: u.error };
+        pushHistory(tx, 'failed', String(u.error || '').slice(0, 120));
         store.appendBroadcastLog(DATA_DIR, {
           ts: now.toISOString(), kind: 'release', status: 'failed', method: 'slipstream', txid: u.txid,
           hexPreview: tx.hex.slice(0, 64),
@@ -3273,6 +3358,9 @@ async function handleApi(req, res, pathname) {
       // the release has evaluated it once.
       trigger,
       triggerState: null,
+      // The event trail (0.8.2): starts with the add itself —
+      // the rule that was set, in its own words.
+      history: [{ ts: now.toISOString(), type: 'added', detail: triggerConditionText(trigger) }],
       release: null,
       // broadcasted is set by broadcastOne() (release or manual) and
       // survives check-ins: { txid, broadcastedAt, method,
@@ -3676,6 +3764,23 @@ async function handleApi(req, res, pathname) {
     // computed from submittedAt at evaluation time (see
     // fallbackDeadline), so no clock is restarted here.
     if (body.publicFallbackDays !== undefined) tx.publicFallbackDays = validPublicFallbackDays(body.publicFallbackDays);
+    // (0.8.2) The history events for this edit: an arm/disarm
+    // flip logs on its own; any other field change logs as one
+    // 'edited' event naming what changed. The events are appended
+    // to tx.history here and ride into fresh state through the
+    // mutator's field list below ('history' is in it), so a
+    // rejected edit (a 400 above) leaves no event behind.
+    if (typeof body.enabled === 'boolean' && orig.enabled !== tx.enabled) {
+      pushHistory(tx, tx.enabled ? 'armed' : 'disarmed', '');
+    }
+    const editChanges = [];
+    if (orig.label !== tx.label) editChanges.push('Label changed');
+    if (JSON.stringify(orig.trigger) !== JSON.stringify(tx.trigger)) editChanges.push('Trigger changed to ' + triggerConditionText(tx.trigger));
+    if (orig.hex !== tx.hex) editChanges.push('Transaction replaced');
+    if (orig.broadcastVia !== tx.broadcastVia) editChanges.push('Route changed to ' + (tx.broadcastVia === 'slipstream' ? 'Slipstream' : 'Public'));
+    if (orig.publicFallbackDays !== tx.publicFallbackDays) editChanges.push('Public fallback changed to ' + (tx.publicFallbackDays === null ? 'Never' : tx.publicFallbackDays + (tx.publicFallbackDays === 1 ? ' day' : ' days')));
+    if (orig.notes !== tx.notes) editChanges.push('Notes changed');
+    if (editChanges.length) pushHistory(tx, 'edited', editChanges.join('; '));
     let checkinReset = false;
     // (0.8.1, audit finding 4) The edit's field changes were
     // computed on the request's snapshot while the fee and trigger
@@ -3700,7 +3805,7 @@ async function handleApi(req, res, pathname) {
         if (dup) { dupTx = dup; editError = 'duplicate'; return false; }
       }
       const freshWasEnabled = ftx.enabled;
-      for (const k of ['hex', 'txid', 'inputs', 'outputs', 'totalOutSats', 'locktime', 'segwit', 'feeSats', 'feeRateSatVb', 'release', 'broadcasted', 'label', 'notes', 'trigger', 'triggerState', 'enabled', 'broadcastVia', 'publicFallbackDays']) {
+      for (const k of ['hex', 'txid', 'inputs', 'outputs', 'totalOutSats', 'locktime', 'segwit', 'feeSats', 'feeRateSatVb', 'release', 'broadcasted', 'label', 'notes', 'trigger', 'triggerState', 'enabled', 'broadcastVia', 'publicFallbackDays', 'history']) {
         if (JSON.stringify(tx[k]) !== JSON.stringify(orig[k])) ftx[k] = tx[k];
       }
       // The freeze (0.8.0): the danger zone is measured from the
@@ -3756,6 +3861,9 @@ async function handleApi(req, res, pathname) {
       for (const t of txs) {
         const wasEnabled = t.enabled;
         t.enabled = body.enabled;
+        // (0.8.2) An arm/disarm flip logs on the tx it flipped —
+        // a no-op toggle (already in that state) logs nothing.
+        if (wasEnabled !== body.enabled) pushHistory(t, body.enabled ? 'armed' : 'disarmed', '');
         syncCheckinFreeze(t, f, now);
         if (body.enabled === true && wasEnabled === false) newlyArmed.push(t);
       }
@@ -4127,6 +4235,21 @@ async function handleApi(req, res, pathname) {
         // self-correcting, so they ride along.
         release: (t.release && (t.release.status === 'broadcast' || t.release.status === 'stale')) ? null : (t.release ? t.release : null),
         broadcasted: null,
+        // (0.8.2) The event trail rides along when it is well
+        // formed — display-only, so a hand-edited backup cannot
+        // hurt anything by forging it. The same distrust as the
+        // records above applies to its broadcast claims: a
+        // 'broadcast', 'confirmed', or 'stale' event from the
+        // backup is dropped with the record it describes, and the
+        // network re-derives it. A backup from before 0.8.2
+        // carries no history (null) — the load-time backfill seeds
+        // it from the restored facts on the next load.
+        history: Array.isArray(t.history)
+          ? t.history.filter((e) => e && typeof e === 'object' && store.HISTORY_TYPES.has(e.type)
+              && typeof e.ts === 'string' && !Number.isNaN(new Date(e.ts).getTime())
+              && typeof e.detail === 'string'
+              && e.type !== 'broadcast' && e.type !== 'confirmed' && e.type !== 'stale').slice(-HISTORY_MAX)
+          : null,
       });
     }
     const bsCheckin = (bs.checkin && typeof bs.checkin === 'object') ? bs.checkin : {};
@@ -4390,6 +4513,9 @@ async function handleApi(req, res, pathname) {
           if (a.stale) {
             if (ftx.release && ftx.release.status === 'stale') continue;
             ftx.release = { status: 'stale', kind: 'dryrun', trigger: releaseTriggerFor(f, ftx), txid: ftx.txid, method: a.stale.method, lastAttemptAt: now.toISOString(), error: a.stale.error };
+            // (0.8.2) The dry run discovered the staleness — the
+            // tx's history should say so, not just its card.
+            pushHistory(ftx, 'stale', a.stale.error);
             continue;
           }
           if (a.own) {
@@ -4403,6 +4529,9 @@ async function handleApi(req, res, pathname) {
                 txid: ftx.txid, broadcastedAt: now.toISOString(), method: a.own.method,
                 confirmations: null, blockHeight: a.own.blockHeight, found: true, checkedAt: now.toISOString(),
               };
+              // (0.8.2) The dry run discovered the tx is out there.
+              pushHistory(ftx, 'broadcast', 'txid ' + shortTxid(ftx.txid));
+              if (a.own.blockHeight != null) pushHistory(ftx, 'confirmed', 'Block ' + a.own.blockHeight.toLocaleString('en-US'));
             }
             if (!ftx.release || ftx.release.status !== 'broadcast') {
               ftx.release = { status: 'broadcast', kind: 'dryrun', trigger: releaseTriggerFor(f, ftx), txid: ftx.txid, method: a.own.method, broadcastedAt: now.toISOString() };
@@ -4412,6 +4541,8 @@ async function handleApi(req, res, pathname) {
           if (a.conflict) {
             if (ftx.release && ftx.release.status === 'stale') continue;
             ftx.release = { status: 'conflict', kind: 'dryrun', trigger: releaseTriggerFor(f, ftx), txid: ftx.txid, method: a.conflict.method, lastAttemptAt: now.toISOString(), error: a.conflict.error };
+            // (0.8.2) The warning on the card gets its history line.
+            pushHistory(ftx, 'conflict', a.conflict.error);
             continue;
           }
           if (a.clearConflict && ftx.release && ftx.release.status === 'conflict') ftx.release = null;

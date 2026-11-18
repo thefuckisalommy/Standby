@@ -527,6 +527,25 @@ p.inline-btns { display: flex; gap: 8px; flex-wrap: nowrap; align-items: center;
 .modal ul.plain-list li { margin: 4px 0; overflow-wrap: anywhere; }
 .tx-card .tx-details { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 6px; }
 .tx-card .tx-details summary { cursor: pointer; color: var(--muted); font-size: 14px; }
+/* The per-tx History (0.8.2): a collapsible of its own below
+   Details, collapsed by default, in the same chrome — the
+   timeline inside is a vertical line with a dot per event
+   (green = confirmed, amber = fired / conflict, red = failed /
+   stale, grey = the rest), the event name bold with the time
+   floated right, the detail muted below it. Oldest first. */
+.tx-card .tx-history { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 6px; }
+.tx-card .tx-history summary { cursor: pointer; color: var(--muted); font-size: 14px; }
+.tx-card .timeline { margin: 10px 0 0; padding: 0; list-style: none; position: relative; }
+.tx-card .timeline::before { content: ""; position: absolute; left: 5px; top: 8px; bottom: 8px; width: 1px; background: var(--line); }
+.tx-card .timeline li { position: relative; padding: 0 0 12px 22px; }
+.tx-card .timeline li:last-child { padding-bottom: 2px; }
+.tx-card .timeline .dot { position: absolute; left: 0; top: 5px; width: 11px; height: 11px; border-radius: 50%; background: var(--muted); border: 2px solid var(--card); }
+.tx-card .timeline .dot.ok { background: var(--ok); }
+.tx-card .timeline .dot.warn { background: var(--warn); }
+.tx-card .timeline .dot.bad { background: var(--bad); }
+.tx-card .timeline .ev { font-size: 14px; font-weight: 600; }
+.tx-card .timeline .ev .t { float: right; color: var(--muted); font-size: 12px; font-weight: 400; margin-top: 2px; }
+.tx-card .timeline .det { color: var(--muted); font-size: 13px; margin-top: 1px; }
 /* The Inputs and Outputs drop-downs nested inside a card's
    Details: two separate <details>, one per side — each summary
    reads like the Details summary (14px, muted) — the header
