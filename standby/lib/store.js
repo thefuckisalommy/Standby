@@ -417,7 +417,7 @@ function loadState(dataDir) {
     if (migrated) console.log('Standby 0.4.0: migrated single transaction to the transactions list');
     if (pruned) console.log('Standby: pruned legacy state (recipient/channels/reminders/release)');
     if (triggerMigrated) console.log('Standby 0.8.0: migrated transactions to per-transaction triggers');
-    if (historySeeded) console.log('Standby 0.8.2: seeded per-transaction history');
+    if (historySeeded) console.log('Standby 0.8.1: seeded per-transaction history');
     saveState(dataDir, state);
   }
   return state;

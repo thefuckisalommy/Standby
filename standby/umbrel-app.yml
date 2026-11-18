@@ -5,12 +5,8 @@ manifestVersion: 1
 id: standby
 category: automation
 name: Standby
-version: "0.8.2"
+version: "0.8.1"
 releaseNotes: |-
-  0.8.2 — Every transaction keeps its own history.
-
-  - **Per-transaction history:** each transaction card now has a History section — a timeline of what happened to it, oldest first: added, trigger fired, broadcast sent, confirmed, went stale, edits, and arm/disarm changes. Older transactions get their history filled in from what Standby already knows (a broadcast that confirmed shows added, broadcast, confirmed).
-
   0.8.1 — Three more triggers join the broadcast engine.
 
   - **Block height:** fire when the chain reaches a block height you set. Deterministic — the height comes from your node's own chain, and a reorg can't un-fire it.
@@ -23,6 +19,7 @@ releaseNotes: |-
   Also in 0.8.1:
 
   - **Node capability test:** Test connection now reports each node's Broadcast, Fee estimates, and Block height readiness, with the measured value beside it — and each node is one row, with the checks in a drop-down.
+  - **Per-transaction history:** each transaction card now has a History section, nested inside Details — a timeline of what happened to it, oldest first: added, trigger fired, broadcast sent, confirmed, went stale, edits, and arm/disarm changes. Older transactions get their history filled in from what Standby already knows (a broadcast that confirmed shows added, broadcast, confirmed).
   - **Primary first:** prices, fees, and block height all come from the primary source or node; the secondary is only a fallback if the primary is down.
   - **Readiness card:** transactions read as separate tiles, node and exchange status sit in their own sub-card, and the price sits next to each source's status.
 tagline: Presigned Bitcoin transactions, ready when they're needed.
