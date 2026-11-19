@@ -7,7 +7,7 @@ category: automation
 name: Standby
 version: "0.8.4"
 releaseNotes: |-
-  0.8.4 — Fee rule pill stays live — reads the last known fee like price does.
+  0.8.4 — Fee rule pill stays live — reads the last known fee like price does. Trigger statuses stay live for disarmed transactions — evaluated for display, never broadcast unless armed.
 
   0.8.3 — Persistence hardening: rotating state backups, recovery from a corrupt state file, and check-in key verification on startup.
 

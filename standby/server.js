@@ -1222,16 +1222,19 @@ function exchangeStatusFor(pc, sources, agreementPct) {
   return { status: 'error', detail: 'No price source responding', sources: rows };
 }
 
-// Refresh the price cache when it is stale and a price rule is
-// armed (0.8.0): the 1-minute fast tick and the startup refresh
-// call this, so a price rule's "currently $X" line stays fresh.
-// Best-effort — a failed refresh never throws here; the cache just
-// stays cold until the next tick, and the evaluator reports the
-// trigger 'unknown' in the meantime.
+// Refresh the price cache when it is stale and any tx has a price
+// rule (0.8.0; 0.8.4: armed or not — a disarmed price tx's pill
+// reads the cache too, and the tick evaluates disarmed txs, so a
+// price rule that is disarmed-only must still keep the cache warm).
+// The 1-minute fast tick and the startup refresh call this, so a
+// price rule's "currently $X" line stays fresh. Best-effort — a
+// failed refresh never throws here; the cache just stays cold
+// until the next tick, and the evaluator reports the trigger
+// 'unknown' in the meantime.
 async function refreshPriceIfStale() {
   try {
     const st = store.loadState(DATA_DIR);
-    const hasPrice = (st.bitcoin.txs || []).some((t) => t.enabled && store.hasTriggerType(t, 'price'));
+    const hasPrice = (st.bitcoin.txs || []).some((t) => store.hasTriggerType(t, 'price'));
     if (!hasPrice) return;
     await fetchPriceCached(priceSourcesOf(st.settings), checkCadenceSecondsOf(st.settings));
   } catch (e) { console.error('price refresh failed:', e); }
@@ -2592,8 +2595,12 @@ async function evaluateReleaseInner(automatic) {
   // only changes one thing: the broadcast backoff guard in the
   // firing loop below. Every rule type is evaluated, every time —
   // there is no type filter any more (0.8.2, the full tick).
-  let armed = (state.bitcoin.txs || []).filter((t) => t.enabled);
-  if (!armed.length) return { action: 'skipped', reason: 'no armed transactions', results: [] };
+  // (0.8.4) Every tx is evaluated — armed or not — so a disarmed
+  // tx's triggerStatus stays live for display. Only ARMED txs can
+  // enter the firing set below: unarmed means "will not broadcast
+  // even if the conditions are met" (Ryan, Nov 18).
+  const all = state.bitcoin.txs || [];
+  if (!all.length) return { action: 'skipped', reason: 'no transactions', results: [] };
 
   // Endpoints: the primary node first, the secondary if the primary
   // does not answer. (The MEMPOOL_* env vars can override the primary
@@ -2601,11 +2608,12 @@ async function evaluateReleaseInner(automatic) {
   const endpoints = bitcoin.endpointsFor(s);
   const results = [];
 
-  // (0.8.0) Each armed tx's own trigger decides whether it fires —
-  // the release is no longer one global clock. The triggers are
-  // evaluated ONCE, in list order, and the firing set is decided
-  // before any broadcast starts (all-or-none, 0.7.10: a check-in
-  // landing mid-run is recorded but does not stop the txs still to
+  // (0.8.0) Each tx's own trigger decides whether its conditions
+  // hold — armed or not. The release is no longer one global
+  // clock. The triggers are evaluated ONCE, in list order, and the
+  // firing set (armed txs only, 0.8.4) is decided before any
+  // broadcast starts (all-or-none, 0.7.10: a check-in landing
+  // mid-run is recorded but does not stop the txs still to
   // broadcast). A trigger that cannot be read (a feed outage, an
   // outpoint no node can say about) is 'unknown' and does not fire.
   // The evaluations are persisted even when nothing fires — the
@@ -2613,6 +2621,9 @@ async function evaluateReleaseInner(automatic) {
   // last outspend live in triggerState, and the next evaluation
   // builds on them.
   const firing = [];
+  // (0.8.4) Whether any DISARMED tx's conditions held — so the
+  // top-level reason says so instead of 'no trigger fired' when
+  // nothing else happened.
   // (0.8.2) The 'fired' history event is logged once, on the
   // transition into due — so each evaluation records whether the
   // set was already due before it ran (from the STORED slices,
@@ -2621,9 +2632,10 @@ async function evaluateReleaseInner(automatic) {
   // — the old code only checked 'due', so a check-in tx whose
   // broadcast failed re-logged 'fired' on every hourly retry;
   // the new reading matches the "logged once" intent.
+  let disarmedFired = false;
   const wasDueById = new Map();
   const evById = new Map();
-  for (const tx of armed) {
+  for (const tx of all) {
     wasDueById.set(tx.id, storedCombinedDue(tx));
     let ev;
     try { ev = await evaluateTrigger(state, tx, now); }
@@ -2640,6 +2652,15 @@ async function evaluateReleaseInner(automatic) {
       ev = { fire: false, status: 'unknown', reason: 'evaluation failed — will retry', ruleResults: [], firedIndexes: [], firedRuleTypes: [] };
     }
     evById.set(tx.id, ev);
+    if (!tx.enabled) {
+      // (0.8.4) Evaluated for display only — never broadcast, and
+      // no 'fired' history event (nothing fired in the release
+      // sense). The slice is still written below, so the pill
+      // reads the live status.
+      if (ev.fire) disarmedFired = true;
+      results.push({ id: tx.id, txid: tx.txid, label: tx.label || '', action: 'skipped', reason: 'disarmed — ' + ev.reason, trigger: triggerTypesLabel(tx), triggerStatus: ev.status });
+      continue;
+    }
     if (!ev.fire) {
       results.push({ id: tx.id, txid: tx.txid, label: tx.label || '', action: 'skipped', reason: ev.reason, trigger: triggerTypesLabel(tx), triggerStatus: ev.status });
       continue;
@@ -2657,17 +2678,26 @@ async function evaluateReleaseInner(automatic) {
   // change a transaction — must not be clobbered by saving the stale
   // snapshot. The broadcast path below reloads fresh state per tx
   // and merges only its own record, so these evaluations survive
-  // the broadcasts.
+  // the broadcasts. (0.8.4) The slice is persisted for every
+  // evaluated tx, armed or not; the 'fired' event below stays
+  // armed-only (firingIds).
   try {
     const fresh = store.loadState(DATA_DIR);
-    for (const tx of armed) {
+    for (const tx of all) {
       const ftx = (fresh.bitcoin.txs || []).find((t) => t.id === tx.id);
       if (ftx && tx.triggerState) ftx.triggerState = tx.triggerState;
       // (0.8.2) The 'fired' history event, on the transition into
       // due only (see wasDueById above) — it rides on this same
       // save as the triggerState, so the event and the state that
       // caused it can never part ways.
-      if (ftx && firingIds.has(tx.id) && !wasDueById.get(tx.id)) {
+      // (0.8.4) A tx whose conditions held while DISARMED reaches
+      // the firing set with a stored due slice but no 'fired'
+      // event (nothing fired while disarmed) — log it now, on the
+      // first armed tick that fires it. Without this the trail
+      // would read added → disarmed → armed → broadcast with no
+      // 'fired' step.
+      if (ftx && firingIds.has(tx.id)
+        && (!wasDueById.get(tx.id) || !(ftx.history || []).some((e) => e.type === 'fired'))) {
         const ev = evById.get(tx.id);
         pushHistory(ftx, 'fired', firedDetail(store.triggerOf(tx), ev.ruleResults, ev.firedIndexes));
       }
@@ -2739,7 +2769,7 @@ async function evaluateReleaseInner(automatic) {
     : results.some((r) => r.action === 'failed') ? 'failed'
     : results.some((r) => r.action === 'stale') ? 'stale' : 'skipped';
   const out = { action, results };
-  if (action === 'skipped') out.reason = backedOff ? 'broadcast backoff — retry after an hour' : 'no trigger fired';
+  if (action === 'skipped') out.reason = backedOff ? 'broadcast backoff — retry after an hour' : disarmedFired ? 'trigger fired — transaction disarmed' : 'no trigger fired';
   return out;
 }
 
@@ -3105,7 +3135,7 @@ function feePeakForState() {
 // set spanning the two domains — check-in AND price, say — can
 // only fire when both rules are judged at the same tick, and the
 // split ticks never did that (only a manual release check did).
-// The cadence is a fast-trigger cadence: a setup with no armed
+// The cadence is a fast-trigger cadence: a setup with no
 // non-manual rule never runs this tick, so a manual-only setup
 // makes no extra API calls, and a check-in-only setup costs only
 // the clock math (a timestamp compare — no network). The
@@ -3155,11 +3185,11 @@ async function runFullTick() {
   try {
     await refreshPriceIfStale();
     const st = store.loadState(DATA_DIR);
-    const hasArmed = (st.bitcoin.txs || []).some((t) => {
-      if (!t.enabled) return false;
-      return store.triggerTypesOf(t).some((ty) => ty !== 'manual');
-    });
-    if (!hasArmed) return;
+    // (0.8.4) Any tx with a non-manual rule keeps the tick
+    // evaluating — armed or not — so disarmed txs' statuses stay
+    // live. A manual-only setup still makes no extra API calls.
+    const hasWork = (st.bitcoin.txs || []).some((t) => store.triggerTypesOf(t).some((ty) => ty !== 'manual'));
+    if (!hasWork) return;
     const r = await evaluateRelease({ automatic: true });
     if (r.action !== 'skipped') {
       const sum = (r.results || []).map((x) => x.action + ':' + (x.txid || '').slice(0, 8)).join(', ');

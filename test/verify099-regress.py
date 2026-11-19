@@ -2605,7 +2605,8 @@ def main():
         # (e) Manual broadcast while disarmed: Broadcast Now on a
         # disarmed tx SUCCEEDS (it already bypassed disarm — this
         # locks the behaviour in); an automatic release does NOT
-        # fire a disarmed tx; Broadcast Armed does not include a
+        # fire a disarmed tx (0.8.4: it evaluates it and lists it
+        # as skipped); Broadcast Armed does not include a
         # disarmed tx; Broadcast All (not armed-only) DOES send a
         # disarmed tx, by design.
         s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft(1, 210501), 'label': 'V21e ck 25d',
@@ -2616,8 +2617,9 @@ def main():
         s, r = req('PUT', '/api/bitcoin/txs/' + txv21e, {'enabled': False})
         check('21e disarming the past-due tx', s == 200 and r.get('tx', {}).get('enabled') is False, r)
         s, r, res = release_results()
-        check('21e an automatic release does NOT fire a disarmed tx (absent from the results)',
-              txv21e not in res, res)
+        check('21e an automatic release does NOT fire a disarmed tx (evaluated, listed as skipped — 0.8.4)',
+              res.get(txv21e, {}).get('action') == 'skipped'
+              and (res.get(txv21e, {}).get('reason') or '').startswith('disarmed'), res.get(txv21e))
         check('21e the disarmed tx is still un-broadcast after the release check',
               not (state_tx(txv21e) or {}).get('broadcasted'), state_tx(txv21e))
         s, st = req('GET', '/api/status')
