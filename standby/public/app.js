@@ -1471,8 +1471,8 @@
       // the Exchange Status section and the dry-run notes.
       // (0.8.2) One subcard per rule. A one-rule set renders
       // exactly the 0.8.1 subcard ("TRIGGER - <TYPE>", 3 rows);
-      // a multi-rule set gets the combination line ("Fires when
-      // ANY rule fires" / "Fires when ALL rules hold") and one
+      // a multi-rule set gets the combination line ("Broadcasts when
+      // ANY rule fires" / "Broadcasts when ALL rules hold") and one
       // 3-row subcard per rule ("Rule N — <Type>"). (0.8.2 v2)
       // Every subcard header also carries the per-rule state
       // pill (ruleStatePill) — Met / Not met / Unknown / Held,
@@ -1482,7 +1482,7 @@
       if (ruleSet.rules.length > 1) {
         var combo = document.createElement('div');
         combo.className = 'tx-rules-combo';
-        combo.appendChild(document.createElement('span')).textContent = 'Fires when ';
+        combo.appendChild(document.createElement('span')).textContent = 'Broadcasts when ';
         var comboOp = document.createElement('strong');
         comboOp.textContent = ruleSet.op === 'AND' ? 'ALL' : 'ANY';
         combo.appendChild(comboOp);
