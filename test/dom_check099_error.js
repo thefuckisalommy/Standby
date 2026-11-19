@@ -437,9 +437,11 @@ function check(name, cond, detail) {
 const APP_DIR = process.env.ERR_APP_DIR
   || (fs.existsSync(path.join(__dirname, '..', 'standby', 'server.js'))
     ? path.join(__dirname, '..', 'standby')
-    : fs.existsSync(path.join(__dirname, '..', 'branch-0.8.3', 'server.js'))
-      ? path.join(__dirname, '..', 'branch-0.8.3')
-      : path.join(__dirname, '..', 'app'));
+    : fs.existsSync(path.join(__dirname, '..', 'branch-0.8.4', 'server.js'))
+      ? path.join(__dirname, '..', 'branch-0.8.4')
+      : fs.existsSync(path.join(__dirname, '..', 'branch-0.8.3', 'server.js'))
+        ? path.join(__dirname, '..', 'branch-0.8.3')
+        : path.join(__dirname, '..', 'app'));
 const DATA = process.env.ERR_DATA || '/tmp/heirloom099-dom-err';
 const CHECKIN_DIR = process.env.ERR_CHECKIN || '/tmp/heirloom099-dom-err-checkin';
 const STUB_P = process.env.ERR_STUB_P || '18265';

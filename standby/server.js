@@ -59,7 +59,7 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 // (last.json). Absent on a plain `node server.js` run — the key
 // feature is dormant then; every file access is guarded.
 const CHECKIN_DIR = process.env.CHECKIN_DIR || '/checkin';
-const VERSION = '0.8.3';
+const VERSION = '0.8.4';
 const MAX_BODY = 1024 * 1024; // 1 MB
 
 const MIME = {
@@ -1935,20 +1935,21 @@ function ruleStatusFor(state, tx, rule, slice, now) {
   }
   if (trg.type === 'feemarket') {
     // Like price, the fee rule reads the live in-memory
-    // node-fee cache when it is warm (same endpoints, younger
-    // than one cadence — the same validation fetchNodeFeesCached
-    // applies) — so the pill reflects the market even for a tx
-    // that was never evaluated or is disarmed. Otherwise the
-    // stored last evaluation carries it; with neither, the rule
-    // is not-evaluated (Unknown), as before.
+    // node-fee cache when it is warm (same endpoints) — so the
+    // pill reflects the market even for a tx that was never
+    // evaluated or is disarmed. There is NO age check here, like
+    // price: the last known fee is trusted until a fresh reading
+    // arrives. (0.8.4: the old cadence-age check expired the
+    // cache after one tick, so the pill fell back to Unknown
+    // between the hourly refreshes.) Otherwise the stored last
+    // evaluation carries it; with neither, the rule is
+    // not-evaluated (Unknown), as before.
     const maxRate = trg.params.maxFeeRate;
     const dir = trg.params.direction === 'above' ? 'above' : 'below';
     const eps = bitcoin.endpointsFor(state.settings);
     const feeCacheOk = nodeFeeCache.readings && Object.keys(nodeFeeCache.readings).length
       && nodeFeeCache.primary === (eps[0] ? eps[0].base : null)
-      && nodeFeeCache.secondary === (eps[1] ? eps[1].base : null)
-      && nodeFeeCache.fetchedAt
-      && (Date.now() - new Date(nodeFeeCache.fetchedAt).getTime()) < checkCadenceSecondsOf(state.settings) * 1000;
+      && nodeFeeCache.secondary === (eps[1] ? eps[1].base : null);
     if (feeCacheOk) {
       const comb = bitcoin.combineFeeReadings(nodeFeeCache.readings);
       if (comb.valid) {

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Standby 0.8.3 local verification: block-height, set-date, and
+"""Standby 0.8.4 local verification: block-height, set-date, and
 fee-market triggers.
 
-Boots the branch-0.8.3 app (port 3438), the check-in receiver
+Boots the branch-0.8.4 app (port 3438), the check-in receiver
 (3439), and two mempool stubs — primary 18235 and secondary 18236
 (both fixed: tip height 900000, economy fee 1 sat/vB, price 98200)
 — and checks the 0.8.1 trigger work:
 
-  1. health reports version 0.8.3.
+  1. health reports version 0.8.4.
   2. Block-height trigger: validation at add (bad heights rejected,
      good ones accepted), checkTriggerNow (a height already reached
      fires + warns, a future height watches), evaluation via the
@@ -280,7 +280,7 @@ def main():
 
         # --- 1. health + version ----------------------------------------
         s, h = req('GET', '/api/health')
-        check('1 health reports version 0.8.3', h.get('version') == '0.8.3', h)
+        check('1 health reports version 0.8.4', h.get('version') == '0.8.4', h)
 
         # --- 2. block-height trigger --------------------------------------
         # Validation at add: bad heights rejected, good ones accepted.
@@ -1642,14 +1642,16 @@ def main():
         t = state_tx(fm_live)
         check('19 cold: fee rule reads watching live again once warm',
               t and t.get('triggerStatus', {}).get('status') == 'watching', t.get('triggerStatus') if t else None)
-        # TTL expiry (0.8.3, the live fee-pill intermittency): the
-        # fee branch only trusts the node-fee cache while it is
-        # younger than one cadence — nothing re-warms it for a
-        # disarmed tx (the tick skips disarmed txs; the hourly node
-        # check is an hour away), so past one cadence the pill falls
-        # back to Unknown. The price branch has no age check, so the
-        # same tx's price rule stays live — the contrast is the
-        # point. Cadence 10 s keeps the wait short.
+        # TTL expiry (0.8.4: the age check is gone, like price).
+        # Before 0.8.4 the fee branch only trusted the node-fee
+        # cache while it was younger than one cadence — nothing
+        # re-warms it for a disarmed tx (the tick skips disarmed
+        # txs; the hourly node check is an hour away), so past one
+        # cadence the pill fell back to Unknown. Now the last known
+        # fee is trusted until a fresh reading arrives, exactly
+        # like the price branch: past one cadence the fee rule
+        # still reads live (watching/due) with its fee note
+        # intact. Cadence 10 s keeps the wait short.
         s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 10})
         check('19 ttl: cadence set to 10 s', s == 200, (s, r))
         s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'feemarket', 'params': {'maxFeeRate': 5}}})
@@ -1664,11 +1666,19 @@ def main():
               t and (t.get('triggerStatus', {}).get('rules') or [{}])[0].get('status') == 'due', t.get('triggerStatus') if t else None)
         time.sleep(12)
         t = state_tx(fm_live)
-        check('19 ttl: fee rule falls back to not-evaluated past one cadence',
-              t and t.get('triggerStatus', {}).get('status') == 'not-evaluated', t.get('triggerStatus') if t else None)
+        check('19 ttl: fee rule still live (watching) past one cadence',
+              t and t.get('triggerStatus', {}).get('status') == 'watching', t.get('triggerStatus') if t else None)
+        check('19 ttl: fee rule still carries its last known fee past one cadence',
+              t and t.get('triggerStatus', {}).get('lastEconomyFee') == STUB_ECONOMY_FEE
+              and t.get('triggerStatus', {}).get('feeMode')
+              and t.get('triggerStatus', {}).get('feeNote'), t.get('triggerStatus') if t else None)
         t = state_tx(and_live)
         check('19 ttl: AND price rule still due past one cadence (no age check)',
               t and (t.get('triggerStatus', {}).get('rules') or [{}])[0].get('status') == 'due', t.get('triggerStatus') if t else None)
+        check('19 ttl: AND fee rule still due past one cadence (no age check)',
+              t and (t.get('triggerStatus', {}).get('rules') or [{}])[1].get('status') == 'due', t.get('triggerStatus') if t else None)
+        check('19 ttl: AND combined status still due past one cadence',
+              t and t.get('triggerStatus', {}).get('status') == 'due', t.get('triggerStatus') if t else None)
         s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 60})
         check('19 ttl: cadence restored to 60 s', s == 200, (s, r))
         delete_all_txs()
