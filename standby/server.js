@@ -1822,12 +1822,49 @@ function ruleStatusFor(state, tx, rule, slice, now) {
     return { ...base, status: st.status || 'watching', reason: st.reason || 'waiting for the height', lastTipHeight: (typeof st.lastTipHeight === 'number' ? st.lastTipHeight : null) };
   }
   if (trg.type === 'setdate') {
-    if (!st) return { ...base, status: 'not-evaluated', reason: 'Not evaluated yet' };
-    return { ...base, status: st.status || 'watching', reason: st.reason || 'waiting for the date' };
+    // Pure clock math — no cache, no network — so a set-date
+    // rule reads live even when never evaluated or disarmed,
+    // like the price rule below. Mirrors checkSetDateRule's
+    // reasons exactly; the stored slice is never consulted.
+    const fireMs = Date.parse(trg.params.fireAt);
+    if (!Number.isFinite(fireMs)) return { ...base, status: 'unknown', reason: 'set date is not a valid date — will retry' };
+    if (now.getTime() >= fireMs) return { ...base, status: 'due', reason: 'date reached — firing' };
+    const d = new Date(fireMs);
+    const shown = d.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
+    return { ...base, status: 'watching', reason: 'fires on ' + shown };
   }
   if (trg.type === 'feemarket') {
+    // Like price, the fee rule reads the live in-memory
+    // node-fee cache when it is warm (same endpoints, younger
+    // than one cadence — the same validation fetchNodeFeesCached
+    // applies) — so the pill reflects the market even for a tx
+    // that was never evaluated or is disarmed. Otherwise the
+    // stored last evaluation carries it; with neither, the rule
+    // is not-evaluated (Unknown), as before.
+    const maxRate = trg.params.maxFeeRate;
+    const dir = trg.params.direction === 'above' ? 'above' : 'below';
+    const eps = bitcoin.endpointsFor(state.settings);
+    const feeCacheOk = nodeFeeCache.readings && Object.keys(nodeFeeCache.readings).length
+      && nodeFeeCache.primary === (eps[0] ? eps[0].base : null)
+      && nodeFeeCache.secondary === (eps[1] ? eps[1].base : null)
+      && nodeFeeCache.fetchedAt
+      && (Date.now() - new Date(nodeFeeCache.fetchedAt).getTime()) < checkCadenceSecondsOf(state.settings) * 1000;
+    if (feeCacheOk) {
+      const comb = bitcoin.combineFeeReadings(nodeFeeCache.readings);
+      if (comb.valid) {
+        const econ = comb.fee;
+        const fired = dir === 'above' ? econ >= maxRate : econ <= maxRate;
+        if (fired) return { ...base, status: 'due', reason: 'economy fee ' + econ + ' sat/vB — firing', lastEconomyFee: econ, feeMode: comb.mode, feeNote: comb.note };
+        const side = dir === 'above' ? 'below ' : 'above ';
+        return { ...base, status: 'watching', reason: 'economy fee ' + econ + ' sat/vB (' + side + maxRate + ')', lastEconomyFee: econ, feeMode: comb.mode, feeNote: comb.note };
+      }
+      // The latest fetch says no usable reading — the card shows
+      // unknown, whatever the last evaluation said (same fail-safe
+      // as the price branch above).
+      return { ...base, status: 'unknown', reason: comb.reason || 'fee unavailable — will retry', lastEconomyFee: null, feeMode: comb.mode, feeNote: '' };
+    }
     if (!st) return { ...base, status: 'not-evaluated', reason: 'Not evaluated yet', lastEconomyFee: null };
-    return { ...base, status: st.status || 'watching', reason: st.reason || 'waiting for fees to fall', lastEconomyFee: (typeof st.lastEconomyFee === 'number' ? st.lastEconomyFee : null) };
+    return { ...base, status: st.status || 'watching', reason: st.reason || 'waiting for fees to fall', lastEconomyFee: (typeof st.lastEconomyFee === 'number' ? st.lastEconomyFee : null), feeMode: (typeof st.feeMode === 'string' ? st.feeMode : null), feeNote: (typeof st.feeNote === 'string' ? st.feeNote : '') };
   }
   return { ...base, status: 'not-evaluated', reason: 'Not evaluated yet' };
 }

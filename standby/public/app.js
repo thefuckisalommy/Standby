@@ -3066,8 +3066,13 @@
       // The aggregate line is amber (not red) when the only reason
       // nothing would broadcast is timelocks: a timelocked dry-run
       // is a warning, not a failure, and the release will retry it.
+      // And it is the default colour — not red — when the run
+      // completed cleanly and simply nothing would broadcast
+      // (e.g. every staged tx is disarmed on purpose): red is
+      // reserved for a run where a transaction errored.
       var anyTimelocked = (r.results || []).some(function (one) { return one.verdict === 'timelocked'; });
-      setMsg($('btc-all-msg'), 'Dry-run: ' + (r.note || '') + ' Nothing was broadcast.', r.wouldBroadcast ? true : (anyTimelocked ? 'warn' : false));
+      var anyError = (r.results || []).some(function (one) { return one.error; });
+      setMsg($('btc-all-msg'), 'Dry-run: ' + (r.note || '') + ' Nothing was broadcast.', r.wouldBroadcast ? true : (anyError ? false : (anyTimelocked ? 'warn' : true)));
       await load();
       // The ones this run found spent move to Archived — pop up a
       // notice naming them (only the ones that moved in this run).
