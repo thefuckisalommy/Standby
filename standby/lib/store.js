@@ -496,6 +496,22 @@ function backupCandidates(dataDir) {
   return out;
 }
 
+// Try each backup candidate in order; return { parsed, file } for
+// the first one that parses and looks like a Standby state, or
+// null. A backup that cannot be read or parsed is skipped, never
+// an error.
+function tryBackupCandidates(dataDir, candidates) {
+  for (const cand of candidates) {
+    let parsed;
+    try {
+      parsed = JSON.parse(fs.readFileSync(path.join(dataDir, cand), 'utf8'));
+      if (!isPlausibleState(parsed)) continue;
+    } catch { continue; }
+    return { parsed, file: cand };
+  }
+  return null;
+}
+
 // Try to recover a corrupt state file from the backups. Returns
 // the parsed backup document. On success the corrupt file is
 // preserved (renamed, never deleted) and the recovered state is
@@ -505,28 +521,49 @@ function backupCandidates(dataDir) {
 // throws loudly; the caller must NOT fall back to defaults.
 function recoverStateFromBackup(dataDir, file, err) {
   const candidates = backupCandidates(dataDir);
-  for (const cand of candidates) {
-    let parsed;
-    try {
-      parsed = JSON.parse(fs.readFileSync(path.join(dataDir, cand), 'utf8'));
-      if (!isPlausibleState(parsed)) continue;
-    } catch { continue; }
+  const found = tryBackupCandidates(dataDir, candidates);
+  if (found) {
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     const preserved = file + '.corrupt.' + stamp;
     try { fs.renameSync(file, preserved); }
     catch (e) { console.error('Standby: could not preserve corrupt state file:', e.message); }
-    const msg = 'Standby: state.json was corrupt (' + err.message + '); recovered from ' + cand
+    const msg = 'Standby: state.json was corrupt (' + err.message + '); recovered from ' + found.file
       + ' — the corrupt file was preserved as ' + path.basename(preserved);
     console.warn(msg);
     addStateWarning('state-recovered', msg);
     // The state file is gone (renamed above), so this save skips
     // rotation — there is no previous version left to rotate.
-    saveState(dataDir, parsed);
-    return parsed;
+    saveState(dataDir, found.parsed);
+    return found.parsed;
   }
   throw new Error('Standby: state.json is corrupt (' + err.message + ') and no usable backup was found'
     + ' (' + candidates.length + ' backup(s) tried: ' + (candidates.join(', ') || 'none') + ').'
     + ' The corrupt file was left in place — restore a backup manually; the state was NOT reset to defaults.');
+}
+
+// A missing state.json with backups on disk is a lost state file,
+// not a fresh install: recover from the newest usable backup
+// (previous version, then daily snapshots newest first), exactly
+// like the corrupt-state path. Returns the recovered document, or
+// null when there are no backups at all (a genuine first boot).
+// When backups exist but none loads, throws loudly — the state is
+// NEVER silently reset while historical data exists.
+function recoverMissingState(dataDir) {
+  const candidates = backupCandidates(dataDir);
+  if (candidates.length === 0) return null;
+  const found = tryBackupCandidates(dataDir, candidates);
+  if (found) {
+    const msg = 'Standby: state.json was missing; recovered from ' + found.file;
+    console.warn(msg);
+    addStateWarning('state-missing-recovered', msg);
+    // The state file is missing, so this save skips rotation —
+    // there is no previous version left to rotate.
+    saveState(dataDir, found.parsed);
+    return found.parsed;
+  }
+  throw new Error('Standby: state.json is missing and no usable backup was found'
+    + ' (' + candidates.length + ' backup(s) tried: ' + candidates.join(', ') + ').'
+    + ' No state file was created — restore a backup manually; the state was NOT reset to defaults.');
 }
 
 // Find the newest backup that still holds check-in keys (0.8.3,
@@ -551,25 +588,37 @@ function findBackupWithKeys(dataDir) {
 function loadState(dataDir) {
   ensureDir(dataDir);
   const file = path.join(dataDir, STATE_FILE);
-  if (!fs.existsSync(file)) {
-    const state = defaultState();
-    saveState(dataDir, state);
-    return state;
-  }
-  // (0.8.3) A state file that cannot be read no longer crashes
-  // the app on startup with no fallback: recover from the newest
-  // usable backup (previous version, then daily snapshots newest
-  // first). A file that parses but is not a Standby state document
-  // is treated the same way. If no backup loads, this throws
-  // loudly — the state is NEVER silently reset to defaults.
   let saved;
-  try {
-    saved = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (!isPlausibleState(saved)) {
-      throw new Error('state.json parsed but is not a Standby state document');
+  if (!fs.existsSync(file)) {
+    // (0.8.3, finding 1) A missing state file is NOT a fresh
+    // install when backups exist — recover from the newest usable
+    // backup, exactly like the corrupt-state path. Only a data
+    // directory with no backups at all is a genuine first boot.
+    // recoverMissingState throws loudly when backups exist but
+    // none loads, and returns null when there are none.
+    const recovered = recoverMissingState(dataDir);
+    if (recovered) {
+      saved = recovered;
+    } else {
+      const state = defaultState();
+      saveState(dataDir, state);
+      return state;
     }
-  } catch (e) {
-    saved = recoverStateFromBackup(dataDir, file, e);
+  } else {
+    // (0.8.3) A state file that cannot be read no longer crashes
+    // the app on startup with no fallback: recover from the newest
+    // usable backup (previous version, then daily snapshots newest
+    // first). A file that parses but is not a Standby state document
+    // is treated the same way. If no backup loads, this throws
+    // loudly — the state is NEVER silently reset to defaults.
+    try {
+      saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (!isPlausibleState(saved)) {
+        throw new Error('state.json parsed but is not a Standby state document');
+      }
+    } catch (e) {
+      saved = recoverStateFromBackup(dataDir, file, e);
+    }
   }
   const state = mergeDefaults(defaultState(), saved);
   // (0.8.0) The `paused` setting is gone — Global Arm/Disarm
