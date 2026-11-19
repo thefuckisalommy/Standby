@@ -402,11 +402,16 @@ const PRE_MIGRATION_FILE = 'state.json.pre-migration';
 const DAILY_BACKUP_PREFIX = 'state.json.bak.';
 const DAILY_BACKUP_KEEP = 7;
 const DAILY_BACKUP_RE = /^state\.json\.bak\.(\d{4}-\d{2}-\d{2})$/;
+// Preserved corrupt files are named state.json.corrupt.<ISO stamp>
+// (see recoverStateFromBackup below).
+const CORRUPT_FILE_PREFIX = 'state.json.corrupt.';
 
 // Warnings recorded by the persistence layer (0.8.3) — a state
 // recovery, for now. Kept in memory for the life of the process
 // and served on GET /api/state so the UI can show them (a later
-// increment). Never cleared: a recovery is a fact about this run.
+// increment). Cleared only when the state they describe is
+// replaced wholesale (a restore or a reset) — a recovery is
+// otherwise a fact about this run.
 const stateWarnings = [];
 function addStateWarning(code, message) {
   if (stateWarnings.some((w) => w.code === code)) return;
@@ -414,6 +419,27 @@ function addStateWarning(code, message) {
 }
 function getStateWarnings() {
   return stateWarnings.slice();
+}
+function clearStateWarnings() {
+  stateWarnings.length = 0;
+}
+
+// Delete the state file and every local backup (0.8.3, reset):
+// the previous version, the daily snapshots, the pre-migration
+// snapshot, and any preserved corrupt files. Missing files are
+// fine — a reset from the missing-state failure has nothing to
+// delete. Returns the number of files removed.
+function resetStateFiles(dataDir) {
+  let names = [];
+  try { names = fs.readdirSync(dataDir); } catch { return 0; }
+  let removed = 0;
+  for (const name of names) {
+    if (name === STATE_FILE || name === BACKUP_FILE || name === PRE_MIGRATION_FILE
+        || name.startsWith(DAILY_BACKUP_PREFIX) || name.startsWith(CORRUPT_FILE_PREFIX)) {
+      try { fs.unlinkSync(path.join(dataDir, name)); removed++; } catch { /* already gone */ }
+    }
+  }
+  return removed;
 }
 
 // Today's UTC date (YYYY-MM-DD) — the same clock the rest of the
@@ -827,6 +853,6 @@ module.exports = {
   // (0.8.3) Persistence hardening: backup rotation, corrupt-state
   // recovery warnings, and the backup-with-keys lookup for the
   // startup key-store check.
-  getStateWarnings, findBackupWithKeys,
+  getStateWarnings, clearStateWarnings, resetStateFiles, findBackupWithKeys,
   BACKUP_FILE, PRE_MIGRATION_FILE, DAILY_BACKUP_PREFIX, DAILY_BACKUP_KEEP,
 };

@@ -3331,7 +3331,57 @@ async function handleApi(req, res, pathname) {
   if (req.method !== 'GET' && !csrfAllowed(req)) {
     return sendError(res, 403, 'cross-origin or non-JSON request rejected');
   }
-  let state = store.loadState(DATA_DIR);
+  // (0.8.3) A state file that cannot be loaded — corrupt or
+  // missing with no usable backup — throws loudly by design, but
+  // it must not take the whole API down with it: the two rescue
+  // endpoints do not need the current state (restore validates
+  // the uploaded backup from the body alone; reset starts fresh),
+  // so they still run. Everything else answers with the load
+  // error, exactly as before — including /api/health, which keeps
+  // 500ing in this state.
+  let state = null;
+  let stateError = null;
+  try {
+    state = store.loadState(DATA_DIR);
+  } catch (e) {
+    stateError = e;
+  }
+  if (stateError) {
+    const rescue = req.method === 'POST'
+      && (pathname === '/api/restore' || pathname === '/api/state/reset');
+    if (!rescue) return sendError(res, 500, stateError.message || 'internal error');
+  }
+
+  // POST /api/state/reset — start fresh after an unrecoverable
+  // state-load failure (0.8.3). This sits above the endpoints
+  // that need state because it must run while state fails to
+  // load (see the rescue gate above): it deletes the state file
+  // and every local backup, empties the audit logs, clears the
+  // receiver keys, and writes a fresh default state. The body
+  // must be {confirm:true} — anything else is a 400, so a stray
+  // or accidental call cannot erase anything.
+  if (req.method === 'POST' && pathname === '/api/state/reset') {
+    const body = await readBody(req);
+    if (!body || body.confirm !== true) {
+      return sendError(res, 400, 'reset requires {confirm:true}');
+    }
+    store.resetStateFiles(DATA_DIR);
+    // (0.8.3) Also drop the receiver's last check-in record: on
+    // the next /api/state read mergeExternalCheckin would otherwise
+    // resurrect the pre-reset check-in time into the fresh state
+    // (a fresh state's clock is null, so any last.json wins).
+    // A start-fresh means fresh — including the clock.
+    try { fs.unlinkSync(path.join(CHECKIN_DIR, 'last.json')); } catch {}
+    const fresh = store.defaultState();
+    store.saveState(DATA_DIR, fresh);
+    store.writeCheckins(DATA_DIR, []);
+    store.writeBroadcastLog(DATA_DIR, []);
+    writeReceiverKeys(fresh);
+    store.clearStateWarnings();
+    startupWarnings.length = 0;
+    rearmFullTick();
+    return sendJson(res, 200, { ok: true });
+  }
 
   // GET /api/health
   if (req.method === 'GET' && pathname === '/api/health') {
@@ -4941,6 +4991,11 @@ async function handleApi(req, res, pathname) {
     }
     for (const t of txs) syncCheckinFreeze(t, restored, now);
     store.saveState(DATA_DIR, restored);
+    // (0.8.3) The warnings describe the state that was just
+    // replaced — a recovery at boot, say — so they are stale now;
+    // clear both lists.
+    store.clearStateWarnings();
+    startupWarnings.length = 0;
     // A restored cadence takes effect immediately — the running
     // fast tick is cleared and restarted with it.
     rearmFullTick();

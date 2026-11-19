@@ -24,6 +24,22 @@
 </header>
 
 <main>
+  <!-- State-load error (0.8.3): shown in place of the normal UI
+       when the state file cannot be loaded and no backup could be
+       recovered. The app cannot run, but it can still be rescued:
+       restore a backup file, or start fresh. -->
+  <div class="card" id="state-error-card" style="display:none">
+    <h2>Standby could not load its data</h2>
+    <p>The file holding all transactions, settings, and the check-in clock is missing or damaged, and no backup could be loaded. Nothing was erased — the app stopped instead of starting over empty.</p>
+    <p id="state-error-detail" class="muted"></p>
+    <p>
+      <button id="btn-state-restore" class="primary">Restore from a backup file</button>
+      <button id="btn-state-reset" class="danger">Start fresh</button>
+    </p>
+    <input type="file" id="state-restore-file" accept="application/json,.json" style="display:none">
+    <p id="state-error-msg" class="muted"></p>
+  </div>
+
   <nav class="tabs" id="tabs">
     <button data-tab="dashboard" class="active">Dashboard</button>
     <button data-tab="bitcoin">Transactions</button>
