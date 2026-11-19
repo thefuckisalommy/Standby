@@ -59,7 +59,7 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 // (last.json). Absent on a plain `node server.js` run — the key
 // feature is dormant then; every file access is guarded.
 const CHECKIN_DIR = process.env.CHECKIN_DIR || '/checkin';
-const VERSION = '0.8.2';
+const VERSION = '0.8.3';
 const MAX_BODY = 1024 * 1024; // 1 MB
 
 const MIME = {
@@ -411,6 +411,106 @@ function writeReceiverKeys(state) {
   } catch (e) {
     // No shared directory (a plain `node server.js` run, or the
     // receiver is not installed) — the keys are inert until it is.
+  }
+}
+
+// Read the receiver's key list (CHECKIN_DIR/keys.json) — tri-state,
+// like readExternalCheckin below: 'missing' (no file — no receiver
+// installed), 'ok' (a parsed {keys:[...]} list), 'error'
+// (unreadable or unparseable). Only entries with a string id and
+// hash count; anything else is dropped, never trusted.
+function readReceiverKeys() {
+  const file = path.join(CHECKIN_DIR, 'keys.json');
+  let raw;
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch (e) {
+    if (e && e.code === 'ENOENT') return { status: 'missing', keys: [] };
+    return { status: 'error', error: e.message, keys: [] };
+  }
+  try {
+    const doc = JSON.parse(raw);
+    if (!doc || typeof doc !== 'object' || !Array.isArray(doc.keys)) {
+      return { status: 'error', error: 'keys.json is not a key list', keys: [] };
+    }
+    return {
+      status: 'ok',
+      keys: doc.keys.filter((k) => k && typeof k.id === 'string' && typeof k.hash === 'string'),
+    };
+  } catch (e) {
+    return { status: 'error', error: e.message, keys: [] };
+  }
+}
+
+// Warnings recorded at startup (0.8.3) — the check-in key-store
+// verification below. Kept in memory for the life of the process
+// and served on GET /api/state alongside the persistence layer's
+// warnings, so the UI can show them (a later increment). Deduped
+// by code: the check runs once at startup, but a warning is a
+// fact about this run either way.
+const startupWarnings = [];
+function addStartupWarning(code, message) {
+  if (startupWarnings.some((w) => w.code === code)) return;
+  startupWarnings.push({ code, message, at: new Date().toISOString() });
+}
+
+// (0.8.3) Startup check-in key-store verification. The Nov 19
+// incident: state.checkinKeys AND the receiver's keys.json were
+// both empty — the old "Muse check-in" key was gone from both
+// sides, cause undetermined (the 0.8.1 update or a Settings
+// deletion; the app logged no key deletes). writeReceiverKeys
+// only ran on create/revoke/restore, never on startup, so a
+// divergence could sit unnoticed until the next check-in 401'd.
+// This runs once at startup and compares the two sides:
+//   state has keys + receiver missing/unreadable/mismatched ->
+//     rewrite the receiver file from state (state is the source
+//     of truth) and log it.
+//   state empty + receiver has keys -> warn only. The receiver is
+//     NOT overwritten (its keys may be the only copies left) and
+//     keys are NOT auto-restored into state — that is a manual
+//     decision by the owner.
+//   state empty + a backup has keys -> warn, naming the backup.
+//     Again, no auto-restore.
+// Honest limit: this check does NOT recover the Nov 19 case —
+// both sides were empty there. The daily backup (0.8.3) is what
+// covers that case.
+function verifyCheckinKeyStore() {
+  try {
+    const state = store.loadState(DATA_DIR);
+    const stateKeys = Array.isArray(state.checkinKeys) ? state.checkinKeys : [];
+    const recv = readReceiverKeys();
+    const sameKeys = (a, b) => {
+      if (a.length !== b.length) return false;
+      const byId = new Map(a.map((k) => [k.id, k.hash]));
+      return b.every((k) => byId.get(k.id) === k.hash);
+    };
+    if (stateKeys.length > 0) {
+      if (recv.status !== 'ok' || !sameKeys(stateKeys, recv.keys)) {
+        writeReceiverKeys(state);
+        const why = recv.status === 'missing' ? 'missing'
+          : recv.status === 'error' ? 'unreadable (' + recv.error + ')' : 'out of sync with state';
+        const msg = 'Standby: receiver keys.json was ' + why + '; rewrote it from state (' + stateKeys.length + ' key(s))';
+        console.warn(msg);
+        addStartupWarning('receiver-keys-rewritten', msg);
+      }
+      return;
+    }
+    // State has no keys.
+    if (recv.status === 'ok' && recv.keys.length > 0) {
+      const msg = 'Standby: state has no check-in keys but the receiver still lists ' + recv.keys.length
+        + ' key(s); receiver left untouched — restore the keys from a backup if they were lost';
+      console.warn(msg);
+      addStartupWarning('receiver-keys-orphaned', msg);
+    }
+    const backup = store.findBackupWithKeys(DATA_DIR);
+    if (backup) {
+      const msg = 'Standby: state has no check-in keys, but backup ' + backup.file + ' holds ' + backup.count
+        + ' key(s); recovery is a manual decision — restore that backup if the keys were lost';
+      console.warn(msg);
+      addStartupWarning('keys-in-backup', msg);
+    }
+  } catch (e) {
+    console.error('Standby: startup check-in key verification failed:', e.message);
   }
 }
 
@@ -3231,7 +3331,57 @@ async function handleApi(req, res, pathname) {
   if (req.method !== 'GET' && !csrfAllowed(req)) {
     return sendError(res, 403, 'cross-origin or non-JSON request rejected');
   }
-  let state = store.loadState(DATA_DIR);
+  // (0.8.3) A state file that cannot be loaded — corrupt or
+  // missing with no usable backup — throws loudly by design, but
+  // it must not take the whole API down with it: the two rescue
+  // endpoints do not need the current state (restore validates
+  // the uploaded backup from the body alone; reset starts fresh),
+  // so they still run. Everything else answers with the load
+  // error, exactly as before — including /api/health, which keeps
+  // 500ing in this state.
+  let state = null;
+  let stateError = null;
+  try {
+    state = store.loadState(DATA_DIR);
+  } catch (e) {
+    stateError = e;
+  }
+  if (stateError) {
+    const rescue = req.method === 'POST'
+      && (pathname === '/api/restore' || pathname === '/api/state/reset');
+    if (!rescue) return sendError(res, 500, stateError.message || 'internal error');
+  }
+
+  // POST /api/state/reset — start fresh after an unrecoverable
+  // state-load failure (0.8.3). This sits above the endpoints
+  // that need state because it must run while state fails to
+  // load (see the rescue gate above): it deletes the state file
+  // and every local backup, empties the audit logs, clears the
+  // receiver keys, and writes a fresh default state. The body
+  // must be {confirm:true} — anything else is a 400, so a stray
+  // or accidental call cannot erase anything.
+  if (req.method === 'POST' && pathname === '/api/state/reset') {
+    const body = await readBody(req);
+    if (!body || body.confirm !== true) {
+      return sendError(res, 400, 'reset requires {confirm:true}');
+    }
+    store.resetStateFiles(DATA_DIR);
+    // (0.8.3) Also drop the receiver's last check-in record: on
+    // the next /api/state read mergeExternalCheckin would otherwise
+    // resurrect the pre-reset check-in time into the fresh state
+    // (a fresh state's clock is null, so any last.json wins).
+    // A start-fresh means fresh — including the clock.
+    try { fs.unlinkSync(path.join(CHECKIN_DIR, 'last.json')); } catch {}
+    const fresh = store.defaultState();
+    store.saveState(DATA_DIR, fresh);
+    store.writeCheckins(DATA_DIR, []);
+    store.writeBroadcastLog(DATA_DIR, []);
+    writeReceiverKeys(fresh);
+    store.clearStateWarnings();
+    startupWarnings.length = 0;
+    rearmFullTick();
+    return sendJson(res, 200, { ok: true });
+  }
 
   // GET /api/health
   if (req.method === 'GET' && pathname === '/api/health') {
@@ -3261,6 +3411,12 @@ async function handleApi(req, res, pathname) {
       if (changed) store.saveState(DATA_DIR, state);
     } catch (e) { console.error('offline-hold apply failed:', e); }
     const served = sanitizeState(state);
+    // (0.8.3) Persistence / startup warnings for the UI (a later
+    // increment renders them): a state recovery that happened in
+    // this process, a receiver key list rewritten at startup, keys
+    // orphaned in the receiver, or keys found in a backup. Empty
+    // on a healthy run.
+    served.warnings = startupWarnings.concat(store.getStateWarnings());
     served.grace = graceStatus(state, now); // the price/UTXO grace (0.8.0): null when none is active, else { active, indefinite, graceUntil, triggeredAt, offlineGapDays }
     served.bitcoin.overlaps = bitcoin.findSharedInputs(state.bitcoin.txs || []);
     // The fee verdict's 90-day peak (0.7.20): the cached number (or
@@ -3539,6 +3695,10 @@ async function handleApi(req, res, pathname) {
       f.checkinKeys.push(key);
     });
     writeReceiverKeys(fresh);
+    // (0.8.3) Key creates are logged (id + label only — never the
+    // hash or plaintext). The Nov 19 key loss had no log line
+    // anywhere, so there was no way to tell when the key vanished.
+    console.log('Standby: check-in key created: ' + key.id + ' (' + key.label + ')');
     return sendJson(res, 201, { key: publicCheckinKey(key), plain });
   }
   const keyMatch = pathname.match(/^\/api\/checkin-keys\/([^/]+)$/);
@@ -3551,6 +3711,8 @@ async function handleApi(req, res, pathname) {
     });
     if (!fresh) return sendError(res, 404, 'no such key');
     writeReceiverKeys(fresh);
+    // (0.8.3) Key revokes are logged too — same reason as creates.
+    console.log('Standby: check-in key revoked: ' + keyMatch[1]);
     return sendJson(res, 200, { ok: true, removed: keyMatch[1] });
   }
 
@@ -4829,6 +4991,11 @@ async function handleApi(req, res, pathname) {
     }
     for (const t of txs) syncCheckinFreeze(t, restored, now);
     store.saveState(DATA_DIR, restored);
+    // (0.8.3) The warnings describe the state that was just
+    // replaced — a recovery at boot, say — so they are stale now;
+    // clear both lists.
+    store.clearStateWarnings();
+    startupWarnings.length = 0;
     // A restored cadence takes effect immediately — the running
     // fast tick is cleared and restarted with it.
     rearmFullTick();
@@ -5121,6 +5288,9 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`Standby ${VERSION} listening on :${PORT} (data: ${DATA_DIR})`);
+  // (0.8.3) Compare the check-in keys in state with the receiver's
+  // key list once at startup — see verifyCheckinKeyStore above.
+  verifyCheckinKeyStore();
 });
 
 // Release-evaluation timers (0.8.2): the full tick runs once
@@ -5147,6 +5317,17 @@ setInterval(runHourlyTick, 60 * 60 * 1000);
 let fullTickTimer = null;
 function rearmFullTick() {
   if (fullTickTimer) clearInterval(fullTickTimer);
-  fullTickTimer = setInterval(runFullTick, checkCadenceSecondsOf(store.loadState(DATA_DIR).settings) * 1000);
+  // (0.8.3) loadState throws when state.json is corrupt and no
+  // backup loads — a loud failure by design, but it must not kill
+  // the process here at startup: fall back to the default cadence
+  // and keep answering (the API reports the corruption as a 500)
+  // until the owner restores a backup. Without this, a corrupt
+  // state would crash-loop the server instead of staying up to
+  // say what is wrong.
+  let seconds = 60;
+  try {
+    seconds = checkCadenceSecondsOf(store.loadState(DATA_DIR).settings);
+  } catch (e) { console.error('Standby: could not read check cadence, using 60 s:', e.message); }
+  fullTickTimer = setInterval(runFullTick, seconds * 1000);
 }
 rearmFullTick();

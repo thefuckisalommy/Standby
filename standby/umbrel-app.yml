@@ -5,8 +5,14 @@ manifestVersion: 1
 id: standby
 category: automation
 name: Standby
-version: "0.8.2"
+version: "0.8.3"
 releaseNotes: |-
+  0.8.3 — Persistence hardening: rotating state backups, recovery from a corrupt state file, and check-in key verification on startup.
+
+  - **Rotating state backups:** every save keeps the previous version as state.json.bak, the first save of each day snapshots the state (kept 7 days), and a snapshot is taken before any migration changes the state shape. A slow wipe — like the check-in keys that vanished in November — stays recoverable from yesterday's snapshot even though every save since is keyless.
+  - **Corrupt-state recovery:** a state file that cannot be read no longer crashes the app on startup — it recovers from the newest usable backup, preserves the corrupt file for inspection, and says so in the log. If no backup loads, it fails loudly instead of silently resetting to an empty state.
+  - **Check-in key verification on startup:** the app now compares its check-in keys with the receiver's key list when it starts, rewrites the receiver's list when state has keys the receiver is missing, and warns (without overwriting anything) when state has no keys but the receiver — or a backup — still does.
+
   0.8.2 — Multiple triggers per transaction.
 
   - **Rule sets:** each transaction can now carry several triggers at once, combined with AND or OR. OR fires when any rule fires; AND fires only when every rule holds at the same moment. The Add and Edit forms let you add, remove, and reorder rules, and pick AND or OR for the set.

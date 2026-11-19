@@ -4,6 +4,7 @@
 // transaction at release. There is no message delivery any more.
 (function () {
   var S = null; // cached state
+  var stateErrorShown = false; // the 0.8.3 state-load error view is up
 
   function $(id) { return document.getElementById(id); }
 
@@ -244,6 +245,7 @@
     return HASH_TAB[h] || 'dashboard';
   }
   function showTab(name, updateHash) {
+    if (stateErrorShown) return; // the error view replaces the tabs
     if (!TAB_HASH[name]) name = 'dashboard';
     currentTab = name;
     document.querySelectorAll('#tabs button').forEach(function (b) { b.classList.toggle('active', b.dataset.tab === name); });
@@ -314,6 +316,50 @@
     renderSettings();
     refreshConfirmations(); // fire-and-forget: the sent lines show the last known count, then update
   }
+
+  // The state file could not be loaded and no backup could be
+  // recovered (0.8.3): the app cannot run, but it can still be
+  // rescued — restore a backup file, or start fresh. Only a
+  // state-load error shows this view; any other load failure
+  // (a network error, say) keeps the plain notice at startup
+  // and never offers to erase anything.
+  function showStateError(message) {
+    stateErrorShown = true;
+    $('tabs').style.display = 'none';
+    document.querySelectorAll('main section.tab').forEach(function (s) { s.style.display = 'none'; });
+    $('state-error-detail').textContent = message;
+    $('state-error-card').style.display = '';
+  }
+
+  $('btn-state-restore').addEventListener('click', function () { $('state-restore-file').click(); });
+
+  $('state-restore-file').addEventListener('change', async function () {
+    var file = $('state-restore-file').files && $('state-restore-file').files[0];
+    if (!file) return;
+    try {
+      var text = await new Promise(function (resolve, reject) {
+        var reader = new FileReader();
+        reader.onload = function () { resolve(reader.result); };
+        reader.onerror = function () { reject(new Error('could not read the backup file')); };
+        reader.readAsText(file);
+      });
+      var backup = JSON.parse(text);
+      var r = await api('POST', '/api/restore', backup);
+      setMsg($('state-error-msg'), 'Restored ' + r.restoredTxs + ' transaction(s) and settings from the backup.', true);
+      $('state-restore-file').value = '';
+      location.reload();
+    } catch (e) { setMsg($('state-error-msg'), e.message, false); $('state-restore-file').value = ''; }
+  });
+
+  $('btn-state-reset').addEventListener('click', function () {
+    showConfirm('Start fresh?',
+      'This erases all transactions, settings, check-in keys, and history. The check-in key stops working until you create a new one. This cannot be undone.',
+      function () {
+        api('POST', '/api/state/reset', { confirm: true }).then(function () {
+          location.reload();
+        }).catch(function (e) { setMsg($('state-error-msg'), e.message, false); });
+      }, 'Start fresh');
+  });
 
   var PILL_CLASS = {
     'on-track': 'ok', 'release-due': 'bad', 'broadcasted': 'bad',
@@ -3826,6 +3872,7 @@
   }).catch(function () { /* leave the placeholder */ });
 
   load().catch(function (e) {
+    if (/state\.json is (corrupt|missing)/.test(e.message)) { showStateError(e.message); return; }
     document.querySelector('main').insertAdjacentHTML('afterbegin',
       '<div class="notice bad">Could not load Standby state: ' + e.message + '</div>');
   });

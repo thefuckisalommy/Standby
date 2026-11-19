@@ -378,15 +378,274 @@ function ensureDir(dataDir) {
   fs.mkdirSync(dataDir, { recursive: true });
 }
 
+// ---------------------------------------------------------------------------
+// State backups (0.8.3). The Nov 19 key incident: the live app's
+// checkinKeys vanished (cause undetermined — the 0.8.1 update or a
+// Settings deletion) and there was NO backup file anywhere in
+// /data to recover from, and no log line saying when it happened.
+// Three files, all plain copies of state.json, in DATA_DIR:
+//   state.json.bak — the previous version, rotated on every save.
+//     Protects against a bad in-memory state being saved.
+//   state.json.bak.YYYY-MM-DD — a daily snapshot, written on the
+//     first save of a new day, last 7 days kept. This is the piece
+//     that protects against a SLOW wipe like the key loss: a key
+//     present yesterday is still in yesterday's snapshot even
+//     though every save since the wipe is keyless. A rotation of
+//     only the last few saves would NOT cover that case.
+//   state.json.pre-migration — written before any migration
+//     changes the state shape (see loadState below).
+// Backups are never written by hand anywhere else; saveState is
+// the single funnel, so rotation cannot be skipped by a caller.
+// ---------------------------------------------------------------------------
+const BACKUP_FILE = 'state.json.bak';
+const PRE_MIGRATION_FILE = 'state.json.pre-migration';
+const DAILY_BACKUP_PREFIX = 'state.json.bak.';
+const DAILY_BACKUP_KEEP = 7;
+const DAILY_BACKUP_RE = /^state\.json\.bak\.(\d{4}-\d{2}-\d{2})$/;
+// Preserved corrupt files are named state.json.corrupt.<ISO stamp>
+// (see recoverStateFromBackup below).
+const CORRUPT_FILE_PREFIX = 'state.json.corrupt.';
+
+// Warnings recorded by the persistence layer (0.8.3) — a state
+// recovery, for now. Kept in memory for the life of the process
+// and served on GET /api/state so the UI can show them (a later
+// increment). Cleared only when the state they describe is
+// replaced wholesale (a restore or a reset) — a recovery is
+// otherwise a fact about this run.
+const stateWarnings = [];
+function addStateWarning(code, message) {
+  if (stateWarnings.some((w) => w.code === code)) return;
+  stateWarnings.push({ code, message, at: new Date().toISOString() });
+}
+function getStateWarnings() {
+  return stateWarnings.slice();
+}
+function clearStateWarnings() {
+  stateWarnings.length = 0;
+}
+
+// Delete the state file and every local backup (0.8.3, reset):
+// the previous version, the daily snapshots, the pre-migration
+// snapshot, and any preserved corrupt files. Missing files are
+// fine — a reset from the missing-state failure has nothing to
+// delete. Returns the number of files removed.
+function resetStateFiles(dataDir) {
+  let names = [];
+  try { names = fs.readdirSync(dataDir); } catch { return 0; }
+  let removed = 0;
+  for (const name of names) {
+    if (name === STATE_FILE || name === BACKUP_FILE || name === PRE_MIGRATION_FILE
+        || name.startsWith(DAILY_BACKUP_PREFIX) || name.startsWith(CORRUPT_FILE_PREFIX)) {
+      try { fs.unlinkSync(path.join(dataDir, name)); removed++; } catch { /* already gone */ }
+    }
+  }
+  return removed;
+}
+
+// Today's UTC date (YYYY-MM-DD) — the same clock the rest of the
+// app uses (ISO strings are UTC everywhere).
+function todayStamp() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+// The daily snapshots on disk, newest first.
+function listDailyBackups(dataDir) {
+  let out = [];
+  let names = [];
+  try { names = fs.readdirSync(dataDir); } catch { return out; }
+  for (const name of names) {
+    const m = DAILY_BACKUP_RE.exec(name);
+    if (m) out.push({ file: name, date: m[1] });
+  }
+  out.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  return out.reverse();
+}
+
+function pruneDailyBackups(dataDir) {
+  const dailies = listDailyBackups(dataDir);
+  for (const old of dailies.slice(DAILY_BACKUP_KEEP)) {
+    try { fs.unlinkSync(path.join(dataDir, old.file)); } catch { /* already gone */ }
+  }
+}
+
+// Rotate the backups BEFORE the new state is written, while the
+// current state.json is still the previous version. Called by
+// saveState only. Failures are logged, never thrown — a backup
+// that cannot be written must not take down the save itself.
+function rotateStateBackups(dataDir) {
+  const file = path.join(dataDir, STATE_FILE);
+  if (!fs.existsSync(file)) return; // first save ever — nothing to back up
+  try {
+    fs.copyFileSync(file, path.join(dataDir, BACKUP_FILE));
+  } catch (e) { console.error('Standby: state backup rotation failed:', e.message); }
+  try {
+    const daily = path.join(dataDir, DAILY_BACKUP_PREFIX + todayStamp());
+    if (!fs.existsSync(daily)) {
+      fs.copyFileSync(file, daily);
+      pruneDailyBackups(dataDir);
+    }
+  } catch (e) { console.error('Standby: daily state snapshot failed:', e.message); }
+}
+
+// Snapshot the current state file before a migration rewrites it
+// (called by loadState's migration branch). A plain copy — the
+// migration can then be undone by hand if it ever goes wrong.
+function snapshotPreMigration(dataDir) {
+  const file = path.join(dataDir, STATE_FILE);
+  if (!fs.existsSync(file)) return;
+  try {
+    fs.copyFileSync(file, path.join(dataDir, PRE_MIGRATION_FILE));
+  } catch (e) { console.error('Standby: pre-migration state snapshot failed:', e.message); }
+}
+
+// Is this parsed document plausibly a Standby state file? Every
+// state file the app has written since 0.4.0 carries a numeric
+// version and a bitcoin object with a txs list (older ones carry
+// the single-tx shape the migration still understands). A
+// document that parses but fails this check is treated as corrupt
+// — mergeDefaults would otherwise fill a `{}` up to a
+// near-empty state and the transactions would be silently lost.
+function isPlausibleState(parsed) {
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+  if (typeof parsed.version !== 'number') return false;
+  if (!parsed.bitcoin || typeof parsed.bitcoin !== 'object' || Array.isArray(parsed.bitcoin)) return false;
+  return Array.isArray(parsed.bitcoin.txs)
+    || (parsed.bitcoin.tx && typeof parsed.bitcoin.tx === 'object');
+}
+
+// Backup candidates for recovery, in the order to try them: the
+// previous version first, then the daily snapshots newest first.
+function backupCandidates(dataDir) {
+  const out = [];
+  if (fs.existsSync(path.join(dataDir, BACKUP_FILE))) out.push(BACKUP_FILE);
+  for (const d of listDailyBackups(dataDir)) out.push(d.file);
+  return out;
+}
+
+// Try each backup candidate in order; return { parsed, file } for
+// the first one that parses and looks like a Standby state, or
+// null. A backup that cannot be read or parsed is skipped, never
+// an error.
+function tryBackupCandidates(dataDir, candidates) {
+  for (const cand of candidates) {
+    let parsed;
+    try {
+      parsed = JSON.parse(fs.readFileSync(path.join(dataDir, cand), 'utf8'));
+      if (!isPlausibleState(parsed)) continue;
+    } catch { continue; }
+    return { parsed, file: cand };
+  }
+  return null;
+}
+
+// Try to recover a corrupt state file from the backups. Returns
+// the parsed backup document. On success the corrupt file is
+// preserved (renamed, never deleted) and the recovered state is
+// written back to state.json — otherwise the next loadState would
+// find no state file at all and create a fresh default, which is
+// exactly the silent reset this must never do. On failure it
+// throws loudly; the caller must NOT fall back to defaults.
+function recoverStateFromBackup(dataDir, file, err) {
+  const candidates = backupCandidates(dataDir);
+  const found = tryBackupCandidates(dataDir, candidates);
+  if (found) {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const preserved = file + '.corrupt.' + stamp;
+    try { fs.renameSync(file, preserved); }
+    catch (e) { console.error('Standby: could not preserve corrupt state file:', e.message); }
+    const msg = 'Standby: state.json was corrupt (' + err.message + '); recovered from ' + found.file
+      + ' — the corrupt file was preserved as ' + path.basename(preserved);
+    console.warn(msg);
+    addStateWarning('state-recovered', msg);
+    // The state file is gone (renamed above), so this save skips
+    // rotation — there is no previous version left to rotate.
+    saveState(dataDir, found.parsed);
+    return found.parsed;
+  }
+  throw new Error('Standby: state.json is corrupt (' + err.message + ') and no usable backup was found'
+    + ' (' + candidates.length + ' backup(s) tried: ' + (candidates.join(', ') || 'none') + ').'
+    + ' The corrupt file was left in place — restore a backup manually; the state was NOT reset to defaults.');
+}
+
+// A missing state.json with backups on disk is a lost state file,
+// not a fresh install: recover from the newest usable backup
+// (previous version, then daily snapshots newest first), exactly
+// like the corrupt-state path. Returns the recovered document, or
+// null when there are no backups at all (a genuine first boot).
+// When backups exist but none loads, throws loudly — the state is
+// NEVER silently reset while historical data exists.
+function recoverMissingState(dataDir) {
+  const candidates = backupCandidates(dataDir);
+  if (candidates.length === 0) return null;
+  const found = tryBackupCandidates(dataDir, candidates);
+  if (found) {
+    const msg = 'Standby: state.json was missing; recovered from ' + found.file;
+    console.warn(msg);
+    addStateWarning('state-missing-recovered', msg);
+    // The state file is missing, so this save skips rotation —
+    // there is no previous version left to rotate.
+    saveState(dataDir, found.parsed);
+    return found.parsed;
+  }
+  throw new Error('Standby: state.json is missing and no usable backup was found'
+    + ' (' + candidates.length + ' backup(s) tried: ' + candidates.join(', ') + ').'
+    + ' No state file was created — restore a backup manually; the state was NOT reset to defaults.');
+}
+
+// Find the newest backup that still holds check-in keys (0.8.3,
+// for the startup key-store check in server.js): daily snapshots
+// newest first, then the previous version. Returns
+// { file, count } or null. A backup that cannot be read or parsed
+// simply does not count — it is skipped, never an error.
+function findBackupWithKeys(dataDir) {
+  const candidates = listDailyBackups(dataDir).map((d) => d.file);
+  candidates.push(BACKUP_FILE);
+  for (const cand of candidates) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(path.join(dataDir, cand), 'utf8'));
+      if (!isPlausibleState(parsed)) continue;
+      const keys = Array.isArray(parsed.checkinKeys) ? parsed.checkinKeys : [];
+      if (keys.length > 0) return { file: cand, count: keys.length };
+    } catch { continue; }
+  }
+  return null;
+}
+
 function loadState(dataDir) {
   ensureDir(dataDir);
   const file = path.join(dataDir, STATE_FILE);
+  let saved;
   if (!fs.existsSync(file)) {
-    const state = defaultState();
-    saveState(dataDir, state);
-    return state;
+    // (0.8.3, finding 1) A missing state file is NOT a fresh
+    // install when backups exist — recover from the newest usable
+    // backup, exactly like the corrupt-state path. Only a data
+    // directory with no backups at all is a genuine first boot.
+    // recoverMissingState throws loudly when backups exist but
+    // none loads, and returns null when there are none.
+    const recovered = recoverMissingState(dataDir);
+    if (recovered) {
+      saved = recovered;
+    } else {
+      const state = defaultState();
+      saveState(dataDir, state);
+      return state;
+    }
+  } else {
+    // (0.8.3) A state file that cannot be read no longer crashes
+    // the app on startup with no fallback: recover from the newest
+    // usable backup (previous version, then daily snapshots newest
+    // first). A file that parses but is not a Standby state document
+    // is treated the same way. If no backup loads, this throws
+    // loudly — the state is NEVER silently reset to defaults.
+    try {
+      saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (!isPlausibleState(saved)) {
+        throw new Error('state.json parsed but is not a Standby state document');
+      }
+    } catch (e) {
+      saved = recoverStateFromBackup(dataDir, file, e);
+    }
   }
-  const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
   const state = mergeDefaults(defaultState(), saved);
   // (0.8.0) The `paused` setting is gone — Global Arm/Disarm
   // replaces it. Prune it from older state files so a stale
@@ -533,6 +792,9 @@ function loadState(dataDir) {
     if (pruned) console.log('Standby: pruned legacy state (recipient/channels/reminders/release)');
     if (triggerMigrated) console.log('Standby 0.8.2: migrated transactions to rule sets (AND/OR) with per-rule triggerState');
     if (historySeeded) console.log('Standby 0.8.1: seeded per-transaction history');
+    // (0.8.3) Snapshot the pre-migration file before the
+    // migrating save rewrites it.
+    snapshotPreMigration(dataDir);
     saveState(dataDir, state);
   }
   return state;
@@ -541,6 +803,9 @@ function loadState(dataDir) {
 function saveState(dataDir, state) {
   ensureDir(dataDir);
   state.updatedAt = new Date().toISOString();
+  // (0.8.3) Rotate the backups while the current state.json is
+  // still the previous version — see rotateStateBackups above.
+  rotateStateBackups(dataDir);
   const file = path.join(dataDir, STATE_FILE);
   const tmp = file + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(state, null, 2) + '\n', 'utf8');
@@ -585,4 +850,9 @@ module.exports = {
   serveTrigger, serveTriggerState, normalizeTriggerState, defaultTrigger, defaultTriggerSet,
   FALLBACK_THRESHOLD_DAYS, MAX_RULES_PER_TX,
   TRIGGER_TYPES, PRICE_MIN_USD, PRICE_MAX_USD, HISTORY_TYPES, HISTORY_MAX,
+  // (0.8.3) Persistence hardening: backup rotation, corrupt-state
+  // recovery warnings, and the backup-with-keys lookup for the
+  // startup key-store check.
+  getStateWarnings, clearStateWarnings, resetStateFiles, findBackupWithKeys,
+  BACKUP_FILE, PRE_MIGRATION_FILE, DAILY_BACKUP_PREFIX, DAILY_BACKUP_KEEP,
 };
