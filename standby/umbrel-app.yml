@@ -5,8 +5,12 @@ manifestVersion: 1
 id: standby
 category: automation
 name: Standby
-version: "0.8.1"
+version: "0.8.2"
 releaseNotes: |-
+  0.8.2 — Multiple triggers per transaction.
+
+  - **Rule sets:** each transaction can now carry several triggers at once, combined with AND or OR. OR fires when any rule fires; AND fires only when every rule holds at the same moment. The Add and Edit forms let you add, remove, and reorder rules, and pick AND or OR for the set.
+
   0.8.1 — Three more triggers join the broadcast engine.
 
   - **Block height:** fire when the chain reaches a block height you set. Deterministic — the height comes from your node's own chain, and a reorg can't un-fire it.

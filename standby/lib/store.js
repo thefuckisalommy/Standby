@@ -13,7 +13,7 @@ const BROADCAST_LOG = 'broadcast.jsonl';
 function defaultState() {
   const now = new Date().toISOString();
   return {
-    version: 6,
+    version: 7,
     createdAt: now,
     updatedAt: now,
     settings: {
@@ -73,12 +73,18 @@ function defaultState() {
     // (added, fired, broadcast, confirmed, stale, failed, conflict,
     // edited, armed, disarmed, slipstream), never the hourly
     // release checks.
-    // trigger (0.8.0) is the rule that fires this transaction —
-    // { type, params } — one of checkin / price / utxo / manual
-    // (see normalizeTrigger below). triggerState is the trigger's
-    // last evaluation ({ lastEvalAt, status, reason,
-    // lastPrice, lastOutspend } — the fields depend on the type) or
-    // null when it has never been evaluated.
+    // trigger (0.8.2) is the rule SET that fires this transaction —
+    // { op: 'AND' | 'OR', rules: [...] } — one rule per entry, each
+    // { type, params } (see normalizeTrigger below). triggerState is
+    // the per-rule last evaluation — an array parallel to the rules
+    // (index-keyed), each entry the slice that rule's evaluator
+    // wrote ({ lastEvalAt, status, reason, lastPrice, lastOutspend,
+    // ... } — the fields depend on the type) or null when that rule
+    // has never been evaluated; the whole triggerState is null until
+    // the release has evaluated any rule once. A one-rule set is
+    // served to the API as its single rule (legacy shape — see
+    // serveTrigger in server.js), so the 0.8.1 frontend keeps
+    // working while the stored form is always the set.
     // release is the current cycle's record (a check-in clears it);
     // broadcasted is the permanent fact that the tx went out (a
     // check-in never clears it; replacing the hex does).
@@ -115,23 +121,28 @@ function newTxId() {
 }
 
 // ---------------------------------------------------------------------------
-// Triggers (0.8.0). Each transaction carries its own trigger —
-// { type, params } — and the check-in clock is one trigger type:
+// Triggers (0.8.0, rule sets 0.8.2). Each transaction carries a rule
+// SET — { op: 'AND' | 'OR', rules: [...] } — and the check-in clock
+// is one rule type:
 //   checkin { thresholdDays } — fire when the check-in clock is
-//     release-due at this tx's own threshold.
+//     release-due at this rule's own threshold.
 //   price   { asset: 'BTC', op: '>=' | '<=', value } — fire when
 //     the BTC price (USD) is at/above (or at/below) value and both
 //     price sources agree (no sustained wait).
 //   utxo    { outpoint: 'txid:vout', condition: 'spent' } — fire
 //     when the outpoint is spent by a confirmed transaction.
 //   manual  {} — never fires; the owner broadcasts it by hand.
-// A tx with no trigger (an older state file) defaults to the
-// check-in trigger at the 35-day fallback, so existing behaviour
-// is unchanged. The price value is bounded (a trigger for $0 or
-// $999,999,999 is a typo, not a rule); the outpoint must be a
-// 64-hex txid, a colon, and an output index.
+// A tx with no trigger (an older state file) defaults to a one-rule
+// OR set holding the check-in trigger at the 35-day fallback, so
+// existing behaviour is unchanged. The price value is bounded (a
+// trigger for $0 or $999,999,999 is a typo, not a rule); the outpoint
+// must be a 64-hex txid, a colon, and an output index.
+// (0.8.2) MAX_RULES_PER_TX caps the rules in one set — a proposed
+// cap, not Ryan's decision (5 is enough for any real rule set and
+// keeps the combine readable); raise it here if a set ever needs more.
 // ---------------------------------------------------------------------------
 const TRIGGER_TYPES = ['checkin', 'price', 'utxo', 'manual', 'blockheight', 'setdate', 'feemarket'];
+const MAX_RULES_PER_TX = 5;
 // (0.8.2) The per-transaction history event types — the only
 // types a history entry may carry (see server.js pushHistory and
 // the load-time backfill below). 'slipstream' is the MARA
@@ -158,13 +169,18 @@ function defaultTrigger() {
   return { type: 'checkin', params: { thresholdDays: FALLBACK_THRESHOLD_DAYS } };
 }
 
-// Validate + normalize a trigger (from a client, a backup, or a
+// The default rule set: one check-in rule at the 35-day fallback.
+function defaultTriggerSet() {
+  return { op: 'OR', rules: [defaultTrigger()] };
+}
+
+// Validate + normalize ONE rule (from a client, a backup, or a
 // stored state file). Returns { trigger } (normalized) or
-// { error: '...' } — never throws, so a bad trigger is a
+// { error: '...' } — never throws, so a bad rule is a
 // validation error, not a crash. A check-in thresholdDays is
 // clamped to 1..3650 (a range issue is not a rejection);
 // a non-numeric one is.
-function normalizeTrigger(input) {
+function normalizeRule(input) {
   if (input === undefined || input === null) return { error: 'trigger is required' };
   if (typeof input !== 'object' || Array.isArray(input)) return { error: 'trigger must be an object with a type' };
   const params = (input.params && typeof input.params === 'object' && !Array.isArray(input.params)) ? input.params : {};
@@ -246,14 +262,105 @@ function normalizeTrigger(input) {
   }
 }
 
-// The tx's trigger, normalized — a missing or unusable trigger
-// defaults to the check-in trigger at the 35-day fallback, so
+// Validate + normalize a rule SET (from a client, a backup, or a
+// stored state file). Accepts EITHER a single rule (normalized and
+// wrapped as a one-rule OR set) or a set { op: 'AND' | 'OR', rules:
+// [...] } — so the add / import / edit / check endpoints take both
+// shapes. Returns { trigger: set } (normalized) or { error: '...' }
+// — never throws. A set needs 1..MAX_RULES_PER_TX rules, each valid
+// on its own; one bad rule rejects the whole set.
+function normalizeTrigger(input) {
+  if (input === undefined || input === null) return { error: 'trigger is required' };
+  if (typeof input !== 'object' || Array.isArray(input)) return { error: 'trigger must be an object with a type, or a rule set { op, rules }' };
+  if (Array.isArray(input.rules)) {
+    if (input.op !== 'AND' && input.op !== 'OR') return { error: "rule set op must be 'AND' or 'OR'" };
+    if (input.rules.length < 1) return { error: 'rule set needs at least one rule' };
+    if (input.rules.length > MAX_RULES_PER_TX) return { error: 'a transaction can have at most ' + MAX_RULES_PER_TX + ' rules' };
+    const rules = [];
+    for (let i = 0; i < input.rules.length; i++) {
+      const r = normalizeRule(input.rules[i]);
+      if (!r.trigger) return { error: 'rule ' + (i + 1) + ': ' + r.error };
+      rules.push(r.trigger);
+    }
+    return { trigger: { op: input.op, rules } };
+  }
+  const r = normalizeRule(input);
+  if (!r.trigger) return r;
+  return { trigger: { op: 'OR', rules: [r.trigger] } };
+}
+
+// The tx's rule set, normalized — a missing or unusable trigger
+// defaults to the one-rule check-in set at the 35-day fallback, so
 // the release never loses a transaction to a trigger it cannot
 // read. (The frontend mirrors this rule in public/app.js.)
 function triggerOf(tx) {
-  if (!tx || typeof tx !== 'object') return defaultTrigger();
+  if (!tx || typeof tx !== 'object') return defaultTriggerSet();
   const r = normalizeTrigger(tx.trigger);
-  return r.trigger || defaultTrigger();
+  return r.trigger || defaultTriggerSet();
+}
+
+// The set's rules, normalized (the same fallback as triggerOf).
+function triggerRulesOf(tx) {
+  return triggerOf(tx).rules;
+}
+
+// The set's rule types, in rule order (duplicates kept — a set can
+// hold two check-in rules at different thresholds).
+function triggerTypesOf(tx) {
+  return triggerRulesOf(tx).map((r) => r.type);
+}
+
+// True when the tx's set holds at least one rule of this type.
+function hasTriggerType(tx, type) {
+  return triggerRulesOf(tx).some((r) => r.type === type);
+}
+
+// The rule set as the API serves it (0.8.2, interim dual-shape
+// serving): a one-rule set is served as its single rule (the legacy
+// shape — the 0.8.1 frontend and the 098 suites only ever see that
+// for one-rule txs); a multi-rule set is served as the set. The
+// stored form is always the set. Remove this when the UI build lands
+// (the new frontend normalizes both shapes on read).
+function serveTrigger(set) {
+  if (!set || typeof set !== 'object' || !Array.isArray(set.rules)) return defaultTrigger();
+  if (set.rules.length === 1) return set.rules[0];
+  return set;
+}
+
+// The per-rule triggerState as the API serves it (same interim rule
+// as serveTrigger): a one-rule set's state is served as its single
+// slice (the legacy flat shape); a multi-rule set's as the array.
+// `state` is the stored triggerState (null, a flat legacy object, or
+// the per-rule array). A flat object serves as-is (a legacy state
+// file the migration has not wrapped yet — defensive only, loadState
+// wraps it on every load).
+function serveTriggerState(set, state) {
+  if (state === null || state === undefined) return null;
+  if (!Array.isArray(state)) return state;
+  if (!set || !Array.isArray(set.rules) || set.rules.length !== 1) return state;
+  return (state.length ? state[0] : null);
+}
+
+// Normalize a stored triggerState to the per-rule array form —
+// null stays null, a flat legacy object wraps to a one-element
+// array, an array is sanitized entry by entry (an object stays,
+// anything else becomes null) and sized to the rule count (padded
+// with nulls, truncated past it). Used by loadState's migration and
+// by restore, so a hand-edited state file or backup can never store
+// a triggerState the evaluators cannot index by rule.
+function normalizeTriggerState(input, ruleCount) {
+  const n = (typeof ruleCount === 'number' && Number.isFinite(ruleCount) && ruleCount >= 1) ? Math.floor(ruleCount) : 1;
+  if (input === null || input === undefined) return null;
+  let arr;
+  if (Array.isArray(input)) arr = input;
+  else if (typeof input === 'object') arr = [input];
+  else return null;
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const e = arr[i];
+    out.push((e && typeof e === 'object' && !Array.isArray(e)) ? e : null);
+  }
+  return out;
 }
 
 // Deep-merge saved state over defaults so older state files keep working
@@ -357,7 +464,7 @@ function loadState(dataDir) {
   for (const k of ['broadcastMethod', 'publicApiUrl', 'rpcHost', 'rpcPort', 'rpcUser', 'rpcPassword']) {
     if (state.settings && k in state.settings) { delete state.settings[k]; pruned = true; }
   }
-  if (state.version !== 6) state.version = 6;
+  if (state.version !== 7) state.version = 7;
   // 0.8.0 migration: every transaction carries its own trigger
   // and triggerState. A tx from before 0.8.0 carries neither: it
   // defaults to the check-in trigger at the 35-day fallback (so
@@ -366,15 +473,23 @@ function loadState(dataDir) {
   // back the same way — the release must never lose a transaction
   // to a trigger it cannot read. The migration is idempotent and
   // runs on every load (cheap), so a hand-edited state file is
-  // normalized too. A triggerState that is not null and not an
-  // object is dropped (the evaluator overwrites it on the next
-  // evaluation anyway).
+  // normalized too.
+  // 0.8.2 migration: the trigger is a RULE SET now, and the
+  // triggerState is per-rule (an array parallel to the rules).
+  // A single trigger wraps as a one-rule OR set; a flat
+  // triggerState wraps as a one-element array (the seeded slice
+  // keeps its fields — a price rule's lastPrice, a block-height
+  // rule's latch — so the evaluators keep their baselines). A
+  // triggerState that is not null, not an object, and not an array
+  // is dropped (the evaluator overwrites it on the next evaluation
+  // anyway).
   let triggerMigrated = false;
   for (const t of (state.bitcoin.txs || [])) {
     const trg = triggerOf(t);
     if (JSON.stringify(trg) !== JSON.stringify(t.trigger)) { t.trigger = trg; triggerMigrated = true; }
-    if (t.triggerState === undefined || (t.triggerState !== null && typeof t.triggerState !== 'object') || Array.isArray(t.triggerState)) {
-      t.triggerState = null; triggerMigrated = true;
+    const normState = normalizeTriggerState(t.triggerState, trg.rules.length);
+    if (JSON.stringify(normState) !== JSON.stringify(t.triggerState)) {
+      t.triggerState = normState; triggerMigrated = true;
     }
   }
   // 0.8.2 migration: every transaction carries its own event
@@ -416,7 +531,7 @@ function loadState(dataDir) {
   if (pruned || migrated || triggerMigrated || historySeeded) {
     if (migrated) console.log('Standby 0.4.0: migrated single transaction to the transactions list');
     if (pruned) console.log('Standby: pruned legacy state (recipient/channels/reminders/release)');
-    if (triggerMigrated) console.log('Standby 0.8.0: migrated transactions to per-transaction triggers');
+    if (triggerMigrated) console.log('Standby 0.8.2: migrated transactions to rule sets (AND/OR) with per-rule triggerState');
     if (historySeeded) console.log('Standby 0.8.1: seeded per-transaction history');
     saveState(dataDir, state);
   }
@@ -466,6 +581,8 @@ module.exports = {
   loadState, saveState, defaultState, newTxId,
   appendCheckin, readCheckins, writeCheckins,
   appendBroadcastLog, readBroadcastLog, writeBroadcastLog,
-  normalizeTrigger, triggerOf, defaultTrigger, FALLBACK_THRESHOLD_DAYS,
+  normalizeTrigger, normalizeRule, triggerOf, triggerRulesOf, triggerTypesOf, hasTriggerType,
+  serveTrigger, serveTriggerState, normalizeTriggerState, defaultTrigger, defaultTriggerSet,
+  FALLBACK_THRESHOLD_DAYS, MAX_RULES_PER_TX,
   TRIGGER_TYPES, PRICE_MIN_USD, PRICE_MAX_USD, HISTORY_TYPES, HISTORY_MAX,
 };

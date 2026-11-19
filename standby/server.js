@@ -59,7 +59,7 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 // (last.json). Absent on a plain `node server.js` run — the key
 // feature is dormant then; every file access is guarded.
 const CHECKIN_DIR = process.env.CHECKIN_DIR || '/checkin';
-const VERSION = '0.8.1';
+const VERSION = '0.8.2';
 const MAX_BODY = 1024 * 1024; // 1 MB
 
 const MIME = {
@@ -189,11 +189,62 @@ function triggerLabel(trigger) {
 // The condition in plain words, as shown in the trigger subcard:
 // "Fires when you don't check in for 35 days",
 // "Fires when BTC price ≥ $150,000", "Fires when UTXO 4a74…:0 is spent",
-// "Never fires — manual only". `trigger` is normalized (see
-// triggerOf) — the callers pass the normalized one; a missing one
-// falls back to the check-in default.
+// "Never fires — manual only". `trigger` is a normalized rule SET
+// (see triggerOf) — a one-rule set reads exactly as its single rule
+// did; a multi-rule set joins its rules with AND / OR. The
+// single-rule text is unchanged, so a one-rule tx's 'added' history
+// detail and subcard read exactly as before.
 function triggerConditionText(trigger) {
-  const t = (trigger && trigger.type) ? trigger : store.defaultTrigger(35);
+  const set = toTriggerSet(trigger);
+  if (set.rules.length === 1) return singleTriggerConditionText(set.rules[0]);
+  const joiner = set.op === 'AND' ? ' AND ' : ' OR ';
+  return 'Fires when ' + set.rules.map(ruleConditionShort).join(joiner);
+}
+
+// A rule set from a single rule or a set (both accepted everywhere
+// a trigger is): a set passes through, a single rule wraps as a
+// one-rule OR set, anything else falls back to the default set.
+function toTriggerSet(input) {
+  if (input && typeof input === 'object' && !Array.isArray(input) && Array.isArray(input.rules)
+      && (input.op === 'AND' || input.op === 'OR')) return input;
+  const r = store.normalizeRule(input);
+  return r.trigger ? { op: 'OR', rules: [r.trigger] } : store.defaultTriggerSet();
+}
+
+// One rule's condition without the "Fires when" lead — the piece a
+// multi-rule condition joins with AND / OR.
+function ruleConditionShort(rule) {
+  const t = (rule && rule.type) ? rule : store.defaultTrigger();
+  switch (t.type) {
+    case 'checkin':
+      return "you don't check in for " + t.params.thresholdDays + (t.params.thresholdDays === 1 ? ' day' : ' days');
+    case 'price':
+      return 'BTC price ' + (t.params.op === '>=' ? '≥' : '≤') + ' $' + t.params.value.toLocaleString('en-US');
+    case 'utxo': {
+      const parts = String(t.params.outpoint || '').split(':');
+      const confs = (t.params.confirmations === 0) ? 0 : (t.params.confirmations || 1);
+      const suffix = confs === 0 ? ' (unconfirmed)' : (confs === 1 ? '' : ' (' + confs + ' confirmations)');
+      return 'UTXO ' + (parts[0] || '').slice(0, 4) + '…:' + (parts[1] || '') + ' is spent' + suffix;
+    }
+    case 'manual':
+      return 'never — manual only';
+    case 'blockheight':
+      return 'the chain reaches block ' + Number(t.params.targetHeight).toLocaleString('en-US');
+    case 'setdate': {
+      const d = new Date(t.params.fireAt);
+      const shown = Number.isFinite(d.getTime()) ? d.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : String(t.params.fireAt);
+      return 'the date ' + shown + ' is reached';
+    }
+    case 'feemarket':
+      return 'tx fees are ' + (t.params.direction === 'above' ? '>= ' : '<= ') + Number(t.params.maxFeeRate).toLocaleString('en-US') + ' sat/vB';
+    default:
+      return '';
+  }
+}
+
+// One rule's condition in full — the 0.8.0/0.8.1 text, unchanged.
+function singleTriggerConditionText(trigger) {
+  const t = (trigger && trigger.type) ? trigger : store.defaultTrigger();
   switch (t.type) {
     case 'checkin':
       return "Fires when you don't check in for " + t.params.thresholdDays + (t.params.thresholdDays === 1 ? ' day' : ' days');
@@ -225,12 +276,24 @@ function triggerConditionText(trigger) {
   }
 }
 
-// The trigger type to stamp on a release record (0.8.0): the type
-// that fired this broadcast, so a release record says which rule
-// it came from. For a manual broadcast it is the tx's current
-// trigger type (informational — the owner fired it by hand).
-function releaseTriggerFor(state, tx) {
-  return store.triggerOf(tx).type;
+// The rule types that fired this broadcast, joined — the type
+// stamped on a release record (0.8.0): the rule(s) that fired it,
+// or the tx's current rule types when nothing fired it (a manual
+// broadcast, a dry-run verdict, a confirmation refresh). One rule
+// reads as its type, exactly as before ('price', 'checkin'); several
+// join with '+' ('price+setdate'), so the record still says which
+// rules it came from.
+function releaseTriggerFor(state, tx, firedRuleTypes) {
+  const types = (Array.isArray(firedRuleTypes) && firedRuleTypes.length)
+    ? firedRuleTypes
+    : store.triggerTypesOf(tx);
+  return types.join('+');
+}
+
+// The tx's rule types, joined — the per-result `trigger` field on a
+// release check (one rule reads as its type, as before).
+function triggerTypesLabel(tx) {
+  return store.triggerTypesOf(tx).join('+');
 }
 
 // The deadline a Slipstream transaction's public fallback fires at —
@@ -265,6 +328,28 @@ function fallbackDeadline(tx) {
   const at = new Date(anchor).getTime();
   if (Number.isNaN(at)) return null;
   return new Date(at + days * 86400000);
+}
+
+// The tx as the API serves it (0.8.2, interim dual-shape serving):
+// a one-rule set is served as its single rule with its triggerState
+// as the single slice (the legacy shape — the 0.8.1 frontend and the
+// 098 suites only ever see that for one-rule txs); a multi-rule set
+// is served as the set, with the per-rule state array. The stored
+// form is always the set — this only shapes what leaves the server.
+// A shallow copy: the stored record keeps its set. Remove this when
+// the UI build lands (the new frontend normalizes both shapes on
+// read).
+function serveTx(tx) {
+  if (!tx || typeof tx !== 'object') return tx;
+  const set = store.triggerOf(tx);
+  return {
+    ...tx,
+    trigger: store.serveTrigger(set),
+    triggerState: store.serveTriggerState(set, tx.triggerState),
+  };
+}
+function serveTxs(txs) {
+  return (txs || []).map(serveTx);
 }
 
 // State as served to the UI: a plain deep copy, except the check-in key
@@ -398,7 +483,7 @@ function mergeExternalCheckin(state, now) {
   // check-in must not clear it (and must not reset its trigger).
   // A stale record survives either way, as before.
   for (const t of (state.bitcoin.txs || [])) {
-    if (store.triggerOf(t).type !== 'checkin') continue;
+    if (!store.hasTriggerType(t, 'checkin')) continue;
     if (t.release && t.release.status === 'stale') continue;
     t.release = null;
     // The clock restarts at this check-in: any frozen time is
@@ -455,9 +540,11 @@ function applyOfflineHold(state, now) {
   // just because the 35-day fallback is longer. With no armed
   // check-in rule the fallback is the threshold (the hold is
   // inert then anyway — nothing fires on the check-in clock).
+  // (0.8.2) A tx may carry several check-in rules; every one of
+  // them is measured.
   const ckThresholds = (state.bitcoin.txs || [])
-    .filter((t) => t.enabled && store.triggerOf(t).type === 'checkin')
-    .map((t) => store.triggerOf(t).params.thresholdDays);
+    .filter((t) => t.enabled && store.hasTriggerType(t, 'checkin'))
+    .flatMap((t) => store.triggerOf(t).rules.filter((r) => r.type === 'checkin').map((r) => r.params.thresholdDays));
   const thresholdDays = ckThresholds.length ? Math.min.apply(null, ckThresholds) : store.FALLBACK_THRESHOLD_DAYS;
   const thresholdMs = thresholdDays * 86400000;
   if (now.getTime() - online.getTime() <= thresholdMs / 4) return false;
@@ -578,7 +665,7 @@ function resetCheckin(state, now, method) {
   // push it into the future). A tx that is still inactive is
   // re-marked inactive from now, so it stays frozen at 0.
   for (const t of (state.bitcoin.txs || [])) {
-    if (store.triggerOf(t).type !== 'checkin') continue;
+    if (!store.hasTriggerType(t, 'checkin')) continue;
     t.checkinOffsetMs = 0;
     t.checkinInactiveSince = null;
   }
@@ -617,7 +704,7 @@ function checkinLiveOffsetMs(tx, now) {
   return base;
 }
 function syncCheckinFreeze(tx, state, now) {
-  if (store.triggerOf(tx).type !== 'checkin') return;
+  if (!store.hasTriggerType(tx, 'checkin')) return;
   const inactive = !tx.enabled || !!state.settings.vacationMode;
   if (inactive) {
     if (!tx.checkinInactiveSince) tx.checkinInactiveSince = now.toISOString();
@@ -768,16 +855,26 @@ function checkinStatus(state, now) {
   const s = state.settings;
   const last = state.checkin.lastCheckinAt ? new Date(state.checkin.lastCheckinAt) : null;
   const txs = state.bitcoin.txs || [];
-  const isCheckinTx = (t) => store.triggerOf(t).type === 'checkin';
+  const isCheckinTx = (t) => store.hasTriggerType(t, 'checkin');
+  // (0.8.2) One entry PER check-in RULE: a tx with two check-in
+  // rules (different thresholds) appears once per rule, each entry
+  // carrying its ruleIndex — the bar is per rule, the clock is
+  // global, and the smallest threshold is the one that fires
+  // first. The DOM suite and the old frontend read these entries
+  // the same way: a one-rule tx yields exactly one entry, as
+  // before.
   const checkinTxs = txs
     .filter((t) => isCheckinTx(t) && !txSettledOrPending(t))
-    .map((t) => {
-      const th = store.triggerOf(t).params.thresholdDays;
-      const off = checkinLiveOffsetMs(t, now);
-      if (!last) return { id: t.id, label: t.label || '', thresholdDays: th, daysSince: 0, windowDays: th, nextDue: null, state: 'not-started', enabled: !!t.enabled };
-      const clock = checkinClock(state, now, th, off);
-      return { id: t.id, label: t.label || '', thresholdDays: th, daysSince: clock.daysSince, windowDays: clock.windowDays, nextDue: clock.nextDue, state: clock.state, enabled: !!t.enabled };
-    });
+    .flatMap((t) => store.triggerOf(t).rules
+      .map((r, i) => ({ rule: r, ruleIndex: i }))
+      .filter((x) => x.rule.type === 'checkin')
+      .map(({ rule, ruleIndex }) => {
+        const th = rule.params.thresholdDays;
+        const off = checkinLiveOffsetMs(t, now);
+        if (!last) return { id: t.id, label: t.label || '', ruleIndex, thresholdDays: th, daysSince: 0, windowDays: th, nextDue: null, state: 'not-started', enabled: !!t.enabled };
+        const clock = checkinClock(state, now, th, off);
+        return { id: t.id, label: t.label || '', ruleIndex, thresholdDays: th, daysSince: clock.daysSince, windowDays: clock.windowDays, nextDue: clock.nextDue, state: clock.state, enabled: !!t.enabled };
+      }));
   // The top level is driven by the ARMED entries only — a
   // disarmed tx cannot fire (see the comment above). When
   // nothing is armed the soonest due is null, and daysSince
@@ -829,16 +926,29 @@ function checkinStatus(state, now) {
 }
 
 // ---------------------------------------------------------------------------
-// Trigger evaluation (0.8.0). One function per trigger type, plus the
-// shared price cache. evaluateTrigger(state, tx, now) returns
-// { fire, status, reason } and writes the tx's triggerState (the
-// caller saves). triggerStatusFor(state, tx, now) is the UI-facing
-// status, computed from the STORED triggerState (no network) —
-// except the check-in trigger, whose state is live clock math so
-// the card's "3 of 35 days elapsed" line is current on every page
-// load. checkTriggerNow(trg, state, now) evaluates a trigger ONCE,
-// live, without changing any state (the /api/triggers/check
-// endpoint and the add-time warning).
+// Trigger evaluation (0.8.0, unified 0.8.2). One pure condition
+// function per rule type — checkXRule(state, rule, now, ctx) —
+// shared by BOTH paths: the evaluator (evaluateRule /
+// evaluateTrigger, which writes the rule's triggerState slice and
+// applies the evaluator-only holds) and the gate (checkTriggerNow,
+// which answers the raw condition without writing anything and
+// without grace / vacation / disarm — the gate blocks an add when
+// satisfaction is definite, even while a hold would stop the
+// release). A check function returns { fire, status, reason, slice,
+// detail, warning }: `slice` is the triggerState slice to store for
+// this rule (null = keep the stored slice — a held rule writes
+// nothing); `detail` is the extra facts the gate answers with;
+// `warning` is the already-satisfied warning (the gate's text —
+// the evaluator ignores it). ctx is { prevSlice, liveOffsetMs,
+// latchedTarget }: the rule's stored slice (the price jump guard's
+// baseline, the block-height latch), the tx's frozen time (check-in
+// rules only), and a latched block height for the gate.
+// evaluateTrigger(state, tx, now) evaluates each rule
+// and combines by the set's op (see combineOutcomes). triggerStatusFor
+// (state, tx, now) is the UI-facing status, computed from the STORED
+// triggerState (no network) — except the check-in trigger, whose
+// state is live clock math so the card's "3 of 35 days elapsed" line
+// is current on every page load.
 // ---------------------------------------------------------------------------
 const PRICE_JUMP_WINDOW_MS = 60 * 60 * 1000; // the 10x-jump guard (below) only applies when the last good reading is recent — over a longer gap a real 10x move is possible
 
@@ -899,7 +1009,7 @@ let priceCache = { readings: {}, fetchedAt: null, source1: null, source2: null }
 // slower cadence does not refetch on every read. A fetched
 // reading is cached even when the evaluator later judges it
 // implausible (the evaluator keeps lastPrice separately — see
-// evaluatePriceTrigger — so a bad reading never becomes the
+// checkPriceRule — so a bad reading never becomes the
 // baseline for the next one).
 async function fetchPriceCached(sources, cadenceSeconds) {
   const src = (sources && sources.source1 && sources.source2) ? sources : { source1: 'coingecko', source2: 'coinbase' };
@@ -1021,59 +1131,69 @@ function exchangeStatusFor(pc, sources, agreementPct) {
 async function refreshPriceIfStale() {
   try {
     const st = store.loadState(DATA_DIR);
-    const hasPrice = (st.bitcoin.txs || []).some((t) => t.enabled && store.triggerOf(t).type === 'price');
+    const hasPrice = (st.bitcoin.txs || []).some((t) => t.enabled && store.hasTriggerType(t, 'price'));
     if (!hasPrice) return;
     await fetchPriceCached(priceSourcesOf(st.settings), checkCadenceSecondsOf(st.settings));
   } catch (e) { console.error('price refresh failed:', e); }
 }
 
-// The triggerState shape (0.8.0): every evaluation writes all of
-// these, null when a field does not apply to the type — so the
-// shape is stable across types and the UI can read it blind.
-//   lastEvalAt — when the trigger was last evaluated (ISO)
+// The triggerState shape (0.8.0, per-rule 0.8.2): tx.triggerState
+// is an array parallel to the rules (index-keyed); every evaluation
+// writes one rule's slice, with all of these fields, null when a
+// field does not apply to the type — so the shape is stable across
+// types and the UI can read it blind.
+//   lastEvalAt — when the rule was last evaluated (ISO)
 //   status / reason — the status word + the human-readable state
 //   lastPrice / lastPriceAt — the last GOOD price reading (price only)
 //   lastOutspend — { spent, confirmed, txid, checkedAt } (UTXO only)
 //   lastError — the last fetch failure, if any (else null)
+// ruleTriggerState(tx, i) reads one slice (null when the rule was
+// never evaluated); setRuleTriggerState(tx, i, slice) writes one,
+// growing the array with nulls when a legacy flat state is being
+// normalized (loadState wraps it first, so this is defensive).
 function freshTriggerState(now, status, reason) {
   return {
     lastEvalAt: now.toISOString(), status, reason,
     lastPrice: null, lastPriceAt: null, lastOutspend: null, lastError: null,
   };
 }
+function ruleTriggerState(tx, i) {
+  const arr = (tx && Array.isArray(tx.triggerState)) ? tx.triggerState : null;
+  if (!arr) return null;
+  const s = arr[i];
+  return (s && typeof s === 'object') ? s : null;
+}
+function setRuleTriggerState(tx, i, slice) {
+  if (!tx) return;
+  if (!Array.isArray(tx.triggerState)) tx.triggerState = [];
+  while (tx.triggerState.length <= i) tx.triggerState.push(null);
+  tx.triggerState[i] = slice;
+}
 
-// The check-in trigger: the same clock as checkinStatus, at this
-// tx's own threshold (a rule with a 7-day threshold fires on its
-// own 7-day window, not the global 35). Vacation never fires it
-// — evaluateReleaseInner returns early for those anyway,
-// but the evaluator is explicit so a direct call is safe too.
-// The clock is measured with the tx's live freeze offset, so a
-// frozen clock is never release-due while inactive.
-function evaluateCheckinTrigger(state, tx, now) {
-  const trg = store.triggerOf(tx);
-  const clock = checkinClock(state, now, trg.params.thresholdDays, checkinLiveOffsetMs(tx, now));
-  if (state.settings.vacationMode) {
-    tx.triggerState = freshTriggerState(now, 'vacation', 'Vacation mode is on');
-    return { fire: false, status: 'vacation', reason: 'Vacation mode is on' };
-  }
+// The check-in rule: the same clock as checkinStatus, at this
+// rule's own threshold (a rule with a 7-day threshold fires on its
+// own 7-day window, not the global 35). Pure clock math — no
+// vacation handling here (the evaluator holds it; the gate ignores
+// it — see evaluateRule / checkTriggerNow). The clock is measured
+// with the tx's live freeze offset, so a frozen clock is never
+// release-due while inactive.
+function checkCheckinRule(state, rule, now, ctx) {
+  const clock = checkinClock(state, now, rule.params.thresholdDays, ctx && ctx.liveOffsetMs);
+  const detail = { daysSince: clock.daysSince, nextDue: clock.nextDue };
   if (clock.state === 'not-started') {
-    tx.triggerState = freshTriggerState(now, 'not-started', 'No check-in recorded yet');
-    return { fire: false, status: 'not-started', reason: 'No check-in recorded yet' };
+    return { fire: false, status: 'not-started', reason: 'No check-in recorded yet', slice: freshTriggerState(now, 'not-started', 'No check-in recorded yet'), detail, warning: null };
   }
   if (clock.state === 'held') {
     // No special grace display: the bar just shows the longer
     // held window ("40 of 52 days elapsed"), and the reason
     // reads the same — the hold still gates the release (no fire
     // while held), it just is not named on the card.
-    tx.triggerState = freshTriggerState(now, 'held', clock.daysSince + ' of ' + clock.windowDays + ' days elapsed');
-    return { fire: false, status: 'held', reason: clock.daysSince + ' of ' + clock.windowDays + ' days elapsed' };
+    return { fire: false, status: 'held', reason: clock.daysSince + ' of ' + clock.windowDays + ' days elapsed', slice: freshTriggerState(now, 'held', clock.daysSince + ' of ' + clock.windowDays + ' days elapsed'), detail, warning: null };
   }
   if (clock.state === 'release-due') {
-    tx.triggerState = freshTriggerState(now, 'release-due', 'Release due');
-    return { fire: true, status: 'release-due', reason: 'Release due' };
+    return { fire: true, status: 'release-due', reason: 'Release due', slice: freshTriggerState(now, 'release-due', 'Release due'), detail, warning: 'This condition is already satisfied — it would fire on the next evaluation.' };
   }
-  tx.triggerState = freshTriggerState(now, 'on-track', clock.daysSince + ' of ' + clock.windowDays + ' days elapsed');
-  return { fire: false, status: 'on-track', reason: clock.daysSince + ' of ' + clock.windowDays + ' days elapsed' };
+  return { fire: false, status: 'on-track', reason: clock.daysSince + ' of ' + clock.windowDays + ' days elapsed', slice: freshTriggerState(now, 'on-track', clock.daysSince + ' of ' + clock.windowDays + ' days elapsed'), detail, warning: null };
 }
 
 // The price trigger (0.8.0, two-source 0.8.0). The price is read
@@ -1106,10 +1226,9 @@ function evaluateCheckinTrigger(state, tx, now) {
 //       when the last reading is recent (within an hour). Over a
 //       longer gap a real 10x move is possible (the app was off
 //       for months), so an old baseline does not veto a new price.
-async function evaluatePriceTrigger(state, tx, now) {
-  const trg = store.triggerOf(tx);
-  const p = trg.params;
-  const prev = (tx.triggerState && typeof tx.triggerState === 'object') ? tx.triggerState : {};
+async function checkPriceRule(state, rule, now, ctx) {
+  const p = rule.params;
+  const prev = (ctx && ctx.prevSlice && typeof ctx.prevSlice === 'object') ? ctx.prevSlice : {};
   // The last GOOD state, kept across unknown readings (fail-safe):
   // a disagreement or outage never fires the rule.
   const keepGood = {
@@ -1119,58 +1238,81 @@ async function evaluatePriceTrigger(state, tx, now) {
   let readings;
   try { readings = await fetchPriceCached(priceSourcesOf(state.settings), checkCadenceSecondsOf(state.settings)); }
   catch (e) {
-    tx.triggerState = {
-      ...freshTriggerState(now, 'unknown', 'price unavailable — will retry'),
-      ...keepGood, lastError: e.message, priceMode: 'none', priceNote: '',
+    return {
+      fire: false, status: 'unknown', reason: 'price unavailable — will retry',
+      slice: {
+        ...freshTriggerState(now, 'unknown', 'price unavailable — will retry'),
+        ...keepGood, lastError: e.message, priceMode: 'none', priceNote: '',
+      },
+      detail: { error: e.message }, warning: null,
     };
-    return { fire: false, status: 'unknown', reason: 'price unavailable — will retry' };
   }
   const comb = bitcoin.combinePriceReadings(readings, priceAgreementPctOf(state.settings));
   if (!comb.valid) {
-    tx.triggerState = {
-      ...freshTriggerState(now, 'unknown', comb.reason),
-      ...keepGood, lastError: comb.reason, priceMode: comb.mode, priceNote: '',
+    return {
+      fire: false, status: 'unknown', reason: comb.reason,
+      slice: {
+        ...freshTriggerState(now, 'unknown', comb.reason),
+        ...keepGood, lastError: comb.reason, priceMode: comb.mode, priceNote: '',
+      },
+      detail: { mode: comb.mode, readings: comb.readings }, warning: null,
     };
-    return { fire: false, status: 'unknown', reason: comb.reason };
   }
   const price = comb.price;
   if (price < store.PRICE_MIN_USD || price > store.PRICE_MAX_USD) {
-    tx.triggerState = {
-      ...freshTriggerState(now, 'unknown', 'implausible price reading ($' + price.toLocaleString('en-US') + ') — ignored'),
-      ...keepGood, lastError: 'price out of bounds: $' + price.toLocaleString('en-US'), priceMode: comb.mode, priceNote: comb.note,
+    return {
+      fire: false, status: 'unknown', reason: 'implausible price reading ($' + price.toLocaleString('en-US') + ') — ignored',
+      slice: {
+        ...freshTriggerState(now, 'unknown', 'implausible price reading ($' + price.toLocaleString('en-US') + ') — ignored'),
+        ...keepGood, lastError: 'price out of bounds: $' + price.toLocaleString('en-US'), priceMode: comb.mode, priceNote: comb.note,
+      },
+      detail: { price, mode: comb.mode }, warning: null,
     };
-    return { fire: false, status: 'unknown', reason: 'implausible price reading ($' + price.toLocaleString('en-US') + ') — ignored' };
   }
   const lastPrice = keepGood.lastPrice;
   const lastAt = (typeof keepGood.lastPriceAt === 'string' && keepGood.lastPriceAt) ? new Date(keepGood.lastPriceAt).getTime() : NaN;
   if (lastPrice !== null && Number.isFinite(lastAt) && (now.getTime() - lastAt) <= PRICE_JUMP_WINDOW_MS
       && (price > lastPrice * 10 || price < lastPrice / 10)) {
-    tx.triggerState = {
-      ...freshTriggerState(now, 'unknown', 'implausible price jump ($' + lastPrice.toLocaleString('en-US') + ' → $' + price.toLocaleString('en-US') + ') — ignored'),
-      ...keepGood, lastError: 'price jumped 10x since the last reading: $' + lastPrice.toLocaleString('en-US') + ' → $' + price.toLocaleString('en-US'), priceMode: comb.mode, priceNote: comb.note,
+    return {
+      fire: false, status: 'unknown', reason: 'implausible price jump ($' + lastPrice.toLocaleString('en-US') + ' → $' + price.toLocaleString('en-US') + ') — ignored',
+      slice: {
+        ...freshTriggerState(now, 'unknown', 'implausible price jump ($' + lastPrice.toLocaleString('en-US') + ' → $' + price.toLocaleString('en-US') + ') — ignored'),
+        ...keepGood, lastError: 'price jumped 10x since the last reading: $' + lastPrice.toLocaleString('en-US') + ' → $' + price.toLocaleString('en-US'), priceMode: comb.mode, priceNote: comb.note,
+      },
+      detail: { price, mode: comb.mode }, warning: null,
     };
-    return { fire: false, status: 'unknown', reason: 'implausible price jump ($' + lastPrice.toLocaleString('en-US') + ' → $' + price.toLocaleString('en-US') + ') — ignored' };
   }
   // The reading is good: it becomes the new baseline.
   const holding = p.op === '>=' ? price >= p.value : price <= p.value;
   // The stored reason is trigger-only — the effective price, no
   // per-source note (that lives in priceNote as data, and in the
-  // Exchange Status section and dry-run notes for display).
+  // Exchange Status section and dry-run notes for display). The
+  // GATE's reason (gateReason) keeps the note — the /api/triggers/check
+  // answer names the sources it read ("currently $100,000 (Custom
+  // $100,000, Coinbase $98,200)"), as it always has.
   const shown = '$' + price.toLocaleString('en-US');
+  const gateShown = 'currently ' + shown + ' (' + comb.note + ')';
   if (!holding) {
-    tx.triggerState = {
-      ...freshTriggerState(now, 'watching', 'currently ' + shown),
-      lastPrice: price, lastPriceAt: now.toISOString(), lastError: null, priceMode: comb.mode, priceNote: comb.note,
+    return {
+      fire: false, status: 'watching', reason: 'currently ' + shown, gateReason: gateShown,
+      slice: {
+        ...freshTriggerState(now, 'watching', 'currently ' + shown),
+        lastPrice: price, lastPriceAt: now.toISOString(), lastError: null, priceMode: comb.mode, priceNote: comb.note,
+      },
+      detail: { price, mode: comb.mode, note: comb.note }, warning: null,
     };
-    return { fire: false, status: 'watching', reason: 'currently ' + shown };
   }
   // Holding: the effective price is past the threshold and both
   // sources agree — fire at once, no sustained wait.
-  tx.triggerState = {
-    ...freshTriggerState(now, 'due', 'past threshold — firing'),
-    lastPrice: price, lastPriceAt: now.toISOString(), lastError: null, priceMode: comb.mode, priceNote: comb.note,
+  return {
+    fire: true, status: 'due', reason: 'past threshold — firing', gateReason: gateShown,
+    slice: {
+      ...freshTriggerState(now, 'due', 'past threshold — firing'),
+      lastPrice: price, lastPriceAt: now.toISOString(), lastError: null, priceMode: comb.mode, priceNote: comb.note,
+    },
+    detail: { price, mode: comb.mode, note: comb.note },
+    warning: 'This condition is already satisfied — it would fire on the next evaluation.',
   };
-  return { fire: true, status: 'due', reason: 'past threshold — firing' };
 }
 
 // The UTXO trigger (0.8.0). The confirmation mode is per-rule
@@ -1190,59 +1332,85 @@ async function evaluatePriceTrigger(state, tx, now) {
 //   (d) The already-spent guard at creation is the add-time gate
 //       (see POST /api/bitcoin/txs) and the /api/triggers/check
 //       endpoint — not this evaluator.
-async function evaluateUtxoTrigger(state, tx, now) {
-  const trg = store.triggerOf(tx);
-  const needConfs = (trg.params.confirmations === 0) ? 0 : (trg.params.confirmations || 1);
+async function checkUtxoRule(state, rule, now, ctx) {
+  const needConfs = (rule.params.confirmations === 0) ? 0 : (rule.params.confirmations || 1);
   const endpoints = bitcoin.endpointsFor(state.settings);
   let res;
-  try { res = await bitcoin.checkOutspend(trg.params.outpoint, endpoints); }
+  try { res = await bitcoin.checkOutspend(rule.params.outpoint, endpoints); }
   catch (e) { res = { unknown: true, error: e.message }; }
-  const prev = (tx.triggerState && typeof tx.triggerState === 'object') ? tx.triggerState : {};
+  const prev = (ctx && ctx.prevSlice && typeof ctx.prevSlice === 'object') ? ctx.prevSlice : {};
   if (res.unknown) {
-    tx.triggerState = {
-      ...freshTriggerState(now, 'unknown', 'could not check the outpoint — will retry'),
-      lastOutspend: (prev.lastOutspend && typeof prev.lastOutspend === 'object') ? prev.lastOutspend : null,
-      lastError: res.error || 'outpoint could not be checked',
+    return {
+      fire: false, status: 'unknown', reason: 'could not check the outpoint — will retry',
+      slice: {
+        ...freshTriggerState(now, 'unknown', 'could not check the outpoint — will retry'),
+        lastOutspend: (prev.lastOutspend && typeof prev.lastOutspend === 'object') ? prev.lastOutspend : null,
+        lastError: res.error || 'outpoint could not be checked',
+      },
+      detail: { error: res.error || null }, warning: null,
     };
-    return { fire: false, status: 'unknown', reason: 'could not check the outpoint — will retry' };
   }
   const lastOutspend = { spent: res.spent, confirmed: res.confirmed, txid: res.txid || null, blockHeight: (res.blockHeight === undefined ? null : res.blockHeight), confirmations: null, checkedAt: now.toISOString() };
   if (!res.spent) {
-    tx.triggerState = { ...freshTriggerState(now, 'watching', 'still unspent'), lastOutspend, lastError: null };
-    return { fire: false, status: 'watching', reason: 'still unspent' };
+    return {
+      fire: false, status: 'watching', reason: 'still unspent',
+      slice: { ...freshTriggerState(now, 'watching', 'still unspent'), lastOutspend, lastError: null },
+      detail: { spent: false, confirmed: false }, warning: null,
+    };
   }
   // Spent. Unconfirmed mode (0) fires on any spend, confirmed or
   // not — the owner chose the mempool as the trigger.
   if (needConfs === 0) {
-    tx.triggerState = { ...freshTriggerState(now, 'due', 'spent — firing'), lastOutspend, lastError: null };
-    return { fire: true, status: 'due', reason: 'spent — firing' };
+    return {
+      fire: true, status: 'due', reason: 'spent — firing',
+      slice: { ...freshTriggerState(now, 'due', 'spent — firing'), lastOutspend, lastError: null },
+      detail: { spent: true, confirmed: res.confirmed, txid: res.txid, confirmations: 0 },
+      warning: 'This UTXO is already spent — it would fire on the next evaluation.',
+    };
   }
   // N-confirmation mode: an unconfirmed spend only watches.
   if (!res.confirmed) {
     lastOutspend.confirmations = 0;
     const noun = needConfs === 1 ? ' confirmation' : ' confirmations';
-    tx.triggerState = { ...freshTriggerState(now, 'watching', 'spend unconfirmed — waiting for ' + needConfs + noun), lastOutspend, lastError: null };
-    return { fire: false, status: 'watching', reason: 'spend unconfirmed — waiting for ' + needConfs + noun };
+    return {
+      fire: false, status: 'watching', reason: 'spend unconfirmed — waiting for ' + needConfs + noun,
+      slice: { ...freshTriggerState(now, 'watching', 'spend unconfirmed — waiting for ' + needConfs + noun), lastOutspend, lastError: null },
+      detail: { spent: true, confirmed: false, txid: res.txid, confirmations: 0 },
+      warning: 'This UTXO is already spent (unconfirmed) — it would fire once the spend reaches ' + needConfs + noun + '.',
+    };
   }
   // A confirmed spend: count its confirmations from the tip.
   if (res.blockHeight === null || res.blockHeight === undefined || !Number.isFinite(res.blockHeight)) {
-    tx.triggerState = { ...freshTriggerState(now, 'unknown', 'spend confirmed but its block height is unknown — will retry'), lastOutspend, lastError: 'spend block height unknown' };
-    return { fire: false, status: 'unknown', reason: 'spend confirmed but its block height is unknown — will retry' };
+    return {
+      fire: false, status: 'unknown', reason: 'spend confirmed but its block height is unknown — will retry',
+      slice: { ...freshTriggerState(now, 'unknown', 'spend confirmed but its block height is unknown — will retry'), lastOutspend, lastError: 'spend block height unknown' },
+      detail: { spent: true, confirmed: true, txid: res.txid }, warning: null,
+    };
   }
   let tip;
   try { tip = await bitcoin.getTipHeight(endpoints); }
   catch (e) {
-    tx.triggerState = { ...freshTriggerState(now, 'unknown', 'could not fetch the tip height — will retry'), lastOutspend, lastError: e.message };
-    return { fire: false, status: 'unknown', reason: 'could not fetch the tip height — will retry' };
+    return {
+      fire: false, status: 'unknown', reason: 'could not fetch the tip height — will retry',
+      slice: { ...freshTriggerState(now, 'unknown', 'could not fetch the tip height — will retry'), lastOutspend, lastError: e.message },
+      detail: { spent: true, confirmed: true, txid: res.txid, error: e.message }, warning: null,
+    };
   }
   const confs = Math.max(0, tip - res.blockHeight + 1);
   lastOutspend.confirmations = confs;
   if (confs >= needConfs) {
-    tx.triggerState = { ...freshTriggerState(now, 'due', 'spent — ' + confs + (confs === 1 ? ' confirmation' : ' confirmations') + ' — firing'), lastOutspend, lastError: null };
-    return { fire: true, status: 'due', reason: 'spent — ' + confs + (confs === 1 ? ' confirmation' : ' confirmations') + ' — firing' };
+    return {
+      fire: true, status: 'due', reason: 'spent — ' + confs + (confs === 1 ? ' confirmation' : ' confirmations') + ' — firing',
+      slice: { ...freshTriggerState(now, 'due', 'spent — ' + confs + (confs === 1 ? ' confirmation' : ' confirmations') + ' — firing'), lastOutspend, lastError: null },
+      detail: { spent: true, confirmed: true, txid: res.txid, confirmations: confs, blockHeight: res.blockHeight },
+      warning: 'This UTXO is already spent (' + confs + ' confirmations) — it would fire on the next evaluation.',
+    };
   }
-  tx.triggerState = { ...freshTriggerState(now, 'watching', 'spent — ' + confs + ' of ' + needConfs + ' confirmations'), lastOutspend, lastError: null };
-  return { fire: false, status: 'watching', reason: 'spent — ' + confs + ' of ' + needConfs + ' confirmations' };
+  return {
+    fire: false, status: 'watching', reason: 'spent — ' + confs + ' of ' + needConfs + ' confirmations',
+    slice: { ...freshTriggerState(now, 'watching', 'spent — ' + confs + ' of ' + needConfs + ' confirmations'), lastOutspend, lastError: null },
+    detail: { spent: true, confirmed: true, txid: res.txid, confirmations: confs, blockHeight: res.blockHeight }, warning: null,
+  };
 }
 
 // The block-height trigger (0.8.1). Fires when the chain tip
@@ -1257,9 +1425,8 @@ async function evaluateUtxoTrigger(state, tx, now) {
 // fires on data it cannot read. No grace period: the tip height is
 // the chain's own state, not a feed that can go stale — an offline
 // gap that ends past the height means the height was genuinely reached.
-async function evaluateBlockHeightTrigger(state, tx, now) {
-  const trg = store.triggerOf(tx);
-  const target = trg.params.targetHeight;
+async function checkBlockHeightRule(state, rule, now, ctx) {
+  const target = rule.params.targetHeight;
   // (0.8.1, audit finding 1) One-way latch: once the chain has been
   // observed at or past the target, the rule has fired — a later
   // reorg that drops the tip below the target, or a node outage,
@@ -1268,34 +1435,57 @@ async function evaluateBlockHeightTrigger(state, tx, now) {
   // reorg, because the next evaluation would say 'watching'. The
   // latch is keyed to the target height, so editing the rule to a
   // different height starts fresh (the edit path also clears
-  // triggerState on a trigger change).
-  const prev = (tx.triggerState && typeof tx.triggerState === 'object') ? tx.triggerState : {};
-  if (prev.heightReachedFor === target) {
-    tx.triggerState = { ...freshTriggerState(now, 'due', 'block ' + target.toLocaleString('en-US') + ' reached — firing'), lastTipHeight: (typeof prev.lastTipHeight === 'number' ? prev.lastTipHeight : target), lastError: null, heightReachedFor: target };
-    return { fire: true, status: 'due', reason: 'block ' + target.toLocaleString('en-US') + ' reached — firing' };
+  // triggerState on a trigger change). The latch arrives in
+  // ctx.latchedTarget — the evaluator reads it from the rule's
+  // stored slice, the gate from the tx being edited.
+  const prev = (ctx && ctx.prevSlice && typeof ctx.prevSlice === 'object') ? ctx.prevSlice : {};
+  const latchedTarget = (ctx && typeof ctx.latchedTarget === 'number') ? ctx.latchedTarget : null;
+  if (latchedTarget === target) {
+    return {
+      fire: true, status: 'due', reason: 'block ' + target.toLocaleString('en-US') + ' reached — firing',
+      slice: { ...freshTriggerState(now, 'due', 'block ' + target.toLocaleString('en-US') + ' reached — firing'), lastTipHeight: (typeof prev.lastTipHeight === 'number' ? prev.lastTipHeight : target), lastError: null, heightReachedFor: target },
+      detail: { tip: null, targetHeight: target, latched: true },
+      warning: 'This height has already been reached — it would fire on the next evaluation.',
+    };
   }
   const endpoints = bitcoin.endpointsFor(state.settings);
   let comb;
   try { comb = bitcoin.combineTipHeights(await bitcoin.fetchTipHeights(endpoints)); }
   catch (e) {
-    tx.triggerState = { ...freshTriggerState(now, 'unknown', 'could not fetch the tip height — will retry'), lastError: e.message };
-    return { fire: false, status: 'unknown', reason: 'could not fetch the tip height — will retry' };
+    return {
+      fire: false, status: 'unknown', reason: 'could not fetch the tip height — will retry',
+      slice: { ...freshTriggerState(now, 'unknown', 'could not fetch the tip height — will retry'), lastError: e.message },
+      detail: { error: e.message }, warning: null,
+    };
   }
   if (!comb.valid) {
-    tx.triggerState = { ...freshTriggerState(now, 'unknown', comb.reason), lastError: comb.reason };
-    return { fire: false, status: 'unknown', reason: comb.reason };
+    return {
+      fire: false, status: 'unknown', reason: comb.reason,
+      slice: { ...freshTriggerState(now, 'unknown', comb.reason), lastError: comb.reason },
+      detail: { error: comb.reason }, warning: null,
+    };
   }
   const tip = comb.tip;
   if (typeof tip !== 'number' || !Number.isFinite(tip) || tip < 0) {
-    tx.triggerState = { ...freshTriggerState(now, 'unknown', 'tip height unreadable — will retry'), lastError: 'tip height is not a number: ' + String(tip) };
-    return { fire: false, status: 'unknown', reason: 'tip height unreadable — will retry' };
+    return {
+      fire: false, status: 'unknown', reason: 'tip height unreadable — will retry',
+      slice: { ...freshTriggerState(now, 'unknown', 'tip height unreadable — will retry'), lastError: 'tip height is not a number: ' + String(tip) },
+      detail: { tip: String(tip) }, warning: null,
+    };
   }
   if (tip >= target) {
-    tx.triggerState = { ...freshTriggerState(now, 'due', 'block ' + tip.toLocaleString('en-US') + ' reached — firing'), lastTipHeight: tip, lastError: null, heightReachedFor: target };
-    return { fire: true, status: 'due', reason: 'block ' + tip.toLocaleString('en-US') + ' reached — firing' };
+    return {
+      fire: true, status: 'due', reason: 'block ' + tip.toLocaleString('en-US') + ' reached — firing',
+      slice: { ...freshTriggerState(now, 'due', 'block ' + tip.toLocaleString('en-US') + ' reached — firing'), lastTipHeight: tip, lastError: null, heightReachedFor: target },
+      detail: { tip, targetHeight: target },
+      warning: 'This height has already been reached — it would fire on the next evaluation.',
+    };
   }
-  tx.triggerState = { ...freshTriggerState(now, 'watching', 'block ' + tip.toLocaleString('en-US') + ' of ' + target.toLocaleString('en-US')), lastTipHeight: tip, lastError: null };
-  return { fire: false, status: 'watching', reason: 'block ' + tip.toLocaleString('en-US') + ' of ' + target.toLocaleString('en-US') };
+  return {
+    fire: false, status: 'watching', reason: 'block ' + tip.toLocaleString('en-US') + ' of ' + target.toLocaleString('en-US'),
+    slice: { ...freshTriggerState(now, 'watching', 'block ' + tip.toLocaleString('en-US') + ' of ' + target.toLocaleString('en-US')), lastTipHeight: tip, lastError: null },
+    detail: { tip, targetHeight: target }, warning: null,
+  };
 }
 
 // The set-date trigger (0.8.1). Fires when the wall clock
@@ -1306,21 +1496,30 @@ async function evaluateBlockHeightTrigger(state, tx, now) {
 // past the date means the date genuinely passed. The
 // "fire unless I check in" snooze variant is a later addition,
 // not this rule.
-function evaluateSetDateTrigger(state, tx, now) {
-  const trg = store.triggerOf(tx);
-  const fireMs = Date.parse(trg.params.fireAt);
+function checkSetDateRule(state, rule, now, ctx) {
+  const fireMs = Date.parse(rule.params.fireAt);
   if (!Number.isFinite(fireMs)) {
-    tx.triggerState = { ...freshTriggerState(now, 'unknown', 'set date is not a valid date — will retry'), lastError: 'fireAt is not a valid date: ' + String(trg.params.fireAt) };
-    return { fire: false, status: 'unknown', reason: 'set date is not a valid date — will retry' };
+    return {
+      fire: false, status: 'unknown', reason: 'set date is not a valid date — will retry',
+      slice: { ...freshTriggerState(now, 'unknown', 'set date is not a valid date — will retry'), lastError: 'fireAt is not a valid date: ' + String(rule.params.fireAt) },
+      detail: { fireAt: String(rule.params.fireAt) }, warning: null,
+    };
   }
   if (now.getTime() >= fireMs) {
-    tx.triggerState = { ...freshTriggerState(now, 'due', 'date reached — firing'), lastError: null };
-    return { fire: true, status: 'due', reason: 'date reached — firing' };
+    return {
+      fire: true, status: 'due', reason: 'date reached — firing',
+      slice: { ...freshTriggerState(now, 'due', 'date reached — firing'), lastError: null },
+      detail: { fireAt: rule.params.fireAt },
+      warning: 'This date has already passed — it would fire on the next evaluation.',
+    };
   }
   const d = new Date(fireMs);
   const shown = d.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
-  tx.triggerState = { ...freshTriggerState(now, 'watching', 'fires on ' + shown), lastError: null };
-  return { fire: false, status: 'watching', reason: 'fires on ' + shown };
+  return {
+    fire: false, status: 'watching', reason: 'fires on ' + shown,
+    slice: { ...freshTriggerState(now, 'watching', 'fires on ' + shown), lastError: null },
+    detail: { fireAt: rule.params.fireAt }, warning: null,
+  };
 }
 
 // The fee-market trigger (0.8.1). Fires when the economy fee
@@ -1342,11 +1541,10 @@ function evaluateSetDateTrigger(state, tx, now) {
 // live market reading, not a feed that can go stale in the
 // price-trigger sense — an offline gap that ends in a low-fee
 // market means fees genuinely are low.
-async function evaluateFeeMarketTrigger(state, tx, now) {
-  const trg = store.triggerOf(tx);
-  const maxRate = trg.params.maxFeeRate;
-  const dir = trg.params.direction === 'above' ? 'above' : 'below';
-  const prev = (tx.triggerState && typeof tx.triggerState === 'object') ? tx.triggerState : {};
+async function checkFeeMarketRule(state, rule, now, ctx) {
+  const maxRate = rule.params.maxFeeRate;
+  const dir = rule.params.direction === 'above' ? 'above' : 'below';
+  const prev = (ctx && ctx.prevSlice && typeof ctx.prevSlice === 'object') ? ctx.prevSlice : {};
   // The last GOOD fee, kept across unknown readings (fail-safe):
   // a disagreement or outage never fires the rule, and the
   // subcard keeps showing the last fee it could trust.
@@ -1356,67 +1554,210 @@ async function evaluateFeeMarketTrigger(state, tx, now) {
   let readings;
   try { readings = await fetchNodeFeesCached(bitcoin.endpointsFor(state.settings), checkCadenceSecondsOf(state.settings)); }
   catch (e) {
-    tx.triggerState = { ...freshTriggerState(now, 'unknown', 'fee unavailable — will retry'), ...keepGood, lastError: e.message, feeMode: 'none', feeNote: '' };
-    return { fire: false, status: 'unknown', reason: 'fee unavailable — will retry' };
+    return {
+      fire: false, status: 'unknown', reason: 'fee unavailable — will retry',
+      slice: { ...freshTriggerState(now, 'unknown', 'fee unavailable — will retry'), ...keepGood, lastError: e.message, feeMode: 'none', feeNote: '' },
+      detail: { error: e.message }, warning: null,
+    };
   }
   const comb = bitcoin.combineFeeReadings(readings);
   if (!comb.valid) {
-    tx.triggerState = { ...freshTriggerState(now, 'unknown', comb.reason), ...keepGood, lastError: comb.reason, feeMode: comb.mode, feeNote: '' };
-    return { fire: false, status: 'unknown', reason: comb.reason };
+    return {
+      fire: false, status: 'unknown', reason: comb.reason,
+      slice: { ...freshTriggerState(now, 'unknown', comb.reason), ...keepGood, lastError: comb.reason, feeMode: comb.mode, feeNote: '' },
+      detail: { mode: comb.mode, error: comb.reason }, warning: null,
+    };
   }
   const econ = comb.fee;
   const fired = dir === 'above' ? econ >= maxRate : econ <= maxRate;
   if (fired) {
-    tx.triggerState = { ...freshTriggerState(now, 'due', 'economy fee ' + econ + ' sat/vB — firing'), lastEconomyFee: econ, lastError: null, feeMode: comb.mode, feeNote: comb.note };
-    return { fire: true, status: 'due', reason: 'economy fee ' + econ + ' sat/vB — firing' };
+    return {
+      fire: true, status: 'due', reason: 'economy fee ' + econ + ' sat/vB — firing',
+      slice: { ...freshTriggerState(now, 'due', 'economy fee ' + econ + ' sat/vB — firing'), lastEconomyFee: econ, lastError: null, feeMode: comb.mode, feeNote: comb.note },
+      detail: { economyFee: econ, maxFeeRate: maxRate, direction: dir },
+      warning: 'The economy fee is already at or ' + dir + ' your threshold — it would fire on the next evaluation.',
+    };
   }
   const side = dir === 'above' ? 'below ' : 'above ';
-  tx.triggerState = { ...freshTriggerState(now, 'watching', 'economy fee ' + econ + ' sat/vB (' + side + maxRate + ')'), lastEconomyFee: econ, lastError: null, feeMode: comb.mode, feeNote: comb.note };
-  return { fire: false, status: 'watching', reason: 'economy fee ' + econ + ' sat/vB (' + side + maxRate + ')' };
+  return {
+    fire: false, status: 'watching', reason: 'economy fee ' + econ + ' sat/vB (' + side + maxRate + ')',
+    slice: { ...freshTriggerState(now, 'watching', 'economy fee ' + econ + ' sat/vB (' + side + maxRate + ')'), lastEconomyFee: econ, lastError: null, feeMode: comb.mode, feeNote: comb.note },
+    detail: { economyFee: econ, maxFeeRate: maxRate, direction: dir }, warning: null,
+  };
 }
 
-// Dispatch by trigger type. Returns { fire, status, reason } and
-// writes the tx's triggerState (the caller saves). The manual
-// trigger never fires — the owner broadcasts it by hand.
+// Dispatch by rule type. Returns the check function's result
+// { fire, status, reason, slice, detail, warning } — no state is
+// written here (the caller stores the slice). The manual rule never
+// fires — the owner broadcasts it by hand.
+async function checkRule(state, rule, now, ctx) {
+  switch (rule.type) {
+    case 'checkin': return checkCheckinRule(state, rule, now, ctx);
+    case 'price': return await checkPriceRule(state, rule, now, ctx);
+    case 'utxo': return await checkUtxoRule(state, rule, now, ctx);
+    case 'blockheight': return await checkBlockHeightRule(state, rule, now, ctx);
+    case 'setdate': return checkSetDateRule(state, rule, now, ctx);
+    case 'feemarket': return await checkFeeMarketRule(state, rule, now, ctx);
+    case 'manual': return checkManualRule(state, rule, now, ctx);
+    default: return checkCheckinRule(state, rule, now, ctx);
+  }
+}
+
+function checkManualRule(state, rule, now, ctx) {
+  return {
+    fire: false, status: 'manual', reason: 'Waiting for manual broadcast',
+    slice: freshTriggerState(now, 'manual', 'Waiting for manual broadcast'),
+    detail: {}, warning: null,
+  };
+}
+
+// Evaluate ONE rule of a tx, applying the evaluator-only holds,
+// and write the rule's triggerState slice when the check produces
+// one. Returns { rule, fire, status, reason, held, slice } — held
+// is null | 'grace' | 'vacation'.
+//   Grace (0.8.0): while it is active, a price or UTXO rule is not
+//     evaluated at all — it cannot fire, and its stored slice keeps
+//     the last real evaluation (so the subcard's current-state line
+//     still shows the live condition; only the pill says Grace).
+//     No network calls happen for it during the grace. The
+//     release-check result carries status 'grace' so the hold is
+//     named there. Grace is PER RULE: in an OR set a non-held rule
+//     can still fire during a grace; in an AND set a held rule is
+//     not satisfied, so the set cannot fire.
+//   Vacation (0.8.0): while it is on, a check-in rule does not
+//     fire — its slice records 'vacation', and the release holds
+//     it. Vacation touches check-in rules only; price, UTXO and
+//     the other rules keep firing. Vacation is PER RULE too: an OR
+//     set can still fire via a non-check-in rule while on vacation.
+async function evaluateRule(state, tx, ruleIndex, now) {
+  const set = store.triggerOf(tx);
+  const rule = set.rules[ruleIndex];
+  const prevSlice = ruleTriggerState(tx, ruleIndex);
+  if ((rule.type === 'price' || rule.type === 'utxo') && isGraceActive(state, now)) {
+    return { rule, fire: false, status: 'grace', reason: 'grace period active — will evaluate when it ends', held: 'grace', slice: null };
+  }
+  if (rule.type === 'checkin' && state.settings.vacationMode) {
+    const slice = freshTriggerState(now, 'vacation', 'Vacation mode is on');
+    setRuleTriggerState(tx, ruleIndex, slice);
+    return { rule, fire: false, status: 'vacation', reason: 'Vacation mode is on', held: 'vacation', slice };
+  }
+  const r = await checkRule(state, rule, now, {
+    prevSlice,
+    liveOffsetMs: checkinLiveOffsetMs(tx, now),
+    latchedTarget: (prevSlice && typeof prevSlice.heightReachedFor === 'number') ? prevSlice.heightReachedFor : null,
+  });
+  if (r.slice) setRuleTriggerState(tx, ruleIndex, r.slice);
+  return { rule, fire: r.fire, status: r.status, reason: r.reason, held: null, slice: r.slice || null };
+}
+
+// Combine the per-rule outcomes by the set's op. Each outcome is
+// { index, fire, status, reason, held, skipped, cls } — cls is the
+// outcome class: 'satisfied' (the rule fired), 'not' (it did not,
+// and was read), 'unknown' (it could not be read — fail-safe), or
+// 'held' (grace / vacation / offline-hold — read, but held back).
+// `skipped` means the rule was not evaluated this tick. No caller
+// skips any more (0.8.2 — the type filter is gone, the full tick
+// evaluates everything); the class is kept as a defensive reading:
+// a skipped rule is not satisfied, so an AND set cannot fire on a
+// tick that did not evaluate all of it, while an OR set only needs
+// one evaluated rule to fire.
+//   OR: fire iff any evaluated rule is SATISFIED; unknowns are
+//     ignored — a setdate rule still fires while its sibling price
+//     rule cannot be read.
+//   AND: fire iff EVERY rule is SATISFIED at this same tick —
+//     "all at once" (Ryan, Nov 18), no per-rule latching (the
+//     block-height latch is that rule type's own one-way semantics,
+//     not latching). Any UNKNOWN, HELD, or SKIPPED rule blocks it.
+// The combined status is the tx-level word: a one-rule set reads
+// exactly as its single rule did ('on-track', 'grace', 'due',
+// ...); a multi-rule set reads 'due' | 'unknown' | 'grace' |
+// 'vacation' | 'held' | 'watching' (unknown beats held — a rule
+// that cannot be read is the more urgent fact).
+// Returns { fire, status, reason, firedIndexes } — firedIndexes
+// are the rule indexes that fired, so the history event can name
+// them.
+function combineOutcomes(set, outcomes) {
+  const evaluated = outcomes.filter((o) => !o.skipped);
+  const fired = evaluated.filter((o) => o.cls === 'satisfied');
+  const firedIndexes = fired.map((o) => o.index);
+  let fire = false;
+  if (set.op === 'OR') fire = fired.length > 0;
+  else fire = evaluated.length === set.rules.length && evaluated.every((o) => o.cls === 'satisfied');
+  if (set.rules.length === 1) {
+    const o = outcomes[0];
+    return { fire: o.fire, status: o.status, reason: o.reason, firedIndexes: o.fire ? [0] : [] };
+  }
+  let status, reason;
+  if (fire) {
+    status = 'due';
+    reason = fired.map((o) => o.reason).join(' + ');
+  } else if (evaluated.some((o) => o.cls === 'unknown')) {
+    const u = evaluated.find((o) => o.cls === 'unknown');
+    status = 'unknown';
+    reason = u.reason;
+  } else if (evaluated.some((o) => o.held === 'grace')) {
+    status = 'grace';
+    reason = 'grace period active — will evaluate when it ends';
+  } else if (evaluated.some((o) => o.held === 'vacation')) {
+    status = 'vacation';
+    reason = 'Vacation mode is on';
+  } else if (evaluated.some((o) => o.held === 'held')) {
+    const h = evaluated.find((o) => o.held === 'held');
+    status = 'held';
+    reason = h.reason;
+  } else {
+    status = 'watching';
+    reason = evaluated.map((o) => o.reason).join('; ');
+  }
+  return { fire, status, reason, firedIndexes };
+}
+
+// The outcome class of one evaluated rule: 'satisfied' when it
+// fired, 'unknown' when it could not be read, 'held' when a hold
+// kept it from firing, else 'not'.
+function outcomeClass(r) {
+  if (r.fire) return 'satisfied';
+  if (r.status === 'unknown') return 'unknown';
+  if (r.held) return 'held';
+  return 'not';
+}
+
+// Evaluate a tx's whole rule set (0.8.2). Returns { fire, status,
+// reason, ruleResults, firedIndexes } and writes each evaluated
+// rule's triggerState slice (the caller saves). Every rule is
+// evaluated, every time — there is no type filter any more
+// (0.8.2): the full tick judges all types together, so an AND
+// set spanning domains (check-in AND price) fires on the tick,
+// not only on a manual check. That is what "all at once" needs:
+// a tick that did not evaluate a rule cannot claim it held, and
+// now every tick evaluates every rule.
 async function evaluateTrigger(state, tx, now) {
-  const trg = store.triggerOf(tx);
-  // Grace period (0.8.0): while it is active, a price or UTXO
-  // trigger is not evaluated at all — it cannot fire, and its
-  // stored triggerState keeps the last real evaluation (so the
-  // subcard's current-state line still shows the live
-  // condition; only the pill says Grace). No network calls
-  // happen for it during the grace. Check-in and manual
-  // triggers are not affected (check-in keeps its own
-  // heldUntil hold). The release-check result carries status
-  // 'grace' so the hold is named there.
-  if ((trg.type === 'price' || trg.type === 'utxo') && isGraceActive(state, now)) {
-    return { fire: false, status: 'grace', reason: 'grace period active — will evaluate when it ends' };
+  const set = store.triggerOf(tx);
+  const ruleResults = [];
+  for (let i = 0; i < set.rules.length; i++) {
+    const rule = set.rules[i];
+    const r = await evaluateRule(state, tx, i, now);
+    ruleResults.push({ index: i, rule, fire: r.fire, status: r.status, reason: r.reason, held: r.held, skipped: false, cls: outcomeClass(r), slice: r.slice });
   }
-  switch (trg.type) {
-    case 'checkin': return evaluateCheckinTrigger(state, tx, now);
-    case 'price': return await evaluatePriceTrigger(state, tx, now);
-    case 'utxo': return await evaluateUtxoTrigger(state, tx, now);
-    case 'blockheight': return await evaluateBlockHeightTrigger(state, tx, now);
-    case 'setdate': return evaluateSetDateTrigger(state, tx, now);
-    case 'feemarket': return await evaluateFeeMarketTrigger(state, tx, now);
-    case 'manual': {
-      tx.triggerState = freshTriggerState(now, 'manual', 'Waiting for manual broadcast');
-      return { fire: false, status: 'manual', reason: 'Waiting for manual broadcast' };
-    }
-    default: return evaluateCheckinTrigger(state, tx, now);
-  }
+  const combined = combineOutcomes(set, ruleResults);
+  return {
+    fire: combined.fire, status: combined.status, reason: combined.reason,
+    ruleResults, firedIndexes: combined.firedIndexes,
+    firedRuleTypes: combined.firedIndexes.map((i) => set.rules[i].type),
+  };
 }
 
-// The UI-facing trigger status, computed from the STORED
-// triggerState (no network) — except the check-in trigger, whose
-// state is live clock math. Returns { type, label, condition,
-// status, reason, ...type-specific fields }. The price's
-// "currently $X" line uses the cached price when one is available
-// (it is fresher than the stored reading).
-function triggerStatusFor(state, tx, now) {
-  const trg = store.triggerOf(tx);
-  const base = { type: trg.type, label: triggerLabel(trg), condition: triggerConditionText(trg) };
-  const st = (tx.triggerState && typeof tx.triggerState === 'object') ? tx.triggerState : null;
+// One rule's UI-facing status, computed from its STORED slice (no
+// network) — except the check-in rule, whose state is live clock
+// math. Returns { type, label, condition, status, reason,
+// ...type-specific fields }. The price's "currently $X" line uses
+// the cached price when one is available (it is fresher than the
+// stored reading). `slice` is the rule's triggerState slice (null
+// when it has never been evaluated).
+function ruleStatusFor(state, tx, rule, slice, now) {
+  const trg = rule;
+  const st = slice;
+  const base = { type: trg.type, label: triggerLabel(trg), condition: singleTriggerConditionText(trg) };
   if (trg.type === 'checkin') {
     const clock = checkinClock(state, now, trg.params.thresholdDays, checkinLiveOffsetMs(tx, now));
     if (clock.state === 'not-started') return { ...base, status: 'not-started', reason: 'No check-in recorded yet' };
@@ -1481,154 +1822,147 @@ function triggerStatusFor(state, tx, now) {
     return { ...base, status: st.status || 'watching', reason: st.reason || 'waiting for the height', lastTipHeight: (typeof st.lastTipHeight === 'number' ? st.lastTipHeight : null) };
   }
   if (trg.type === 'setdate') {
-    if (!st) return { ...base, status: 'not-evaluated', reason: 'Not evaluated yet' };
-    return { ...base, status: st.status || 'watching', reason: st.reason || 'waiting for the date' };
+    // Pure clock math — no cache, no network — so a set-date
+    // rule reads live even when never evaluated or disarmed,
+    // like the price rule below. Mirrors checkSetDateRule's
+    // reasons exactly; the stored slice is never consulted.
+    const fireMs = Date.parse(trg.params.fireAt);
+    if (!Number.isFinite(fireMs)) return { ...base, status: 'unknown', reason: 'set date is not a valid date — will retry' };
+    if (now.getTime() >= fireMs) return { ...base, status: 'due', reason: 'date reached — firing' };
+    const d = new Date(fireMs);
+    const shown = d.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
+    return { ...base, status: 'watching', reason: 'fires on ' + shown };
   }
   if (trg.type === 'feemarket') {
+    // Like price, the fee rule reads the live in-memory
+    // node-fee cache when it is warm (same endpoints, younger
+    // than one cadence — the same validation fetchNodeFeesCached
+    // applies) — so the pill reflects the market even for a tx
+    // that was never evaluated or is disarmed. Otherwise the
+    // stored last evaluation carries it; with neither, the rule
+    // is not-evaluated (Unknown), as before.
+    const maxRate = trg.params.maxFeeRate;
+    const dir = trg.params.direction === 'above' ? 'above' : 'below';
+    const eps = bitcoin.endpointsFor(state.settings);
+    const feeCacheOk = nodeFeeCache.readings && Object.keys(nodeFeeCache.readings).length
+      && nodeFeeCache.primary === (eps[0] ? eps[0].base : null)
+      && nodeFeeCache.secondary === (eps[1] ? eps[1].base : null)
+      && nodeFeeCache.fetchedAt
+      && (Date.now() - new Date(nodeFeeCache.fetchedAt).getTime()) < checkCadenceSecondsOf(state.settings) * 1000;
+    if (feeCacheOk) {
+      const comb = bitcoin.combineFeeReadings(nodeFeeCache.readings);
+      if (comb.valid) {
+        const econ = comb.fee;
+        const fired = dir === 'above' ? econ >= maxRate : econ <= maxRate;
+        if (fired) return { ...base, status: 'due', reason: 'economy fee ' + econ + ' sat/vB — firing', lastEconomyFee: econ, feeMode: comb.mode, feeNote: comb.note };
+        const side = dir === 'above' ? 'below ' : 'above ';
+        return { ...base, status: 'watching', reason: 'economy fee ' + econ + ' sat/vB (' + side + maxRate + ')', lastEconomyFee: econ, feeMode: comb.mode, feeNote: comb.note };
+      }
+      // The latest fetch says no usable reading — the card shows
+      // unknown, whatever the last evaluation said (same fail-safe
+      // as the price branch above).
+      return { ...base, status: 'unknown', reason: comb.reason || 'fee unavailable — will retry', lastEconomyFee: null, feeMode: comb.mode, feeNote: '' };
+    }
     if (!st) return { ...base, status: 'not-evaluated', reason: 'Not evaluated yet', lastEconomyFee: null };
-    return { ...base, status: st.status || 'watching', reason: st.reason || 'waiting for fees to fall', lastEconomyFee: (typeof st.lastEconomyFee === 'number' ? st.lastEconomyFee : null) };
+    return { ...base, status: st.status || 'watching', reason: st.reason || 'waiting for fees to fall', lastEconomyFee: (typeof st.lastEconomyFee === 'number' ? st.lastEconomyFee : null), feeMode: (typeof st.feeMode === 'string' ? st.feeMode : null), feeNote: (typeof st.feeNote === 'string' ? st.feeNote : '') };
   }
   return { ...base, status: 'not-evaluated', reason: 'Not evaluated yet' };
 }
 
-// Evaluate a trigger ONCE, live, without changing any state
-// (0.8.0): the POST /api/triggers/check endpoint (the UI's
-// already-true guard) and the add-time warning use this. `trg` is
-// a NORMALIZED trigger (the caller validates first).
+// The tx-level trigger status for the UI (0.8.2): a one-rule set
+// reads exactly as its single rule did (the object above); a
+// multi-rule set reads the same combine as the evaluator — 'due'
+// when the set would fire, 'unknown' when a rule cannot be read,
+// 'grace' / 'vacation' / 'held' when a hold is the thing stopping
+// it, else 'watching' — with one status object per rule under
+// `rules`, so the card can list them. A rule never evaluated reads
+// 'not-evaluated', which the combine treats as unknown (fail-safe:
+// the set cannot be proven satisfied or not).
+function triggerStatusFor(state, tx, now) {
+  const set = store.triggerOf(tx);
+  const statuses = set.rules.map((rule, i) => ruleStatusFor(state, tx, rule, ruleTriggerState(tx, i), now));
+  if (set.rules.length === 1) return statuses[0];
+  const outcomes = statuses.map((s, i) => {
+    const held = s.status === 'grace' ? 'grace' : s.status === 'vacation' ? 'vacation' : s.status === 'held' ? 'held' : null;
+    const cls = (s.status === 'due' || s.status === 'release-due') ? 'satisfied'
+      : (s.status === 'unknown' || s.status === 'not-evaluated') ? 'unknown'
+      : held ? 'held' : 'not';
+    return { index: i, rule: set.rules[i], fire: cls === 'satisfied', status: s.status, reason: s.reason, held, skipped: false, cls };
+  });
+  const combined = combineOutcomes(set, outcomes);
+  return {
+    type: 'ruleset', op: set.op,
+    label: set.op === 'AND' ? 'AND rules' : 'OR rules',
+    condition: triggerConditionText(set),
+    status: combined.status, reason: combined.reason,
+    rules: statuses,
+  };
+}
+
+// Evaluate a rule set ONCE, live, without changing any state
+// (0.8.0, unified 0.8.2): the POST /api/triggers/check endpoint
+// (the UI's already-true guard) and the add-time warning use this.
+// `trgSet` is a NORMALIZED rule set (the caller validates first —
+// a single rule is already wrapped as a one-rule set).
 // Returns { valid, fire, status, reason, warning, detail } —
-// `warning` is a human-readable string when the condition is
-// already satisfied (it would fire on the next evaluation), else
-// null. A price trigger reports fire=true when both sources
-// agree the price is already past the threshold — there is no
-// sustained wait, so a single live sample that both sources
-// agree on proves the condition. The 10x-jump guard does not
-// apply here (it needs a stored baseline — the evaluator owns
-// it); only the absolute bounds are checked. `latchedTarget`
-// (0.8.1, audit finding 1) is a block-height target the chain
-// has already been observed at or past — a latched rule fires
-// even if the tip has since reorged below it; the add/edit
-// gates pass nothing (a new rule has no latch).
-async function checkTriggerNow(trg, state, now, liveOffsetMs, latchedTarget) {
-  if (trg.type === 'checkin') {
-    // (0.8.0) liveOffsetMs is the tx's frozen time (disarmed /
-    // vacation) — the same effective clock the evaluator uses.
-    // A caller that knows the tx passes it (POST
-    // /api/triggers/check takes an optional txId); a new tx has
-    // none, so the clock is measured from the raw last check-in.
-    const clock = checkinClock(state, now, trg.params.thresholdDays, liveOffsetMs);
-    if (clock.state === 'release-due') {
-      return { valid: true, fire: true, status: 'release-due', reason: 'Release due', warning: 'This condition is already satisfied — it would fire on the next evaluation.', detail: { daysSince: clock.daysSince, nextDue: clock.nextDue } };
-    }
-    return {
-      valid: true, fire: false, status: clock.state,
-      reason: clock.state === 'not-started' ? 'No check-in recorded yet' : clock.daysSince + ' of ' + clock.windowDays + ' days elapsed',
-      warning: null, detail: { daysSince: clock.daysSince, nextDue: clock.nextDue },
-    };
+// `warning` is a human-readable string when the set is already
+// satisfied (it would fire on the next evaluation), else the first
+// per-rule warning (an unconfirmed UTXO spend warns without
+// firing), else null. A price rule reports fire=true when both
+// sources agree the price is already past the threshold — there is
+// no sustained wait, so a single live sample that both sources
+// agree on proves the condition. The 10x-jump guard does not apply
+// here (it needs a stored baseline — the evaluator owns it); only
+// the absolute bounds are checked.
+// The gate answers the RAW condition: no grace, no vacation, no
+// disarm. A price rule that is past its threshold during a grace,
+// or a check-in rule that is due during vacation, still reports
+// fire=true — the hold is temporary and the condition itself is
+// already met, so adding the rule would fire on the next evaluation
+// once the hold lifts. That is the gate's conservative block, and
+// it is deliberate: the evaluator (evaluateRule) is the only path
+// that applies the holds. `ctx` is { liveOffsetMs, latchedTargets }:
+// the tx's frozen time for a check-in rule (a txId the caller
+// passes), and one latched block height per rule (0.8.1, audit
+// finding 1) — a latched rule fires even if the tip has since
+// reorged below it; the add/edit gates pass none (a new rule has
+// no latch). A one-rule set answers exactly as its single rule
+// did (same status / reason / warning / detail); a multi-rule set
+// answers the combined fire with the per-rule results in
+// detail.rules.
+async function checkTriggerNow(trgSet, state, now, ctx) {
+  const set = toTriggerSet(trgSet);
+  const liveOff = (ctx && typeof ctx.liveOffsetMs === 'number' && Number.isFinite(ctx.liveOffsetMs)) ? ctx.liveOffsetMs : 0;
+  const latched = (ctx && Array.isArray(ctx.latchedTargets)) ? ctx.latchedTargets : [];
+  const ruleResults = [];
+  for (let i = 0; i < set.rules.length; i++) {
+    const rule = set.rules[i];
+    const r = await checkRule(state, rule, now, {
+      prevSlice: null,
+      liveOffsetMs: liveOff,
+      latchedTarget: (typeof latched[i] === 'number') ? latched[i] : null,
+    });
+    ruleResults.push({
+      index: i, rule, fire: r.fire, status: r.status,
+      reason: (typeof r.gateReason === 'string' && r.gateReason) ? r.gateReason : r.reason,
+      detail: r.detail || {}, warning: r.warning || null,
+      held: null, skipped: false, cls: r.fire ? 'satisfied' : (r.status === 'unknown' ? 'unknown' : 'not'),
+    });
   }
-  if (trg.type === 'price') {
-    let readings;
-    try { readings = await fetchPriceCached(priceSourcesOf(state.settings), checkCadenceSecondsOf(state.settings)); }
-    catch (e) { return { valid: true, fire: false, status: 'unknown', reason: 'price unavailable — will retry', warning: null, detail: { error: e.message } }; }
-    const comb = bitcoin.combinePriceReadings(readings, priceAgreementPctOf(state.settings));
-    if (!comb.valid) {
-      return { valid: true, fire: false, status: 'unknown', reason: comb.reason, warning: null, detail: { mode: comb.mode, readings: comb.readings } };
-    }
-    const price = comb.price;
-    if (price < store.PRICE_MIN_USD || price > store.PRICE_MAX_USD) {
-      return { valid: true, fire: false, status: 'unknown', reason: 'implausible price reading ($' + price.toLocaleString('en-US') + ') — ignored', warning: null, detail: { price, mode: comb.mode } };
-    }
-    const shown = 'currently $' + price.toLocaleString('en-US') + ' (' + comb.note + ')';
-    const holding = trg.params.op === '>=' ? price >= trg.params.value : price <= trg.params.value;
-    if (holding) {
-      return { valid: true, fire: true, status: 'due', reason: shown, warning: 'This condition is already satisfied — it would fire on the next evaluation.', detail: { price, mode: comb.mode, note: comb.note } };
-    }
-    return { valid: true, fire: false, status: 'watching', reason: shown, warning: null, detail: { price, mode: comb.mode, note: comb.note } };
+  const combined = combineOutcomes(set, ruleResults);
+  let warning = null;
+  if (set.rules.length === 1) {
+    warning = ruleResults[0].warning;
+  } else if (combined.fire) {
+    warning = 'This rule set is already satisfied — it would fire on the next evaluation.';
+  } else {
+    const w = ruleResults.find((r) => r.warning);
+    warning = w ? w.warning : null;
   }
-  if (trg.type === 'utxo') {
-    const endpoints = bitcoin.endpointsFor(state.settings);
-    const needConfs = (trg.params.confirmations === 0) ? 0 : (trg.params.confirmations || 1);
-    let res;
-    try { res = await bitcoin.checkOutspend(trg.params.outpoint, endpoints); }
-    catch (e) { res = { unknown: true, error: e.message }; }
-    if (res.unknown) return { valid: true, fire: false, status: 'unknown', reason: 'could not check the outpoint — will retry', warning: null, detail: { error: res.error || null } };
-    if (!res.spent) return { valid: true, fire: false, status: 'watching', reason: 'still unspent', warning: null, detail: { spent: false, confirmed: false } };
-    // Spent. Unconfirmed mode (0) fires on any spend — the
-    // condition is already satisfied, so this is a fire.
-    if (needConfs === 0) return { valid: true, fire: true, status: 'due', reason: 'spent — firing', warning: 'This UTXO is already spent — it would fire on the next evaluation.', detail: { spent: true, confirmed: res.confirmed, txid: res.txid, confirmations: 0 } };
-    // N-confirmation mode: an unconfirmed spend is a warning,
-    // not a fire — it may still be evicted.
-    if (!res.confirmed) {
-      const noun = needConfs === 1 ? ' confirmation' : ' confirmations';
-      return { valid: true, fire: false, status: 'unconfirmed', reason: 'spend unconfirmed — waiting for ' + needConfs + noun, warning: 'This UTXO is already spent (unconfirmed) — it would fire once the spend reaches ' + needConfs + noun + '.', detail: { spent: true, confirmed: false, txid: res.txid, confirmations: 0 } };
-    }
-    // A confirmed spend: count its confirmations from the tip.
-    if (res.blockHeight === null || res.blockHeight === undefined || !Number.isFinite(res.blockHeight)) {
-      return { valid: true, fire: false, status: 'unknown', reason: 'spend confirmed but its block height is unknown — will retry', warning: null, detail: { spent: true, confirmed: true, txid: res.txid } };
-    }
-    let tip;
-    try { tip = await bitcoin.getTipHeight(endpoints); }
-    catch (e) { return { valid: true, fire: false, status: 'unknown', reason: 'could not fetch the tip height — will retry', warning: null, detail: { spent: true, confirmed: true, txid: res.txid, error: e.message } }; }
-    const confs = Math.max(0, tip - res.blockHeight + 1);
-    if (confs >= needConfs) {
-      return { valid: true, fire: true, status: 'due', reason: 'spent — ' + confs + (confs === 1 ? ' confirmation' : ' confirmations') + ' — firing', warning: 'This UTXO is already spent (' + confs + ' confirmations) — it would fire on the next evaluation.', detail: { spent: true, confirmed: true, txid: res.txid, confirmations: confs, blockHeight: res.blockHeight } };
-    }
-    // Already spent but below the threshold — not yet firing, so
-    // no warning and no block: the rule will fire on its own once
-    // the spend reaches N confirmations.
-    return { valid: true, fire: false, status: 'watching', reason: 'spent — ' + confs + ' of ' + needConfs + ' confirmations', warning: null, detail: { spent: true, confirmed: true, txid: res.txid, confirmations: confs, blockHeight: res.blockHeight } };
-  }
-  if (trg.type === 'blockheight') {
-    // A latched rule (0.8.1, audit finding 1): the height was
-    // already observed — it fires without consulting the tip.
-    if (latchedTarget === trg.params.targetHeight) {
-      return { valid: true, fire: true, status: 'due', reason: 'block ' + trg.params.targetHeight.toLocaleString('en-US') + ' reached — firing', warning: 'This height has already been reached — it would fire on the next evaluation.', detail: { tip: null, targetHeight: trg.params.targetHeight, latched: true } };
-    }
-    const endpoints = bitcoin.endpointsFor(state.settings);
-    let comb;
-    try { comb = bitcoin.combineTipHeights(await bitcoin.fetchTipHeights(endpoints)); }
-    catch (e) { return { valid: true, fire: false, status: 'unknown', reason: 'could not fetch the tip height — will retry', warning: null, detail: { error: e.message } }; }
-    if (!comb.valid) {
-      return { valid: true, fire: false, status: 'unknown', reason: comb.reason, warning: null, detail: { error: comb.reason } };
-    }
-    const tip = comb.tip;
-    if (typeof tip !== 'number' || !Number.isFinite(tip) || tip < 0) {
-      return { valid: true, fire: false, status: 'unknown', reason: 'tip height unreadable — will retry', warning: null, detail: { tip: String(tip) } };
-    }
-    if (tip >= trg.params.targetHeight) {
-      return { valid: true, fire: true, status: 'due', reason: 'block ' + tip.toLocaleString('en-US') + ' reached — firing', warning: 'This height has already been reached — it would fire on the next evaluation.', detail: { tip, targetHeight: trg.params.targetHeight } };
-    }
-    return { valid: true, fire: false, status: 'watching', reason: 'block ' + tip.toLocaleString('en-US') + ' of ' + trg.params.targetHeight.toLocaleString('en-US'), warning: null, detail: { tip, targetHeight: trg.params.targetHeight } };
-  }
-  if (trg.type === 'setdate') {
-    const fireMs = Date.parse(trg.params.fireAt);
-    if (!Number.isFinite(fireMs)) {
-      return { valid: true, fire: false, status: 'unknown', reason: 'set date is not a valid date — will retry', warning: null, detail: { fireAt: String(trg.params.fireAt) } };
-    }
-    if (now.getTime() >= fireMs) {
-      return { valid: true, fire: true, status: 'due', reason: 'date reached — firing', warning: 'This date has already passed — it would fire on the next evaluation.', detail: { fireAt: trg.params.fireAt } };
-    }
-    const d = new Date(fireMs);
-    const shown = d.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
-    return { valid: true, fire: false, status: 'watching', reason: 'fires on ' + shown, warning: null, detail: { fireAt: trg.params.fireAt } };
-  }
-  if (trg.type === 'feemarket') {
-    let readings;
-    try { readings = await fetchNodeFeesCached(bitcoin.endpointsFor(state.settings), checkCadenceSecondsOf(state.settings)); }
-    catch (e) { return { valid: true, fire: false, status: 'unknown', reason: 'fee unavailable — will retry', warning: null, detail: { error: e.message } }; }
-    const dir = trg.params.direction === 'above' ? 'above' : 'below';
-    const comb = bitcoin.combineFeeReadings(readings);
-    if (!comb.valid) {
-      return { valid: true, fire: false, status: 'unknown', reason: comb.reason, warning: null, detail: { mode: comb.mode, error: comb.reason } };
-    }
-    const econ = comb.fee;
-    const fired = dir === 'above' ? econ >= trg.params.maxFeeRate : econ <= trg.params.maxFeeRate;
-    if (fired) {
-      return { valid: true, fire: true, status: 'due', reason: 'economy fee ' + econ + ' sat/vB — firing', warning: 'The economy fee is already at or ' + dir + ' your threshold — it would fire on the next evaluation.', detail: { economyFee: econ, maxFeeRate: trg.params.maxFeeRate, direction: dir } };
-    }
-    const side = dir === 'above' ? 'below ' : 'above ';
-    return { valid: true, fire: false, status: 'watching', reason: 'economy fee ' + econ + ' sat/vB (' + side + trg.params.maxFeeRate + ')', warning: null, detail: { economyFee: econ, maxFeeRate: trg.params.maxFeeRate, direction: dir } };
-  }
-  return { valid: true, fire: false, status: 'manual', reason: 'Waiting for manual broadcast', warning: null, detail: {} };
+  const detail = set.rules.length === 1
+    ? ruleResults[0].detail
+    : { rules: ruleResults.map((r) => ({ fire: r.fire, status: r.status, reason: r.reason, detail: r.detail })) };
+  return { valid: true, fire: combined.fire, status: combined.status, reason: combined.reason, warning, detail };
 }
 
 function days(from, to) {
@@ -1676,7 +2010,13 @@ function preBroadcastCheck(tx, logKind, opts) {
     // UTXO tx broadcasts on schedule while the owner is away.
     // Manual broadcasts never enter this branch (logKind
     // 'broadcast'), so they bypass disarm and vacation entirely.
-    if (fresh.settings.vacationMode && store.triggerOf(ftx).type === 'checkin') return { ok: false, reason: 'vacation mode' };
+    // (0.8.2) Only a FIRED check-in rule is held: a set that fired
+    // on a price rule broadcasts during vacation. When the caller
+    // did not name the fired rules (the public-fallback path), a
+    // tx that HAS a check-in rule is held, as before.
+    const firedTypes = (opts && Array.isArray(opts.firedRuleTypes)) ? opts.firedRuleTypes : null;
+    const holdsOnCheckin = firedTypes ? firedTypes.includes('checkin') : store.hasTriggerType(ftx, 'checkin');
+    if (fresh.settings.vacationMode && holdsOnCheckin) return { ok: false, reason: 'vacation mode' };
     // All-or-none release (0.7.10): once a release evaluation has
     // decided the clock is due, the whole armed set broadcasts even
     // if a check-in lands mid-run. A check-in is still recorded —
@@ -1756,8 +2096,11 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
     : 'Broadcast check failed before broadcast: ';
   // (0.8.0) The trigger type stamped on every release record this
   // broadcast writes — the rule that fired it (or the tx's current
-  // trigger, for a manual broadcast).
-  const trigType = releaseTriggerFor(state, tx);
+  // trigger, for a manual broadcast). (0.8.2) The caller names the
+  // fired rules when it knows them (the release path does); a
+  // manual broadcast and the fallback paths name none, so the
+  // record carries all of the tx's rule types.
+  const trigType = releaseTriggerFor(state, tx, opts && opts.firedRuleTypes);
   let check;
   try {
     check = await bitcoin.checkInputsUnspent(bitcoin.parseTx(tx.hex), endpoints);
@@ -1977,13 +2320,25 @@ function shortTxid(txid) {
 // threshold') — name the reading and the threshold. Every other
 // type's reason already says it ('block 976,435 reached',
 // 'spent — 1 confirmation', 'economy fee 1 sat/vB', 'Release
-// due'), with the trailing ' — firing' stripped.
-function firedDetail(trigger, reason, triggerState) {
-  if (trigger && trigger.type === 'price' && triggerState && typeof triggerState.lastPrice === 'number') {
-    const op = trigger.params.op === '>=' ? '≥' : '≤';
-    return 'BTC $' + triggerState.lastPrice.toLocaleString('en-US') + ' ' + op + ' $' + Number(trigger.params.value).toLocaleString('en-US');
+// due'), with the trailing ' — firing' stripped. One rule's detail
+// reads exactly as a single rule's did; a multi-rule set names
+// each fired rule, joined ' + ' — so the trail says which of the
+// set's rules fired, and the ones that did not stay silent.
+function firedDetailForRule(rule, reason, slice) {
+  if (rule && rule.type === 'price' && slice && typeof slice.lastPrice === 'number') {
+    const op = rule.params.op === '>=' ? '≥' : '≤';
+    return 'BTC $' + slice.lastPrice.toLocaleString('en-US') + ' ' + op + ' $' + Number(rule.params.value).toLocaleString('en-US');
   }
   return (typeof reason === 'string' ? reason : '').replace(/ — firing$/, '');
+}
+function firedDetail(set, ruleResults, firedIndexes) {
+  if (set.rules.length === 1) {
+    const r = ruleResults[0];
+    return firedDetailForRule(r.rule, r.reason, r.slice || null);
+  }
+  return firedIndexes
+    .map((i) => firedDetailForRule(ruleResults[i].rule, ruleResults[i].reason, ruleResults[i].slice || null))
+    .join(' + ');
 }
 
 function recordRelease(state, tx, record, logEntry) {
@@ -1993,13 +2348,14 @@ function recordRelease(state, tx, record, logEntry) {
 }
 
 // Release evaluation — the heart of the app. Each ARMED transaction
-// carries its own trigger (0.8.0: check-in, price, UTXO, manual),
-// and the evaluation runs every trigger in list order: the ones
-// whose condition holds fire, via broadcastOne() above. The
-// check-in clock is one trigger type now — a check-in tx fires
-// when its own threshold is release-due; a price tx fires when the
-// price has held past its threshold for an hour; a UTXO tx fires
-// when its outpoint is spent by a confirmed transaction.
+// carries its own rule set (0.8.2: AND / OR over check-in, price,
+// UTXO, block-height, set-date, fee-market, manual rules), and the
+// evaluation runs every set in list order: the ones whose combined
+// condition holds fire, via broadcastOne() above. The check-in
+// clock is one rule type now — a check-in rule fires when its own
+// threshold is release-due; a price rule fires when the price has
+// held past its threshold for an hour; a UTXO rule fires when its
+// outpoint is spent by a confirmed transaction.
 //   1. Skip if nothing armed. There is NO global skip any more
 //      (0.8.0): pause is gone, and vacation is check-in-only —
 //      the check-in evaluator holds a check-in tx while on
@@ -2030,23 +2386,31 @@ function recordRelease(state, tx, record, logEntry) {
 // record, and the broadcasted fact keeps the card showing it.
 // ---------------------------------------------------------------------------
 // Single-flight: only one release evaluation runs at a time. The
-// hourly tick and the manual release-check API both call
+// full tick and the manual release-check API both call
 // evaluateRelease(); without this they can overlap, and two
 // evaluations can broadcast the same transaction. A second caller gets
 // a plain 'already in progress' skip. The flag is set and cleared
 // synchronously around the awaited work, in a finally, so it can never
 // stick — and Node's single thread makes the check-and-set atomic.
 let releaseEvaluationInFlight = false;
-// `options.onlyTypes` (optional) restricts which trigger types this
-// evaluation covers — the fast tick passes ['price', 'utxo',
-// 'blockheight', 'setdate', 'feemarket'], the hourly tick
-// ['checkin'], the manual release check passes nothing (all types).
-// The check-in merge below is only a gate when the evaluation
-// includes check-in triggers: a fast-tick-only evaluation must not
-// be blocked by a check-in receiver problem.
+// Broadcast backoff (0.8.2): an automatic evaluation does not
+// re-attempt a broadcast for a tx within an hour of its last
+// failed broadcast attempt (see the guard in
+// evaluateReleaseInner). One hour, hard-coded — the retry
+// cadence is a safety property, not a user setting.
+const BROADCAST_BACKOFF_MS = 60 * 60 * 1000;
+// `options.automatic` (optional) marks a tick-driven evaluation —
+// the full tick passes { automatic: true }; the manual release
+// check passes nothing. The backoff guard in evaluateReleaseInner
+// applies only to automatic evaluations (a manual check or
+// broadcast is explicit user action and always attempts).
+// There is no type filter any more (0.8.2): the full tick
+// evaluates every rule type together, so the check-in merge below
+// is always a gate — an unreadable receiver state withholds the
+// whole evaluation, because the clock may hold a check-in that
+// would clear a due state.
 async function evaluateRelease(options) {
-  const onlyTypes = (options && Array.isArray(options.onlyTypes)) ? options.onlyTypes : null;
-  const includeCheckin = !onlyTypes || onlyTypes.includes('checkin');
+  const automatic = !!(options && options.automatic);
   if (releaseEvaluationInFlight) {
     return { action: 'skipped', reason: 'release evaluation already in progress', results: [] };
   }
@@ -2074,15 +2438,8 @@ async function evaluateRelease(options) {
     try { merged = mergeExternalCheckin(store.loadState(DATA_DIR), new Date()); }
     catch (e) { console.error('external check-in merge failed:', e); merged = 'error'; }
     if (merged === 'error') {
-      if (!includeCheckin) {
-        // Price/UTXO-only evaluation: the check-in clock is
-        // irrelevant here, so an unreadable receiver state must
-        // not block it — continue without the merge.
-        console.error('check-in state unreadable — continuing price/UTXO-only evaluation without the check-in merge');
-      } else {
-        console.error('release withheld: external check-in state is unreadable — not broadcasting until it can be read (see GET /api/status checkinReadError)');
-        return { action: 'skipped', reason: 'check-in state unreadable', results: [] };
-      }
+      console.error('release withheld: external check-in state is unreadable — not broadcasting until it can be read (see GET /api/status checkinReadError)');
+      return { action: 'skipped', reason: 'check-in state unreadable', results: [] };
     }
     // Offline-gap grace (0.7.22): judged on the stored "I was
     // online" stamp (the tick refreshes it; a manual release check
@@ -2098,24 +2455,43 @@ async function evaluateRelease(options) {
       if (expireVacation(stH, new Date())) changed = true;
       if (changed) store.saveState(DATA_DIR, stH);
     } catch (e) { console.error('offline-hold apply failed:', e); }
-    return await evaluateReleaseInner(onlyTypes);
+    return await evaluateReleaseInner(automatic);
   } finally {
     releaseEvaluationInFlight = false;
   }
 }
 
-async function evaluateReleaseInner(onlyTypes) {
+// The set's combined outcome from its STORED slices only (no
+// network) — what the set read as the last time it was evaluated.
+// A rule never evaluated reads 'not-evaluated', which maps to
+// unknown (fail-safe). Used for the 'fired' history transition:
+// the set was already due before this tick.
+function storedRuleOutcomes(tx) {
+  const set = store.triggerOf(tx);
+  return set.rules.map((rule, i) => {
+    const s = ruleTriggerState(tx, i);
+    const status = s ? (s.status || 'not-evaluated') : 'not-evaluated';
+    const held = status === 'grace' ? 'grace' : status === 'vacation' ? 'vacation' : status === 'held' ? 'held' : null;
+    const cls = (status === 'due' || status === 'release-due') ? 'satisfied'
+      : (status === 'unknown' || status === 'not-evaluated') ? 'unknown'
+      : held ? 'held' : 'not';
+    return { index: i, rule, fire: cls === 'satisfied', status, reason: s ? (s.reason || '') : '', held, skipped: false, cls };
+  });
+}
+function storedCombinedDue(tx) {
+  return combineOutcomes(store.triggerOf(tx), storedRuleOutcomes(tx)).fire;
+}
+
+async function evaluateReleaseInner(automatic) {
   const state = store.loadState(DATA_DIR);
   const now = new Date();
   const s = state.settings;
-  // `onlyTypes` (optional) restricts the evaluation to those trigger
-  // types — the fast tick passes ['price', 'utxo', 'blockheight',
-  // 'setdate', 'feemarket'], the hourly tick ['checkin'], the manual
-  // check passes nothing (all types). A filtered run that finds no
-  // armed tx of its types is a skip, and it must not touch the other
-  // types' triggerState.
+  // `automatic` marks a tick-driven evaluation (the full tick
+  // passes true; the manual release check passes nothing). It
+  // only changes one thing: the broadcast backoff guard in the
+  // firing loop below. Every rule type is evaluated, every time —
+  // there is no type filter any more (0.8.2, the full tick).
   let armed = (state.bitcoin.txs || []).filter((t) => t.enabled);
-  if (onlyTypes) armed = armed.filter((t) => onlyTypes.includes(store.triggerOf(t).type));
   if (!armed.length) return { action: 'skipped', reason: 'no armed transactions', results: [] };
 
   // Endpoints: the primary node first, the secondary if the primary
@@ -2138,28 +2514,42 @@ async function evaluateReleaseInner(onlyTypes) {
   const firing = [];
   // (0.8.2) The 'fired' history event is logged once, on the
   // transition into due — so each evaluation records whether the
-  // trigger was already due before it ran, and the reason it fired.
+  // set was already due before it ran (from the STORED slices,
+  // combined the same way), and the full evaluation result (which
+  // rules fired) for the detail. 'release-due' counts as due here
+  // — the old code only checked 'due', so a check-in tx whose
+  // broadcast failed re-logged 'fired' on every hourly retry;
+  // the new reading matches the "logged once" intent.
   const wasDueById = new Map();
-  const reasonById = new Map();
+  const evById = new Map();
   for (const tx of armed) {
-    wasDueById.set(tx.id, !!(tx.triggerState && tx.triggerState.status === 'due'));
+    wasDueById.set(tx.id, storedCombinedDue(tx));
     let ev;
     try { ev = await evaluateTrigger(state, tx, now); }
     catch (e) {
       // An evaluator must never take the whole run down with it:
       // a throw is the same as 'unknown' — do not fire, and say so.
+      // Every rule gets an unknown slice (the ones already
+      // evaluated keep theirs).
       console.error('trigger evaluation failed for ' + (tx.label || tx.id) + ':', e);
-      tx.triggerState = { ...freshTriggerState(now, 'unknown', 'evaluation failed — will retry'), lastError: e.message };
-      ev = { fire: false, status: 'unknown', reason: 'evaluation failed — will retry' };
+      const set = store.triggerOf(tx);
+      set.rules.forEach((rule, i) => {
+        setRuleTriggerState(tx, i, { ...freshTriggerState(now, 'unknown', 'evaluation failed — will retry'), lastError: e.message });
+      });
+      ev = { fire: false, status: 'unknown', reason: 'evaluation failed — will retry', ruleResults: [], firedIndexes: [], firedRuleTypes: [] };
     }
-    reasonById.set(tx.id, ev.reason);
+    evById.set(tx.id, ev);
     if (!ev.fire) {
-      results.push({ id: tx.id, txid: tx.txid, label: tx.label || '', action: 'skipped', reason: ev.reason, trigger: store.triggerOf(tx).type, triggerStatus: ev.status });
+      results.push({ id: tx.id, txid: tx.txid, label: tx.label || '', action: 'skipped', reason: ev.reason, trigger: triggerTypesLabel(tx), triggerStatus: ev.status });
       continue;
     }
     firing.push(tx);
   }
   const firingIds = new Set(firing.map((f) => f.id));
+  // (0.8.2) Whether any firing tx was held back by the broadcast
+  // backoff below — so the top-level reason says so instead of
+  // 'no trigger fired' when nothing else happened.
+  let backedOff = false;
   // Persist the triggerState updates by merging them into FRESH
   // state (see refreshConfirmations): the evaluations waited on the
   // network, so a user edit landing mid-loop — disable, delete, or
@@ -2177,7 +2567,8 @@ async function evaluateReleaseInner(onlyTypes) {
       // save as the triggerState, so the event and the state that
       // caused it can never part ways.
       if (ftx && firingIds.has(tx.id) && !wasDueById.get(tx.id)) {
-        pushHistory(ftx, 'fired', firedDetail(store.triggerOf(tx), reasonById.get(tx.id), tx.triggerState));
+        const ev = evById.get(tx.id);
+        pushHistory(ftx, 'fired', firedDetail(store.triggerOf(tx), ev.ruleResults, ev.firedIndexes));
       }
     }
     store.saveState(DATA_DIR, fresh);
@@ -2205,17 +2596,49 @@ async function evaluateReleaseInner(onlyTypes) {
       results.push({ id: tx.id, txid: tx.txid, label: tx.label || '', action: 'skipped', reason: 'submitted to Slipstream — waiting on MARA' });
       continue;
     }
+    // (0.8.2) Broadcast backoff — automatic evaluations only. A
+    // tx whose last broadcast attempt failed is not re-attempted
+    // until an hour has passed since that attempt. The timestamp
+    // is the release record's lastAttemptAt, written by
+    // broadcastOneInner on every failed attempt (either route,
+    // and the input-check failure too — and by refreshMaraWaiting
+    // when MARA drops a submission). The tx stays due — the next
+    // automatic attempt waits out the hour — and the guard never
+    // re-logs 'fired' (that event fired once, on the transition
+    // into due). Manual broadcasts bypass it: they call
+    // broadcastOne directly, never through this loop. The record
+    // is read from the snapshot loaded at the start of this
+    // evaluation (the same snapshot the already-broadcast /
+    // stale checks above read) — a manual failure landing
+    // mid-evaluation is caught on the next tick at the latest,
+    // so the worst case is one extra attempt, never a skipped
+    // first one. A missing or unparseable lastAttemptAt means no
+    // backoff (the pre-0.8.2 behaviour): a timestamp that cannot
+    // be read cannot prove recency.
+    if (automatic && tx.release && tx.release.status === 'failed'
+        && typeof tx.release.lastAttemptAt === 'string') {
+      const last = Date.parse(tx.release.lastAttemptAt);
+      if (Number.isFinite(last) && (now - last) < BROADCAST_BACKOFF_MS) {
+        backedOff = true;
+        results.push({ id: tx.id, txid: tx.txid, label: tx.label || '', action: 'skipped', reason: 'broadcast backoff — last failed attempt was less than an hour ago' });
+        continue;
+      }
+    }
     // The release decision was made once, above — a check-in landing
     // mid-run is recorded but does not stop the remaining
-    // transactions (all-or-none, 0.7.10).
-    results.push(await broadcastOne(state, tx, endpoints, now, 'release'));
+    // transactions (all-or-none, 0.7.10). The fired rules ride along
+    // so the broadcast path knows which of the set's rules fired
+    // (the vacation guard only blocks a firing CHECK-IN rule; a
+    // price rule firing during vacation broadcasts).
+    const firedRuleTypes = (evById.get(tx.id) || {}).firedRuleTypes || store.triggerTypesOf(tx);
+    results.push(await broadcastOne(state, tx, endpoints, now, 'release', { firedRuleTypes }));
   }
 
   const action = results.some((r) => r.action === 'broadcast') ? 'broadcast'
     : results.some((r) => r.action === 'failed') ? 'failed'
     : results.some((r) => r.action === 'stale') ? 'stale' : 'skipped';
   const out = { action, results };
-  if (action === 'skipped') out.reason = 'no trigger fired';
+  if (action === 'skipped') out.reason = backedOff ? 'broadcast backoff — retry after an hour' : 'no trigger fired';
   return out;
 }
 
@@ -2574,7 +2997,33 @@ function feePeakForState() {
   return { peak: feePeakCache.peak, fetchedAt: new Date(feePeakCache.fetchedAt).toISOString() };
 }
 
-async function runReleaseTick() {
+// The full-evaluation tick (0.8.2): ONE tick evaluates every rule
+// type together, on the check cadence (Settings: Check cadence,
+// default 60 s). It replaces the two-tick split (an hourly tick
+// for check-in only, a fast tick for the five fast types): an AND
+// set spanning the two domains — check-in AND price, say — can
+// only fire when both rules are judged at the same tick, and the
+// split ticks never did that (only a manual release check did).
+// The cadence is a fast-trigger cadence: a setup with no armed
+// non-manual rule never runs this tick, so a manual-only setup
+// makes no extra API calls, and a check-in-only setup costs only
+// the clock math (a timestamp compare — no network). The
+// evaluation is the same single-flight evaluateRelease() the
+// manual check uses, with no type filter — so every rule is
+// judged together, every tick.
+//   The stamp block (offline hold, grace, vacation expiry, the
+//   "I was online" stamp) runs here, before the evaluation, on
+//   the same reasoning as before: the hold is judged on the stamp
+//   as it stands BEFORE this tick refreshes it. Refreshing it
+//   every minute instead of hourly changes nothing — while the
+//   app runs the stamp stays fresh, and only real downtime
+//   grows the gap. A dated vacation now expires within a minute
+//   of its end instead of within an hour.
+//   Housekeeping (node tests, confirmation / MARA / fallback
+//   refreshes, fee caches) is NOT here — it stays hourly in
+//   runHourlyTick below, on its own cadence, so the merge does
+//   not re-time it.
+async function runFullTick() {
   const now = new Date();
   // Offline-gap grace (0.7.22): the hold is judged on the "I was
   // online" stamp as it stands BEFORE this tick refreshes it —
@@ -2589,7 +3038,7 @@ async function runReleaseTick() {
     applyGrace(st0, now); // the grace for price/UTXO triggers (0.8.0) — judged on the same stale stamp, before it is refreshed; the unconditional save below persists it
     // Vacation expiry (0.8.0): a dated vacation ends at the end
     // of its last day — the clock resumes from its frozen count.
-    // Judged here on the hourly tick (and on every release
+    // Judged here on the full tick (and on every release
     // evaluation, see evaluateRelease), so a lapsed vacation
     // never lingers past the next tick.
     expireVacation(st0, now);
@@ -2599,15 +3048,34 @@ async function runReleaseTick() {
   // A receiver check-in lands in the clock before the release is
   // evaluated, so a check-in that arrived between ticks is honoured
   // even if nobody opened the app.
-  // The hourly tick handles the check-in trigger (plus the
-  // housekeeping below) — price/UTXO rules are the fast tick's job.
+  // The price cache refresh runs first, so the price rule's
+  // "currently $X" line stays fresh even while its trigger is held
+  // by a grace.
   try {
-    const r = await evaluateRelease({ onlyTypes: ['checkin'] });
+    await refreshPriceIfStale();
+    const st = store.loadState(DATA_DIR);
+    const hasArmed = (st.bitcoin.txs || []).some((t) => {
+      if (!t.enabled) return false;
+      return store.triggerTypesOf(t).some((ty) => ty !== 'manual');
+    });
+    if (!hasArmed) return;
+    const r = await evaluateRelease({ automatic: true });
     if (r.action !== 'skipped') {
       const sum = (r.results || []).map((x) => x.action + ':' + (x.txid || '').slice(0, 8)).join(', ');
-      console.log('release tick:', r.action, sum || r.reason || '');
+      console.log('full tick:', r.action, sum || r.reason || '');
     }
-  } catch (e) { console.error('release tick failed:', e); }
+  } catch (e) { console.error('full tick failed:', e); }
+}
+
+// The hourly tick (0.8.2): housekeeping only. It used to be the
+// release tick (check-in evaluation + this housekeeping); the
+// evaluation moved to runFullTick above, and this tick keeps the
+// hourly cadence for the work that is genuinely hourly — node
+// capability tests, confirmation counts, MARA-waiting and public
+// fallback refreshes, the fee-peak / current-fee caches (each
+// with its own TTL, so they refresh at most once per their own
+// period). Nothing here broadcasts.
+async function runHourlyTick() {
   try {
     await testNodes();
   } catch (e) { console.error('node check failed:', e); }
@@ -2617,9 +3085,8 @@ async function runReleaseTick() {
   } catch (e) { console.error('confirmations refresh failed:', e); }
   // MARA-waiting transactions (0.7.16): a Slipstream submission
   // that is not yet visible publicly needs its status kept current
-  // even while the clock is on-track — the refresh runs after the
-  // evaluation (so a tx MARA just dropped is retried on the NEXT
-  // tick, not in this one) and regardless of the clock.
+  // even while the clock is on-track — the refresh runs regardless
+  // of the clock.
   try {
     const st = store.loadState(DATA_DIR);
     await refreshMaraWaiting(st);
@@ -2627,8 +3094,8 @@ async function runReleaseTick() {
   // Public fallback (0.7.17): a Slipstream transaction whose
   // fallback deadline has passed goes public — after the MARA
   // refresh above, so a tx MARA just confirmed as visible is not
-  // also fallback-broadcast. Runs regardless of the clock, like the
-  // MARA refresh.
+  // also fallback-broadcast. Runs regardless of the clock, like
+  // the MARA refresh.
   try {
     const st = store.loadState(DATA_DIR);
     await refreshPublicFallbacks(st);
@@ -2643,42 +3110,6 @@ async function runReleaseTick() {
   // refresh never breaks the tick (the Critical check is skipped
   // until the fees come back).
   try { await refreshCurrentFeesIfStale(); } catch (e) { console.error('current-fees refresh failed:', e); }
-}
-
-// The fast tick (0.8.0, extended 0.8.1): every minute, while a price,
-// UTXO, block-height, set-date, or fee-market rule is armed, run a
-// release evaluation for those trigger types only. The hourly tick
-// samples them once an hour — too coarse: an unconfirmed UTXO
-// trigger must be caught well within one block time (~10 min), a
-// price that holds for an hour should fire within a minute of the
-// hour being up, not up to an hour later, and a set date or block
-// height should fire within a minute of its moment, not up to an
-// hour later. The 1-minute cadence is a fast-trigger cadence: a
-// setup with no armed fast rule never runs this tick, so a
-// check-in-only setup keeps the pure hourly cadence and makes no
-// extra API calls. The evaluation is the same single-flight
-// evaluateRelease() the hourly tick and the manual check use,
-// restricted to the fast types — so a check-in rule is never
-// evaluated (and never broadcast) by this tick; the hourly tick
-// owns check-in. The cache refresh runs first, so the price rule's
-// "currently $X" line stays fresh even while its trigger is held
-// by a grace.
-async function runFastTick() {
-  try {
-    await refreshPriceIfStale();
-    const st = store.loadState(DATA_DIR);
-    const hasFast = (st.bitcoin.txs || []).some((t) => {
-      if (!t.enabled) return false;
-      const type = store.triggerOf(t).type;
-      return type === 'price' || type === 'utxo' || type === 'blockheight' || type === 'setdate' || type === 'feemarket';
-    });
-    if (!hasFast) return;
-    const r = await evaluateRelease({ onlyTypes: ['price', 'utxo', 'blockheight', 'setdate', 'feemarket'] });
-    if (r.action !== 'skipped') {
-      const sum = (r.results || []).map((x) => x.action + ':' + (x.txid || '').slice(0, 8)).join(', ');
-      console.log('fast tick:', r.action, sum || r.reason || '');
-    }
-  } catch (e) { console.error('fast tick failed:', e); }
 }
 
 // Test both nodes and save the per-endpoint results, so the Dashboard
@@ -2877,9 +3308,17 @@ async function handleApi(req, res, pathname) {
       // valid one — a legacy tx reads as the check-in trigger) and
       // its current status, computed from the stored evaluation
       // (no network on a read) — except the check-in trigger,
-      // whose state is live clock math.
-      t.trigger = store.triggerOf(t);
+      // whose state is live clock math. (0.8.2) The served trigger
+      // is the legacy single-rule shape for a one-rule set and the
+      // set for a multi-rule set (see serveTrigger); the served
+      // triggerState matches — a flat slice for one rule, the
+      // per-rule array for several. The status is computed first,
+      // on the stored form, so a one-rule set reads exactly as it
+      // did before rule sets.
       t.triggerStatus = triggerStatusFor(state, t, now);
+      const servedSet = store.triggerOf(t);
+      t.trigger = store.serveTrigger(servedSet);
+      t.triggerState = store.serveTriggerState(servedSet, t.triggerState);
     }
     return sendJson(res, 200, served);
   }
@@ -2929,7 +3368,7 @@ async function handleApi(req, res, pathname) {
     return sendJson(res, 200, store.readBroadcastLog(DATA_DIR, 50).reverse());
   }
 
-  // POST /api/release/check — run the release evaluation now (also runs hourly).
+  // POST /api/release/check — run the release evaluation now (the full tick runs the same evaluation on the cadence).
   // A receiver check-in is merged inside evaluateRelease first (0.7.12),
   // so a check-in that arrived since the last read is honoured here too.
   if (req.method === 'POST' && pathname === '/api/release/check') {
@@ -2979,26 +3418,30 @@ async function handleApi(req, res, pathname) {
     // check-in rule reads it (checkTriggerNow takes it as the
     // clock's live offset); a price or UTXO rule ignores it.
     // A latched block-height rule (0.8.1, audit finding 1) is
-    // passed the same way, so the check answers what the
-    // evaluator would answer for this tx.
+    // passed the same way, one latch per rule, so the check
+    // answers what the evaluator would answer for this tx.
     let liveOff = 0;
-    let latchedTarget = null;
+    let latchedTargets = null;
     if (typeof body.txId === 'string' && body.txId) {
       const etx = (state.bitcoin.txs || []).find((t) => t.id === body.txId);
       if (etx) {
         liveOff = checkinLiveOffsetMs(etx, now);
-        const ets = (etx.triggerState && typeof etx.triggerState === 'object') ? etx.triggerState : {};
-        if (typeof ets.heightReachedFor === 'number') latchedTarget = ets.heightReachedFor;
+        const slices = Array.isArray(etx.triggerState) ? etx.triggerState
+          : (etx.triggerState && typeof etx.triggerState === 'object' ? [etx.triggerState] : []);
+        latchedTargets = v.trigger.rules.map((_, i) => {
+          const s = slices[i];
+          return (s && typeof s.heightReachedFor === 'number') ? s.heightReachedFor : null;
+        });
       }
     }
     try {
-      const r = await checkTriggerNow(v.trigger, state, now, liveOff, latchedTarget);
-      return sendJson(res, 200, { ...r, trigger: v.trigger });
+      const r = await checkTriggerNow(v.trigger, state, now, { liveOffsetMs: liveOff, latchedTargets });
+      return sendJson(res, 200, { ...r, trigger: store.serveTrigger(v.trigger) });
     } catch (e) {
       // Belt-and-braces: checkTriggerNow already answers 'unknown'
       // on a fetch failure, so a throw here is a bug — but it must
       // still answer 'unknown', never crash the check.
-      return sendJson(res, 200, { valid: true, fire: false, status: 'unknown', reason: 'could not check the trigger — will retry', warning: null, detail: { error: e.message }, trigger: v.trigger });
+      return sendJson(res, 200, { valid: true, fire: false, status: 'unknown', reason: 'could not check the trigger — will retry', warning: null, detail: { error: e.message }, trigger: store.serveTrigger(v.trigger) });
     }
   }
 
@@ -3026,7 +3469,7 @@ async function handleApi(req, res, pathname) {
       // alive, the clock resets, and there is nothing to hold back.
       f.checkin.heldUntil = null;
       for (const t of (f.bitcoin.txs || [])) {
-        if (store.triggerOf(t).type !== 'checkin') continue;
+        if (!store.hasTriggerType(t, 'checkin')) continue;
         if (t.release && t.release.status === 'stale') continue;
         t.release = null;
         // The clock restarts at this check-in: any frozen time is
@@ -3288,7 +3731,7 @@ async function handleApi(req, res, pathname) {
     if (!fresh) return sendError(res, 400, 'feeLowMultiplier must be greater than feeMediumMultiplier');
     // A new cadence takes effect immediately — the running fast
     // tick is cleared and restarted with the new delay.
-    if (cadenceChanged) rearmFastTick();
+    if (cadenceChanged) rearmFullTick();
     return sendJson(res, 200, sanitizeState(fresh).settings);
   }
 
@@ -3308,6 +3751,48 @@ async function handleApi(req, res, pathname) {
   // PUT    /api/bitcoin/txs/:id  — update { txHex?, label?, notes?, enabled?, broadcastVia? }
   // DELETE /api/bitcoin/txs/:id  — remove
   const txsMatch = pathname.match(/^\/api\/bitcoin\/txs\/([^/]+)$/);
+  // The already-satisfied gate for a rule set (0.8.2): evaluates
+  // the WHOLE set with the combined semantics — an OR set is blocked
+  // when any rule is satisfied now, an AND set when all are.
+  // Unknown rules never block (satisfaction cannot be proven).
+  // Check-in-only sets never reach this gate: a due check-in rule
+  // resets the clock instead (the danger-zone reset below), exactly
+  // as a single check-in rule does today — so the gate only runs
+  // when the set holds a price, UTXO, block-height, set-date, or
+  // fee-market rule. `verb` is 'add' | 'import' | 'save' (the
+  // handler's word for the action being confirmed). Returns
+  // { chk, blocked, message } — chk is the checkTriggerNow answer
+  // (its warning rides on the 201 when the set is not already
+  // satisfied, so the UI can say what it found).
+  async function setGateCheck(trgSet, state, now, verb) {
+    const hasGatedRule = trgSet.rules.some((r) => r.type === 'price' || r.type === 'utxo' || r.type === 'blockheight' || r.type === 'setdate' || r.type === 'feemarket');
+    if (!hasGatedRule) return { chk: null, blocked: false, message: null };
+    const chk = await checkTriggerNow(trgSet, state, now, null);
+    if (!chk.fire) return { chk, blocked: false, message: null };
+    return { chk, blocked: true, message: alreadySatisfiedMessage(trgSet, verb) };
+  }
+  function alreadySatisfiedMessage(trgSet, verb) {
+    const cap = verb.charAt(0).toUpperCase() + verb.slice(1);
+    const tail = cap + ' it with triggerConfirmed to ' + verb + ' it anyway.';
+    if (trgSet.rules.length === 1) {
+      const r = trgSet.rules[0];
+      switch (r.type) {
+        case 'utxo': return 'That UTXO is already spent — this rule would fire on the next evaluation. ' + tail;
+        case 'price': {
+          const dir = r.params.op === '>=' ? 'above' : 'below';
+          return 'The price is already ' + dir + ' $' + Number(r.params.value).toLocaleString('en-US') + ' — this rule would fire on the next evaluation. ' + tail;
+        }
+        case 'blockheight': return 'That block height has already been reached — this rule would fire on the next evaluation. ' + tail;
+        case 'setdate': return 'That date has already passed — this rule would fire on the next evaluation. ' + tail;
+        case 'feemarket': {
+          const fdir = r.params.direction === 'above' ? 'at or above' : 'at or below';
+          return 'The economy fee is already ' + fdir + ' ' + Number(r.params.maxFeeRate).toLocaleString('en-US') + ' sat/vB — this rule would fire on the next evaluation. ' + tail;
+        }
+        default: return 'This rule is already satisfied — it would fire on the next evaluation. ' + tail;
+      }
+    }
+    return 'This rule set is already satisfied — it would fire on the next evaluation. ' + tail;
+  }
   // One stored-transaction record, from a parsed tx and its hex —
   // shared by the paste path (POST /api/bitcoin/txs) and the file
   // import path (POST /api/bitcoin/txs/import), so the two cannot
@@ -3415,7 +3900,7 @@ async function handleApi(req, res, pathname) {
     // is a 400 with the reason). Omitted → the check-in trigger at
     // the 35-day fallback, so the old add path is unchanged.
     const trig = (body.trigger === undefined)
-      ? { trigger: store.defaultTrigger() }
+      ? { trigger: store.defaultTriggerSet() }
       : store.normalizeTrigger(body.trigger);
     if (!trig.trigger) return sendError(res, 400, 'invalid trigger: ' + trig.error);
     const tx = newTxRecord(parsed, hex, body.label, body.notes, body.broadcastVia, body.publicFallbackDays, trig.trigger);
@@ -3443,28 +3928,13 @@ async function handleApi(req, res, pathname) {
     // still rides on the response when the condition is NOT
     // already satisfied, so the UI can say what it found.
     let triggerWarning = null;
-    if (trig.trigger.type === 'utxo' || trig.trigger.type === 'price' || trig.trigger.type === 'blockheight' || trig.trigger.type === 'setdate' || trig.trigger.type === 'feemarket') {
-      try {
-        const chk = await checkTriggerNow(trig.trigger, state, now);
-        if (chk.warning) triggerWarning = chk.warning;
-        if (trig.trigger.type === 'utxo' && chk.fire && body.triggerConfirmed !== true) {
-          return sendError(res, 400, 'That UTXO is already spent — this rule would fire on the next evaluation. Add it with triggerConfirmed to add it anyway.');
-        }
-        if (trig.trigger.type === 'price' && chk.fire && body.triggerConfirmed !== true) {
-          const dir = trig.trigger.params.op === '>=' ? 'above' : 'below';
-          return sendError(res, 400, 'The price is already ' + dir + ' $' + Number(trig.trigger.params.value).toLocaleString('en-US') + ' — this rule would fire on the next evaluation. Add it with triggerConfirmed to add it anyway.');
-        }
-        if (trig.trigger.type === 'blockheight' && chk.fire && body.triggerConfirmed !== true) {
-          return sendError(res, 400, 'That block height has already been reached — this rule would fire on the next evaluation. Add it with triggerConfirmed to add it anyway.');
-        }
-        if (trig.trigger.type === 'setdate' && chk.fire && body.triggerConfirmed !== true) {
-          return sendError(res, 400, 'That date has already passed — this rule would fire on the next evaluation. Add it with triggerConfirmed to add it anyway.');
-        }
-        if (trig.trigger.type === 'feemarket' && chk.fire && body.triggerConfirmed !== true) {
-          const fdir = trig.trigger.params.direction === 'above' ? 'at or above' : 'at or below'; return sendError(res, 400, 'The economy fee is already ' + fdir + ' ' + Number(trig.trigger.params.maxFeeRate).toLocaleString('en-US') + ' sat/vB — this rule would fire on the next evaluation. Add it with triggerConfirmed to add it anyway.');
-        }
-      } catch (e) { /* best-effort: the add proceeds without the warning */ }
-    }
+    try {
+      const gate = await setGateCheck(trig.trigger, state, now, 'add');
+      if (gate.chk && gate.chk.warning) triggerWarning = gate.chk.warning;
+      if (gate.blocked && body.triggerConfirmed !== true) {
+        return sendError(res, 400, gate.message);
+      }
+    } catch (e) { /* best-effort: the add proceeds without the warning */ }
     // (0.7.22, scoped 0.8.0) A new tx is armed by default — adding
     // a CHECK-IN rule while the clock is in the danger zone (the
     // last 25% of ITS window, including already past due) would
@@ -3488,7 +3958,11 @@ async function handleApi(req, res, pathname) {
       if (dup) { dupTx = dup; return false; }
       if (txs.some((t) => t.id === tx.id)) return false;
       txs.push(tx);
-      if (trig.trigger.type === 'checkin' && inDangerZone(f, now, trig.trigger.params.thresholdDays)) {
+      // The danger zone is measured against the SMALLEST check-in
+      // threshold in the set — the most urgent check-in rule is
+      // the one that would let the release fire soonest.
+      const checkinThresholds = trig.trigger.rules.filter((r) => r.type === 'checkin').map((r) => r.params.thresholdDays);
+      if (checkinThresholds.length > 0 && inDangerZone(f, now, Math.min(...checkinThresholds))) {
         resetCheckin(f, now, 'add-reset');
         checkinReset = true;
       }
@@ -3497,7 +3971,7 @@ async function handleApi(req, res, pathname) {
       if (dupTx) return sendError(res, 400, "This transaction is already stored as '" + (dupTx.label || dupTx.id) + "'");
       return sendError(res, 400, 'could not save the transaction — try again');
     }
-    const out = { tx };
+    const out = { tx: serveTx(tx) };
     if (checkinReset) out.checkinReset = true;
     if (triggerWarning) out.triggerWarning = triggerWarning;
     return sendJson(res, 201, out);
@@ -3562,35 +4036,20 @@ async function handleApi(req, res, pathname) {
     // (0.8.0) The trigger — same validation and already-spent gate
     // as the paste path (see POST /api/bitcoin/txs above).
     const trig = (body.trigger === undefined)
-      ? { trigger: store.defaultTrigger() }
+      ? { trigger: store.defaultTriggerSet() }
       : store.normalizeTrigger(body.trigger);
     if (!trig.trigger) return sendError(res, 400, 'invalid trigger: ' + trig.error);
     const tx = newTxRecord(parsed, hex, body.label, body.notes, body.broadcastVia, body.publicFallbackDays, trig.trigger);
     const fee = await feeFor(parsed);
     if (fee) { tx.feeSats = fee.feeSats; tx.feeRateSatVb = fee.feeRateSatVb; }
     let triggerWarning = null;
-    if (trig.trigger.type === 'utxo' || trig.trigger.type === 'price' || trig.trigger.type === 'blockheight' || trig.trigger.type === 'setdate' || trig.trigger.type === 'feemarket') {
-      try {
-        const chk = await checkTriggerNow(trig.trigger, state, now);
-        if (chk.warning) triggerWarning = chk.warning;
-        if (trig.trigger.type === 'utxo' && chk.fire && body.triggerConfirmed !== true) {
-          return sendError(res, 400, 'That UTXO is already spent — this rule would fire on the next evaluation. Import it with triggerConfirmed to import it anyway.');
-        }
-        if (trig.trigger.type === 'price' && chk.fire && body.triggerConfirmed !== true) {
-          const dir = trig.trigger.params.op === '>=' ? 'above' : 'below';
-          return sendError(res, 400, 'The price is already ' + dir + ' $' + Number(trig.trigger.params.value).toLocaleString('en-US') + ' — this rule would fire on the next evaluation. Import it with triggerConfirmed to import it anyway.');
-        }
-        if (trig.trigger.type === 'blockheight' && chk.fire && body.triggerConfirmed !== true) {
-          return sendError(res, 400, 'That block height has already been reached — this rule would fire on the next evaluation. Import it with triggerConfirmed to import it anyway.');
-        }
-        if (trig.trigger.type === 'setdate' && chk.fire && body.triggerConfirmed !== true) {
-          return sendError(res, 400, 'That date has already passed — this rule would fire on the next evaluation. Import it with triggerConfirmed to import it anyway.');
-        }
-        if (trig.trigger.type === 'feemarket' && chk.fire && body.triggerConfirmed !== true) {
-          const fdir = trig.trigger.params.direction === 'above' ? 'at or above' : 'at or below'; return sendError(res, 400, 'The economy fee is already ' + fdir + ' ' + Number(trig.trigger.params.maxFeeRate).toLocaleString('en-US') + ' sat/vB — this rule would fire on the next evaluation. Import it with triggerConfirmed to import it anyway.');
-        }
-      } catch (e) { /* best-effort: the import proceeds without the warning */ }
-    }
+    try {
+      const gate = await setGateCheck(trig.trigger, state, now, 'import');
+      if (gate.chk && gate.chk.warning) triggerWarning = gate.chk.warning;
+      if (gate.blocked && body.triggerConfirmed !== true) {
+        return sendError(res, 400, gate.message);
+      }
+    } catch (e) { /* best-effort: the import proceeds without the warning */ }
     // (0.7.22, scoped 0.8.0) The import path arms by default too —
     // same reset as the paste path when the clock is in the danger
     // zone, and only for a check-in rule. (0.8.1, audit finding 4)
@@ -3604,7 +4063,11 @@ async function handleApi(req, res, pathname) {
       if (dup) { dupTx = dup; return false; }
       if (txs.some((t) => t.id === tx.id)) return false;
       txs.push(tx);
-      if (trig.trigger.type === 'checkin' && inDangerZone(f, now, trig.trigger.params.thresholdDays)) {
+      // The danger zone is measured against the SMALLEST check-in
+      // threshold in the set — the most urgent check-in rule is
+      // the one that would let the release fire soonest.
+      const checkinThresholds = trig.trigger.rules.filter((r) => r.type === 'checkin').map((r) => r.params.thresholdDays);
+      if (checkinThresholds.length > 0 && inDangerZone(f, now, Math.min(...checkinThresholds))) {
         resetCheckin(f, now, 'add-reset');
         checkinReset = true;
       }
@@ -3613,7 +4076,7 @@ async function handleApi(req, res, pathname) {
       if (dupTx) return sendError(res, 400, "This transaction is already stored as '" + (dupTx.label || dupTx.id) + "'");
       return sendError(res, 400, 'could not save the transaction — try again');
     }
-    const out = { tx };
+    const out = { tx: serveTx(tx) };
     if (checkinReset) out.checkinReset = true;
     if (triggerWarning) out.triggerWarning = triggerWarning;
     return sendJson(res, 201, out);
@@ -3711,28 +4174,13 @@ async function handleApi(req, res, pathname) {
       if (triggerLocked && JSON.stringify(v.trigger) !== JSON.stringify(store.triggerOf(tx))) {
         return sendError(res, 400, 'the trigger cannot be changed once the transaction has been broadcast');
       }
-      if (v.trigger.type === 'utxo' || v.trigger.type === 'price' || v.trigger.type === 'blockheight' || v.trigger.type === 'setdate' || v.trigger.type === 'feemarket') {
-        try {
-          const chk = await checkTriggerNow(v.trigger, state, now);
-          if (chk.warning) triggerWarning = chk.warning;
-          if (chk.fire && body.triggerConfirmed !== true) {
-            if (v.trigger.type === 'utxo') {
-              return sendError(res, 400, 'That UTXO is already spent — this rule would fire on the next evaluation. Save it with triggerConfirmed to save it anyway.');
-            }
-            if (v.trigger.type === 'blockheight') {
-              return sendError(res, 400, 'That block height has already been reached — this rule would fire on the next evaluation. Save it with triggerConfirmed to save it anyway.');
-            }
-            if (v.trigger.type === 'setdate') {
-              return sendError(res, 400, 'That date has already passed — this rule would fire on the next evaluation. Save it with triggerConfirmed to save it anyway.');
-            }
-            if (v.trigger.type === 'feemarket') {
-              const fdir = v.trigger.params.direction === 'above' ? 'at or above' : 'at or below'; return sendError(res, 400, 'The economy fee is already ' + fdir + ' ' + Number(v.trigger.params.maxFeeRate).toLocaleString('en-US') + ' sat/vB — this rule would fire on the next evaluation. Save it with triggerConfirmed to save it anyway.');
-            }
-            const dir = v.trigger.params.op === '>=' ? 'above' : 'below';
-            return sendError(res, 400, 'The price is already ' + dir + ' $' + Number(v.trigger.params.value).toLocaleString('en-US') + ' — this rule would fire on the next evaluation. Save it with triggerConfirmed to save it anyway.');
-          }
-        } catch (e) { /* best-effort: the save proceeds without the warning */ }
-      }
+      try {
+        const gate = await setGateCheck(v.trigger, state, now, 'save');
+        if (gate.chk && gate.chk.warning) triggerWarning = gate.chk.warning;
+        if (gate.blocked && body.triggerConfirmed !== true) {
+          return sendError(res, 400, gate.message);
+        }
+      } catch (e) { /* best-effort: the save proceeds without the warning */ }
       if (JSON.stringify(v.trigger) !== JSON.stringify(tx.trigger)) {
         tx.trigger = v.trigger;
         tx.triggerState = null;
@@ -3814,10 +4262,13 @@ async function handleApi(req, res, pathname) {
       // counted. The freeze is re-synced after the toggle: disarming
       // starts an inactive period, re-arming banks it.
       syncCheckinFreeze(ftx, f, now);
-      const ftxTrigger = store.triggerOf(ftx);
+      // The danger zone is measured against the SMALLEST check-in
+      // threshold in the set — the most urgent check-in rule is
+      // the one that would let the release fire soonest.
+      const ftxCheckinThresholds = store.triggerOf(ftx).rules.filter((r) => r.type === 'checkin').map((r) => r.params.thresholdDays);
       if (body.enabled === true && freshWasEnabled === false
-          && ftxTrigger.type === 'checkin'
-          && inDangerZone(f, now, ftxTrigger.params.thresholdDays, checkinLiveOffsetMs(ftx, now))
+          && ftxCheckinThresholds.length > 0
+          && inDangerZone(f, now, Math.min(...ftxCheckinThresholds), checkinLiveOffsetMs(ftx, now))
           && !ftx.broadcasted && !(ftx.release && ftx.release.status === 'stale')) {
         resetCheckin(f, now, 'arm-reset');
         checkinReset = true;
@@ -3831,7 +4282,7 @@ async function handleApi(req, res, pathname) {
       return sendError(res, 400, 'could not save the edit — try again');
     }
     const outTx = (fresh.bitcoin.txs || []).find((t) => t.id === tx.id);
-    const out = { tx: outTx };
+    const out = { tx: serveTx(outTx) };
     if (checkinReset) out.checkinReset = true;
     if (triggerWarning) out.triggerWarning = triggerWarning;
     return sendJson(res, 200, out);
@@ -3868,10 +4319,10 @@ async function handleApi(req, res, pathname) {
         if (body.enabled === true && wasEnabled === false) newlyArmed.push(t);
       }
       for (const t of newlyArmed) {
-        const trg = store.triggerOf(t);
-        if (trg.type !== 'checkin') continue;
+        const checkinThresholds = store.triggerOf(t).rules.filter((r) => r.type === 'checkin').map((r) => r.params.thresholdDays);
+        if (checkinThresholds.length === 0) continue;
         if (t.broadcasted || (t.release && t.release.status === 'stale')) continue;
-        if (inDangerZone(f, now, trg.params.thresholdDays, checkinLiveOffsetMs(t, now))) {
+        if (inDangerZone(f, now, Math.min(...checkinThresholds), checkinLiveOffsetMs(t, now))) {
           resetCheckin(f, now, 'arm-all-reset');
           checkinReset = true;
           break;
@@ -3879,7 +4330,7 @@ async function handleApi(req, res, pathname) {
       }
     });
     const freshTxs = fresh.bitcoin.txs || [];
-    return sendJson(res, 200, { ok: true, enabled: body.enabled, count: freshTxs.length, checkinReset, txs: freshTxs });
+    return sendJson(res, 200, { ok: true, enabled: body.enabled, count: freshTxs.length, checkinReset, txs: serveTxs(freshTxs) });
   }
 
   // POST /api/bitcoin/txs/:id/broadcast — MANUAL broadcast, now. Same
@@ -3893,12 +4344,12 @@ async function handleApi(req, res, pathname) {
     const tx = (state.bitcoin.txs || []).find((t) => t.id === txBroadcastMatch[1]);
     if (!tx) return sendError(res, 404, 'no such transaction');
     if (tx.broadcasted) {
-      return sendJson(res, 200, { ok: true, id: tx.id, txid: tx.txid, label: tx.label || '', action: 'skipped', reason: 'already broadcast', tx });
+      return sendJson(res, 200, { ok: true, id: tx.id, txid: tx.txid, label: tx.label || '', action: 'skipped', reason: 'already broadcast', tx: serveTx(tx) });
     }
     const r = await broadcastOne(state, tx, bitcoin.endpointsFor(state.settings), now, 'broadcast');
     state = store.loadState(DATA_DIR);
     const fresh = (state.bitcoin.txs || []).find((t) => t.id === tx.id);
-    return sendJson(res, 200, { ok: true, ...r, tx: fresh });
+    return sendJson(res, 200, { ok: true, ...r, tx: serveTx(fresh) });
   }
 
   // POST /api/bitcoin/txs/:id/broadcast-public — the MANUAL escape
@@ -3927,7 +4378,7 @@ async function handleApi(req, res, pathname) {
     const r = await broadcastOne(state, tx, bitcoin.endpointsFor(state.settings), now, 'broadcast', { forcePublic: true });
     state = store.loadState(DATA_DIR);
     const fresh = (state.bitcoin.txs || []).find((t) => t.id === tx.id);
-    return sendJson(res, 200, { ok: true, ...r, tx: fresh });
+    return sendJson(res, 200, { ok: true, ...r, tx: serveTx(fresh) });
   }
 
   // POST /api/broadcast/all — MANUAL broadcast of the transactions
@@ -3995,12 +4446,19 @@ async function handleApi(req, res, pathname) {
   // It also carries the check-in key hashes (not the keys — those were
   // never stored), so a restored setup keeps its keys working.
   if (req.method === 'GET' && pathname === '/api/backup') {
+    // (0.8.2) The backup carries the SERVED form of each tx (a
+    // one-rule set as its single rule) — restore accepts both
+    // shapes, and the backup is compared against the served
+    // triggers after a restore, so the backup must match what
+    // the UI sees.
+    const backupState = JSON.parse(JSON.stringify(state));
+    backupState.bitcoin.txs = serveTxs(backupState.bitcoin.txs || []);
     return sendJson(res, 200, {
       format: 'standby-backup',
       version: 1,
       app: 'standby',
       exportedAt: now.toISOString(),
-      state: JSON.parse(JSON.stringify(state)),
+      state: backupState,
       checkins: store.readCheckins(DATA_DIR, 200),
       broadcastLog: store.readBroadcastLog(DATA_DIR, 200),
     });
@@ -4168,6 +4626,13 @@ async function handleApi(req, res, pathname) {
       let id = (typeof t.id === 'string' && t.id) ? asStr(t.id, 40) : '';
       if (!id || seenIds.has(id)) id = store.newTxId();
       seenIds.add(id);
+      // (0.8.2) The rule set rides through validation (the same
+      // per-rule rules as a single trigger), and the triggerState
+      // is normalized to the rule count — a flat object wraps to
+      // one element, an array is sanitized / padded / truncated,
+      // a malformed one restores as null (the evaluator overwrites
+      // it on the next evaluation anyway).
+      const restoredTrigger = store.triggerOf(t);
       txs.push({
         id,
         txid: parsed.txid,
@@ -4209,18 +4674,19 @@ async function handleApi(req, res, pathname) {
         publicFallbackDays: validPublicFallbackDays(t.publicFallbackDays),
         slipstreamFirstAttemptAt: (typeof t.slipstreamFirstAttemptAt === 'string'
           && !Number.isNaN(new Date(t.slipstreamFirstAttemptAt).getTime())) ? t.slipstreamFirstAttemptAt : null,
-        // The trigger (0.8.0): carried through when valid; a backup
+        // The trigger (0.8.0, rule sets 0.8.2): carried through
+        // when valid — a single trigger or a rule set; a backup
         // from before 0.8.0 carries none, which restores as the
         // check-in trigger at the 35-day fallback — the same as
         // an older record loaded from disk. An invalid trigger in a
         // hand-edited backup falls back the same way (like the
         // route and fallback above: lenient, never a 400 — a bad
         // trigger must not reject a whole restore). The
-        // triggerState rides along too (a malformed one restores
-        // as null — the evaluator overwrites it on the next
-        // evaluation anyway).
-        trigger: store.triggerOf(t),
-        triggerState: (t.triggerState && typeof t.triggerState === 'object' && !Array.isArray(t.triggerState)) ? t.triggerState : null,
+        // triggerState rides along too, normalized to the rule
+        // count (a malformed one restores as null — the evaluator
+        // overwrites it on the next evaluation anyway).
+        trigger: restoredTrigger,
+        triggerState: store.normalizeTriggerState(t.triggerState, restoredTrigger.rules.length),
         // (0.8.1, audit finding: restored `broadcasted` records)
         // A broadcasted fact — or a release record claiming the tx
         // already went out ('broadcast') or is spent ('stale') — is
@@ -4325,7 +4791,7 @@ async function handleApi(req, res, pathname) {
       }
     }
     const restored = {
-      version: 6,
+      version: 7,
       createdAt: (typeof bs.createdAt === 'string' && bs.createdAt) ? bs.createdAt : now.toISOString(),
       updatedAt: now.toISOString(),
       settings,
@@ -4357,7 +4823,7 @@ async function handleApi(req, res, pathname) {
     // is still inactive (disarmed, or the restored vacation is
     // on) is re-marked inactive from now, so it stays frozen at 0.
     for (const t of txs) {
-      if (store.triggerOf(t).type !== 'checkin') continue;
+      if (!store.hasTriggerType(t, 'checkin')) continue;
       t.checkinOffsetMs = 0;
       t.checkinInactiveSince = null;
     }
@@ -4365,7 +4831,7 @@ async function handleApi(req, res, pathname) {
     store.saveState(DATA_DIR, restored);
     // A restored cadence takes effect immediately — the running
     // fast tick is cleared and restarted with it.
-    rearmFastTick();
+    rearmFullTick();
     // The receiver's key list matches the restored state from now on.
     writeReceiverKeys(restored);
     if (Array.isArray(body.checkins)) store.writeCheckins(DATA_DIR, body.checkins.slice(-200));
@@ -4376,7 +4842,11 @@ async function handleApi(req, res, pathname) {
     // (above), so it is the most recent entry; the method reads
     // 'restore' in the recent-check-ins list.
     store.appendCheckin(DATA_DIR, { ts: now.toISOString(), method: 'restore' });
-    return sendJson(res, 200, { ok: true, restoredTxs: txs.length, state: sanitizeState(restored) });
+    // The restored state is served the same way as a read (a
+    // one-rule set as its single rule — see GET /api/state).
+    const servedRestored = sanitizeState(restored);
+    servedRestored.bitcoin.txs = serveTxs(servedRestored.bitcoin.txs || []);
+    return sendJson(res, 200, { ok: true, restoredTxs: txs.length, state: servedRestored });
   }
 
   // POST /api/bitcoin/connection/test — verifies both nodes without
@@ -4437,7 +4907,7 @@ async function handleApi(req, res, pathname) {
         // the dry-run notes). A price-fetch failure never breaks
         // the dry run itself; the note just says so.
         const trg = store.triggerOf(tx);
-        if (trg && trg.type === 'price') {
+        if (trg && store.hasTriggerType(tx, 'price')) {
           try {
             const readings = await fetchPriceCached(priceSourcesOf(state.settings), checkCadenceSecondsOf(state.settings));
             const comb = bitcoin.combinePriceReadings(readings, priceAgreementPctOf(state.settings));
@@ -4653,27 +5123,30 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`Standby ${VERSION} listening on :${PORT} (data: ${DATA_DIR})`);
 });
 
-// Release-evaluation timer: hourly, plus once shortly after startup.
-// The startup fee recompute runs on the same schedule (once, shortly
-// after startup) — see recomputeStoredFees. The fee peak is fetched
-// once shortly after startup too (the hourly tick refreshes it daily
-// after that) — see refreshFeePeakIfStale.
-setTimeout(runReleaseTick, 5000);
+// Release-evaluation timers (0.8.2): the full tick runs once
+// shortly after startup and then every checkCadenceSeconds; the
+// hourly tick runs once shortly after startup and then hourly.
+// The startup fee recompute runs once shortly after startup too
+// — see recomputeStoredFees. The fee peak is fetched once shortly
+// after startup (the hourly tick refreshes it daily after that)
+// — see refreshFeePeakIfStale.
+setTimeout(runFullTick, 5000);
+setTimeout(runHourlyTick, 5000);
 setTimeout(recomputeStoredFees, 5000);
 setTimeout(refreshFeePeakIfStale, 2000);
 setTimeout(refreshCurrentFeesIfStale, 2000);
 setTimeout(refreshPriceIfStale, 2000); // 0.8.0: a price rule's "currently $X" line is live on first load
-setInterval(runReleaseTick, 60 * 60 * 1000);
-// The fast tick (0.8.0): price + UTXO rules are evaluated every
+setInterval(runHourlyTick, 60 * 60 * 1000);
+// The full tick (0.8.2): every rule type is evaluated every
 // checkCadenceSeconds (Settings: Check cadence; default 60) while
-// one is armed. The interval is re-armed from the saved setting
-// whenever the setting changes (PUT /api/settings, restore), so a
-// new cadence takes effect without a restart — the old interval
-// is cleared first, so there is never more than one fast tick
-// running. The hourly check-in tick above is unchanged.
-let fastTickTimer = null;
-function rearmFastTick() {
-  if (fastTickTimer) clearInterval(fastTickTimer);
-  fastTickTimer = setInterval(runFastTick, checkCadenceSecondsOf(store.loadState(DATA_DIR).settings) * 1000);
+// one non-manual rule is armed. The interval is re-armed from the
+// saved setting whenever the setting changes (PUT /api/settings,
+// restore), so a new cadence takes effect without a restart — the
+// old interval is cleared first, so there is never more than one
+// full tick running.
+let fullTickTimer = null;
+function rearmFullTick() {
+  if (fullTickTimer) clearInterval(fullTickTimer);
+  fullTickTimer = setInterval(runFullTick, checkCadenceSecondsOf(store.loadState(DATA_DIR).settings) * 1000);
 }
-rearmFastTick();
+rearmFullTick();
