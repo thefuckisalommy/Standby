@@ -1,0 +1,98 @@
+# Standby test suites.
+#
+# Runs the 099 generation under test/:
+#   - API suite:        python3 test/verify099.py            (~5 min)
+#   - Regression suite: python3 test/verify099-regress.py    (~5 min)
+#   - DOM suite:        python3 test/dom_launcher099.py      (~4 min, TZ set)
+#     (boots the app + stubs, runs dom_check099.js, the 390px
+#     width check, and the error-screen script dom_check099_error.js)
+#
+# Runner needs:
+#   - ubuntu-latest, Node 20+, Python 3.11+
+#   - playwright + chromium: `npm install --prefix test playwright`
+#     installs the driver into test/node_modules (no package.json is
+#     committed); `npx playwright install chromium` fetches the
+#     browser into Playwright's default cache. The launcher only
+#     sets PLAYWRIGHT_BROWSERS_PATH when the variable is already
+#     set or a local screenshots/browsers copy exists, so CI just
+#     leaves it unset.
+#   - No network access to the real world is needed at run time:
+#     the suites point the app at local stub servers (node
+#     test/stubs.js) for Bitcoin nodes, price feeds, fee rates and
+#     Slipstream. The runner still needs network for npm/pip
+#     installs and the Playwright browser download.
+#   - Timeouts: the suites take ~4-6 minutes each; the job gives
+#     each 15 minutes so a slow runner does not flake the run.
+#   - Ports: API 3438/3439 + stubs 18235/18236, regression
+#     3448/3449 + stubs 18245/18246, DOM shares the API ports plus
+#     an error phase on 3468/3469 + stubs 18265/18266. API and
+#     regression run in parallel (distinct ports); DOM runs after
+#     API because it shares its ports.
+#
+# What it does NOT do: build or push the Docker image. The image
+# workflow (.github/workflows/build-standby-image.yml) stays
+# separate and unchanged; wiring test-gating into it (so a push to
+# main only builds when tests pass) is a follow-up.
+name: test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'standby/**'
+      - 'test/**'
+  pull_request:
+    paths:
+      - 'standby/**'
+      - 'test/**'
+  workflow_dispatch:
+
+jobs:
+  api:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Run API suite
+        run: python3 test/verify099.py
+
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Run regression suite
+        run: python3 test/verify099-regress.py
+
+  dom:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: api
+    env:
+      TZ: America/New_York
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install Playwright driver (test/node_modules, no package.json committed)
+        run: npm install --prefix test --no-save playwright
+      - name: Install Chromium for Playwright
+        run: npx playwright install chromium
+      - name: Run DOM suite (DOM checks + width check + error-screen script)
+        run: python3 test/dom_launcher099.py
