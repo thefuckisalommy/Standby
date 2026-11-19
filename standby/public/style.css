@@ -528,7 +528,12 @@ details.archived > summary { cursor: pointer; font-size: 18px; font-weight: 700;
 .rule-manual-note { color: var(--muted); font-size: 14px; margin: 8px 0 2px; }
 .rule-add { width: 100%; margin-top: 10px; }
 .rule-add:disabled { opacity: 0.5; cursor: default; }
-.tx-rules-combo { color: var(--muted); font-size: 13px; margin: 10px 0 0; }
+.tx-rules-combo { color: var(--muted); font-size: 13px; margin: 3px 0 0; }
+/* (0.8.2, combo tightening — Ryan: "just tighten it") The
+   first subcard after the combination line sits closer to it
+   (5px, not its usual 10px) so the line reads as part of the
+   rule list, not a separate block. */
+.tx-rules-combo + .tx-trigger { margin-top: 5px; }
 .tx-rules-combo strong { color: var(--ink); }
 .tx-trigger-k.rule-k { text-transform: none; }
 /* A label/value row inside a card's Details: the label is muted and
