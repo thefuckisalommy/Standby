@@ -23,7 +23,7 @@ releaseNotes: |-
 
   0.8.1 — Three more triggers join the broadcast engine.
 
-  - **Block height:** fire when the chain reaches a block height you set. Deterministic — the height comes from your node's own chain, and a reorg can't un-fire it.
+  - **Block height:** fire when the chain reaches a block height you set. Deterministic — the height comes from your node's own chain.
   - **Set date:** fire at a date and time you set, whether or not you check in. A pure deadline — checking in does not snooze it.
   - **Fee market:** fire when the economy fee crosses a rate you set (sat/vB) — falls to or below it, or rises to or above it.
   - **Custom price source:** pick Custom for either price source and point Standby at your own endpoint — a URL plus the JSON path to the price (for example, `data.amount`).

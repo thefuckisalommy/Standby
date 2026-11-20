@@ -1172,16 +1172,18 @@
     else val.classList.add('failed');
   }
   // After a connection test, open the details of any node that is
-  // not OK so the failure is visible without a tap; OK nodes stay
-  // closed. Runs once per test, never on re-render, so it does not
-  // fight a manual open/close.
+  // not OK so the failure is visible without a tap — and never
+  // close anything: a node the owner opened by hand stays open
+  // across the test (0.8.5). Runs once per test, never on
+  // re-render, so it does not fight a manual open/close.
   function openFailedNodeDetails() {
     var conn = (S.bitcoin && S.bitcoin.connection) || null;
     var results = (conn && conn.results) || [];
     for (var i = 0; i < results.length; i++) {
       var r = results[i];
+      if (r.status === 'ok') continue;
       var det = $('btc-' + r.endpoint + '-details');
-      if (det) det.open = (r.status !== 'ok');
+      if (det) det.open = true;
     }
   }
   // Which endpoint broadcast it — 'primary'/'secondary' today, and the
@@ -4075,7 +4077,7 @@
     },
     cadence: {
       title: 'Check cadence',
-      body: 'How often every trigger is checked. Standby evaluates all triggers — check-in, price, UTXO, block-height, set-date, and fee-market — together every X seconds. Faster catches an unconfirmed spend, a brief price spike, a block height, and a fee move sooner; slower means fewer API calls. The price and fee caches match this interval so a faster cadence fetches fresher readings.',
+      body: 'How often every trigger is checked. Standby evaluates all triggers — check-in, price, UTXO, block-height, set-date, and fee-market — together every X seconds. Faster catches an unconfirmed spend, a brief price spike, and a block height sooner; slower means fewer API calls. The price cache refreshes on this interval too, so a faster cadence fetches fresher prices. The fee-market cache does not: it refreshes once every 5 minutes regardless of this setting, so a fee move is only detected within 5 minutes.',
       triggers: ['price', 'utxo', 'blockheight', 'setdate', 'feemarket'],
     },
     fee: {

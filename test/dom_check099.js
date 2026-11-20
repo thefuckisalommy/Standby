@@ -1542,6 +1542,19 @@ function check(name, cond, detail) {
   check('node checks: opening the primary details shows the checks', detP.open === true, 'open=' + detP.open);
   toggleDetails(detP, false);
   check('node checks: closing the primary details hides them again', detP.open === false, 'open=' + detP.open);
+  // (0.8.5) Test connection must not collapse manually opened
+  // node details: the button used to force every OK node's
+  // details closed after the test. Open the primary details,
+  // click Test connection, and they stay open.
+  toggleDetails(detP, true);
+  check('node checks: the primary details open before the Test connection click', detP.open === true, 'open=' + detP.open);
+  els['btn-btc-test-conn'].click();
+  await new Promise((r) => setTimeout(r, 1500));
+  check('node checks: the primary details stay open across a Test connection click (OK node)', detP.open === true, 'open=' + detP.open);
+  check('node checks: the primary pill still reads OK after the Test connection click',
+    els['btc-primary-status'] && els['btc-primary-status'].textContent === 'OK',
+    els['btc-primary-status'] && els['btc-primary-status'].textContent);
+  toggleDetails(detP, false);
 
   // --- 11. Staged Transactions card (0.8.0) ---
   // Static HTML: the transactions card is renamed "Staged
@@ -2554,7 +2567,7 @@ function check(name, cond, detail) {
     { key: 'price-sources', title: 'Bitcoin price source', bodyPhrase: 'The two price sources Standby reads', appliesPhrase: 'BTC price triggers only' },
     { key: 'grace', title: 'Grace period', bodyPhrase: 'A pause for price and UTXO triggers', appliesPhrase: 'BTC price and UTXO triggers' },
     { key: 'agreement', title: 'Price agreement', bodyPhrase: 'How closely the two price sources must agree', appliesPhrase: 'BTC price triggers only' },
-    { key: 'cadence', title: 'Check cadence', bodyPhrase: 'How often every trigger is checked', appliesPhrase: 'BTC price, UTXO, Block height, Set date, and Fee market triggers' },
+    { key: 'cadence', title: 'Check cadence', bodyPhrase: 'How often every trigger is checked', bodyPhrase2: 'refreshes once every 5 minutes regardless of this setting', appliesPhrase: 'BTC price, UTXO, Block height, Set date, and Fee market triggers' },
     { key: 'fee', title: 'Broadcast Fee Risk', bodyPhrase: 'Where the Low / Medium / High fee pill flips', appliesPhrase: 'General' },
     { key: 'keys', title: 'Check-in API keys', bodyPhrase: 'The keys that can check in through the API', appliesPhrase: 'Check-in triggers only' },
     { key: 'backup', title: 'Data backup', bodyPhrase: 'Back up or restore everything Standby knows', appliesPhrase: 'General' },
@@ -2584,6 +2597,11 @@ function check(name, cond, detail) {
     check('help ' + h.key + ': the pop-out body says what the setting does',
       els['confirm-body'] && els['confirm-body'].textContent.indexOf(h.bodyPhrase) !== -1,
       els['confirm-body'] && els['confirm-body'].textContent.slice(0, 80));
+    if (h.bodyPhrase2) {
+      check('help ' + h.key + ': the pop-out body also says the fee cache refreshes on its own 5-minute interval',
+        els['confirm-body'] && els['confirm-body'].textContent.indexOf(h.bodyPhrase2) !== -1,
+        els['confirm-body'] && els['confirm-body'].textContent.slice(0, 160));
+    }
     check('help ' + h.key + ': the pop-out names the trigger types under "Applies to:"',
       els['modal-details'] && els['modal-details'].innerHTML.indexOf('Applies to:') !== -1
       && els['modal-details'].innerHTML.indexOf(h.appliesPhrase) !== -1,
@@ -2599,6 +2617,11 @@ function check(name, cond, detail) {
   els['modal-x'].click();
   check('help X: the X closes the pop-out',
     !(els['confirm-modal'] && els['confirm-modal'].classList.contains('open')), '');
+  // (0.8.5) The cadence help no longer claims the fee cache
+  // matches the check interval — the fee cache is fixed at
+  // 5 minutes regardless of cadence.
+  check('help cadence: the served app.js no longer says the price and fee caches match the interval',
+    appJs.indexOf('The price and fee caches match this interval') === -1, '');
 
   // --- §23 (0.8.0): Settings filter + trimmed card text ---
   // The filter row at the top of the Settings tab reads the
