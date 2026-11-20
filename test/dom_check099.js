@@ -2575,7 +2575,7 @@ function check(name, cond, detail) {
     { key: 'price-sources', title: 'Bitcoin price source', bodyPhrase: 'The two price sources Standby reads', appliesPhrase: 'BTC price triggers only' },
     { key: 'grace', title: 'Grace period', bodyPhrase: 'A pause for price and UTXO triggers', appliesPhrase: 'BTC price and UTXO triggers' },
     { key: 'agreement', title: 'Price agreement', bodyPhrase: 'How closely the two price sources must agree', appliesPhrase: 'BTC price triggers only' },
-    { key: 'cadence', title: 'Check cadence', bodyPhrase: 'How often every trigger is checked', bodyPhrase2: 'refreshes once every 5 minutes regardless of this setting', appliesPhrase: 'BTC price, UTXO, Block height, Set date, and Fee market triggers' },
+    { key: 'cadence', title: 'Check cadence', bodyPhrase: 'How often every trigger is checked', bodyPhrase2: 'refreshes once every 5 minutes regardless of this setting', bodyPhrase3: 'Public nodes rate-limit heavy use', appliesPhrase: 'BTC price, UTXO, Block height, Set date, and Fee market triggers' },
     { key: 'fee', title: 'Broadcast Fee Risk', bodyPhrase: 'Where the Low / Medium / High fee pill flips', appliesPhrase: 'General' },
     { key: 'keys', title: 'Check-in API keys', bodyPhrase: 'The keys that can check in through the API', appliesPhrase: 'Check-in triggers only' },
     { key: 'backup', title: 'Data backup', bodyPhrase: 'Back up or restore everything Standby knows', appliesPhrase: 'General' },
@@ -2609,6 +2609,11 @@ function check(name, cond, detail) {
       check('help ' + h.key + ': the pop-out body also says the fee cache refreshes on its own 5-minute interval',
         els['confirm-body'] && els['confirm-body'].textContent.indexOf(h.bodyPhrase2) !== -1,
         els['confirm-body'] && els['confirm-body'].textContent.slice(0, 160));
+    }
+    if (h.bodyPhrase3) {
+      check('help ' + h.key + ': the pop-out body also warns that public nodes rate-limit heavy use',
+        els['confirm-body'] && els['confirm-body'].textContent.indexOf(h.bodyPhrase3) !== -1,
+        els['confirm-body'] && els['confirm-body'].textContent.slice(0, 320));
     }
     check('help ' + h.key + ': the pop-out names the trigger types under "Applies to:"',
       els['modal-details'] && els['modal-details'].innerHTML.indexOf('Applies to:') !== -1
