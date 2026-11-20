@@ -1,5 +1,5 @@
 // Standby 0.8.2 DOM checks — block-height, set-date, and fee-market triggers.
-// Runs public/app.js from branch-0.8.5 in Node with the
+// Runs public/app.js from branch-0.8.6 in Node with the
 // minimal DOM shim from dom_check094.js (same El class, same
 // document/window/fetch/setInterval stubs) and verifies the 0.8.0
 // trigger UI only — the 094 suite still owns everything else.
@@ -941,6 +941,16 @@ function check(name, cond, detail) {
   const addU = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ txHex: craftHex(1, 200001), label: 'Dom UTXO unconfirmed', trigger: { type: 'utxo', params: { outpoint: CONFLICT + ':0', confirmations: 0 } }, triggerConfirmed: true }) });
   check('utxo modes: the unconfirmed-mode tx adds via the API', addU.status === 201, 'status=' + addU.status);
+  // (0.8.6) The override goes in BEFORE the 6-conf add below: the
+  // outpoint cache serves a fetched answer for one cadence window,
+  // so if the 6-conf add's gate evaluation read the stub's default
+  // FINNEY:0 answer (11 confirmations) first, the 3-conf add's
+  // gate below would read the same cached answer and refuse the
+  // add as already firing. With the override set first, every
+  // FINNEY:0 read in this section sees 2 confirmations.
+  const ovr = await realFetch('http://127.0.0.1:18235/__test__/outspend', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ txid: FINNEY, vout: 0, blockHeight: 899999 }) });
+  check('utxo modes: the outspend override sets FINNEY:0 to 2 confirmations', ovr.status === 200, 'status=' + ovr.status);
   const add6 = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ txHex: craftHex(1, 200003), label: 'Dom UTXO 6 conf', trigger: { type: 'utxo', params: { outpoint: FINNEY + ':0', confirmations: 6 } }, triggerConfirmed: true }) });
   check('utxo modes: the 6-confirmation tx adds via the API', add6.status === 201, 'status=' + add6.status);
@@ -973,13 +983,11 @@ function check(name, cond, detail) {
 
   // Catch-up waiting state (0.8.0, fast tick): a rule whose spend
   // is first noticed below its N shows the progress reason on its
-  // card. Drive FINNEY:0 to 2 confirmations via the stub override,
-  // add an N=3 rule (below threshold, so no triggerConfirmed
-  // needed), run a release check so the triggerState picks up the
-  // "2 of 3" reason, and read the card's state line.
-  const ovr = await realFetch('http://127.0.0.1:18235/__test__/outspend', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ txid: FINNEY, vout: 0, blockHeight: 899999 }) });
-  check('utxo modes: the outspend override sets FINNEY:0 to 2 confirmations', ovr.status === 200, 'status=' + ovr.status);
+  // card. FINNEY:0 is already driven to 2 confirmations by the
+  // stub override above, so add an N=3 rule (below threshold, so
+  // no triggerConfirmed needed), run a release check so the
+  // triggerState picks up the "2 of 3" reason, and read the card's
+  // state line.
   const add3 = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ txHex: craftHex(1, 200005), label: 'Dom UTXO 2 of 3', trigger: { type: 'utxo', params: { outpoint: FINNEY + ':0', confirmations: 3 } } }) });
   check('utxo modes: the 3-confirmation tx adds via the API (below threshold, no confirm needed)', add3.status === 201, 'status=' + add3.status);
@@ -2567,7 +2575,7 @@ function check(name, cond, detail) {
     { key: 'price-sources', title: 'Bitcoin price source', bodyPhrase: 'The two price sources Standby reads', appliesPhrase: 'BTC price triggers only' },
     { key: 'grace', title: 'Grace period', bodyPhrase: 'A pause for price and UTXO triggers', appliesPhrase: 'BTC price and UTXO triggers' },
     { key: 'agreement', title: 'Price agreement', bodyPhrase: 'How closely the two price sources must agree', appliesPhrase: 'BTC price triggers only' },
-    { key: 'cadence', title: 'Check cadence', bodyPhrase: 'How often every trigger is checked', bodyPhrase2: 'refreshes once every 5 minutes regardless of this setting', appliesPhrase: 'BTC price, UTXO, Block height, Set date, and Fee market triggers' },
+    { key: 'cadence', title: 'Check cadence', bodyPhrase: 'How often every trigger is checked', bodyPhrase2: 'refreshes once every 5 minutes regardless of this setting', bodyPhrase3: 'Public nodes rate-limit heavy use', appliesPhrase: 'BTC price, UTXO, Block height, Set date, and Fee market triggers' },
     { key: 'fee', title: 'Broadcast Fee Risk', bodyPhrase: 'Where the Low / Medium / High fee pill flips', appliesPhrase: 'General' },
     { key: 'keys', title: 'Check-in API keys', bodyPhrase: 'The keys that can check in through the API', appliesPhrase: 'Check-in triggers only' },
     { key: 'backup', title: 'Data backup', bodyPhrase: 'Back up or restore everything Standby knows', appliesPhrase: 'General' },
@@ -2601,6 +2609,11 @@ function check(name, cond, detail) {
       check('help ' + h.key + ': the pop-out body also says the fee cache refreshes on its own 5-minute interval',
         els['confirm-body'] && els['confirm-body'].textContent.indexOf(h.bodyPhrase2) !== -1,
         els['confirm-body'] && els['confirm-body'].textContent.slice(0, 160));
+    }
+    if (h.bodyPhrase3) {
+      check('help ' + h.key + ': the pop-out body also warns that public nodes rate-limit heavy use',
+        els['confirm-body'] && els['confirm-body'].textContent.indexOf(h.bodyPhrase3) !== -1,
+        els['confirm-body'] && els['confirm-body'].textContent.slice(0, 320));
     }
     check('help ' + h.key + ': the pop-out names the trigger types under "Applies to:"',
       els['modal-details'] && els['modal-details'].innerHTML.indexOf('Applies to:') !== -1
@@ -2795,8 +2808,8 @@ function check(name, cond, detail) {
     && idx.indexOf('Installed version:') !== -1 && idx.indexOf('id="app-version"') !== -1, '');
   check('app version static: the card has no "?" button and no details (just the version line)',
     idx.indexOf('id="help-version"') === -1, '');
-  check('app version: the installed version reads 0.8.5 (from /api/health)',
-    els['app-version'] && els['app-version'].textContent === '0.8.5',
+  check('app version: the installed version reads 0.8.6 (from /api/health)',
+    els['app-version'] && els['app-version'].textContent === '0.8.6',
     els['app-version'] && els['app-version'].textContent);
   setFilter('general');
   check('app version: the card is visible under General',

@@ -4077,7 +4077,7 @@
     },
     cadence: {
       title: 'Check cadence',
-      body: 'How often every trigger is checked. Standby evaluates all triggers — check-in, price, UTXO, block-height, set-date, and fee-market — together every X seconds. Faster catches an unconfirmed spend, a brief price spike, and a block height sooner; slower means fewer API calls. The price cache refreshes on this interval too, so a faster cadence fetches fresher prices. The fee-market cache does not: it refreshes once every 5 minutes regardless of this setting, so a fee move is only detected within 5 minutes.',
+      body: 'How often every trigger is checked. Standby evaluates all triggers — check-in, price, UTXO, block-height, set-date, and fee-market — together every X seconds. Faster catches an unconfirmed spend, a brief price spike, and a block height sooner; slower means fewer API calls. The price cache refreshes on this interval too, so a faster cadence fetches fresher prices. The fee-market cache does not: it refreshes once every 5 minutes regardless of this setting, so a fee move is only detected within 5 minutes. A very fast cadence makes many more requests to your nodes. Public nodes rate-limit heavy use, so a short interval can get this IP throttled or limited by the provider.',
       triggers: ['price', 'utxo', 'blockheight', 'setdate', 'feemarket'],
     },
     fee: {

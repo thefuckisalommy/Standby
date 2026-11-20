@@ -167,11 +167,11 @@ GOAL = os.path.dirname(_TESTDIR)
 STUB = os.path.join(_TESTDIR, 'stubs.js')
 
 
-def app_dir(root, candidates=('standby', 'branch-0.8.5', 'branch-0.8.4', 'branch-0.8.3', 'app')):
+def app_dir(root, candidates=('standby', 'branch-0.8.6', 'branch-0.8.5', 'branch-0.8.4', 'branch-0.8.3', 'app')):
     """The app dir under a root: standby/ in a repo checkout,
-    branch-0.8.5/ in the goal dir (0.8.5 working copy), branch-0.8.4/
-    the 0.8.4 copy, branch-0.8.3/ the 0.8.3 copy, app/ for the
-    0.7.22-era layout this file's own suite boots."""
+    branch-0.8.6/ in the goal dir (0.8.6 working copy), branch-0.8.5/
+    the 0.8.5 copy, branch-0.8.4/ the 0.8.4 copy, branch-0.8.3/ the
+    0.8.3 copy, app/ for the 0.7.22-era layout this file's own suite boots."""
     for cand in candidates:
         if os.path.exists(os.path.join(root, cand, 'server.js')):
             return os.path.join(root, cand)

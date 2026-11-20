@@ -59,7 +59,7 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 // (last.json). Absent on a plain `node server.js` run — the key
 // feature is dormant then; every file access is guarded.
 const CHECKIN_DIR = process.env.CHECKIN_DIR || '/checkin';
-const VERSION = '0.8.5';
+const VERSION = '0.8.6';
 const MAX_BODY = 1024 * 1024; // 1 MB
 
 const MIME = {
@@ -1466,8 +1466,20 @@ async function checkPriceRule(state, rule, now, ctx) {
 async function checkUtxoRule(state, rule, now, ctx) {
   const needConfs = (rule.params.confirmations === 0) ? 0 : (rule.params.confirmations || 1);
   const endpoints = bitcoin.endpointsFor(state.settings);
+  // (0.8.6) The outspend lookup is cache-backed (shared outpoint
+  // cache, TTL = the check cadence) and batch-aware: when this
+  // evaluation watches ≥2 outputs of the same funding tx, the
+  // evaluation's batch (ctx.utxoBatch, built by
+  // evaluateReleaseInner) answers them with one /outspends fetch.
+  // Callers without a batch (the single-trigger check endpoint)
+  // take the singular path.
   let res;
-  try { res = await bitcoin.checkOutspend(rule.params.outpoint, endpoints); }
+  try {
+    res = await bitcoin.checkOutspend(rule.params.outpoint, endpoints, {
+      ttlMs: checkCadenceSecondsOf(state.settings) * 1000,
+      batch: (ctx && ctx.utxoBatch) || null,
+    });
+  }
   catch (e) { res = { unknown: true, error: e.message }; }
   const prev = (ctx && ctx.prevSlice && typeof ctx.prevSlice === 'object') ? ctx.prevSlice : {};
   if (res.unknown) {
@@ -1518,8 +1530,16 @@ async function checkUtxoRule(state, rule, now, ctx) {
       detail: { spent: true, confirmed: true, txid: res.txid }, warning: null,
     };
   }
+  // (0.8.6) The tip comes from the SHARED per-tick tip cache
+  // (fetchTipHeightsCached, same as the block-height rule) — the
+  // old direct getTipHeight call cost a second, uncached tip fetch
+  // on every confirmed-spend evaluation.
   let tip;
-  try { tip = await bitcoin.getTipHeight(endpoints); }
+  try {
+    const comb = bitcoin.combineTipHeights(await fetchTipHeightsCached(bitcoin.endpointsFor(state.settings), checkCadenceSecondsOf(state.settings)));
+    if (!comb.valid) throw new Error(comb.reason);
+    tip = comb.tip;
+  }
   catch (e) {
     return {
       fire: false, status: 'unknown', reason: 'could not fetch the tip height — will retry',
@@ -1741,7 +1761,7 @@ function checkManualRule(state, rule, now, ctx) {
 //     it. Vacation touches check-in rules only; price, UTXO and
 //     the other rules keep firing. Vacation is PER RULE too: an OR
 //     set can still fire via a non-check-in rule while on vacation.
-async function evaluateRule(state, tx, ruleIndex, now) {
+async function evaluateRule(state, tx, ruleIndex, now, utxoBatch) {
   const set = store.triggerOf(tx);
   const rule = set.rules[ruleIndex];
   const prevSlice = ruleTriggerState(tx, ruleIndex);
@@ -1756,6 +1776,7 @@ async function evaluateRule(state, tx, ruleIndex, now) {
   const r = await checkRule(state, rule, now, {
     prevSlice,
     liveOffsetMs: checkinLiveOffsetMs(tx, now),
+    utxoBatch: utxoBatch || null,
   });
   if (r.slice) setRuleTriggerState(tx, ruleIndex, r.slice);
   return { rule, fire: r.fire, status: r.status, reason: r.reason, held: null, slice: r.slice || null };
@@ -1841,12 +1862,12 @@ function outcomeClass(r) {
 // not only on a manual check. That is what "all at once" needs:
 // a tick that did not evaluate a rule cannot claim it held, and
 // now every tick evaluates every rule.
-async function evaluateTrigger(state, tx, now) {
+async function evaluateTrigger(state, tx, now, utxoBatch) {
   const set = store.triggerOf(tx);
   const ruleResults = [];
   for (let i = 0; i < set.rules.length; i++) {
     const rule = set.rules[i];
-    const r = await evaluateRule(state, tx, i, now);
+    const r = await evaluateRule(state, tx, i, now, utxoBatch);
     ruleResults.push({ index: i, rule, fire: r.fire, status: r.status, reason: r.reason, held: r.held, skipped: false, cls: outcomeClass(r), slice: r.slice });
   }
   const combined = combineOutcomes(set, ruleResults);
@@ -2208,7 +2229,7 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
   const trigType = releaseTriggerFor(state, tx, opts && opts.firedRuleTypes);
   let check;
   try {
-    check = await bitcoin.checkInputsUnspent(bitcoin.parseTx(tx.hex), endpoints);
+    check = await bitcoin.checkInputsUnspent(bitcoin.parseTx(tx.hex), endpoints, checkCadenceSecondsOf(state.settings) * 1000);
   } catch (e) {
     // The manual "Broadcast publicly" escape hatch (forcePublic)
     // does NOT write a 'failed' record: the tx stays
@@ -2632,6 +2653,29 @@ async function evaluateReleaseInner(automatic) {
   const endpoints = bitcoin.endpointsFor(s);
   const results = [];
 
+  // (0.8.6, audit proposal 2) One evaluation's UTXO batch plan:
+  // every watched outpoint in this run, grouped by funding tx.
+  // A funding tx with ≥2 watched outputs is answered with ONE
+  // /outspends fetch, shared by its rules. The plan is built from
+  // every tx's UTXO rules up front — the fetch itself is LAZY
+  // (only when a rule for that funding tx is actually evaluated),
+  // so a plan entry whose rule is never evaluated (terminal tx,
+  // grace hold) costs nothing, and a funding tx with exactly one
+  // watched output keeps the singular endpoint.
+  const utxoPlan = new Map(); // txid -> Set<vout>
+  for (const tx of all) {
+    const set = store.triggerOf(tx);
+    for (const rule of (set.rules || [])) {
+      if (rule.type !== 'utxo' || !rule.params || typeof rule.params.outpoint !== 'string') continue;
+      const parts = rule.params.outpoint.split(':');
+      const vout = parseInt(parts[1], 10);
+      if (!parts[0] || !Number.isFinite(vout) || vout < 0) continue;
+      if (!utxoPlan.has(parts[0])) utxoPlan.set(parts[0], new Set());
+      utxoPlan.get(parts[0]).add(vout);
+    }
+  }
+  const utxoBatch = bitcoin.createOutspendBatch(utxoPlan, endpoints, checkCadenceSecondsOf(s) * 1000);
+
   // (0.8.0) Each tx's own trigger decides whether its conditions
   // hold — armed or not. The release is no longer one global
   // clock. The triggers are evaluated ONCE, in list order, and the
@@ -2672,7 +2716,7 @@ async function evaluateReleaseInner(automatic) {
     }
     wasDueById.set(tx.id, storedCombinedDue(tx));
     let ev;
-    try { ev = await evaluateTrigger(state, tx, now); }
+    try { ev = await evaluateTrigger(state, tx, now, utxoBatch); }
     catch (e) {
       // An evaluator must never take the whole run down with it:
       // a throw is the same as 'unknown' — do not fire, and say so.
@@ -5175,7 +5219,7 @@ async function handleApi(req, res, pathname) {
         continue;
       }
       try {
-        const r = await bitcoin.dryRun(DATA_DIR, { tx, endpoints: bitcoin.endpointsFor(state.settings) });
+        const r = await bitcoin.dryRun(DATA_DIR, { tx, endpoints: bitcoin.endpointsFor(state.settings), ttlMs: checkCadenceSecondsOf(state.settings) * 1000 });
         // (0.8.0) A price rule's dry-run note carries the source
         // detail — which sources were used, their readings,
         // single-source fallback, or that they disagreed — because
