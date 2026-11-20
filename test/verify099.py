@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
-"""Standby 0.8.3 local verification: block-height, set-date, and
+"""Standby 0.8.4 local verification: block-height, set-date, and
 fee-market triggers.
 
-Boots the branch-0.8.3 app (port 3438), the check-in receiver
+Boots the branch-0.8.4 app (port 3438), the check-in receiver
 (3439), and two mempool stubs — primary 18235 and secondary 18236
 (both fixed: tip height 900000, economy fee 1 sat/vB, price 98200)
 — and checks the 0.8.1 trigger work:
 
-  1. health reports version 0.8.3.
+  1. health reports version 0.8.4.
   2. Block-height trigger: validation at add (bad heights rejected,
      good ones accepted), checkTriggerNow (a height already reached
      fires + warns, a future height watches), evaluation via the
      manual release check (an already-reached height broadcasts, a
      future one does not), and the full tick (an armed block-height
      tx fires on the full tick).
-  2c. Block-height reorg latch (0.8.1, audit 1): once the chain has
-     been observed at the target, a later reorg below the target
-     must not un-fire the rule.
+  2c. Block-height: NO latch (0.8.4): the rule is judged fresh
+     every evaluation — a reorg below the target un-fires it
+     again, for the check endpoint, for a disarmed tx's tick
+     slices, and for an AND set; editing the target starts
+     fresh; a disarmed due tx still never broadcasts, and
+     re-arming it past the target broadcasts.
   3. Set-date trigger: validation (bad dates rejected), checkTriggerNow
      (a past date fires + warns, a future date watches), evaluation
      (a past date broadcasts, a future one does not), and the full
@@ -70,17 +73,17 @@ Boots the branch-0.8.3 app (port 3438), the check-in receiver
       within the hour (stub attempt counts prove it); a manual
       broadcast bypasses the backoff; the retry succeeds once
       the hour has passed (lastAttemptAt backdated in state).
-  19. Live rule status for never-evaluated / disarmed txs (0.8.2):
-      ruleStatusFor reads warm in-memory data for price, fee and
-      set-date, so a tx that was never evaluated (added then
-      disarmed before any tick) still shows Met / Not met instead
-      of Unknown. Block-height and UTXO have no warm cache, so
-      they stay slice-based ('not-evaluated' with no slice). A
-      cold cache + no slice also stays 'not-evaluated' — the live
-      read never invents a value. The fee branch only trusts the
-      node-fee cache while it is younger than one cadence, so past
-      one cadence the fee pill falls back to Unknown while the
-      price rule (no age check) stays live.
+  19. Live rule status for never-evaluated / disarmed txs (0.8.2;
+      0.8.4): ruleStatusFor reads warm in-memory data for price,
+      fee and set-date, so a tx that was never evaluated (added
+      then disarmed before any tick) still shows Met / Not met
+      instead of Unknown. (0.8.4) The tick now evaluates every tx,
+      so a disarmed tx also gets a fresh slice within one cadence
+      — block-height and UTXO read live from the slice, and the
+      fee branch trusts the last known fee like price (no age
+      check), so the fee pill stays live past one cadence. A
+      manual release check evaluates all txs on demand and writes
+      fresh slices.
   20. Persistence hardening (0.8.3): every save keeps the previous
       version as state.json.bak; the first save of a day snapshots
       it (7 days kept); a migration snapshots the pre-migration
@@ -102,6 +105,19 @@ Boots the branch-0.8.3 app (port 3438), the check-in receiver
       GET /api/broadcast/log return their entries; POST
       /api/bitcoin/txs/preview validates hex/psbt; a non-JSON
       POST is rejected 403 by the CSRF gate.
+  22. Evaluate all, broadcast armed only (0.8.4): the tick
+      evaluates every tx — armed or not — and writes fresh
+      slices, but only armed txs can enter the firing set. A
+      disarmed tx whose conditions all hold shows Met, is never
+      broadcast (stub attempt counts prove it), logs no 'fired'
+      history, and is listed as skipped by a manual release
+      check; re-arming it broadcasts on the next tick, with
+      'fired' logged exactly once. A disarmed check-in tx's clock
+      stays frozen while the tick evaluates it.
+  23. No block-height latch (0.8.4): covered by 2c above — the
+      latch is gone from the evaluator, the gate, and the
+      check endpoint, and no stored heightReachedFor is
+      honored anywhere.
 
 Ports: app 3438, receiver 3439, stubs 18235/18236 — no collision
 with the 095 suite (app 3388, receiver 3389, stubs 18175/18176) or
@@ -184,6 +200,16 @@ def state_tx(tx_id, base=BASE):
         if t.get('id') == tx_id:
             return t
     return None
+
+
+def rule_slice(t, i=0):
+    """One rule's triggerState slice from a state_tx() tx: the API
+    serves a one-rule set's state as its single flat slice (a dict)
+    and a multi-rule set's as an array (serveTriggerState)."""
+    ts = (t or {}).get('triggerState')
+    if isinstance(ts, list):
+        return ts[i] if i < len(ts) else {}
+    return ts if isinstance(ts, dict) else {}
 
 
 def delete_all_txs(base=BASE):
@@ -280,7 +306,7 @@ def main():
 
         # --- 1. health + version ----------------------------------------
         s, h = req('GET', '/api/health')
-        check('1 health reports version 0.8.3', h.get('version') == '0.8.3', h)
+        check('1 health reports version 0.8.4', h.get('version') == '0.8.4', h)
 
         # --- 2. block-height trigger --------------------------------------
         # Validation at add: bad heights rejected, good ones accepted.
@@ -321,25 +347,92 @@ def main():
               t and t.get('triggerStatus', {}).get('status') == 'watching' and t.get('triggerStatus', {}).get('lastTipHeight') == STUB_TIP, t.get('triggerStatus') if t else None)
         delete_all_txs()
 
-        # --- 2c. block-height: the reorg latch (0.8.1, audit 1) --------
-        # Once the chain has been observed at the target, the rule has
-        # fired — a later reorg below the target must not un-fire it.
-        # The past-height tx broadcasts (latch set), the primary tip
-        # then drops below the target, and the rule must still fire.
-        s, r = add_tx('BH latch', {'type': 'blockheight', 'params': {'targetHeight': STUB_TIP - 100000}}, 110108, trigger_confirmed=True)
-        check('2c latch add: past height accepted with triggerConfirmed (201)', s == 201, (s, r))
-        bh_latch = r['tx']['id'] if s == 201 else None
-        s, r, res = release_results()
-        check('2c latch release: past height broadcasts (latch set)', s == 200 and res.get(bh_latch, {}).get('action') == 'broadcast', res.get(bh_latch))
+        # --- 2c. block-height: NO latch (0.8.4) -------------------------
+        # The one-way latch is gone: the rule is judged fresh every
+        # evaluation, like every other rule. A reorg that drops the
+        # tip below the target un-fires it again.
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 10})
+        check('2c tick: cadence set to 10 s', s == 200, (s, r))
+        # (a) The check endpoint judges the CURRENT tip: due above
+        # the target, watching again after a simulated reorg.
+        s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'blockheight', 'params': {'targetHeight': STUB_TIP - 100000}}})
+        check('2c no-latch check: tip above target fires', s == 200 and r.get('fire') is True and r.get('status') == 'due', r)
         s, r = req('POST', '/__test__/tip', {'height': STUB_TIP - 200000}, base=STUB_BASE_P)
         check('2c primary stub tip dropped to 700000', s == 200 and r.get('height') == STUB_TIP - 200000, r)
-        s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'blockheight', 'params': {'targetHeight': STUB_TIP - 100000}}, 'txId': bh_latch})
-        check('2c latch check: reorged tip still fires with the tx latch', s == 200 and r.get('fire') is True and r.get('status') == 'due', r)
-        s, r, res = release_results()
-        t = state_tx(bh_latch)
-        check('2c latch status: reorged tip still shows due', t and t.get('triggerStatus', {}).get('status') == 'due', t.get('triggerStatus') if t else None)
+        s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'blockheight', 'params': {'targetHeight': STUB_TIP - 100000}}})
+        check('2c no-latch check: reorged tip no longer fires', s == 200 and r.get('fire') is False and r.get('status') == 'watching', r)
         s, r = req('POST', '/__test__/tip', {'height': STUB_TIP}, base=STUB_BASE_P)
         check('2c primary stub tip restored to 900000', s == 200 and r.get('height') == STUB_TIP, r)
+        # (b) The tick writes fresh slices for a disarmed tx: due
+        # while the tip is past the target, watching after the reorg.
+        s, r = add_tx('BH nolatch', {'type': 'blockheight', 'params': {'targetHeight': STUB_TIP - 100000}}, 110108, trigger_confirmed=True)
+        check('2c no-latch add: past height accepted with triggerConfirmed (201)', s == 201, (s, r))
+        bh_nl = r['tx']['id'] if s == 201 else None
+        s, r = req('PUT', '/api/bitcoin/txs/' + bh_nl, {'enabled': False})
+        check('2c no-latch: disarmed at once (200)', s == 200, (s, r))
+        time.sleep(12)  # a full tick at the 10 s cadence
+        t = state_tx(bh_nl)
+        sl = rule_slice(t)
+        check('2c no-latch slice: disarmed tx is due with the tip past the target',
+              sl.get('status') == 'due' and sl.get('lastTipHeight') == STUB_TIP, sl)
+        check('2c no-latch status: live status is due (no latch needed)',
+              t and t.get('triggerStatus', {}).get('status') == 'due', t.get('triggerStatus') if t else None)
+        s, r = req('POST', '/__test__/tip', {'height': STUB_TIP - 200000}, base=STUB_BASE_P)
+        check('2c primary stub tip dropped to 700000 (again)', s == 200 and r.get('height') == STUB_TIP - 200000, r)
+        time.sleep(12)
+        t = state_tx(bh_nl)
+        sl = rule_slice(t)
+        check('2c no-latch slice: the reorg un-fires it (watching, tip 700000)',
+              sl.get('status') == 'watching' and sl.get('lastTipHeight') == STUB_TIP - 200000, sl)
+        check('2c no-latch status: live status is watching after the reorg',
+              t and t.get('triggerStatus', {}).get('status') == 'watching', t.get('triggerStatus') if t else None)
+        s, r = req('POST', '/__test__/tip', {'height': STUB_TIP}, base=STUB_BASE_P)
+        check('2c primary stub tip restored to 900000 (again)', s == 200 and r.get('height') == STUB_TIP, r)
+        # (c) An AND set [blockheight, price] stops firing when the
+        # tip drops: the height rule is judged fresh, so the set
+        # cannot fire on a stale latch.
+        and_bh = {'op': 'AND', 'rules': [{'type': 'blockheight', 'params': {'targetHeight': STUB_TIP - 100000}},
+                                       {'type': 'price', 'params': {'op': '>=', 'value': 90000}}]}
+        s, r = req('POST', '/api/triggers/check', {'trigger': and_bh})
+        check('2c no-latch AND check: height reached + price holding fires', s == 200 and r.get('fire') is True and r.get('status') == 'due', r)
+        s, r = req('POST', '/__test__/tip', {'height': STUB_TIP - 200000}, base=STUB_BASE_P)
+        check('2c primary stub tip dropped to 700000 (AND)', s == 200 and r.get('height') == STUB_TIP - 200000, r)
+        s, r = req('POST', '/api/triggers/check', {'trigger': and_bh})
+        check('2c no-latch AND check: reorged height un-fires the set', s == 200 and r.get('fire') is False and r.get('status') == 'watching', r)
+        s, r = req('POST', '/__test__/tip', {'height': STUB_TIP}, base=STUB_BASE_P)
+        check('2c primary stub tip restored to 900000 (AND)', s == 200 and r.get('height') == STUB_TIP, r)
+        # (d) Editing the target starts fresh: the edited rule is
+        # judged against the NEW target, with no memory of the old one.
+        s, r = req('PUT', '/api/bitcoin/txs/' + bh_nl, {'trigger': {'type': 'blockheight', 'params': {'targetHeight': STUB_TIP + 50000}}})
+        check('2c no-latch edit: retarget above the tip saves (200)', s == 200, (s, r))
+        time.sleep(12)
+        t = state_tx(bh_nl)
+        sl = rule_slice(t)
+        check('2c no-latch edit: retargeted rule is watching (tip 900000 of 950000)',
+              sl.get('status') == 'watching' and sl.get('lastTipHeight') == STUB_TIP, sl)
+        s, r = req('PUT', '/api/bitcoin/txs/' + bh_nl, {'trigger': {'type': 'blockheight', 'params': {'targetHeight': STUB_TIP - 100000}}, 'triggerConfirmed': True})
+        check('2c no-latch edit: retarget back below the tip saves with confirmation (200)', s == 200, (s, r))
+        time.sleep(12)
+        t = state_tx(bh_nl)
+        sl = rule_slice(t)
+        check('2c no-latch edit: retargeted rule is due again (tip 900000 of 800000)',
+              sl.get('status') == 'due' and sl.get('lastTipHeight') == STUB_TIP, sl)
+        # (e) Safety: the disarmed tx whose target is reached still
+        # does NOT broadcast; re-arming it after the tip is still
+        # past the target DOES broadcast on the next manual check.
+        s, r, res = release_results()
+        check('2c no-latch safety: manual check lists the disarmed due tx as skipped',
+              res.get(bh_nl, {}).get('action') == 'skipped', res.get(bh_nl))
+        t = state_tx(bh_nl)
+        check('2c no-latch safety: the disarmed due tx is still un-broadcast',
+              t is not None and not t.get('broadcasted') and not t.get('release'), t)
+        s, r = req('PUT', '/api/bitcoin/txs/' + bh_nl, {'enabled': True})
+        check('2c no-latch rearm: the tx re-arms (200)', s == 200 and r.get('tx', {}).get('enabled') is True, r)
+        s, r, res = release_results()
+        check('2c no-latch rearm: re-armed tx broadcasts with the tip past the target',
+              s == 200 and res.get(bh_nl, {}).get('action') == 'broadcast', res.get(bh_nl))
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 60})
+        check('2c tick: cadence restored to 60 s', s == 200, (s, r))
         delete_all_txs()
 
         # --- 2b. block-height: the PRIMARY node's tip decides ----------
@@ -1544,15 +1637,17 @@ def main():
         check('18 tick: cadence restored to 60 s', s == 200, (s, r))
         delete_all_txs()
 
-        # --- 19. live rule status for never-evaluated / disarmed txs (0.8.2) -----
+        # --- 19. live rule status for never-evaluated / disarmed txs (0.8.2; 0.8.4) -----
         # ruleStatusFor reads warm in-memory data for price, fee and
         # set-date, so a tx that was never evaluated (added then
         # disarmed before any tick) still shows Met / Not met instead
-        # of Unknown. Block-height and UTXO have no warm cache, so
-        # they stay slice-based ('not-evaluated' with no slice). A
-        # cold cache + no slice also stays 'not-evaluated' — the
-        # live read never invents a value. Stub facts: price 98200,
-        # economy fee 1 sat/vB, tip 900000.
+        # of Unknown. (0.8.4) The tick now evaluates EVERY tx, so a
+        # disarmed tx also gets a fresh slice within one cadence —
+        # block-height and UTXO read live from the slice, not from
+        # a warm cache (there is none). A manual release check
+        # evaluates all txs on demand, which is what pins the slice
+        # values below. Stub facts: price 98200, economy fee 1
+        # sat/vB, tip 900000.
         # Warm both caches first (the trigger-check endpoint reads
         # through the same caches the status read uses).
         s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'feemarket', 'params': {'maxFeeRate': 5}}})
@@ -1566,7 +1661,6 @@ def main():
         s, r = req('PUT', '/api/bitcoin/txs/' + fm_live, {'enabled': False})
         check('19 fee: disarmed at once (200)', s == 200, (s, r))
         t = state_tx(fm_live)
-        check('19 fee: never evaluated (no slice written)', t and not t.get('triggerState'), t.get('triggerState') if t else None)
         check('19 fee: live status is watching with the economy fee',
               t and t.get('triggerStatus', {}).get('status') == 'watching' and t.get('triggerStatus', {}).get('lastEconomyFee') == STUB_ECONOMY_FEE, t.get('triggerStatus') if t else None)
         # A disarmed fee tx above the fee reads due (Met), live.
@@ -1576,7 +1670,6 @@ def main():
         s, r = req('PUT', '/api/bitcoin/txs/' + fm_due, {'enabled': False})
         check('19 fee due: disarmed at once (200)', s == 200, (s, r))
         t = state_tx(fm_due)
-        check('19 fee due: never evaluated (no slice written)', t and not t.get('triggerState'), t.get('triggerState') if t else None)
         check('19 fee due: live status is due',
               t and t.get('triggerStatus', {}).get('status') == 'due', t.get('triggerStatus') if t else None)
         # Set-date is pure clock math: future watches, past is due.
@@ -1586,7 +1679,6 @@ def main():
         s, r = req('PUT', '/api/bitcoin/txs/' + sd_live, {'enabled': False})
         check('19 setdate: disarmed at once (200)', s == 200, (s, r))
         t = state_tx(sd_live)
-        check('19 setdate: never evaluated (no slice written)', t and not t.get('triggerState'), t.get('triggerState') if t else None)
         check('19 setdate: future date reads watching live',
               t and t.get('triggerStatus', {}).get('status') == 'watching', t.get('triggerStatus') if t else None)
         past_date = iso_ago(days=1)
@@ -1606,50 +1698,84 @@ def main():
         s, r = req('PUT', '/api/bitcoin/txs/' + and_live, {'enabled': False})
         check('19 AND: disarmed at once (200)', s == 200, (s, r))
         t = state_tx(and_live)
-        check('19 AND: never evaluated (no slice written)', t and not t.get('triggerState'), t.get('triggerState') if t else None)
         ts = (t or {}).get('triggerStatus', {})
         check('19 AND: combined status is due, both rules due live',
               ts.get('status') == 'due' and len(ts.get('rules', [])) == 2
               and ts['rules'][0].get('status') == 'due' and ts['rules'][1].get('status') == 'due', ts)
-        # Block-height and UTXO stay slice-based: no slice, no live
-        # read — still 'not-evaluated'.
+        # Block-height and UTXO have no live cache read — their
+        # status comes from the evaluation slice, pinned after the
+        # manual check below (0.8.4: the tick writes it too).
         s, r = add_tx('BH live disarmed', {'type': 'blockheight', 'params': {'targetHeight': STUB_TIP + 50000}}, 119010)
         check('19 blockheight: disarmed tx adds (201)', s == 201, (s, r))
         bh_live = r['tx']['id'] if s == 201 else None
         s, r = req('PUT', '/api/bitcoin/txs/' + bh_live, {'enabled': False})
         check('19 blockheight: disarmed at once (200)', s == 200, (s, r))
-        t = state_tx(bh_live)
-        check('19 blockheight: no warm tip anywhere, still not-evaluated',
-              t and t.get('triggerStatus', {}).get('status') == 'not-evaluated', t.get('triggerStatus') if t else None)
         s, r = add_tx('UTXO live disarmed', {'type': 'utxo', 'params': {'outpoint': FINNEY + ':1', 'condition': 'spent', 'confirmations': 1}}, 119012)
         check('19 utxo: disarmed tx adds (201)', s == 201, (s, r))
         ux_live = r['tx']['id'] if s == 201 else None
         s, r = req('PUT', '/api/bitcoin/txs/' + ux_live, {'enabled': False})
         check('19 utxo: disarmed at once (200)', s == 200, (s, r))
+        # (0.8.4) A manual release check evaluates every disarmed
+        # tx and writes fresh slices — no broadcast (nothing is
+        # armed), and the due ones are listed as skipped with a
+        # disarmed reason.
+        s, r, res = release_results()
+        check('19 slices: the manual check evaluates all disarmed txs (200)',
+              s == 200, (s, r))
+        check('19 slices: the top-level reason names the disarmed firing',
+              r.get('reason') == 'trigger fired — transaction disarmed', r.get('reason'))
+        t = state_tx(fm_live)
+        check('19 slices: disarmed fee slice is fresh (watching, economy fee 1)',
+              rule_slice(t).get('status') == 'watching'
+              and rule_slice(t).get('lastEconomyFee') == STUB_ECONOMY_FEE, t.get('triggerState') if t else None)
+        t = state_tx(fm_due)
+        check('19 slices: disarmed due fee slice is fresh (due)',
+              rule_slice(t).get('status') == 'due', t.get('triggerState') if t else None)
+        t = state_tx(sd_live)
+        check('19 slices: disarmed set-date slice is fresh (watching)',
+              rule_slice(t).get('status') == 'watching', t.get('triggerState') if t else None)
+        t = state_tx(sd_past)
+        check('19 slices: disarmed past-date slice is fresh (due)',
+              rule_slice(t).get('status') == 'due', t.get('triggerState') if t else None)
+        t = state_tx(and_live)
+        check('19 slices: disarmed AND slices are fresh (both rules due)',
+              rule_slice(t, 0).get('status') == 'due'
+              and rule_slice(t, 1).get('status') == 'due', t.get('triggerState') if t else None)
+        t = state_tx(bh_live)
+        check('19 slices: disarmed block-height slice is live (watching, tip 900000)',
+              rule_slice(t).get('status') == 'watching'
+              and rule_slice(t).get('lastTipHeight') == STUB_TIP, t.get('triggerState') if t else None)
         t = state_tx(ux_live)
-        check('19 utxo: no outspend cache, still not-evaluated',
-              t and t.get('triggerStatus', {}).get('status') == 'not-evaluated', t.get('triggerStatus') if t else None)
-        # Cold cache + no slice stays 'not-evaluated': restart clears
-        # the in-memory caches (the disarmed txs are skipped by the
-        # startup tick, so no slice is written), then the fee rule
-        # reads not-evaluated until the cache warms again.
-        check('19 cold: app restarts', restart())
+        check('19 slices: disarmed UTXO slice is live (watching, unspent)',
+              rule_slice(t).get('status') == 'watching', t.get('triggerState') if t else None)
+        check('19 slices: the due disarmed txs are listed as skipped, not broadcast',
+              res.get(fm_due, {}).get('action') == 'skipped' and res.get(and_live, {}).get('action') == 'skipped'
+              and (res.get(fm_due, {}).get('reason') or '').startswith('disarmed'), res)
+        # Cold cache (0.8.4): restart clears the in-memory caches,
+        # but the slices are wiped from the state file first, so
+        # only the startup tick can rewrite them — proving the tick
+        # evaluates disarmed txs. The fee rule reads watching from
+        # the fresh slice and the re-warmed cache.
+        stj = load_state_file()
+        for txj in stj.get('bitcoin', {}).get('txs', []):
+            txj['triggerState'] = None
+        save_state_file(stj)
+        check('19 cold: app restarts with wiped slices', restart())
         t = state_tx(fm_live)
-        check('19 cold: fee rule is not-evaluated with a cold cache and no slice',
-              t and t.get('triggerStatus', {}).get('status') == 'not-evaluated', t.get('triggerStatus') if t else None)
-        s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'feemarket', 'params': {'maxFeeRate': 5}}})
-        check('19 cold: fee trigger check re-warms the cache', s == 200, (s, r))
-        t = state_tx(fm_live)
-        check('19 cold: fee rule reads watching live again once warm',
+        check('19 cold: the startup tick re-evaluated the disarmed fee tx (slice fresh, watching)',
+              t and rule_slice(t).get('status') == 'watching', t.get('triggerState') if t else None)
+        check('19 cold: fee rule reads watching live after restart',
               t and t.get('triggerStatus', {}).get('status') == 'watching', t.get('triggerStatus') if t else None)
-        # TTL expiry (0.8.3, the live fee-pill intermittency): the
-        # fee branch only trusts the node-fee cache while it is
-        # younger than one cadence — nothing re-warms it for a
-        # disarmed tx (the tick skips disarmed txs; the hourly node
-        # check is an hour away), so past one cadence the pill falls
-        # back to Unknown. The price branch has no age check, so the
-        # same tx's price rule stays live — the contrast is the
-        # point. Cadence 10 s keeps the wait short.
+        # TTL expiry (0.8.4: the age check is gone, like price, and
+        # the tick evaluates disarmed txs, so the caches stay warm
+        # for them too). Before 0.8.4 the fee branch only trusted
+        # the node-fee cache while it was younger than one cadence
+        # — nothing re-warmed it for a disarmed tx, so past one
+        # cadence the pill fell back to Unknown. Now the last known
+        # fee is trusted until a fresh reading arrives, exactly
+        # like the price branch: past one cadence the fee rule
+        # still reads live (watching/due) with its fee note
+        # intact. Cadence 10 s keeps the wait short.
         s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 10})
         check('19 ttl: cadence set to 10 s', s == 200, (s, r))
         s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'feemarket', 'params': {'maxFeeRate': 5}}})
@@ -1664,11 +1790,19 @@ def main():
               t and (t.get('triggerStatus', {}).get('rules') or [{}])[0].get('status') == 'due', t.get('triggerStatus') if t else None)
         time.sleep(12)
         t = state_tx(fm_live)
-        check('19 ttl: fee rule falls back to not-evaluated past one cadence',
-              t and t.get('triggerStatus', {}).get('status') == 'not-evaluated', t.get('triggerStatus') if t else None)
+        check('19 ttl: fee rule still live (watching) past one cadence',
+              t and t.get('triggerStatus', {}).get('status') == 'watching', t.get('triggerStatus') if t else None)
+        check('19 ttl: fee rule still carries its last known fee past one cadence',
+              t and t.get('triggerStatus', {}).get('lastEconomyFee') == STUB_ECONOMY_FEE
+              and t.get('triggerStatus', {}).get('feeMode')
+              and t.get('triggerStatus', {}).get('feeNote'), t.get('triggerStatus') if t else None)
         t = state_tx(and_live)
         check('19 ttl: AND price rule still due past one cadence (no age check)',
               t and (t.get('triggerStatus', {}).get('rules') or [{}])[0].get('status') == 'due', t.get('triggerStatus') if t else None)
+        check('19 ttl: AND fee rule still due past one cadence (no age check)',
+              t and (t.get('triggerStatus', {}).get('rules') or [{}])[1].get('status') == 'due', t.get('triggerStatus') if t else None)
+        check('19 ttl: AND combined status still due past one cadence',
+              t and t.get('triggerStatus', {}).get('status') == 'due', t.get('triggerStatus') if t else None)
         s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 60})
         check('19 ttl: cadence restored to 60 s', s == 200, (s, r))
         delete_all_txs()
@@ -2160,6 +2294,159 @@ def main():
         except _urlerr.HTTPError as _e:
             _cs = _e.code
         check('21 csrf: non-JSON POST rejected (403)', _cs == 403, _cs)
+        delete_all_txs()
+
+        # --- 22. evaluate all, broadcast armed only (0.8.4) ------------
+        # The tick evaluates EVERY tx — armed or not — and writes
+        # fresh triggerState slices for display, but only ARMED txs
+        # can enter the firing set. A disarmed tx whose conditions
+        # all hold is evaluated, shows Met, and is never broadcast;
+        # its 'fired' history event never logs. Re-arming it
+        # broadcasts on the next tick. A disarmed check-in tx's
+        # clock stays frozen. Stub facts: price 98200, economy fee
+        # 1 sat/vB, tip 900000.
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 10})
+        check('22 tick: cadence set to 10 s', s == 200, (s, r))
+        s, r = req('POST', '/__test__/broadcast-fail', {'fail': False}, base=STUB_BASE_P)
+        check('22 stubs: primary accepting broadcasts', s == 200 and r.get('fail') is False, r)
+        s, r = req('POST', '/__test__/broadcast-fail', {'fail': False}, base=STUB_BASE_S)
+        check('22 stubs: secondary accepting broadcasts', s == 200 and r.get('fail') is False, r)
+        delete_all_txs()
+        # (a) Disarmed price tx: no armed price tx anywhere, yet
+        # the tick warms the price cache (refreshPriceIfStale) and
+        # writes a fresh due slice.
+        s, r = add_tx('22 price disarmed', {'type': 'price', 'params': {'op': '>=', 'value': 90000}}, 122000, trigger_confirmed=True)
+        check('22 price: disarmed price tx adds with confirmation (201)', s == 201, (s, r))
+        pr22 = r['tx']['id'] if s == 201 else None
+        s, r = req('PUT', '/api/bitcoin/txs/' + pr22, {'enabled': False})
+        check('22 price: disarmed at once (200)', s == 200, (s, r))
+        time.sleep(12)  # a full tick at the 10 s cadence
+        t = state_tx(pr22)
+        sl = rule_slice(t)
+        check('22 price: the tick wrote a fresh slice for the disarmed tx',
+              sl.get('status') == 'due' and sl.get('lastPrice') == 98200, sl)
+        check('22 price: live status is due with zero armed price txs',
+              t and t.get('triggerStatus', {}).get('status') == 'due', t.get('triggerStatus') if t else None)
+        # (b) Disarmed fee tx stays due past one cadence.
+        s, r = add_tx('22 fee disarmed', {'type': 'feemarket', 'params': {'maxFeeRate': 5, 'direction': 'below'}}, 122002, trigger_confirmed=True)
+        check('22 fee: disarmed fee tx adds with confirmation (201)', s == 201, (s, r))
+        fm22 = r['tx']['id'] if s == 201 else None
+        s, r = req('PUT', '/api/bitcoin/txs/' + fm22, {'enabled': False})
+        check('22 fee: disarmed at once (200)', s == 200, (s, r))
+        time.sleep(12)
+        t = state_tx(fm22)
+        sl = rule_slice(t)
+        check('22 fee: disarmed fee slice still due past one cadence',
+              sl.get('status') == 'due' and sl.get('lastEconomyFee') == STUB_ECONOMY_FEE, sl)
+        # (c) Disarmed block-height tx: the slice goes live from the stub tip.
+        s, r = add_tx('22 blockheight disarmed', {'type': 'blockheight', 'params': {'targetHeight': STUB_TIP + 50000}}, 122004)
+        check('22 blockheight: disarmed tx adds (201)', s == 201, (s, r))
+        bh22 = r['tx']['id'] if s == 201 else None
+        s, r = req('PUT', '/api/bitcoin/txs/' + bh22, {'enabled': False})
+        check('22 blockheight: disarmed at once (200)', s == 200, (s, r))
+        time.sleep(12)
+        t = state_tx(bh22)
+        sl = rule_slice(t)
+        check('22 blockheight: disarmed slice is live (watching, tip 900000)',
+              sl.get('status') == 'watching' and sl.get('lastTipHeight') == STUB_TIP, sl)
+        # (d) Disarmed UTXO tx: the slice updates on the tick.
+        s, r = add_tx('22 utxo disarmed', {'type': 'utxo', 'params': {'outpoint': FINNEY + ':1', 'condition': 'spent', 'confirmations': 1}}, 122006)
+        check('22 utxo: disarmed tx adds (201)', s == 201, (s, r))
+        ux22 = r['tx']['id'] if s == 201 else None
+        s, r = req('PUT', '/api/bitcoin/txs/' + ux22, {'enabled': False})
+        check('22 utxo: disarmed at once (200)', s == 200, (s, r))
+        time.sleep(12)
+        t = state_tx(ux22)
+        sl = rule_slice(t)
+        check('22 utxo: disarmed slice is live (watching, FINNEY:1 unspent)',
+              sl.get('status') == 'watching', sl)
+        # (e) Safety: the disarmed price tx's conditions all hold,
+        # yet ticks do NOT broadcast it — no broadcast, no release
+        # record, no 'fired' history. The manual check lists it as
+        # skipped.
+        s, c0p = req('GET', '/__test__/broadcast-count', base=STUB_BASE_P)
+        s, c0s = req('GET', '/__test__/broadcast-count', base=STUB_BASE_S)
+        check('22 safety: attempt counts read', isinstance(c0p.get('count'), int) and isinstance(c0s.get('count'), int), (c0p, c0s))
+        time.sleep(12)  # another full tick with the disarmed tx due
+        s, c1p = req('GET', '/__test__/broadcast-count', base=STUB_BASE_P)
+        s, c1s = req('GET', '/__test__/broadcast-count', base=STUB_BASE_S)
+        check('22 safety: the tick made no broadcast attempt for the disarmed due tx',
+              c1p.get('count') == c0p.get('count') and c1s.get('count') == c0s.get('count'), (c0p, c1p, c0s, c1s))
+        t = state_tx(pr22)
+        check('22 safety: the disarmed due tx is still un-broadcast (no release record)',
+              t is not None and not t.get('broadcasted') and not t.get('release'), t)
+        h = t.get('history') if t else None
+        types = [e.get('type') for e in h] if isinstance(h, list) else []
+        check('22 safety: no fired history event for the disarmed due tx',
+              'fired' not in types, types)
+        s, r, res = release_results()
+        check('22 safety: the manual check lists the disarmed due tx as skipped (evaluated, not broadcast)',
+              res.get(pr22, {}).get('action') == 'skipped' and (res.get(pr22, {}).get('reason') or '').startswith('disarmed'), res.get(pr22))
+        check('22 safety: the manual check reason names the disarmed firing',
+              r.get('reason') == 'trigger fired — transaction disarmed', r.get('reason'))
+        # (f) Re-arming the satisfied tx DOES broadcast on the next tick.
+        s, r = req('PUT', '/api/bitcoin/txs/' + pr22, {'enabled': True})
+        check('22 rearm: the satisfied tx re-arms (200)', s == 200 and r.get('tx', {}).get('enabled') is True, r)
+        time.sleep(12)
+        t = state_tx(pr22)
+        check('22 rearm: the next tick broadcast the re-armed tx',
+              t is not None and (t.get('release') or {}).get('status') == 'broadcast', (t or {}).get('release'))
+        h = t.get('history') if t else None
+        types = [e.get('type') for e in h] if isinstance(h, list) else []
+        check('22 rearm: fired logged exactly once, on the re-arm',
+              types.count('fired') == 1, types)
+        delete_all_txs()
+        # (g) Disarmed check-in tx: the clock stays frozen while
+        # disarmed — the tick evaluates it but the bar never
+        # advances.
+        s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft(1, 122100), 'label': '22 ck frozen',
+                                                'trigger': {'type': 'checkin', 'params': {'thresholdDays': 25}}})
+        check('22 frozen: the check-in tx adds (201)', s == 201, (s, r))
+        ck22 = r['tx']['id'] if s == 201 else None
+        s, r = req('POST', '/api/checkin', {'method': 'app'})
+        check('22 frozen: check-in lands (clock fresh)', s == 200 and r.get('ok') is True, r)
+        # The §21 auth test checked in to the receiver, so its
+        # last.json holds a recent timestamp — the tick's
+        # mergeExternalCheckin would apply it over any backdate.
+        # Remove it so the simulated clock below survives.
+        try:
+            os.remove(os.path.join(CHECKIN_DIR, 'last.json'))
+        except OSError:
+            pass
+        # Backdate the clock 13 days, then disarm at 13/25.
+        stj = load_state_file()
+        stj['checkin']['lastCheckinAt'] = iso_ago(days=13)
+        stj['checkin']['lastOnlineAt'] = iso_ago(minutes=5)
+        save_state_file(stj)
+        s, r = req('PUT', '/api/bitcoin/txs/' + ck22, {'enabled': False})
+        check('22 frozen: disarmed at 13/25 (200)', s == 200 and r.get('tx', {}).get('enabled') is False, r)
+        # Simulate 14 more days passing while disarmed: the clock
+        # moves to 27 days back and the open inactive period
+        # started 14 days ago — the live offset is the simulated
+        # inactive span, so the bar stays at the frozen 13.
+        stj = load_state_file()
+        stj['checkin']['lastCheckinAt'] = iso_ago(days=27, seconds=30)
+        stj['checkin']['lastOnlineAt'] = iso_ago(minutes=5)
+        for txj in stj.get('bitcoin', {}).get('txs', []):
+            if txj.get('id') == ck22:
+                txj['checkinInactiveSince'] = iso_ago(days=14)
+        save_state_file(stj)
+        time.sleep(12)  # a full tick evaluates the disarmed tx
+        s, st = req('GET', '/api/status')
+        bars = {c.get('id'): c for c in st.get('checkinTxs', [])}
+        check('22 frozen: the bar is STILL 13 of 25 after the tick (frozen)',
+              bars.get(ck22, {}).get('daysSince') == 13 and bars.get(ck22, {}).get('windowDays') == 25, bars.get(ck22))
+        check('22 frozen: the card stays on-track (a disarmed tx cannot make it release-due)',
+              st.get('state') == 'on-track', st.get('state'))
+        t = state_tx(ck22)
+        sl = rule_slice(t)
+        check('22 frozen: the tick evaluated the disarmed check-in rule (slice on-track, not unknown)',
+              sl.get('status') == 'on-track', sl)
+        check('22 frozen: the disarmed tx is still un-broadcast',
+              t is not None and not t.get('broadcasted') and not t.get('release'), t)
+        # Restore the default cadence for the remaining sections.
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 60})
+        check('22 tick: cadence restored to 60 s', s == 200, (s, r))
         delete_all_txs()
     finally:
         for p in list(v.procs):

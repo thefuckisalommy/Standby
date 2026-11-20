@@ -5,8 +5,10 @@ manifestVersion: 1
 id: standby
 category: automation
 name: Standby
-version: "0.8.3"
+version: "0.8.4"
 releaseNotes: |-
+  0.8.4 — Fee rule pill stays live — reads the last known fee like price does. Trigger statuses stay live for disarmed transactions — evaluated for display, never broadcast unless armed. Block-height trigger no longer latches — judged fresh each tick like every other rule.
+
   0.8.3 — Persistence hardening: rotating state backups, recovery from a corrupt state file, and check-in key verification on startup.
 
   - **Rotating state backups:** every save keeps the previous version as state.json.bak, the first save of each day snapshots the state (kept 7 days), and a snapshot is taken before any migration changes the state shape. A slow wipe — like the check-in keys that vanished in November — stays recoverable from yesterday's snapshot even though every save since is keyless.
