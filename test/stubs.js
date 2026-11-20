@@ -111,6 +111,15 @@ const priceState = {};
 // /__test__/fee-count below.
 let feeRequests = 0;
 const feeState = { economyFee: 1 };
+// Test hook (0.8.6, UTXO cache/batch): outspendRequests counts
+// every singular /api/tx/:txid/outspend/:vout request this stub
+// has answered, outspendsRequests every batch
+// /api/tx/:txid/outspends request — so a suite can prove repeated
+// outpoints cost one request (cache) and shared funding txs cost
+// one batch request. Runtime-readable via GET
+// /__test__/outspend-count and /__test__/outspends-count below.
+let outspendRequests = 0;
+let outspendsRequests = 0;
 // Test hook (0.8.0, UA fix): the User-Agent each price feed was
 // last fetched with, so a suite can prove the app identifies
 // itself (CoinGecko 403s a missing/non-descriptive UA).
@@ -365,6 +374,18 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ ok: true, count: feeRequests }));
   }
+  // Test controls for the outspend fetch (0.8.6): GET
+  // /__test__/outspend-count answers how many singular outspend
+  // requests this stub has answered; GET
+  // /__test__/outspends-count how many batch outspends requests.
+  if (req.method === 'GET' && p === '/__test__/outspend-count') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ ok: true, count: outspendRequests }));
+  }
+  if (req.method === 'GET' && p === '/__test__/outspends-count') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ ok: true, count: outspendsRequests }));
+  }
   // BTC price (0.8.0, two-source 0.8.0): one route per provider,
   // each in the real provider's shape. state.fail answers 500
   // (a dead feed); state.bad answers a malformed reading. The
@@ -460,8 +481,53 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
+  // One output's outspend answer (0.8.6): the JSON object for
+  // this outpoint, or null when the stub must 404 (a parent tx it
+  // has never seen, or one flagged unknown via
+  // /__test__/unknown-parent). Shared by the singular route below
+  // and the batch route above it, so both answer identically.
+  function outspendEntry(txid, vout) {
+    if (txid !== FINNEY && txid !== SECOND && txid !== CONFLICT && txid !== OWN_SPEND) return null;
+    if (unknownParents.has(txid)) return null;
+    const okey = txid + ':' + vout;
+    if (outspendOverride[okey] !== undefined) {
+      return { spent: true, txid: 'aabbccdd', vin: 0, status: { confirmed: true, block_height: outspendOverride[okey] } };
+    }
+    if (txid === FINNEY && vout === '0') {
+      return { spent: true, txid: 'aabbccdd', vin: 0, status: { confirmed: true, block_height: 899990 } };
+    }
+    if (txid === CONFLICT) {
+      const mode = process.env.STUB_CONFLICT_MODE || 'unconfirmed';
+      if (mode === 'unspent') return { spent: false };
+      return mode === 'confirmed'
+        ? { spent: true, txid: CONFLICT_SPENDER, vin: 0, status: { confirmed: true, block_height: 899990 } }
+        : { spent: true, txid: CONFLICT_SPENDER, vin: 0, status: { confirmed: false } };
+    }
+    if (txid === OWN_SPEND) {
+      if (!OWN_SPEND_TXID) return { spent: false };
+      return { spent: true, txid: OWN_SPEND_TXID, vin: 0, status: { confirmed: false } };
+    }
+    return { spent: false };
+  }
+  // Batch outspend (0.8.6, Esplora): GET /api/tx/:txid/outspends
+  // answers one entry per output of the funding tx, in vout order
+  // — the shape the real endpoint serves. FINNEY has 2 outputs
+  // (vout 0 spent, vout 1 unspent); the other known parents have 1.
+  // An unknown parent 404s, like the singular route.
+  const outs = p.match(/^\/api\/tx\/([0-9a-fA-F]+)\/outspends$/);
+  if (req.method === 'GET' && outs) {
+    outspendsRequests++;
+    const txid = outs[1].toLowerCase();
+    const nouts = txid === FINNEY ? 2 : 1;
+    const entries = [];
+    for (let i = 0; i < nouts; i++) entries.push(outspendEntry(txid, String(i)));
+    if (entries.some((e) => e === null)) { res.writeHead(404); return res.end(); }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify(entries));
+  }
   const out = p.match(/^\/api\/tx\/([0-9a-fA-F]+)\/outspend\/(\d+)$/);
   if (req.method === 'GET' && out) {
+    outspendRequests++;
     const txid = out[1].toLowerCase();
     const vout = out[2];
     const delay = parseInt(process.env.STUB_OUTSPEND_DELAY_MS || '0', 10);
@@ -471,38 +537,10 @@ const server = http.createServer((req, res) => {
         res.writeHead(200, { 'Content-Type': 'text/plain' });
         return res.end('x'.repeat(big));
       }
-      if (txid !== FINNEY && txid !== SECOND && txid !== CONFLICT && txid !== OWN_SPEND) { res.writeHead(404); return res.end(); }
-      if (unknownParents.has(txid)) { res.writeHead(404); return res.end(); }
-      const okey = txid + ':' + vout;
-      if (outspendOverride[okey] !== undefined) {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ spent: true, txid: 'aabbccdd', vin: 0, status: { confirmed: true, block_height: outspendOverride[okey] } }));
-      }
-      if (txid === FINNEY && vout === '0') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ spent: true, txid: 'aabbccdd', vin: 0, status: { confirmed: true, block_height: 899990 } }));
-      }
-      if (txid === CONFLICT) {
-        const mode = process.env.STUB_CONFLICT_MODE || 'unconfirmed';
-        if (mode === 'unspent') {
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          return res.end(JSON.stringify({ spent: false }));
-        }
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify(mode === 'confirmed'
-          ? { spent: true, txid: CONFLICT_SPENDER, vin: 0, status: { confirmed: true, block_height: 899990 } }
-          : { spent: true, txid: CONFLICT_SPENDER, vin: 0, status: { confirmed: false } }));
-      }
-      if (txid === OWN_SPEND) {
-        if (!OWN_SPEND_TXID) {
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          return res.end(JSON.stringify({ spent: false }));
-        }
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ spent: true, txid: OWN_SPEND_TXID, vin: 0, status: { confirmed: false } }));
-      }
+      const entry = outspendEntry(txid, vout);
+      if (entry === null) { res.writeHead(404); return res.end(); }
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ spent: false }));
+      return res.end(JSON.stringify(entry));
     };
     if (delay > 0) return setTimeout(answer, delay);
     return answer();

@@ -118,6 +118,16 @@ Boots the branch-0.8.5 app (port 3438), the check-in receiver
       latch is gone from the evaluator, the gate, and the
       check endpoint, and no stored heightReachedFor is
       honored anywhere.
+  24. Fee trigger: 5-minute node fee cache (0.8.5): two fee-rule
+      evaluations inside one 5-minute window cost ONE stub fee
+      fetch, from the primary only.
+  25. UTXO shared outpoint cache + /outspends batching (0.8.6):
+      repeated checks of the same outpoint cost one request per
+      cadence window; several watched outputs of one funding tx
+      cost one batch request; a 404 is never cached — a spend
+      that appears after the parent was unknown is detected on
+      the next evaluation; a confirmed-spend UTXO rule reuses
+      the shared per-tick tip cache.
 
 Ports: app 3438, receiver 3439, stubs 18235/18236 — no collision
 with the 095 suite (app 3388, receiver 3389, stubs 18175/18176) or
@@ -306,7 +316,7 @@ def main():
 
         # --- 1. health + version ----------------------------------------
         s, h = req('GET', '/api/health')
-        check('1 health reports version 0.8.5', h.get('version') == '0.8.5', h)
+        check('1 health reports version 0.8.6', h.get('version') == '0.8.6', h)
 
         # --- 2. block-height trigger --------------------------------------
         # Validation at add: bad heights rejected, good ones accepted.
@@ -1100,9 +1110,15 @@ def main():
         s, r = req('POST', '/api/broadcast/test', {'id': u404})
         one = (r.get('results') or [{}])[0]
         check('13 404 dry-run: spent input seen via the secondary', s == 200 and len(one.get('spent', [])) == 1, one)
-        # Both 404: unknown, never fires.
+        # Both 404: unknown, never fires. (0.8.6) The outpoint
+        # cache holds the secondary's answer from the failover
+        # check above, inside its TTL window — so restart first
+        # for a cold cache; this proves the failover logic itself,
+        # not the cache. The startup tick evaluates only the
+        # manual dry-run tx, so no outspend fetch warms the cache.
         s, r = req('POST', '/__test__/unknown-parent', {'txid': FINNEY}, base=STUB_BASE_S)
         check('13 secondary stub marks FINNEY unknown', s == 200 and FINNEY in r.get('unknownParents', []), r)
+        check('13 both 404: app restarted for a cold outpoint cache', restart())
         s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'utxo', 'params': {'outpoint': FINNEY + ':0', 'confirmations': 1}}})
         check('13 both 404: unknown, never fires', s == 200 and r.get('fire') is False and r.get('status') == 'unknown', r)
         # Cleanup: both stubs know FINNEY again.
@@ -2788,6 +2804,193 @@ def main():
         s, r = req('POST', '/__test__/fees', {'economyFee': 1}, base=STUB_BASE_P)
         s, r = req('POST', '/__test__/fees', {'economyFee': 1}, base=STUB_BASE_S)
         check('24 cleanup: stubs restored to fee 1', s == 200, (s, r))
+        delete_all_txs()
+
+        # --- 25. UTXO shared outpoint cache + /outspends batching (0.8.6) ---
+        # Ryan (Nov 20): UTXO triggers should stop being independent
+        # API requests — one shared monitoring workload. (a) Repeated
+        # checks of the same outpoint cost ONE stub request per
+        # cadence window (shared outpoint cache, TTL = cadence).
+        # (b) Several watched outputs of one funding tx cost ONE
+        # batch /outspends request; a single watched output keeps
+        # the singular endpoint. (c) A 404 is never cached — a
+        # spend that appears after the parent was unknown is
+        # detected on the next evaluation. (d) A confirmed-spend
+        # UTXO rule reuses the shared per-tick tip cache — no extra
+        # tip fetch. The background tick is parked (cadence 3600 s)
+        # so only the evaluations this section triggers can move
+        # the stub counters. The startup tick (5 s) is the single
+        # evaluation each sub-part measures: baseline BEFORE
+        # restart(), read counters after it.
+        def outspend_counts():
+            _, rp = req('GET', '/__test__/outspend-count', base=STUB_BASE_P)
+            _, rs = req('GET', '/__test__/outspend-count', base=STUB_BASE_S)
+            _, bp = req('GET', '/__test__/outspends-count', base=STUB_BASE_P)
+            _, bs = req('GET', '/__test__/outspends-count', base=STUB_BASE_S)
+            return rp.get('count', -1), rs.get('count', -1), bp.get('count', -1), bs.get('count', -1)
+        def tip_counts_25():
+            _, rp = req('GET', '/__test__/tip-count', base=STUB_BASE_P)
+            _, rs = req('GET', '/__test__/tip-count', base=STUB_BASE_S)
+            return rp.get('count', -1), rs.get('count', -1)
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 3600})
+        check('25 setup: cadence parked at 3600 s', s == 200, (s, r))
+        # (a) Two rules, one outpoint: the startup tick's evaluation
+        # costs ONE singular outspend request, primary only.
+        s, r = add_tx('UTXO 25a', {'type': 'utxo', 'params': {'outpoint': FINNEY + ':1', 'confirmations': 1}}, 111500)
+        check('25 dedup: first same-outpoint tx adds', s == 201, (s, r))
+        utxo_a1 = r['tx']['id'] if s == 201 else None
+        s, r = add_tx('UTXO 25b', {'type': 'utxo', 'params': {'outpoint': FINNEY + ':1', 'confirmations': 1}}, 111501)
+        check('25 dedup: second same-outpoint tx adds', s == 201, (s, r))
+        utxo_a2 = r['tx']['id'] if s == 201 else None
+        for tid in (utxo_a1, utxo_a2):
+            s, r = req('PUT', '/api/bitcoin/txs/' + tid, {'enabled': False})
+        check('25 dedup: both txs disarm (disarmed staged txs are still evaluated)', s == 200, (s, r))
+        p0, s0, bp0, bs0 = outspend_counts()
+        check('25 dedup: app restarted (cold caches, startup tick is the measured evaluation)', restart())
+        p1, s1, bp1, bs1 = outspend_counts()
+        check('25 dedup: two rules on one outpoint cost ONE singular request, primary only, no batch',
+              (p1, s1, bp1, bs1) == (p0 + 1, s0, bp0, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        for tid in (utxo_a1, utxo_a2):
+            t = state_tx(tid)
+            check('25 dedup: the disarmed tx IS evaluated (slice watching, still unspent)',
+                  rule_slice(t).get('status') == 'watching' and rule_slice(t).get('reason') == 'still unspent', rule_slice(t))
+        # A second evaluation inside the TTL window costs nothing —
+        # the cache holds the answer.
+        s, r, res = release_results()
+        check('25 dedup: release check runs', s == 200, (s, r))
+        p2, s2, bp2, bs2 = outspend_counts()
+        check('25 dedup: re-evaluation inside the cache window costs ZERO outspend requests',
+              (p2, s2, bp2, bs2) == (p1, s1, bp1, bs1), ((p1, s1, bp1, bs1), (p2, s2, bp2, bs2)))
+        delete_all_txs()
+        # (b) Two outputs, one funding tx: the startup tick costs
+        # ONE batch request, primary only — and zero singular ones.
+        s, r = add_tx('UTXO 25c', {'type': 'utxo', 'params': {'outpoint': FINNEY + ':0', 'confirmations': 1}}, 111502, True)
+        check('25 batch: first same-funding-tx tx adds (trigger confirmed)', s == 201, (s, r))
+        utxo_b1 = r['tx']['id'] if s == 201 else None
+        s, r = add_tx('UTXO 25d', {'type': 'utxo', 'params': {'outpoint': FINNEY + ':1', 'confirmations': 1}}, 111503)
+        check('25 batch: second same-funding-tx tx adds', s == 201, (s, r))
+        utxo_b2 = r['tx']['id'] if s == 201 else None
+        for tid in (utxo_b1, utxo_b2):
+            s, r = req('PUT', '/api/bitcoin/txs/' + tid, {'enabled': False})
+        check('25 batch: both txs disarm', s == 200, (s, r))
+        p0, s0, bp0, bs0 = outspend_counts()
+        check('25 batch: app restarted', restart())
+        p1, s1, bp1, bs1 = outspend_counts()
+        check('25 batch: two outputs of one funding tx cost ONE batch request, primary only, zero singular',
+              (p1, s1, bp1, bs1) == (p0, s0, bp0 + 1, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        t = state_tx(utxo_b1)
+        check('25 batch: the spent output reads due (11 confirmations)',
+              rule_slice(t).get('status') == 'due', rule_slice(t))
+        t = state_tx(utxo_b2)
+        check('25 batch: the unspent output reads watching',
+              rule_slice(t).get('status') == 'watching' and rule_slice(t).get('reason') == 'still unspent', rule_slice(t))
+        # The batch populated the per-output cache: a later singular
+        # lookup of one of those outpoints costs nothing.
+        p0, s0, bp0, bs0 = outspend_counts()
+        s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'utxo', 'params': {'outpoint': FINNEY + ':0', 'confirmations': 1}}})
+        check('25 batch: single-trigger check of a batched outpoint reads due', s == 200 and r.get('fire') is True and r.get('status') == 'due', r)
+        p1, s1, bp1, bs1 = outspend_counts()
+        check('25 batch: the batched outpoint is served from the cache (zero new requests)',
+              (p1, s1, bp1, bs1) == (p0, s0, bp0, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        delete_all_txs()
+        # (b2) One watched output of a funding tx: the singular
+        # endpoint, no batch.
+        s, r = add_tx('UTXO 25e', {'type': 'utxo', 'params': {'outpoint': SECOND + ':0', 'confirmations': 1}}, 111504)
+        check('25 single: lone-output tx adds', s == 201, (s, r))
+        utxo_e = r['tx']['id'] if s == 201 else None
+        s, r = req('PUT', '/api/bitcoin/txs/' + utxo_e, {'enabled': False})
+        check('25 single: the tx disarms', s == 200, (s, r))
+        p0, s0, bp0, bs0 = outspend_counts()
+        check('25 single: app restarted', restart())
+        p1, s1, bp1, bs1 = outspend_counts()
+        check('25 single: one watched output costs ONE singular request, primary only, zero batch',
+              (p1, s1, bp1, bs1) == (p0 + 1, s0, bp0, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        t = state_tx(utxo_e)
+        check('25 single: the lone output reads watching (SECOND:0 unspent)',
+              rule_slice(t).get('status') == 'watching', rule_slice(t))
+        delete_all_txs()
+        # (c) A 404 is never cached: the parent unknown on both
+        # stubs, then known again with a spend — the next
+        # evaluation must see the spend, not a cached unknown.
+        # (0.8.6) The earlier sub-parts cached FINNEY:1 as
+        # unspent (TTL = the parked 3600 s cadence), so the
+        # unknowns are marked BEFORE a restart: the restart
+        # clears the cache, and the startup tick itself reads
+        # unknown from both stubs (a 404 is never cached).
+        s, r = add_tx('UTXO 25f', {'type': 'utxo', 'params': {'outpoint': FINNEY + ':1', 'confirmations': 1}}, 111505)
+        check('25 unknown: watching tx adds', s == 201, (s, r))
+        utxo_f = r['tx']['id'] if s == 201 else None
+        s, r = req('PUT', '/api/bitcoin/txs/' + utxo_f, {'enabled': False})
+        check('25 unknown: the tx disarms', s == 200, (s, r))
+        s, r = req('POST', '/__test__/unknown-parent', {'txid': FINNEY}, base=STUB_BASE_P)
+        check('25 unknown: primary stub marks FINNEY unknown', s == 200 and FINNEY in r.get('unknownParents', []), r)
+        s, r = req('POST', '/__test__/unknown-parent', {'txid': FINNEY}, base=STUB_BASE_S)
+        check('25 unknown: secondary stub marks FINNEY unknown', s == 200 and FINNEY in r.get('unknownParents', []), r)
+        check('25 unknown: app restarted for a cold outpoint cache', restart())
+        s, r, res = release_results()
+        check('25 unknown: release check runs', s == 200, (s, r))
+        t = state_tx(utxo_f)
+        check('25 unknown: the rule reads unknown while the parent is unknown to both nodes',
+              rule_slice(t).get('status') == 'unknown', rule_slice(t))
+        # The parent is known again, and the outpoint is now spent
+        # (override: confirmed at 899999 = 2 confirmations).
+        s, r = req('POST', '/__test__/unknown-parent', {'txid': FINNEY, 'clear': True}, base=STUB_BASE_P)
+        s, r = req('POST', '/__test__/unknown-parent', {'txid': FINNEY, 'clear': True}, base=STUB_BASE_S)
+        check('25 unknown: both stubs know FINNEY again', s == 200, (s, r))
+        s, r = req('POST', '/__test__/outspend', {'txid': FINNEY, 'vout': 1, 'blockHeight': 899999}, base=STUB_BASE_P)
+        check('25 unknown: primary stub overrides FINNEY:1 as spent', s == 200, (s, r))
+        s, r = req('POST', '/__test__/outspend', {'txid': FINNEY, 'vout': 1, 'blockHeight': 899999}, base=STUB_BASE_S)
+        check('25 unknown: secondary stub overrides FINNEY:1 as spent', s == 200, (s, r))
+        s, r, res = release_results()
+        check('25 unknown: release check runs again', s == 200, (s, r))
+        t = state_tx(utxo_f)
+        check('25 unknown: the spend is detected on the next evaluation (the 404 was not cached)',
+              rule_slice(t).get('status') == 'due', rule_slice(t))
+        # The mirror side, pinned explicitly: a genuine observation
+        # stands for one TTL window — if both nodes go unknown
+        # again right after observing the spend, the rule still
+        # reads due from the cache. The fail-safe is that unknowns
+        # are never cached, not that a fresh 404 overrides a fresh
+        # observation.
+        s, r = req('POST', '/__test__/unknown-parent', {'txid': FINNEY}, base=STUB_BASE_P)
+        s, r = req('POST', '/__test__/unknown-parent', {'txid': FINNEY}, base=STUB_BASE_S)
+        check('25 unknown: both stubs mark FINNEY unknown again', s == 200, (s, r))
+        s, r, res = release_results()
+        check('25 unknown: release check runs a third time', s == 200, (s, r))
+        t = state_tx(utxo_f)
+        check('25 unknown: the observed spend still reads due inside its TTL window',
+              rule_slice(t).get('status') == 'due', rule_slice(t))
+        # Cleanup: the unknowns and the override go away, FINNEY:1
+        # is unspent again.
+        s, r = req('POST', '/__test__/unknown-parent', {'txid': FINNEY, 'clear': True}, base=STUB_BASE_P)
+        s, r = req('POST', '/__test__/unknown-parent', {'txid': FINNEY, 'clear': True}, base=STUB_BASE_S)
+        check('25 unknown: unknowns cleared', s == 200, (s, r))
+        s, r = req('POST', '/__test__/outspend', {'txid': FINNEY, 'vout': 1, 'clear': True}, base=STUB_BASE_P)
+        s, r = req('POST', '/__test__/outspend', {'txid': FINNEY, 'vout': 1, 'clear': True}, base=STUB_BASE_S)
+        check('25 unknown: overrides cleared', s == 200, (s, r))
+        delete_all_txs()
+        # (d) A confirmed-spend UTXO rule reuses the shared tip
+        # cache: with the tip cache warm, a re-evaluation costs
+        # ZERO tip fetches (before the fix, every evaluation paid
+        # for its own direct tip fetch).
+        s, r = add_tx('UTXO 25g', {'type': 'utxo', 'params': {'outpoint': FINNEY + ':0', 'confirmations': 1}}, 111506, True)
+        check('25 tip: confirmed-spend tx adds (trigger confirmed)', s == 201, (s, r))
+        utxo_g = r['tx']['id'] if s == 201 else None
+        s, r = req('PUT', '/api/bitcoin/txs/' + utxo_g, {'enabled': False})
+        check('25 tip: the tx disarms', s == 200, (s, r))
+        check('25 tip: app restarted (startup tick warms the tip cache)', restart())
+        t0, s0 = tip_counts_25()
+        s, r, res = release_results()
+        check('25 tip: release check runs', s == 200, (s, r))
+        t1, s1 = tip_counts_25()
+        check('25 tip: re-evaluating a confirmed-spend rule costs ZERO tip fetches (shared cache)',
+              (t1, s1) == (t0, s0), ((t0, s0), (t1, s1)))
+        t = state_tx(utxo_g)
+        check('25 tip: the rule still reads due (11 confirmations, from the cached tip)',
+              rule_slice(t).get('status') == 'due', rule_slice(t))
+        # Cleanup: cadence back to 60.
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 60})
+        check('25 cleanup: cadence restored to 60 s', s == 200, (s, r))
         delete_all_txs()
     finally:
         for p in list(v.procs):
