@@ -310,13 +310,12 @@ button.btn-checkin-big { width: 100%; padding: 16px 20px; font-size: 19px; }
 /* The combined Node + Exchange Status block (0.8.1): one sub-card
    holding both sections, in a cool blue-slate hue (#1f2a38) so it
    reads as a different family from the neutral tx tiles (#22252d)
-   at the same lightness. Each section's "last checked" sits inline
-   on its label line, right-aligned (see fmtCheckedAt in app.js). */
+   at the same lightness. Each row carries its own "checked …"
+   left of its pill (0.8.5) — the nodes share the connection
+   test's checkedAt, the exchanges share the price refresh time. */
 .readiness-status { background: #1f2a38; border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; margin: 10px 0; }
 .readiness-status .readiness-item { margin: 0; }
 .readiness-status .readiness-item + .readiness-item { margin-top: 10px; }
-.readiness-label-row { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
-.checked-inline { color: var(--muted); font-size: 13px; white-space: nowrap; }
 /* The guard note under a trigger picker (0.8.0): the rule's own
    safety guard, named where the rule is set — not on the card. */
 .guard-note {
@@ -354,6 +353,16 @@ button.btn-checkin-big { width: 100%; padding: 16px 20px; font-size: 19px; }
    (equal specificity, source order wins). */
 #readiness-exchange-item .node-lines > div { justify-content: flex-start; }
 #readiness-exchange-item .node-lines .node-check-detail { margin-left: auto; }
+/* Node Status rows (0.8.5): the same right-aligned checked-time
+   column as the Exchange Status rows above — the checked span's
+   margin-left: auto absorbs the free space, so the host stays
+   left and checked time + pill sit right, adjacent. Without it
+   the space-between row left the checked time floating mid-row
+   instead of pinned against the pill, the way the price is.
+   Same specificity as the exchange rules above, and placed after
+   the space-between rule, so source order wins. */
+#readiness-node-item .node-lines > div { justify-content: flex-start; }
+#readiness-node-item .node-lines .node-check-detail { margin-left: auto; }
 a { color: #f59e0b; }
 
 /* Card header row: heading left, toggle right. */

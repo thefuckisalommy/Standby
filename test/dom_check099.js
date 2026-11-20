@@ -1,5 +1,5 @@
 // Standby 0.8.2 DOM checks — block-height, set-date, and fee-market triggers.
-// Runs public/app.js from branch-0.8.4 in Node with the
+// Runs public/app.js from branch-0.8.5 in Node with the
 // minimal DOM shim from dom_check094.js (same El class, same
 // document/window/fetch/setInterval stubs) and verifies the 0.8.0
 // trigger UI only — the 094 suite still owns everything else.
@@ -518,9 +518,12 @@ global.FileReader = class {
 };
 const realFetch = fetch;
 global.fetch = (path, opts) => realFetch(BASE + path, opts);
-// The 60s confirmations poll: capture the callback, do not schedule it
-// (a live interval would keep this process alive after the checks).
-global.setInterval = (fn) => { global.__pollFn = fn; return 0; };
+// The intervals: capture the callbacks with their delays, do not
+// schedule them (a live interval would keep this process alive
+// after the checks). __pollFn keeps its old meaning (the last
+// registered callback); __intervals lists them all, so a check can
+// fire the 1-second live-view timer (0.8.5) by hand.
+global.setInterval = (fn, ms) => { (global.__intervals = global.__intervals || []).push({ fn: fn, ms: ms }); global.__pollFn = fn; return global.__intervals.length - 1; };
 global.clearInterval = () => {};
 
 const failures = [];
@@ -1341,10 +1344,10 @@ function check(name, cond, detail) {
   // Settings rows (never inside the label span). The pill stays
   // pinned to the right edge, with the Node pills. There is no
   // overall pill on the header; the rows carry the status.
-  check('exchange status: the section has a row for CoinGecko (row 1), price to the left of the pill (CoinGecko $98,200 [OK])',
+  check('exchange status: the section has a row for CoinGecko (row 1), price to the left of the pill (CoinGecko checked … - $98,200 [OK])',
     els['readiness-exchange-1'] && els['readiness-exchange-1'].textContent.indexOf('CoinGecko') !== -1
     && els['readiness-exchange-1'].textContent.indexOf('$') === -1
-    && els['readiness-exchange-1-price'] && els['readiness-exchange-1-price'].textContent === '$98,200',
+    && els['readiness-exchange-1-price'] && /^checked .+ - \$98,200$/.test(els['readiness-exchange-1-price'].textContent),
     (els['readiness-exchange-1'] && els['readiness-exchange-1'].textContent) + ' / ' + (els['readiness-exchange-1-price'] && els['readiness-exchange-1-price'].textContent));
   check('exchange status: the CoinGecko row pill reads OK',
     els['readiness-exchange-1-status'] && els['readiness-exchange-1-status'].textContent === 'OK',
@@ -1352,10 +1355,10 @@ function check(name, cond, detail) {
   check('exchange status: the CoinGecko row pill uses the ok class',
     els['readiness-exchange-1-status'] && els['readiness-exchange-1-status'].className === 'pill ok',
     els['readiness-exchange-1-status'] && els['readiness-exchange-1-status'].className);
-  check('exchange status: the section has a row for Coinbase (row 2), price to the left of the pill (Coinbase $98,200 [OK])',
+  check('exchange status: the section has a row for Coinbase (row 2), price to the left of the pill (Coinbase checked … - $98,200 [OK])',
     els['readiness-exchange-2'] && els['readiness-exchange-2'].textContent.indexOf('Coinbase') !== -1
     && els['readiness-exchange-2'].textContent.indexOf('$') === -1
-    && els['readiness-exchange-2-price'] && els['readiness-exchange-2-price'].textContent === '$98,200',
+    && els['readiness-exchange-2-price'] && /^checked .+ - \$98,200$/.test(els['readiness-exchange-2-price'].textContent),
     (els['readiness-exchange-2'] && els['readiness-exchange-2'].textContent) + ' / ' + (els['readiness-exchange-2-price'] && els['readiness-exchange-2-price'].textContent));
   check('exchange status: the Coinbase row pill reads OK',
     els['readiness-exchange-2-status'] && els['readiness-exchange-2-status'].textContent === 'OK',
@@ -1432,8 +1435,9 @@ function check(name, cond, detail) {
     els['readiness-exchange-1'] && els['readiness-exchange-1'].textContent.indexOf('answered') === -1
     && els['readiness-exchange-1'].textContent.indexOf('500') === -1,
     els['readiness-exchange-1'] && els['readiness-exchange-1'].textContent);
-  check('exchange status: the CoinGecko row drops its price when it is down (price span empty)',
-    els['readiness-exchange-1-price'] && els['readiness-exchange-1-price'].textContent === '',
+  check('exchange status: the CoinGecko row drops its price when it is down (no price, checked time only)',
+    els['readiness-exchange-1-price'] && els['readiness-exchange-1-price'].textContent.indexOf('$') === -1
+    && /^checked /.test(els['readiness-exchange-1-price'].textContent),
     els['readiness-exchange-1-price'] && els['readiness-exchange-1-price'].textContent);
   check('exchange status: the CoinGecko row still names the exchange when it is down',
     els['readiness-exchange-1'] && els['readiness-exchange-1'].textContent.indexOf('CoinGecko') !== -1,
@@ -1441,7 +1445,7 @@ function check(name, cond, detail) {
   check('exchange status: the Coinbase row stays OK with its price in single-source mode',
     els['readiness-exchange-2-status'] && els['readiness-exchange-2-status'].textContent === 'OK'
     && els['readiness-exchange-2'] && els['readiness-exchange-2'].textContent.indexOf('Coinbase') !== -1
-    && els['readiness-exchange-2-price'] && els['readiness-exchange-2-price'].textContent === '$98,200',
+    && els['readiness-exchange-2-price'] && /^checked .+ - \$98,200$/.test(els['readiness-exchange-2-price'].textContent),
     (els['readiness-exchange-2'] && els['readiness-exchange-2'].textContent) + ' / ' + (els['readiness-exchange-2-price'] && els['readiness-exchange-2-price'].textContent));
   const rbDeg = readinessBlock('Dom Price');
   check('exchange status: the Dom Price readiness line stays trigger-only in single-source mode',
@@ -1465,11 +1469,11 @@ function check(name, cond, detail) {
   // Disagree: each source is up, so each row pill stays OK and
   // shows its own price; there is still no overall pill.
   check('exchange status: the CoinGecko row still shows $100,000 and OK when the sources disagree',
-    els['readiness-exchange-1-price'] && els['readiness-exchange-1-price'].textContent === '$100,000'
+    els['readiness-exchange-1-price'] && /^checked .+ - \$100,000$/.test(els['readiness-exchange-1-price'].textContent)
     && els['readiness-exchange-1-status'] && els['readiness-exchange-1-status'].textContent === 'OK',
     (els['readiness-exchange-1'] && els['readiness-exchange-1'].textContent) + ' / ' + (els['readiness-exchange-1-price'] && els['readiness-exchange-1-price'].textContent));
   check('exchange status: the Coinbase row still shows $106,000 and OK when the sources disagree',
-    els['readiness-exchange-2-price'] && els['readiness-exchange-2-price'].textContent === '$106,000'
+    els['readiness-exchange-2-price'] && /^checked .+ - \$106,000$/.test(els['readiness-exchange-2-price'].textContent)
     && els['readiness-exchange-2-status'] && els['readiness-exchange-2-status'].textContent === 'OK',
     (els['readiness-exchange-2'] && els['readiness-exchange-2'].textContent) + ' / ' + (els['readiness-exchange-2-price'] && els['readiness-exchange-2-price'].textContent));
   const rbDis = readinessBlock('Dom Price');
@@ -1538,6 +1542,19 @@ function check(name, cond, detail) {
   check('node checks: opening the primary details shows the checks', detP.open === true, 'open=' + detP.open);
   toggleDetails(detP, false);
   check('node checks: closing the primary details hides them again', detP.open === false, 'open=' + detP.open);
+  // (0.8.5) Test connection must not collapse manually opened
+  // node details: the button used to force every OK node's
+  // details closed after the test. Open the primary details,
+  // click Test connection, and they stay open.
+  toggleDetails(detP, true);
+  check('node checks: the primary details open before the Test connection click', detP.open === true, 'open=' + detP.open);
+  els['btn-btc-test-conn'].click();
+  await new Promise((r) => setTimeout(r, 1500));
+  check('node checks: the primary details stay open across a Test connection click (OK node)', detP.open === true, 'open=' + detP.open);
+  check('node checks: the primary pill still reads OK after the Test connection click',
+    els['btc-primary-status'] && els['btc-primary-status'].textContent === 'OK',
+    els['btc-primary-status'] && els['btc-primary-status'].textContent);
+  toggleDetails(detP, false);
 
   // --- 11. Staged Transactions card (0.8.0) ---
   // Static HTML: the transactions card is renamed "Staged
@@ -2550,7 +2567,7 @@ function check(name, cond, detail) {
     { key: 'price-sources', title: 'Bitcoin price source', bodyPhrase: 'The two price sources Standby reads', appliesPhrase: 'BTC price triggers only' },
     { key: 'grace', title: 'Grace period', bodyPhrase: 'A pause for price and UTXO triggers', appliesPhrase: 'BTC price and UTXO triggers' },
     { key: 'agreement', title: 'Price agreement', bodyPhrase: 'How closely the two price sources must agree', appliesPhrase: 'BTC price triggers only' },
-    { key: 'cadence', title: 'Check cadence', bodyPhrase: 'How often every trigger is checked', appliesPhrase: 'BTC price, UTXO, Block height, Set date, and Fee market triggers' },
+    { key: 'cadence', title: 'Check cadence', bodyPhrase: 'How often every trigger is checked', bodyPhrase2: 'refreshes once every 5 minutes regardless of this setting', appliesPhrase: 'BTC price, UTXO, Block height, Set date, and Fee market triggers' },
     { key: 'fee', title: 'Broadcast Fee Risk', bodyPhrase: 'Where the Low / Medium / High fee pill flips', appliesPhrase: 'General' },
     { key: 'keys', title: 'Check-in API keys', bodyPhrase: 'The keys that can check in through the API', appliesPhrase: 'Check-in triggers only' },
     { key: 'backup', title: 'Data backup', bodyPhrase: 'Back up or restore everything Standby knows', appliesPhrase: 'General' },
@@ -2580,6 +2597,11 @@ function check(name, cond, detail) {
     check('help ' + h.key + ': the pop-out body says what the setting does',
       els['confirm-body'] && els['confirm-body'].textContent.indexOf(h.bodyPhrase) !== -1,
       els['confirm-body'] && els['confirm-body'].textContent.slice(0, 80));
+    if (h.bodyPhrase2) {
+      check('help ' + h.key + ': the pop-out body also says the fee cache refreshes on its own 5-minute interval',
+        els['confirm-body'] && els['confirm-body'].textContent.indexOf(h.bodyPhrase2) !== -1,
+        els['confirm-body'] && els['confirm-body'].textContent.slice(0, 160));
+    }
     check('help ' + h.key + ': the pop-out names the trigger types under "Applies to:"',
       els['modal-details'] && els['modal-details'].innerHTML.indexOf('Applies to:') !== -1
       && els['modal-details'].innerHTML.indexOf(h.appliesPhrase) !== -1,
@@ -2595,6 +2617,11 @@ function check(name, cond, detail) {
   els['modal-x'].click();
   check('help X: the X closes the pop-out',
     !(els['confirm-modal'] && els['confirm-modal'].classList.contains('open')), '');
+  // (0.8.5) The cadence help no longer claims the fee cache
+  // matches the check interval — the fee cache is fixed at
+  // 5 minutes regardless of cadence.
+  check('help cadence: the served app.js no longer says the price and fee caches match the interval',
+    appJs.indexOf('The price and fee caches match this interval') === -1, '');
 
   // --- §23 (0.8.0): Settings filter + trimmed card text ---
   // The filter row at the top of the Settings tab reads the
@@ -2768,8 +2795,8 @@ function check(name, cond, detail) {
     && idx.indexOf('Installed version:') !== -1 && idx.indexOf('id="app-version"') !== -1, '');
   check('app version static: the card has no "?" button and no details (just the version line)',
     idx.indexOf('id="help-version"') === -1, '');
-  check('app version: the installed version reads 0.8.4 (from /api/health)',
-    els['app-version'] && els['app-version'].textContent === '0.8.4',
+  check('app version: the installed version reads 0.8.5 (from /api/health)',
+    els['app-version'] && els['app-version'].textContent === '0.8.5',
     els['app-version'] && els['app-version'].textContent);
   setFilter('general');
   check('app version: the card is visible under General',
@@ -3075,6 +3102,251 @@ function check(name, cond, detail) {
     heldCard ? pillStr(triggerBoxes(heldCard)) : 'no card');
   const vacOff = await fetch('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ vacationMode: false, vacationUntil: null }) });
   check('rule sets 0.8.2 v2: vacation mode turns back off', vacOff.status === 200, 'status=' + vacOff.status);
+  await rerender(appJs);
+
+  // --- §26 (0.8.5): live view — in-place refresh at the check cadence ---
+  // One 1-second timer updates the check-in countdown from the
+  // clock, and triggers a server refresh once
+  // per check cadence; the server refresh patches changed values
+  // in place (same card elements, new text) and only re-renders
+  // structure when no popup is open and no field is focused. The
+  // intervals are stubbed (captured, not scheduled), so the checks
+  // fire the 1-second timer by hand.
+  function sleep26(ms) { return new Promise((r) => setTimeout(r, ms)); }
+  function liveTickFn() {
+    const ivs = (global.__intervals || []).filter((x) => x.ms === 1000);
+    return ivs.length ? ivs[ivs.length - 1].fn : null;
+  }
+  // The server tick is every 60s and the price cache TTL is the
+  // cadence, so a stub price change takes up to a tick to reach
+  // the slices: poll the state until the Dom Price slice shows
+  // the new price.
+  async function waitPriceSlice26(label, want, timeoutMs) {
+    const t0 = Date.now();
+    for (;;) {
+      const st = await (await fetch('/api/state')).json();
+      const tx = (st.bitcoin.txs || []).find((t) => t.label === label);
+      const ts = tx && tx.triggerStatus;
+      if (ts && ts.lastPrice === want) return true;
+      if (Date.now() - t0 > timeoutMs) return false;
+      await sleep26(3000);
+    }
+  }
+  // (a) Values update without a reload, in place.
+  const st26a = await (await fetch('/api/state')).json();
+  const domPrice26 = (st26a.bitcoin.txs || []).find((t) => t.label === 'Dom Price');
+  const domCheckin26 = (st26a.bitcoin.txs || []).find((t) => t.label === 'Dom Check-in');
+  const domUtxo26 = (st26a.bitcoin.txs || []).find((t) => t.label === 'Dom UTXO');
+  const domOr26 = (st26a.bitcoin.txs || []).find((t) => t.label === 'Dom Rules OR');
+  const cad10 = await fetch('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ checkCadenceSeconds: 10 }) });
+  check('live view: the check cadence drops to 10s for this section', cad10.status === 200, 'status=' + cad10.status);
+  // Disarm Dom Price first, so the $160,000 crossing can never
+  // broadcast it (it would fire the moment the slice updates).
+  const disP26 = await fetch('/api/bitcoin/txs/' + domPrice26.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: false }) });
+  check('live view: Dom Price disarms before the price move', disP26.status === 200, 'status=' + disP26.status);
+  // Disarm Dom Rules OR: its price rule (>= $150,000) would fire
+  // while the stub sits at $160,000. Its blockheight rule is NOT
+  // why it disarms any more: the tip fetch is primary-first now
+  // (0.8.5), and a disarmed tx is still evaluated, so OR's
+  // blockheight rule is itself the primary-only call the stamp
+  // check needs — no fee tx has to be added for it (§19 deleted
+  // the seeded Dom Feemarket and never restored it, and the old
+  // stamp check added one for exactly this). Dom UTXO needs no
+  // disarm either: its outspend check answers on the primary
+  // (FINNEY:1 is unspent there), so the secondary is never
+  // asked. OR re-arms at the end of (d), once the stub price is
+  // back to $98,200 — its price rule would trip the enable gate
+  // while the stub price sits at $160,000.
+  const disOr26 = await fetch('/api/bitcoin/txs/' + domOr26.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: false }) });
+  check('live view: Dom Rules OR disarms (its price rule would fire at $160,000)', disOr26.status === 200, 'status=' + disOr26.status);
+  await rerender(appJs);
+  const priceCard26 = cardByTitle('Dom Price');
+  check('live view: the Dom Price card exists after the re-render', !!priceCard26, '');
+  const parts26a = priceCard26 ? boxParts(triggerBoxes(priceCard26)[0]) : null;
+  check('live view: before the move the price pill reads Not met',
+    !!parts26a && parts26a.pill === 'Not met', parts26a ? parts26a.pill : 'no box');
+  check('live view: before the move the price line reads $98,200',
+    !!parts26a && parts26a.now.indexOf('$98,200') !== -1, parts26a ? parts26a.now : 'no box');
+  const rRow26 = priceCard26 ? (els['readiness-txs'].children || []).find((c) => c.dataset && c.dataset.txId === domPrice26.id) : null;
+  check('live view: the Dom Price readiness row exists', !!rRow26, '');
+  const det26 = priceCard26 ? cardDetails(priceCard26) : null;
+  if (det26) toggleDetails(det26, true);
+  check('live view: the Dom Price Details open before the tick', !!det26 && det26.open === true, det26 ? 'open=' + det26.open : 'no details');
+  // Open the cadence gate: the last fetch was the re-render load.
+  await sleep26(11000);
+  const setP160 = await realFetch('http://127.0.0.1:18235/__test__/price', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ usd: 160000 }) });
+  check('live view: the stub price moves to $160,000', setP160.status === 200, 'status=' + setP160.status);
+  const got160 = await waitPriceSlice26('Dom Price', 160000, 100000);
+  check('live view: the Dom Price slice reaches $160,000', got160, '');
+  // A fresh connection test, so the node rows have a checked
+  // time to show (the DOM app's nodes point at the local stubs).
+  const connTest26 = await fetch('/api/bitcoin/connection/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+  check('live view: the connection test runs for the node rows', connTest26.status === 200, 'status=' + connTest26.status);
+  const tick26 = liveTickFn();
+  check('live view: the app registers a 1-second live timer', !!tick26, '');
+  if (tick26) await tick26();
+  check('live view: the price card is the SAME element after the tick (patched in place, not rebuilt)',
+    !!priceCard26 && cardByTitle('Dom Price') === priceCard26, '');
+  const parts26b = priceCard26 ? boxParts(triggerBoxes(priceCard26)[0]) : null;
+  check('live view: after the tick the price pill reads Met',
+    !!parts26b && parts26b.pill === 'Met', parts26b ? parts26b.pill : 'no box');
+  check('live view: after the tick the price line reads $160,000',
+    !!parts26b && parts26b.now.indexOf('$160,000') !== -1, parts26b ? parts26b.now : 'no box');
+  check('live view: the readiness row is the SAME element after the tick',
+    !!rRow26 && (els['readiness-txs'].children || []).indexOf(rRow26) !== -1, '');
+  check('live view: the open Details stay open across the tick',
+    !!det26 && det26.open === true, det26 ? 'open=' + det26.open : 'no details');
+  check('live view: the Dashboard tab stays active across the tick',
+    !!(els.__tabbtn && els.__tabbtn.dashboard && els.__tabbtn.dashboard.classList.contains('active')), '');
+  check('live view: no overall freshness line — the element is gone',
+    !els['live-updated'], '');
+  const exPrice26 = els['readiness-exchange-1-price'] ? els['readiness-exchange-1-price'].textContent : '';
+  check('live view: the exchange row reads checked time, dash, price',
+    /^checked .+ - \$160,000$/.test(exPrice26), exPrice26);
+  const nodeChecked26a = els['readiness-primary-checked'] ? els['readiness-primary-checked'].textContent : '';
+  const nodeChecked26b = els['readiness-secondary-checked'] ? els['readiness-secondary-checked'].textContent : '';
+  check('live view: each node row carries its own checked time left of the pill',
+    /^checked /.test(nodeChecked26a) && /^checked /.test(nodeChecked26b), nodeChecked26a + ' / ' + nodeChecked26b);
+  // (0.8.5) Per-node stamps: the tick asks the primary every
+  // time (the blockheight rule's tip fetch, primary-first and
+  // cached once per tick) and the secondary only on fallback,
+  // so after a server tick the primary stamp is newer than the
+  // secondary's test time. The tip cache TTL equals the tick
+  // cadence, so a tick can occasionally find the cache still
+  // warm and skip the fetch — poll until a tick actually
+  // fetches (the next tick always does: the cache is then ~2x
+  // the TTL old).
+  async function waitNodeStamps26(timeoutMs) {
+    const t0 = Date.now();
+    for (;;) {
+      const st = await (await fetch('/api/state')).json();
+      const nc = (st.bitcoin && st.bitcoin.connection && st.bitcoin.connection.nodeCheckedAt) || {};
+      if (nc.primary && nc.secondary && nc.primary > nc.secondary) return nc;
+      if (Date.now() - t0 > timeoutMs) return nc;
+      await sleep26(3000);
+    }
+  }
+  const nc26 = await waitNodeStamps26(60000);
+  check('live view: the primary node stamp is newer than the secondary stamp (tick asks primary only)',
+    !!(nc26.primary && nc26.secondary && nc26.primary > nc26.secondary), JSON.stringify(nc26));
+  // Dom Rules OR stays disarmed until the end of (d): its price
+  // rule (>= $150,000) would trip the enable gate while the
+  // stub price sits at $160,000.
+
+  // (b) The refresh RUNS while the Add popup is open, and the
+  // typed input survives; a structural change waits until the
+  // popup closes.
+  els['btn-btc-add-open'].click();
+  check('live view: the Add popup opens for the modal test',
+    !!(els['add-modal'] && els['add-modal'].classList.contains('open')), '');
+  const typedHex26 = craftHex(1, 200401);
+  els['btc-hex'].value = typedHex26;
+  const addLive = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ txHex: craftHex(1, 200402), label: 'Dom Live New', trigger: { type: 'checkin', params: { thresholdDays: 35 } } }) });
+  check('live view: a new tx adds via the API while the popup is open', addLive.status === 201, 'status=' + addLive.status);
+  const addLiveJson = addLive.status === 201 ? await addLive.json() : {};
+  const liveNewId = (addLiveJson.tx || {}).id || null;
+  const setP98 = await realFetch('http://127.0.0.1:18235/__test__/price', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ usd: 98200 }) });
+  check('live view: the stub price moves back to $98,200', setP98.status === 200, 'status=' + setP98.status);
+  const got98 = await waitPriceSlice26('Dom Price', 98200, 100000);
+  check('live view: the Dom Price slice returns to $98,200', got98, '');
+  await sleep26(11000);
+  const tick26b = liveTickFn();
+  if (tick26b) await tick26b();
+  check('live view: the popup is still open after the tick',
+    !!(els['add-modal'] && els['add-modal'].classList.contains('open')), '');
+  check('live view: the typed hex survives the tick untouched',
+    !!(els['btc-hex'] && els['btc-hex'].value === typedHex26), els['btc-hex'] ? els['btc-hex'].value : 'no hex field');
+  const parts26c = priceCard26 ? boxParts(triggerBoxes(priceCard26)[0]) : null;
+  check('live view: the price line behind the popup updates to $98,200',
+    !!parts26c && parts26c.now.indexOf('$98,200') !== -1, parts26c ? parts26c.now : 'no box');
+  check('live view: the new tx does NOT appear while the popup is open (structural change deferred)',
+    !cardByTitle('Dom Live New'), '');
+  check('live view: the price card is still the same element after the modal tick',
+    !!priceCard26 && cardByTitle('Dom Price') === priceCard26, '');
+  els['btn-btc-add-cancel'].click();
+  check('live view: Cancel closes the popup', !!(els['add-modal'] && !els['add-modal'].classList.contains('open')), '');
+  const tick26c = liveTickFn();
+  if (tick26c) await tick26c();
+  check('live view: the new tx appears once the popup closes (pending structural load)',
+    !!cardByTitle('Dom Live New'), '');
+
+  // (c) A local-only tick (no fetch) leaves the values alone.
+  await sleep26(2500);
+  const tick26d = liveTickFn();
+  if (tick26d) await tick26d();
+  const parts26d = cardByTitle('Dom Price') ? boxParts(triggerBoxes(cardByTitle('Dom Price'))[0]) : null;
+  check('live view: the price line is still $98,200 after the local-only tick',
+    !!parts26d && parts26d.now.indexOf('$98,200') !== -1, parts26d ? parts26d.now : 'no box');
+
+  // (d) The check-in countdown ticks locally, and a disarmed
+  // (frozen) bar is not rewritten by the local tick.
+  const disC26 = await fetch('/api/bitcoin/txs/' + domCheckin26.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: false }) });
+  check('live view: Dom Check-in disarms for the frozen-bar test', disC26.status === 200, 'status=' + disC26.status);
+  await sleep26(11000);
+  const tick26e = liveTickFn();
+  if (tick26e) await tick26e();
+  const frozenBar = checkinBar('Dom Check-in');
+  check('live view: the disarmed check-in bar reads frozen',
+    !!frozenBar && frozenBar.caption.indexOf('disarmed, frozen') !== -1, frozenBar ? frozenBar.caption : 'no bar');
+  const frozenCap = frozenBar ? frozenBar.caption : '';
+  const tick26f = liveTickFn();
+  if (tick26f) await tick26f();
+  const frozenBar2 = checkinBar('Dom Check-in');
+  check('live view: the local-only tick leaves the frozen caption unchanged',
+    !!frozenBar2 && frozenBar2.caption === frozenCap, frozenBar2 ? frozenBar2.caption : 'no bar');
+  const reC26 = await fetch('/api/bitcoin/txs/' + domCheckin26.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: true }) });
+  check('live view: Dom Check-in re-arms', reC26.status === 200, 'status=' + reC26.status);
+  await sleep26(11000);
+  const tick26g = liveTickFn();
+  if (tick26g) await tick26g();
+  const liveBar = checkinBar('Dom Check-in');
+  check('live view: the re-armed check-in bar is live again (0 of 35 days elapsed)',
+    !!liveBar && liveBar.caption === '0 of 35 days elapsed', liveBar ? liveBar.caption : 'no bar');
+
+  // --- §27 (0.8.5): an archived tx renders its settled state ---
+  // A tx broadcast by hand and confirmed (the stub reports a
+  // broadcast txid as confirmed at 899995 — 6 confirmations)
+  // renders in the Archived Transactions card with a Broadcasted
+  // pill, and leaves the staged list. Its trigger slice is frozen
+  // by the server (the API suite owns that check); the card reads
+  // its settled state from the broadcasted fact, not the slice.
+  const addArch27 = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ txHex: craftHex(1, 300010), label: 'Dom Archived', trigger: { type: 'manual', params: {} } }) });
+  check('archived row: the tx adds', addArch27.status === 201, 'status=' + addArch27.status);
+  const addArch27Json = addArch27.status === 201 ? await addArch27.json() : {};
+  const arch27Id = (addArch27Json.tx || {}).id || null;
+  const bcArch27 = arch27Id ? await fetch('/api/bitcoin/txs/' + arch27Id + '/broadcast', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) }) : null;
+  check('archived row: the manual broadcast succeeds', !!bcArch27 && bcArch27.status === 200, bcArch27 ? 'status=' + bcArch27.status : 'no id');
+  const conf27 = await fetch('/api/bitcoin/confirmations');
+  check('archived row: the confirmations refresh runs', conf27.status === 200, 'status=' + conf27.status);
+  await rerender(appJs);
+  const archCards27 = listCards('btc-archived-list');
+  const archCard27 = archCards27.find((c) => cardTitle(c) === 'Dom Archived');
+  check('archived row: the broadcasted tx renders in the Archived Transactions card',
+    !!archCard27, archCards27.map((c) => cardTitle(c)).join(','));
+  check('archived row: its face reads Broadcasted',
+    !!archCard27 && cardFaceText(archCard27).indexOf('Broadcasted') !== -1, archCard27 ? cardFaceText(archCard27) : 'no card');
+  const activeCards27 = listCards('btc-active-list');
+  check('archived row: it leaves the staged list',
+    !activeCards27.some((c) => cardTitle(c) === 'Dom Archived'), activeCards27.map((c) => cardTitle(c)).join(','));
+  if (arch27Id) {
+    const delArch27 = await fetch('/api/bitcoin/txs/' + arch27Id, { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
+    check('archived row: the tx is removed again (fixture restored)', delArch27.status === 200, 'status=' + delArch27.status);
+  }
+  await rerender(appJs);
+
+  // Restore the seeded state for the width check.
+  const cad60 = await fetch('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ checkCadenceSeconds: 60 }) });
+  check('live view: the check cadence restores to 60s', cad60.status === 200, 'status=' + cad60.status);
+  const reP26 = await fetch('/api/bitcoin/txs/' + domPrice26.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: true }) });
+  check('live view: Dom Price re-arms', reP26.status === 200, 'status=' + reP26.status);
+  const reOr26 = await fetch('/api/bitcoin/txs/' + domOr26.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: true }) });
+  check('live view: Dom Rules OR re-arms (stub price back to $98,200, so its price rule watches)', reOr26.status === 200, 'status=' + reOr26.status);
+  if (liveNewId) {
+    const delLive = await fetch('/api/bitcoin/txs/' + liveNewId, { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
+    check('live view: the Dom Live New tx is removed', delLive.status === 200, 'status=' + delLive.status);
+  }
   await rerender(appJs);
 
   console.log();

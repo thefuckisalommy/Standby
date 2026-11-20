@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Standby 0.8.4 local verification: block-height, set-date, and
+"""Standby 0.8.5 local verification: block-height, set-date, and
 fee-market triggers.
 
-Boots the branch-0.8.4 app (port 3438), the check-in receiver
+Boots the branch-0.8.5 app (port 3438), the check-in receiver
 (3439), and two mempool stubs — primary 18235 and secondary 18236
 (both fixed: tip height 900000, economy fee 1 sat/vB, price 98200)
 — and checks the 0.8.1 trigger work:
 
-  1. health reports version 0.8.4.
+  1. health reports version 0.8.5.
   2. Block-height trigger: validation at add (bad heights rejected,
      good ones accepted), checkTriggerNow (a height already reached
      fires + warns, a future height watches), evaluation via the
@@ -306,7 +306,7 @@ def main():
 
         # --- 1. health + version ----------------------------------------
         s, h = req('GET', '/api/health')
-        check('1 health reports version 0.8.4', h.get('version') == '0.8.4', h)
+        check('1 health reports version 0.8.5', h.get('version') == '0.8.5', h)
 
         # --- 2. block-height trigger --------------------------------------
         # Validation at add: bad heights rejected, good ones accepted.
@@ -354,14 +354,18 @@ def main():
         s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 10})
         check('2c tick: cadence set to 10 s', s == 200, (s, r))
         # (a) The check endpoint judges the CURRENT tip: due above
-        # the target, watching again after a simulated reorg.
+        # the target, watching again after a simulated reorg. The
+        # check reads the per-tick tip cache (TTL = the 10 s cadence),
+        # so each stub-tip move waits the cache out first.
         s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'blockheight', 'params': {'targetHeight': STUB_TIP - 100000}}})
         check('2c no-latch check: tip above target fires', s == 200 and r.get('fire') is True and r.get('status') == 'due', r)
         s, r = req('POST', '/__test__/tip', {'height': STUB_TIP - 200000}, base=STUB_BASE_P)
+        time.sleep(11)  # the per-tick tip cache (TTL = cadence) must expire so the check reads the new stub tip — the same sleep(11) the fee checks use in 4c
         check('2c primary stub tip dropped to 700000', s == 200 and r.get('height') == STUB_TIP - 200000, r)
         s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'blockheight', 'params': {'targetHeight': STUB_TIP - 100000}}})
         check('2c no-latch check: reorged tip no longer fires', s == 200 and r.get('fire') is False and r.get('status') == 'watching', r)
         s, r = req('POST', '/__test__/tip', {'height': STUB_TIP}, base=STUB_BASE_P)
+        time.sleep(11)  # the per-tick tip cache (TTL = cadence) must expire before the next tick window, so the first tick in it fetches the restored tip instead of writing the stale cached one
         check('2c primary stub tip restored to 900000', s == 200 and r.get('height') == STUB_TIP, r)
         # (b) The tick writes fresh slices for a disarmed tx: due
         # while the tip is past the target, watching after the reorg.
@@ -387,6 +391,7 @@ def main():
         check('2c no-latch status: live status is watching after the reorg',
               t and t.get('triggerStatus', {}).get('status') == 'watching', t.get('triggerStatus') if t else None)
         s, r = req('POST', '/__test__/tip', {'height': STUB_TIP}, base=STUB_BASE_P)
+        time.sleep(11)  # the per-tick tip cache (TTL = cadence) must expire so the check reads the new stub tip — the same sleep(11) the fee checks use in 4c
         check('2c primary stub tip restored to 900000 (again)', s == 200 and r.get('height') == STUB_TIP, r)
         # (c) An AND set [blockheight, price] stops firing when the
         # tip drops: the height rule is judged fresh, so the set
@@ -396,10 +401,12 @@ def main():
         s, r = req('POST', '/api/triggers/check', {'trigger': and_bh})
         check('2c no-latch AND check: height reached + price holding fires', s == 200 and r.get('fire') is True and r.get('status') == 'due', r)
         s, r = req('POST', '/__test__/tip', {'height': STUB_TIP - 200000}, base=STUB_BASE_P)
+        time.sleep(11)  # the per-tick tip cache (TTL = cadence) must expire so the check reads the new stub tip — the same sleep(11) the fee checks use in 4c
         check('2c primary stub tip dropped to 700000 (AND)', s == 200 and r.get('height') == STUB_TIP - 200000, r)
         s, r = req('POST', '/api/triggers/check', {'trigger': and_bh})
         check('2c no-latch AND check: reorged height un-fires the set', s == 200 and r.get('fire') is False and r.get('status') == 'watching', r)
         s, r = req('POST', '/__test__/tip', {'height': STUB_TIP}, base=STUB_BASE_P)
+        time.sleep(11)  # the per-tick tip cache (TTL = cadence) must expire before the next tick window, so the first tick in it fetches the restored tip instead of writing the stale cached one
         check('2c primary stub tip restored to 900000 (AND)', s == 200 and r.get('height') == STUB_TIP, r)
         # (d) Editing the target starts fresh: the edited rule is
         # judged against the NEW target, with no memory of the old one.
@@ -556,11 +563,12 @@ def main():
 
         # --- 4c. fee-market trigger: two-node logic, primary decides ---
         # The two stubs are the two nodes. Drive their fees apart
-        # via POST /__test__/fees, and set the cadence to 10 s so
-        # the node fee cache (TTL = cadence) refreshes within ~11 s
-        # of each fee change. There is NO agreement check: the
-        # primary node's fee is the one that counts — the secondary
-        # is only a fallback if the primary is down.
+        # via POST /__test__/fees. The node fee cache (TTL = 5
+        # minutes, 0.8.5) does NOT refresh on its own within the
+        # section — each fee change is followed by a restart,
+        # which clears the in-memory cache. There is NO agreement
+        # check: the primary node's fee is the one that counts —
+        # the secondary is only a fallback if the primary is down.
         s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 10})
         check('4c two-node fees: cadence set to 10 s', s == 200, (s, r))
         # Dual, close: primary 5, secondary 4.5. BOTH directions
@@ -570,7 +578,7 @@ def main():
         check('4c two-node fees: primary stub fee set to 5', s == 200, (s, r))
         s, r = req('POST', '/__test__/fees', {'economyFee': 4.5}, base=STUB_BASE_S)
         check('4c two-node fees: secondary stub fee set to 4.5', s == 200, (s, r))
-        time.sleep(11)
+        check('4c two-node fees: restarted for a cold fee cache (fees 5/4.5)', restart())
         s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'feemarket', 'params': {'maxFeeRate': 4.7, 'direction': 'below'}}})
         check("4c two-node fees: 'below' 4.7 watches — the primary (5) has not crossed", s == 200 and r.get('fire') is False and r.get('status') == 'watching', r)
         s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'feemarket', 'params': {'maxFeeRate': 4.8, 'direction': 'above'}}})
@@ -583,17 +591,62 @@ def main():
         # 4.5 — the primary still decides. 'below' 5 watches (the
         # secondary's 4.5 does not fire it); 'above' 9 fires (10).
         s, r = req('POST', '/__test__/fees', {'economyFee': 10}, base=STUB_BASE_P)
-        time.sleep(11)
+        check('4c two-node fees: restarted for a cold fee cache (fee 10)', restart())
         s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'feemarket', 'params': {'maxFeeRate': 5, 'direction': 'below'}}})
         check("4c two-node fees: far apart, 'below' 5 watches on the primary (10)", s == 200 and r.get('fire') is False and r.get('status') == 'watching', r)
         s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'feemarket', 'params': {'maxFeeRate': 9, 'direction': 'above'}}})
         check("4c two-node fees: far apart, 'above' 9 fires on the primary (10)", s == 200 and r.get('fire') is True, r)
+        # (0.8.5) Primary-first fetch: the secondary is never asked
+        # while the primary answers — the stored slice says so.
+        # (/api/triggers/check drops the slice, so this reads it
+        # off a real tx after a manual release check.)
+        s, r = add_tx('FM 4c note', {'type': 'feemarket', 'params': {'maxFeeRate': 5, 'direction': 'below'}}, 110520)
+        check("4c two-node fees: far apart, a 'below' 5 fee tx adds (watching on the primary 10)", s == 201, (s, r))
+        fm_note = r['tx']['id'] if s == 201 else None
+        s, r, res = release_results()
+        t = state_tx(fm_note)
+        check("4c two-node fees: far apart, the secondary is not asked — single-primary note",
+              t and (t.get('triggerState') or {}).get('feeMode') == 'single'
+              and (t.get('triggerState') or {}).get('feeNote') == 'primary only — secondary not needed',
+              t.get('triggerState') if t else None)
+        delete_all_txs()
+        # An implausible primary fee counts as the primary not
+        # answering — the secondary is asked, so a valid reading
+        # is not lost to bad data.
+        s, r = req('POST', '/__test__/fees', {'economyFee': 20000}, base=STUB_BASE_P)
+        check('4c two-node fees: primary stub fee set implausible (20000)', s == 200, (s, r))
+        check('4c two-node fees: restarted for a cold fee cache (implausible fee)', restart())
+        s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'feemarket', 'params': {'maxFeeRate': 5, 'direction': 'below'}}})
+        check("4c two-node fees: implausible primary falls back to the secondary (4.5 <= 5 fires)",
+              s == 200 and r.get('fire') is True, r)
+        s, r = add_tx('FM 4c implausible', {'type': 'feemarket', 'params': {'maxFeeRate': 4, 'direction': 'below'}}, 110522)
+        check("4c two-node fees: implausible primary, a 'below' 4 fee tx adds (watching on the secondary 4.5)", s == 201, (s, r))
+        fm_impl = r['tx']['id'] if s == 201 else None
+        s, r, res = release_results()
+        t = state_tx(fm_impl)
+        check('4c two-node fees: implausible-primary fallback note names the secondary',
+              t and (t.get('triggerState') or {}).get('feeMode') == 'single'
+              and (t.get('triggerState') or {}).get('feeNote') == 'secondary only — primary returned invalid data',
+              t.get('triggerState') if t else None)
+        delete_all_txs()
+        s, r = req('POST', '/__test__/fees', {'economyFee': 10}, base=STUB_BASE_P)
+        check('4c two-node fees: primary stub fee back to 10', s == 200, (s, r))
         # One node down: point the PRIMARY at a closed port — the
         # secondary alone is used, with no agreement check. (The
         # changed URL busts the fee cache, so no sleep is needed.)
         s, r = req('PUT', '/api/settings', {'primaryApiUrl': 'http://127.0.0.1:9'})
         s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'feemarket', 'params': {'maxFeeRate': 4.7, 'direction': 'below'}}})
         check('4c two-node fees: primary down, secondary alone decides (4.5 <= 4.7 fires)', s == 200 and r.get('fire') is True, r)
+        s, r = add_tx('FM 4c down', {'type': 'feemarket', 'params': {'maxFeeRate': 4, 'direction': 'below'}}, 110524)
+        check("4c two-node fees: primary down, a 'below' 4 fee tx adds (watching on the secondary 4.5)", s == 201, (s, r))
+        fm_down = r['tx']['id'] if s == 201 else None
+        s, r, res = release_results()
+        t = state_tx(fm_down)
+        check('4c two-node fees: primary down, the note names the fallback',
+              t and (t.get('triggerState') or {}).get('feeMode') == 'single'
+              and (t.get('triggerState') or {}).get('feeNote') == 'secondary only — primary unreachable',
+              t.get('triggerState') if t else None)
+        delete_all_txs()
         s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'feemarket', 'params': {'maxFeeRate': 4.8, 'direction': 'above'}}})
         check('4c two-node fees: primary down, secondary alone decides (4.5 < 4.8 watches)', s == 200 and r.get('fire') is False and r.get('status') == 'watching', r)
         # Restore: primary back to the stub, both fees back to 1,
@@ -848,6 +901,53 @@ def main():
         check('10 nodes: secondary restored to the stub', s == 200, (s, r))
         height_srv.shutdown()
         height_srv.server_close()
+
+        # --- 11. per-node checked stamps (0.8.5) -----------------------
+        # The tick asks the primary every time and the secondary
+        # only on fallback, so each node row carries its own
+        # last-checked time (connection.nodeCheckedAt). A release
+        # check with a watching fee tx fetches fees from the
+        # primary only: the primary stamp moves, the secondary
+        # stamp does not.
+        s, st = req('GET', '/api/state')
+        conn0 = (st.get('bitcoin', {}) or {}).get('connection') or {}
+        stamps0 = conn0.get('nodeCheckedAt') or {}
+        check('11 stamps: the stored connection carries per-node stamps',
+              isinstance(stamps0, dict) and 'primary' in stamps0 and 'secondary' in stamps0,
+              stamps0)
+        # A connection test asks both endpoints, so both stamps
+        # land on the test time.
+        s, r = req('POST', '/api/bitcoin/connection/test', {})
+        check('11 stamps: connection test runs for the stamp baseline', s == 200, (s, r))
+        s, st = req('GET', '/api/state')
+        stamps1 = (((st.get('bitcoin', {}) or {}).get('connection') or {}).get('nodeCheckedAt') or {})
+        check('11 stamps: after a connection test both stamps are set',
+              bool(stamps1.get('primary')) and bool(stamps1.get('secondary')),
+              stamps1)
+        # Restart for a cold fee cache — and note the restart
+        # itself re-tests both nodes (the startup hourly tick
+        # runs testNodes at 5 s), so the baseline is re-read
+        # after it: both stamps move to the startup test, and
+        # only the primary may move after that.
+        check('11 stamps: app restarted for a cold fee cache', restart())
+        s, st = req('GET', '/api/state')
+        stamps1 = (((st.get('bitcoin', {}) or {}).get('connection') or {}).get('nodeCheckedAt') or {})
+        check('11 stamps: after restart both stamps read the startup test',
+              bool(stamps1.get('primary')) and bool(stamps1.get('secondary')),
+              stamps1)
+        s, r = add_tx('Stamp FM', {'type': 'feemarket', 'params': {'maxFeeRate': 0.5}}, 110800)
+        check('11 stamps: watching fee tx added', s == 201, (s, r))
+        s, r, res = release_results()
+        check('11 stamps: release check runs', s == 200, (s, r))
+        s, st = req('GET', '/api/state')
+        stamps2 = (((st.get('bitcoin', {}) or {}).get('connection') or {}).get('nodeCheckedAt') or {})
+        check('11 stamps: the release check moves the primary stamp past the test time',
+              bool(stamps2.get('primary')) and stamps2.get('primary') > stamps1.get('primary'),
+              (stamps1, stamps2))
+        check('11 stamps: the secondary stamp does not move on a primary-only check',
+              stamps2.get('secondary') == stamps1.get('secondary'),
+              (stamps1, stamps2))
+        delete_all_txs()
 
         # --- 12. custom price source --------------------------------------
         # A Custom entry ({id, url, path}) fetches a price from any
@@ -1235,7 +1335,7 @@ def main():
             {'type': 'feemarket', 'params': {'maxFeeRate': 0.5, 'direction': 'below'}},
         ]}
         s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 10})
-        check('17 AND: cadence 10 s for the cache TTL', s == 200, (s, r))
+        check('17 AND: cadence 10 s for the price-cache TTL', s == 200, (s, r))
         s, r = add_tx('17 AND no latch', and_set, 116102)
         check('17 AND: accepted without confirm (nothing holds yet, 201)', s == 201, (s, r))
         and17 = r['tx']['id'] if s == 201 else None
@@ -1257,7 +1357,7 @@ def main():
         check('17 AND: primary fee 0.4', s == 200, (s, r))
         s, r = req('POST', '/__test__/fees', {'economyFee': 0.4}, base=STUB_BASE_S)
         check('17 AND: secondary fee 0.4', s == 200, (s, r))
-        time.sleep(11)
+        check('17 AND phase 2: restarted for a cold fee cache (fee 0.4)', restart())
         s, r, res = release_results()
         check('17 AND phase 2: fee holds, price does not — no broadcast (no latching)',
               s == 200 and res.get(and17, {}).get('action') == 'skipped'
@@ -2447,6 +2547,247 @@ def main():
         # Restore the default cadence for the remaining sections.
         s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 60})
         check('22 tick: cadence restored to 60 s', s == 200, (s, r))
+        delete_all_txs()
+
+        # --- 23. archived txs make no network calls; primary-first tip fetch + per-tick tip cache (0.8.5) ---
+        # Ryan (Nov 20): "Once they are archived with 6 confirmations
+        # they shouldn't be pinging." A tx that can no longer
+        # broadcast is never evaluated on the tick and is never
+        # re-queried once it reaches 6 confirmations — and the
+        # block-height tip is fetched once per tick from the primary
+        # node, not once per rule from both. The background tick is
+        # parked (cadence 3600 s) so only the evaluations this
+        # section triggers can move the stub counters.
+        def tip_counts():
+            _, rp = req('GET', '/__test__/tip-count', base=STUB_BASE_P)
+            _, rs = req('GET', '/__test__/tip-count', base=STUB_BASE_S)
+            return rp.get('count', -1), rs.get('count', -1)
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 3600})
+        check('23 setup: cadence parked at 3600 s', s == 200, (s, r))
+        s, r = req('POST', '/__test__/tip', {'height': STUB_TIP}, base=STUB_BASE_P)
+        s, r = req('POST', '/__test__/tip', {'height': STUB_TIP}, base=STUB_BASE_S)
+        s, r = req('POST', '/__test__/tip-fail', {'fail': False}, base=STUB_BASE_P)
+        s, r = req('POST', '/__test__/tip-fail', {'fail': False}, base=STUB_BASE_S)
+        check('23 setup: app restarted for a cold tip cache', restart())
+        FROZEN = iso_ago(hours=2)
+        # (a) An archived broadcast tx (>= 6 confs), a stale tx, and
+        # a disarmed staged tx. The archived/stale ones are seeded
+        # via the state file (a broadcast fact cannot be made
+        # through the API) with frozen slices; the disarmed one is
+        # a real price tx, so its slice must still refresh.
+        s, r = add_tx('Arch BH', {'type': 'blockheight', 'params': {'targetHeight': 950000}}, 111300)
+        check('23 archived: watching blockheight tx adds', s == 201, (s, r))
+        arch23 = r['tx']['id'] if s == 201 else None
+        s, r = add_tx('Stale BH', {'type': 'blockheight', 'params': {'targetHeight': 950000}}, 111301)
+        check('23 stale: watching blockheight tx adds', s == 201, (s, r))
+        stale23 = r['tx']['id'] if s == 201 else None
+        s, r = add_tx('Dis Price', {'type': 'price', 'params': {'op': '>=', 'value': 150000}}, 111302)
+        check('23 disarmed: watching price tx adds', s == 201, (s, r))
+        dis23 = r['tx']['id'] if s == 201 else None
+        s, r = req('PUT', '/api/bitcoin/txs/' + dis23, {'enabled': False})
+        check('23 disarmed: the price tx disarms', s == 200, (s, r))
+        stj = load_state_file()
+        by_id = {t.get('id'): t for t in stj.get('bitcoin', {}).get('txs', [])}
+        frozen_slice = {'lastEvalAt': FROZEN, 'status': 'watching', 'reason': 'block 900,000 of 950,000',
+                        'lastTipHeight': STUB_TIP, 'lastPrice': None, 'lastPriceAt': None,
+                        'lastOutspend': None, 'lastError': None, 'tipMode': 'dual',
+                        'tipNote': 'primary 900,000 · secondary 900,000'}
+        arch_tx = by_id.get(arch23)
+        arch_tx['broadcasted'] = {'txid': arch_tx.get('txid'), 'broadcastedAt': FROZEN, 'method': 'mempool.space',
+                                  'confirmations': 7, 'blockHeight': 899993, 'found': True, 'checkedAt': FROZEN}
+        arch_tx['release'] = {'status': 'broadcast', 'kind': 'release', 'trigger': 'blockheight',
+                              'txid': arch_tx.get('txid'), 'method': 'mempool.space', 'broadcastedAt': FROZEN}
+        arch_tx['triggerState'] = [dict(frozen_slice)]
+        stale_tx = by_id.get(stale23)
+        stale_tx['release'] = {'status': 'stale', 'kind': 'release', 'trigger': 'blockheight',
+                               'txid': stale_tx.get('txid'), 'method': 'mempool.space',
+                               'error': 'inputs spent: staged'}
+        stale_tx['triggerState'] = [dict(frozen_slice)]
+        save_state_file(stj)
+        check('23 archived: app restarted with the seeded terminal txs', restart())
+        cp0, cs0 = tip_counts()
+        dis_before = rule_slice(state_tx(dis23))
+        s, r, res = release_results()
+        check('23 archived: release check runs', s == 200, (s, r))
+        t = state_tx(arch23)
+        check('23 archived: the broadcast tx (>= 6 confs) is skipped, already broadcast',
+              res.get(arch23, {}).get('action') == 'skipped' and 'already broadcast' in str(res.get(arch23, {}).get('reason', '')), res.get(arch23))
+        check('23 archived: its slice is frozen (lastEvalAt and lastTipHeight untouched)',
+              rule_slice(t).get('lastEvalAt') == FROZEN and rule_slice(t).get('lastTipHeight') == STUB_TIP, rule_slice(t))
+        t = state_tx(stale23)
+        check('23 stale: the stale tx is skipped',
+              res.get(stale23, {}).get('action') == 'skipped' and 'stale' in str(res.get(stale23, {}).get('reason', '')), res.get(stale23))
+        check('23 stale: its slice is frozen too',
+              rule_slice(t).get('lastEvalAt') == FROZEN and rule_slice(t).get('lastTipHeight') == STUB_TIP, rule_slice(t))
+        t = state_tx(dis23)
+        check('23 disarmed: the disarmed staged tx IS still evaluated (slice refreshed, price read)',
+              rule_slice(t).get('lastEvalAt') != dis_before.get('lastEvalAt')
+              and rule_slice(t).get('lastPrice') == 98200, rule_slice(t))
+        cp1, cs1 = tip_counts()
+        check('23 archived: the release check made no tip fetch at all (both stubs quiet)',
+              (cp1, cs1) == (cp0, cs0), ((cp0, cs0), (cp1, cs1)))
+        # (b) A pending broadcast tx (< 6 confs) still gets its
+        # confirmations refreshed hourly, but its rules are not
+        # re-evaluated — while the >= 6 tx above is not re-queried
+        # even though its last check is hours old.
+        s, r = add_tx('Pend BH', {'type': 'blockheight', 'params': {'targetHeight': 950000}}, 111303)
+        check('23 pending: watching blockheight tx adds', s == 201, (s, r))
+        pend23 = r['tx']['id'] if s == 201 else None
+        stj = load_state_file()
+        by_id = {t.get('id'): t for t in stj.get('bitcoin', {}).get('txs', [])}
+        pend_tx = by_id.get(pend23)
+        pend_tx['broadcasted'] = {'txid': pend_tx.get('txid'), 'broadcastedAt': FROZEN, 'method': 'mempool.space',
+                                  'confirmations': 0, 'blockHeight': None, 'found': True, 'checkedAt': FROZEN}
+        pend_tx['release'] = {'status': 'broadcast', 'kind': 'release', 'trigger': 'blockheight',
+                              'txid': pend_tx.get('txid'), 'method': 'mempool.space', 'broadcastedAt': FROZEN}
+        pend_tx['triggerState'] = [dict(frozen_slice)]
+        save_state_file(stj)
+        s, r = req('GET', '/api/bitcoin/confirmations')
+        check('23 pending: the confirmations endpoint runs', s == 200, (s, r))
+        t = state_tx(pend23)
+        check('23 pending: the < 6 tx IS re-queried (checkedAt moved, stub does not know it)',
+              t.get('broadcasted', {}).get('checkedAt') != FROZEN
+              and t.get('broadcasted', {}).get('found') is False, t.get('broadcasted'))
+        t = state_tx(arch23)
+        check('23 archived: the >= 6 tx is NOT re-queried (checkedAt still the old value, 7 confs kept)',
+              t.get('broadcasted', {}).get('checkedAt') == FROZEN
+              and t.get('broadcasted', {}).get('confirmations') == 7, t.get('broadcasted'))
+        cp0, cs0 = tip_counts()
+        s, r, res = release_results()
+        t = state_tx(pend23)
+        check('23 pending: its rules are not re-evaluated (slice frozen)',
+              rule_slice(t).get('lastEvalAt') == FROZEN and rule_slice(t).get('lastTipHeight') == STUB_TIP, rule_slice(t))
+        cp1, cs1 = tip_counts()
+        check('23 pending: the release check made no tip fetch for it either',
+              (cp1, cs1) == (cp0, cs0), ((cp0, cs0), (cp1, cs1)))
+        # (c) Primary-first tip fetch + per-tick cache: two
+        # disarmed staged blockheight rules in one release check
+        # cost ONE tip fetch, from the primary only. (The
+        # secondary is pointed at a closed port first: the cache
+        # is keyed by endpoint bases, so the settings change busts
+        # it — and a closed-port secondary is never even asked.)
+        s, r = add_tx('Tip BH 1', {'type': 'blockheight', 'params': {'targetHeight': 950000}}, 111304)
+        check('23 cache: first watching blockheight tx adds', s == 201, (s, r))
+        tip1 = r['tx']['id'] if s == 201 else None
+        s, r = add_tx('Tip BH 2', {'type': 'blockheight', 'params': {'targetHeight': 950000}}, 111305)
+        check('23 cache: second watching blockheight tx adds', s == 201, (s, r))
+        tip2 = r['tx']['id'] if s == 201 else None
+        for tid in (tip1, tip2):
+            s, r = req('PUT', '/api/bitcoin/txs/' + tid, {'enabled': False})
+        check('23 cache: both tip txs disarm (disarmed staged txs are still evaluated)', s == 200, (s, r))
+        s, r = req('PUT', '/api/settings', {'secondaryApiUrl': 'http://127.0.0.1:9'})
+        check('23 cache: secondary pointed at a closed port (busts the tip cache)', s == 200, (s, r))
+        cp0, cs0 = tip_counts()
+        s, r, res = release_results()
+        check('23 cache: release check runs', s == 200, (s, r))
+        cp1, cs1 = tip_counts()
+        check('23 cache: two blockheight rules cost ONE tip fetch, from the primary only',
+              (cp1, cs1) == (cp0 + 1, cs0), ((cp0, cs0), (cp1, cs1)))
+        for tid in (tip1, tip2):
+            t = state_tx(tid)
+            check('23 cache: the disarmed blockheight tx IS evaluated (slice refreshed, primary-only note)',
+                  rule_slice(t).get('lastTipHeight') == STUB_TIP
+                  and rule_slice(t).get('tipMode') == 'single'
+                  and rule_slice(t).get('tipNote') == 'primary only — secondary not needed', rule_slice(t))
+        s, r = req('PUT', '/api/settings', {'secondaryApiUrl': STUB_BASE_S})
+        check('23 cache: secondary restored to the stub', s == 200, (s, r))
+        # (d) Primary down: the secondary alone decides.
+        s, r = req('PUT', '/api/settings', {'primaryApiUrl': 'http://127.0.0.1:9'})
+        check('23 down: primary pointed at a closed port', s == 200, (s, r))
+        s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'blockheight', 'params': {'targetHeight': 950000}}})
+        check('23 down: the secondary alone decides (watching on its 900,000 tip)',
+              s == 200 and r.get('fire') is False and r.get('status') == 'watching', r)
+        s, r, res = release_results()
+        t = state_tx(tip1)
+        check('23 down: the note names the fallback',
+              rule_slice(t).get('tipMode') == 'single'
+              and rule_slice(t).get('tipNote') == 'secondary only — primary unreachable', rule_slice(t))
+        s, r = req('PUT', '/api/settings', {'primaryApiUrl': STUB_BASE_P})
+        check('23 down: primary restored to the stub', s == 200, (s, r))
+        # (e) Primary failing the tip read (500): the secondary
+        # alone decides, same as down.
+        s, r = req('POST', '/__test__/tip-fail', {'fail': True}, base=STUB_BASE_P)
+        check('23 invalid: primary stub fails the tip read (500)', s == 200, (s, r))
+        s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'blockheight', 'params': {'targetHeight': 950000}}})
+        check('23 invalid: the secondary alone decides on a 500 primary',
+              s == 200 and r.get('fire') is False and r.get('status') == 'watching', r)
+        s, r, res = release_results()
+        t = state_tx(tip1)
+        check('23 invalid: the note names the fallback',
+              rule_slice(t).get('tipMode') == 'single'
+              and rule_slice(t).get('tipNote') == 'secondary only — primary unreachable', rule_slice(t))
+        s, r = req('POST', '/__test__/tip-fail', {'fail': False}, base=STUB_BASE_P)
+        check('23 invalid: primary stub tip reads again', s == 200, (s, r))
+        # (f) Manual paths are unchanged: a single dry-run still
+        # tests an archived tx when asked, and dry-run all runs.
+        s, r = req('POST', '/api/broadcast/test', {'id': arch23})
+        check('23 manual: a single dry-run still tests the archived tx when asked',
+              s == 200 and any(x.get('id') == arch23 for x in r.get('results', [])), (s, r))
+        s, r = req('POST', '/api/broadcast/test', {})
+        check('23 manual: dry-run all still runs', s == 200, (s, r))
+        # Cleanup: settings back to the stubs, cadence back to 60,
+        # caches cold (restart) for the sections after this one.
+        s, r = req('PUT', '/api/settings', {'primaryApiUrl': STUB_BASE_P, 'secondaryApiUrl': STUB_BASE_S,
+                                            'checkCadenceSeconds': 60})
+        check('23 cleanup: settings and cadence restored', s == 200, (s, r))
+        delete_all_txs()
+        check('23 cleanup: app restarted', restart())
+
+        # --- 24. fee trigger: 5-minute node fee cache (0.8.5) --------
+        # Ryan (Nov 20): one fee fetch per 5 minutes for ALL fee
+        # txs combined. The node fee cache TTL is a fixed 5
+        # minutes, not the check cadence — two fee-rule evaluations
+        # inside one window cost ONE stub fee fetch, from the
+        # primary only. The background tick is parked (cadence
+        # 3600 s) so only the evaluations this section triggers
+        # can move the stub counters. (The verdict's hourly
+        # current-fees fetch also hits the primary stub's fees
+        # route, but it fired at startup — before the baseline
+        # below — and does not repeat within the hour.)
+        def fee_counts():
+            _, rp = req('GET', '/__test__/fee-count', base=STUB_BASE_P)
+            _, rs = req('GET', '/__test__/fee-count', base=STUB_BASE_S)
+            return rp.get('count', -1), rs.get('count', -1)
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 3600})
+        check('24 setup: cadence parked at 3600 s', s == 200, (s, r))
+        s, r = req('POST', '/__test__/fees', {'economyFee': 5}, base=STUB_BASE_P)
+        check('24 setup: primary stub fee set to 5', s == 200, (s, r))
+        s, r = req('POST', '/__test__/fees', {'economyFee': 4.5}, base=STUB_BASE_S)
+        check('24 setup: secondary stub fee set to 4.5', s == 200, (s, r))
+        # Two disarmed staged fee txs, both watching at fee 5.
+        s, r = add_tx('Fee 24a', {'type': 'feemarket', 'params': {'maxFeeRate': 4, 'direction': 'below'}}, 111400)
+        check('24 cache: first watching fee tx adds', s == 201, (s, r))
+        fee1 = r['tx']['id'] if s == 201 else None
+        s, r = add_tx('Fee 24b', {'type': 'feemarket', 'params': {'maxFeeRate': 6, 'direction': 'above'}}, 111401)
+        check('24 cache: second watching fee tx adds', s == 201, (s, r))
+        fee2 = r['tx']['id'] if s == 201 else None
+        for tid in (fee1, fee2):
+            s, r = req('PUT', '/api/bitcoin/txs/' + tid, {'enabled': False})
+        check('24 cache: both fee txs disarm (disarmed staged txs are still evaluated)', s == 200, (s, r))
+        # The cache is keyed by endpoint bases, so pointing the
+        # secondary at a closed port busts it — the first
+        # evaluation below fetches, the second reads the cache.
+        s, r = req('PUT', '/api/settings', {'secondaryApiUrl': 'http://127.0.0.1:9'})
+        check('24 cache: secondary pointed at a closed port (busts the fee cache)', s == 200, (s, r))
+        fp0, fs0 = fee_counts()
+        s, r, res = release_results()
+        check('24 cache: release check runs', s == 200, (s, r))
+        fp1, fs1 = fee_counts()
+        check('24 cache: two fee rules cost ONE fee fetch, from the primary only',
+              (fp1, fs1) == (fp0 + 1, fs0), ((fp0, fs0), (fp1, fs1)))
+        for tid in (fee1, fee2):
+            t = state_tx(tid)
+            check('24 cache: the disarmed fee tx IS evaluated (slice refreshed, fee 5, primary-only note)',
+                  rule_slice(t).get('lastEconomyFee') == 5
+                  and rule_slice(t).get('feeMode') == 'single'
+                  and rule_slice(t).get('feeNote') == 'primary only — secondary not needed', rule_slice(t))
+        # Restore: secondary back to the stub, both fees back to
+        # 1, cadence back to 60.
+        s, r = req('PUT', '/api/settings', {'secondaryApiUrl': STUB_BASE_S, 'checkCadenceSeconds': 60})
+        check('24 cleanup: secondary and cadence restored', s == 200, (s, r))
+        s, r = req('POST', '/__test__/fees', {'economyFee': 1}, base=STUB_BASE_P)
+        s, r = req('POST', '/__test__/fees', {'economyFee': 1}, base=STUB_BASE_S)
+        check('24 cleanup: stubs restored to fee 1', s == 200, (s, r))
         delete_all_txs()
     finally:
         for p in list(v.procs):

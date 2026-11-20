@@ -5,6 +5,15 @@
 (function () {
   var S = null; // cached state
   var stateErrorShown = false; // the 0.8.3 state-load error view is up
+  // Live view (0.8.5): the 1-second timer below refreshes the page
+  // from the server once per check cadence, patching changed values
+  // in place — never rebuilding the DOM the owner is touching.
+  var lastStatus = null; // the last /api/status payload (for the live tick)
+  var lastFetchAt = 0; // ms of the last successful state fetch (cadence gate for the next server refresh)
+  var liveRefreshInFlight = false; // one server refresh at a time
+  var liveTickRunning = false; // one 1-second tick at a time
+  var pendingStructural = false; // a structural change is waiting for a safe moment
+  var lastLiveSignature = null; // structural signature of the DOM as rendered
 
   function $(id) { return document.getElementById(id); }
 
@@ -195,6 +204,19 @@
     return v;
   }
 
+  // The fee verdict for one tx right now (0.8.5): the verdict of
+  // the tx's stored fee rate against the current peak and economy
+  // fee — null when the tx is settled or pending (its fee is
+  // moot) or the inputs are unknown. One place, so the card's Fee
+  // line, the readiness pill, and the live tick all agree — and
+  // the Fee-line pop-out computes it at click time, so it never
+  // explains a verdict the tick has since replaced.
+  function txFeeVerdict(tx) {
+    var st = txStatus(tx);
+    if (st.settled || st.pending) return null;
+    return feeVerdict(tx.feeRateSatVb, S.bitcoin.feePeak, S.bitcoin.currentFees && S.bitcoin.currentFees.economyFee, S.settings && S.settings.feeLowMultiplier, S.settings && S.settings.feeMediumMultiplier);
+  }
+
   // The fee-risk pop-out (0.7.21): the Fee line is clickable and
   // opens the shared showDetails pop-out with HOW the verdict was
   // calculated — the 90-day peak, your fee, the current economy
@@ -310,11 +332,14 @@
     var checkins = await api('GET', '/api/checkins');
     var blog = await api('GET', '/api/broadcast/log');
     try { apiKeys = await api('GET', '/api/checkin-keys'); } catch (e) { apiKeys = []; }
+    lastStatus = status;
+    lastFetchAt = Date.now();
     renderDashboard(status);
     renderLogs(checkins, blog);
     renderBitcoin();
     renderSettings();
     refreshConfirmations(); // fire-and-forget: the sent lines show the last known count, then update
+    lastLiveSignature = liveSignature(S, status, apiKeys);
   }
 
   // The state file could not be loaded and no backup could be
@@ -567,17 +592,20 @@
     return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + 'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
   }
 
-  function renderDashboard(status) {
-    // Grace period (0.8.0): the card at the top of the dashboard,
-    // shown only while a grace is active for an armed price or
-    // UTXO tx. The text names how long the app was offline and
-    // when the pause ends (or "until you resume" for an
-    // indefinite grace); Resume now ends it immediately. The
-    // wording and bolding follow the approved mockup exactly:
-    // "Standby was offline for 12 days. Price and UTXO triggers
-    // are paused until Dec 22, 2026 (7 days) so they don't fire
-    // on conditions that changed while the app was away.
-    // Check-in triggers are not affected."
+  // Grace period (0.8.0): the card at the top of the dashboard,
+  // shown only while a grace is active for an armed price or
+  // UTXO tx. The text names how long the app was offline and
+  // when the pause ends (or "until you resume" for an
+  // indefinite grace); Resume now ends it immediately. The
+  // wording and bolding follow the approved mockup exactly:
+  // "Standby was offline for 12 days. Price and UTXO triggers
+  // are paused until Dec 22, 2026 (7 days) so they don't fire
+  // on conditions that changed while the app was away.
+  // Check-in triggers are not affected."
+  // (0.8.5) Shared with the live tick: patchLive calls this
+  // instead of rebuilding the dashboard, so the card's text
+  // stays fresh without touching anything else.
+  function renderGraceCard() {
     var graceCard = $('grace-card');
     var graceApplies = graceActive() && (S.bitcoin.txs || []).some(function (t) { return graceHoldsTx(t); });
     if (graceCard) {
@@ -607,32 +635,13 @@
         gt.appendChild(ts(' so they don\u2019t fire on conditions that changed while the app was away. Check-in triggers are not affected.'));
       }
     }
-    // Getting Started card (0.8.0): the empty-state card at the
-    // top of the Dashboard, shown only when no transactions are
-    // STAGED (active). Archived (settled) and pending
-    // transactions do not count — the card returns when the last
-    // staged tx is archived, goes pending, or is removed, so an
-    // owner with only archived txs still gets the prompt to add
-    // one. The first thing a fresh install sees; it disappears
-    // as soon as the first transaction is staged. Independent of
-    // the grace card (which needs armed price/UTXO txs to show).
-    var anyStaged = (S.bitcoin.txs || []).some(function (t) { return !txStatus(t).settled && !txStatus(t).pending; });
-    var gsCard = $('getting-started-card');
-    if (gsCard) gsCard.style.display = anyStaged ? 'none' : '';
-    // (0.8.0) The check-in card renders when any rule uses the
-    // check-in trigger — check-in is one trigger among
-    // several now, not the whole app, so a price- or UTXO-only
-    // setup has no countdown to show. Only ACTIVE check-in
-    // txs count: a settled (archived) or pending one has nothing
-    // to count down to, so it neither shows a bar nor keeps the
-    // card visible. Armed OR disarmed both count — a disarmed
-    // tx keeps a FROZEN bar (its countdown is held, not gone).
-    // The one exception is a fresh install with no
-    // transactions at all: the card stays visible so the clock
-    // can be started before the first rule exists.
-    var anyCheckinActive = (S.bitcoin.txs || []).some(function (t) { return hasRuleType(t, 'checkin') && !txStatus(t).settled && !txStatus(t).pending; });
-    var showCheckin = anyCheckinActive || !(S.bitcoin.txs || []).length;
-    $('checkin-card').style.display = showCheckin ? '' : 'none';
+  }
+
+  // The check-in card's head (0.8.5): the status pill, the
+  // explainer line under it, and the last check-in date.
+  // Shared with the live tick: patchLive calls this instead of
+  // rebuilding the dashboard.
+  function renderStatusHead(status) {
     var pill = $('status-pill');
     pill.textContent = status.label;
     pill.className = 'pill ' + (PILL_CLASS[status.state] || 'muted');
@@ -648,24 +657,22 @@
       : status.state === 'release-due' ? 'Release is due — the stored transaction will be broadcast unless you check in.'
       : '';
     line.style.display = line.textContent ? '' : 'none';
-    // The per-tx check-in bars (0.8.0): one block per ACTIVE
-    // check-in tx — the label above, the bar, and "X of N
-    // days elapsed" below. Each bar measures its OWN window: the
-    // server sends it per tx as status.checkinTxs[].windowDays —
-    // the tx's own threshold on-track, the longer held window
-    // while an offline-gap grace is active — so a held bar just
-    // counts to the held date, with no special grace display.
-    // A DISARMED check-in tx keeps its bar, frozen at the day
-    // count it was left at: muted grey, marked disarmed, its
-    // count never advancing while it is disarmed or on vacation.
-    // Settled (archived) and pending check-in txs get no bar.
-    // With no check-in yet every bar reads 0 of its threshold. The bar fills as days
-    // elapse; its colour is by how much time is LEFT: green
-    // while more than 3/4 of the window remains, amber past
-    // that, red in the last quarter. Overdue is a full red bar.
-    // A frozen bar is grey instead — it is held, not live.
-    var barsEl = $('checkin-tx-bars');
-    barsEl.innerHTML = '';
+    // Last check-in: the absolute date only. The relative elapsed
+    // time is already in each bar's caption, so no "Checked in X
+    // days ago" line — and no single "Next check-in due": with
+    // per-tx thresholds there is no one due date (each bar
+    // carries its own window).
+    var lastEl = $('last-checkin');
+    lastEl.textContent = status.lastCheckinAt ? fmtDateShort(status.lastCheckinAt) : '—';
+  }
+
+  // The per-tx check-in bars as data (0.8.5): one entry per ACTIVE
+  // check-in RULE, from status.checkinTxs when the server sends
+  // it, else derived from the txs' own triggerState slices (the
+  // same shape, for an older server). Shared by renderDashboard
+  // (which builds the bar elements) and patchLive (which patches
+  // the existing ones in place).
+  function checkinBarsData(status) {
     var bars = status.checkinTxs || [];
     if (!bars.length) {
       // An older server sends no checkinTxs: derive the bars
@@ -697,6 +704,98 @@
         });
       });
     }
+    return bars;
+  }
+
+  var readinessEls = {}; // tx id -> { item, row, pill, feePill }: the readiness row, so the live tick can patch its pills in place
+  // Exchange Status rows (0.8.0): one row per configured price
+  // source, each with its own status pill and last price.
+  // There is NO overall agreement pill next to the header:
+  // the status (OK / Failed) lives only on each exchange
+  // row. The per-price-tx lines stay trigger-only. The price
+  // sits in a small muted span to the left of the pill — the
+  // same `.node-check-detail` shape as the Settings rows —
+  // never inside the label span, and never the error reason;
+  // that detail lives in the Settings card only. The pill
+  // stays pinned to the right edge, with the Node pills.
+  // (0.8.5) Shared with the live tick.
+  // Exchange Status (0.8.0): one row per configured price
+  // source, with the live price and the last-checked time.
+  function renderExchangeRows(status) {
+    var hasPriceTx = (S.bitcoin.txs || []).some(function (t) { return hasRuleType(t, 'price'); });
+    var exItem = $('readiness-exchange-item');
+    if (exItem) exItem.style.display = hasPriceTx ? '' : 'none';
+    if (hasPriceTx) {
+      var ex = (S.bitcoin && S.bitcoin.exchangeStatus) || { status: 'not-tested', detail: '', sources: [] };
+      (ex.sources || []).forEach(function (src, i) {
+        var host = $('readiness-exchange-' + (i + 1));
+        var pill = $('readiness-exchange-' + (i + 1) + '-status');
+        var priceEl = $('readiness-exchange-' + (i + 1) + '-price');
+        if (!host || !pill) return;
+        host.textContent = src.label || src.provider || '';
+        // Per-row checked time (0.8.5): "checked 11:53 PM -
+        // $61,392.8" — the price refresh's time (currentPriceAt,
+        // one refresh for both sources, so the two rows show the
+        // same time as each other), a dash, then the last price.
+        // No price yet but a refresh ran: the checked time alone.
+        // The pill stays pinned to the right edge.
+        var checked = (S.bitcoin && S.bitcoin.currentPriceAt) ? 'checked ' + fmtCheckedAt(S.bitcoin.currentPriceAt) : '';
+        if (priceEl) priceEl.textContent = (src.price != null && Number.isFinite(Number(src.price))) ? (checked ? checked + ' - ' : '') + '$' + Number(src.price).toLocaleString('en-US') : checked;
+        if (src.status === 'ok') { pill.textContent = 'OK'; pill.className = 'pill ok'; }
+        else if (src.status === 'error') { pill.textContent = 'Failed'; pill.className = 'pill bad'; }
+        else { pill.textContent = 'Not tested'; pill.className = 'pill muted'; }
+      });
+    }
+  }
+
+  function renderDashboard(status) {
+    renderGraceCard();
+    // Getting Started card (0.8.0): the empty-state card at the
+    // top of the Dashboard, shown only when no transactions are
+    // STAGED (active). Archived (settled) and pending
+    // transactions do not count — the card returns when the last
+    // staged tx is archived, goes pending, or is removed, so an
+    // owner with only archived txs still gets the prompt to add
+    // one. The first thing a fresh install sees; it disappears
+    // as soon as the first transaction is staged. Independent of
+    // the grace card (which needs armed price/UTXO txs to show).
+    var anyStaged = (S.bitcoin.txs || []).some(function (t) { return !txStatus(t).settled && !txStatus(t).pending; });
+    var gsCard = $('getting-started-card');
+    if (gsCard) gsCard.style.display = anyStaged ? 'none' : '';
+    // (0.8.0) The check-in card renders when any rule uses the
+    // check-in trigger — check-in is one trigger among
+    // several now, not the whole app, so a price- or UTXO-only
+    // setup has no countdown to show. Only ACTIVE check-in
+    // txs count: a settled (archived) or pending one has nothing
+    // to count down to, so it neither shows a bar nor keeps the
+    // card visible. Armed OR disarmed both count — a disarmed
+    // tx keeps a FROZEN bar (its countdown is held, not gone).
+    // The one exception is a fresh install with no
+    // transactions at all: the card stays visible so the clock
+    // can be started before the first rule exists.
+    var anyCheckinActive = (S.bitcoin.txs || []).some(function (t) { return hasRuleType(t, 'checkin') && !txStatus(t).settled && !txStatus(t).pending; });
+    var showCheckin = anyCheckinActive || !(S.bitcoin.txs || []).length;
+    $('checkin-card').style.display = showCheckin ? '' : 'none';
+    renderStatusHead(status);
+    // The per-tx check-in bars (0.8.0): one block per ACTIVE
+    // check-in tx — the label above, the bar, and "X of N
+    // days elapsed" below. Each bar measures its OWN window: the
+    // server sends it per tx as status.checkinTxs[].windowDays —
+    // the tx's own threshold on-track, the longer held window
+    // while an offline-gap grace is active — so a held bar just
+    // counts to the held date, with no special grace display.
+    // A DISARMED check-in tx keeps its bar, frozen at the day
+    // count it was left at: muted grey, marked disarmed, its
+    // count never advancing while it is disarmed or on vacation.
+    // Settled (archived) and pending check-in txs get no bar.
+    // With no check-in yet every bar reads 0 of its threshold. The bar fills as days
+    // elapse; its colour is by how much time is LEFT: green
+    // while more than 3/4 of the window remains, amber past
+    // that, red in the last quarter. Overdue is a full red bar.
+    // A frozen bar is grey instead — it is held, not live.
+    var barsEl = $('checkin-tx-bars');
+    barsEl.innerHTML = '';
+    var bars = checkinBarsData(status);
     // A tx with two check-in rules sends two bars with the same
     // label — tell them apart by rule number, matching the
     // "Rule N" headers on the tx card.
@@ -708,6 +807,12 @@
       var frozen = b.enabled === false;
       var block = document.createElement('div');
       block.className = 'ck-tx' + (frozen ? ' frozen' : '');
+      // (0.8.5) The live tick finds this bar by tx + rule and
+      // ticks its countdown locally — the window it measures
+      // against rides on the element, so no second lookup.
+      block.dataset.txId = b.id;
+      block.dataset.ruleIndex = (typeof b.ruleIndex === 'number') ? b.ruleIndex : 0;
+      block.dataset.windowDays = windowDays;
       var label = document.createElement('div');
       label.className = 'ck-tx-label';
       label.textContent = (b.label || 'Untitled transaction') + ((barsById[b.id] || 0) > 1 && typeof b.ruleIndex === 'number' ? ' \u2014 Rule ' + (b.ruleIndex + 1) : '');
@@ -726,13 +831,6 @@
       block.appendChild(cap);
       barsEl.appendChild(block);
     });
-    // Last check-in: the absolute date only. The relative elapsed
-    // time is already in each bar's caption, so no "Checked in X
-    // days ago" line — and no single "Next check-in due": with
-    // per-tx thresholds there is no one due date (each bar
-    // carries its own window).
-    var lastEl = $('last-checkin');
-    lastEl.textContent = status.lastCheckinAt ? fmtDateShort(status.lastCheckinAt) : '—';
     // The transactions, one row each (0.7.19): the label with its
     // status pill — the same pill the transaction's own card shows
     // ("armed", "Timelocked + armed", ...), via
@@ -748,6 +846,7 @@
     var activeTxs = (S.bitcoin.txs || []).filter(function (t) { return !txStatus(t).settled && !txStatus(t).pending; });
     var txsEl = $('readiness-txs');
     txsEl.innerHTML = '';
+    readinessEls = {};
     if (activeTxs.length) {
       activeTxs.forEach(function (t) {
         var st = txStatus(t);
@@ -759,6 +858,7 @@
         // current value lives on the tx card's third row, not here.
         var item = document.createElement('div');
         item.className = 'readiness-tx';
+        item.dataset.txId = t.id;
         var row = document.createElement('div');
         row.className = 'readiness-tx-row';
         var label = document.createElement('b');
@@ -768,7 +868,7 @@
         pill.className = 'pill ' + st.cls;
         pill.textContent = txPillText(t, st);
         row.appendChild(pill);
-        var fv = feeVerdict(t.feeRateSatVb, S.bitcoin.feePeak, S.bitcoin.currentFees && S.bitcoin.currentFees.economyFee, S.settings && S.settings.feeLowMultiplier, S.settings && S.settings.feeMediumMultiplier);
+        var fv = txFeeVerdict(t);
         if (fv) {
           var fpill = document.createElement('span');
           fpill.className = 'pill fee-pill ' + feeVerdictCls(fv);
@@ -787,6 +887,8 @@
         stateLine.textContent = triggerSetCondition(t);
         item.appendChild(stateLine);
         txsEl.appendChild(item);
+        // (0.8.5) The live tick patches this row's pills in place.
+        readinessEls[t.id] = { item: item, row: row, pill: pill, feePill: (typeof fpill !== 'undefined' && fpill) ? fpill : null };
       });
     } else {
       txsEl.textContent = (S.bitcoin.txs || []).length
@@ -802,45 +904,7 @@
     var conn = S.bitcoin.connection || {};
     renderNodeStatus('readiness-', 'primary', status.primaryApiUrl, conn);
     renderNodeStatus('readiness-', 'secondary', status.secondaryApiUrl, conn);
-    // Exchange Status (0.8.0): one row per configured price
-    // source, each with its own status pill and last price.
-    // There is NO overall agreement pill next to the header:
-    // the status (OK / Failed) lives only on each exchange
-    // row. The per-price-tx lines stay trigger-only. The price
-    // sits in a small muted span to the left of the pill — the
-    // same `.node-check-detail` shape as the Settings rows —
-    // never inside the label span, and never the error reason;
-    // that detail lives in the Settings card only. The pill
-    // stays pinned to the right edge, with the Node pills.
-    var hasPriceTx = (S.bitcoin.txs || []).some(function (t) { return hasRuleType(t, 'price'); });
-    var exItem = $('readiness-exchange-item');
-    if (exItem) exItem.style.display = hasPriceTx ? '' : 'none';
-    if (hasPriceTx) {
-      var ex = (S.bitcoin && S.bitcoin.exchangeStatus) || { status: 'not-tested', detail: '', sources: [] };
-      (ex.sources || []).forEach(function (src, i) {
-        var host = $('readiness-exchange-' + (i + 1));
-        var pill = $('readiness-exchange-' + (i + 1) + '-status');
-        var priceEl = $('readiness-exchange-' + (i + 1) + '-price');
-        if (!host || !pill) return;
-        host.textContent = src.label || src.provider || '';
-        // The price sits to the left of the status pill, in the
-        // same small muted text as the node rows' values
-        // ("Reachable") — never inside the label span. The pill
-        // stays pinned to the right edge, with the Node pills.
-        if (priceEl) priceEl.textContent = (src.price != null && Number.isFinite(Number(src.price))) ? '$' + Number(src.price).toLocaleString('en-US') : '';
-        if (src.status === 'ok') { pill.textContent = 'OK'; pill.className = 'pill ok'; }
-        else if (src.status === 'error') { pill.textContent = 'Failed'; pill.className = 'pill bad'; }
-        else { pill.textContent = 'Not tested'; pill.className = 'pill muted'; }
-      });
-    }
-    // "Last checked", inline on each section's label line (0.8.1):
-    // nodes use the connection test's checkedAt, exchanges use the
-    // last price-fetch time (currentPriceAt, already served) — two
-    // different values, not one shared line at the card's bottom.
-    var nodeChecked = $('readiness-node-checked');
-    if (nodeChecked) nodeChecked.textContent = conn.checkedAt ? 'last checked ' + fmtCheckedAt(conn.checkedAt) : '';
-    var exChecked = $('readiness-exchange-checked');
-    if (exChecked) exChecked.textContent = (hasPriceTx && S.bitcoin && S.bitcoin.currentPriceAt) ? 'last checked ' + fmtCheckedAt(S.bitcoin.currentPriceAt) : '';
+    renderExchangeRows(status);
   }
 
   // The Logs tab: the broadcast log and the recent check-ins. They
@@ -1005,7 +1069,21 @@
     if (left <= 0) return '(fallback due \u2014 broadcasts publicly on the next check)';
     return '(' + left + (left === 1 ? ' day' : ' days') + ' left before fallback)';
   }
-  var txCardEls = {}; // tx id -> { row, sentLine }: the rendered card, so the confirmations poll can update the sent line in place
+  // The Public Fallback row's text (0.8.5): the duration, plus the
+  // countdown while Slipstream-pending, or "from broadcast" while
+  // still active. Shared by renderBitcoin and the live tick.
+  function txFallbackText(tx, st) {
+    var fbText = fallbackLabel(tx.publicFallbackDays);
+    if (st.pending && tx.release && tx.release.status === 'submitted-slipstream') {
+      fbText += ' ' + fallbackCountdown(tx);
+    } else if (!st.pending && !st.settled) {
+      // Not yet broadcast (Active): the duration runs from the
+      // broadcast, not from now — "7 days from broadcast".
+      fbText += ' from broadcast';
+    }
+    return fbText;
+  }
+  var txCardEls = {}; // tx id -> { row, sentLine, pill, rules, feeVerdictEl, maraEl, fallbackValueEl }: the rendered card, so the confirmations poll and the live tick can update it in place
 
   function hostOf(u) { try { return new URL(u).host; } catch (e) { return u || ''; } }
   // One node's row — the host, plus a pill for the last test of that
@@ -1026,15 +1104,27 @@
     var host = $(prefix + label);
     var pill = $(prefix + label + '-status');
     var checksEl = $(prefix + label + '-checks');
+    // Per-row checked time (0.8.5): the readiness rows carry
+    // their own "checked …" left of the pill — each endpoint's
+    // own last-answered stamp (connection.nodeCheckedAt), not
+    // the shared connection-test time: the tick asks the primary
+    // every time and the secondary only on fallback, so the two
+    // stamps diverge. No stamp yet means no time shown, never
+    // an invented one. Only the readiness rows have this
+    // element; the Settings rows have none, so they are untouched.
+    var checkedEl = $(prefix + label + '-checked');
     if (!url) {
       host.textContent = 'Not set';
       pill.textContent = 'Not set';
       pill.className = 'pill muted';
       if (checksEl) checksEl.style.display = 'none';
+      if (checkedEl) checkedEl.textContent = '';
       return;
     }
     host.textContent = hostOf(url);
     var res = (conn.results || []).find(function (r) { return r.endpoint === label && r.base === url; });
+    var stamp = conn.nodeCheckedAt && conn.nodeCheckedAt[label];
+    if (checkedEl) checkedEl.textContent = (res && stamp) ? 'checked ' + fmtCheckedAt(stamp) : '';
     if (!res) {
       pill.textContent = 'Not tested';
       pill.className = 'pill muted';
@@ -1082,16 +1172,18 @@
     else val.classList.add('failed');
   }
   // After a connection test, open the details of any node that is
-  // not OK so the failure is visible without a tap; OK nodes stay
-  // closed. Runs once per test, never on re-render, so it does not
-  // fight a manual open/close.
+  // not OK so the failure is visible without a tap — and never
+  // close anything: a node the owner opened by hand stays open
+  // across the test (0.8.5). Runs once per test, never on
+  // re-render, so it does not fight a manual open/close.
   function openFailedNodeDetails() {
     var conn = (S.bitcoin && S.bitcoin.connection) || null;
     var results = (conn && conn.results) || [];
     for (var i = 0; i < results.length; i++) {
       var r = results[i];
+      if (r.status === 'ok') continue;
       var det = $('btc-' + r.endpoint + '-details');
-      if (det) det.open = (r.status !== 'ok');
+      if (det) det.open = true;
     }
   }
   // Which endpoint broadcast it — 'primary'/'secondary' today, and the
@@ -1394,24 +1486,19 @@
     return parts[0].slice(0, 12) + (parts.length > 1 ? ':' + parts[1] : '');
   }
 
-  function renderBitcoin() {
-    $('btc-primary-url').value = S.settings.primaryApiUrl || 'https://mempool.space';
-    $('btc-secondary-url').value = S.settings.secondaryApiUrl || '';
-    var conn = S.bitcoin.connection || {};
-    renderNodeStatus('btc-', 'primary', S.settings.primaryApiUrl, conn);
-    renderNodeStatus('btc-', 'secondary', S.settings.secondaryApiUrl, conn);
-
-    var txs = S.bitcoin.txs || [];
-    // Shared-input warnings, derived from the stored transactions on
-    // every load (the state carries the shared inputs, computed
-    // server-side), so the warning persists across refreshes — it is
-    // not page memory, and no Dry-run all is needed for it to appear.
-    // A settled or pending card gets no warning: its fate is already
-    // decided. The server-side detection already excludes archived
-    // transactions (round 12); the skip here is belt-and-braces for
-    // a settled or pending card. Editing a transaction to spend a
-    // different input removes it from the shared set, and the warning
-    // clears on the next load.
+  // Shared-input warnings, derived from the stored transactions on
+  // every load (the state carries the shared inputs, computed
+  // server-side), so the warning persists across refreshes — it is
+  // not page memory, and no Dry-run all is needed for it to appear.
+  // A settled or pending card gets no warning: its fate is already
+  // decided. The server-side detection already excludes archived
+  // transactions (round 12); the skip here is belt-and-braces for
+  // a settled or pending card. Editing a transaction to spend a
+  // different input removes it from the shared set, and the warning
+  // clears on the next load.
+  // (0.8.5) Shared with the live tick: patchLive needs the same
+  // map to keep the amber pill in step.
+  function computeOverlaps() {
     var overlapsByTx = {};
     (S.bitcoin.overlaps || []).forEach(function (ov) {
       ov.txIds.forEach(function (tid) {
@@ -1424,6 +1511,18 @@
         (overlapsByTx[tid] = overlapsByTx[tid] || []).push({ input: ov.input, others: others });
       });
     });
+    return overlapsByTx;
+  }
+
+  function renderBitcoin() {
+    $('btc-primary-url').value = S.settings.primaryApiUrl || 'https://mempool.space';
+    $('btc-secondary-url').value = S.settings.secondaryApiUrl || '';
+    var conn = S.bitcoin.connection || {};
+    renderNodeStatus('btc-', 'primary', S.settings.primaryApiUrl, conn);
+    renderNodeStatus('btc-', 'secondary', S.settings.secondaryApiUrl, conn);
+
+    var txs = S.bitcoin.txs || [];
+    var overlapsByTx = computeOverlaps();
     // The three lists: the ones still waiting live inside the
     // Staged Transactions card, below the Dry-run All /
     // Broadcast Armed buttons; the ones broadcast or submitted but not
@@ -1453,6 +1552,13 @@
       var st = txStatus(tx);
       var settled = st.settled;
       var pending = st.pending;
+      // (0.8.5) Element refs for the live tick, filled in below as
+      // the card is built — the tick patches these in place and
+      // never rebuilds the card.
+      var ruleEls = []; // per rule: { pillEl, condEl, nowEl }
+      var feeVerdictEl = null; // the " — Low Risk" suffix span, when rendered
+      var maraEl = null; // the Slipstream queue line, when rendered
+      var fallbackValueEl = null; // the Public Fallback value span, when rendered
       // Header: label (bold) + status pill, and on an Active card
       // the arm/disarm toggle immediately to the right of the pill.
       // The pill carries the armed state as text ("armed" when
@@ -1564,6 +1670,7 @@
         trigNow.textContent = triggerStateLine(rule, ruleStates[ri] || {});
         trigBox.appendChild(trigNow);
         row.appendChild(trigBox);
+        ruleEls.push({ pillEl: (typeof trigPillEl !== 'undefined' && trigPillEl) ? trigPillEl : null, condEl: trigCond, nowEl: trigNow });
       });
       // The Details — collapsed by default on every card (round 12:
       // Ryan decided all cards start collapsed). Everything but the
@@ -1668,12 +1775,13 @@
       // as it was, rather than showing a wrong one.
       if (tx.feeSats !== null && tx.feeSats !== undefined) {
         var feeRow = kvRow('tx-fee', 'Fee', fmtSats(tx.feeSats) + ' · ' + fmtRate(tx.feeRateSatVb) + ' sat/vB');
-        var fv = (!settled && !pending) ? feeVerdict(tx.feeRateSatVb, S.bitcoin.feePeak, S.bitcoin.currentFees && S.bitcoin.currentFees.economyFee, S.settings && S.settings.feeLowMultiplier, S.settings && S.settings.feeMediumMultiplier) : null;
+        var fv = txFeeVerdict(tx);
         if (fv) {
           var fvs = document.createElement('span');
           fvs.className = 'fee-verdict ' + feeVerdictCls(fv);
           fvs.textContent = ' — ' + fv;
           feeRow.children[1].appendChild(fvs);
+          feeVerdictEl = fvs;
           // The Fee line is clickable (0.7.21): tapping it opens
           // the fee-risk pop-out, which explains how the verdict
           // was calculated. The pointer cursor and the title say
@@ -1682,7 +1790,7 @@
           // verdict has nothing to pop out.
           feeRow.children[1].className = 'tx-kv-v tx-fee-value';
           feeRow.children[1].title = 'Click to see how this risk was calculated';
-          feeRow.children[1].addEventListener('click', function () { showFeePopout(tx, fv); });
+          feeRow.children[1].addEventListener('click', function () { showFeePopout(tx, txFeeVerdict(tx) || fv); });
         }
         body.appendChild(feeRow);
       }
@@ -1716,15 +1824,9 @@
       // counted from when MARA first received the transaction, and
       // setting it sooner or later does not change the count.
       if (tx.broadcastVia === 'slipstream' && tx.publicFallbackDays !== null && tx.publicFallbackDays !== undefined) {
-        var fbText = fallbackLabel(tx.publicFallbackDays);
-        if (pending && tx.release && tx.release.status === 'submitted-slipstream') {
-          fbText += ' ' + fallbackCountdown(tx);
-        } else if (!pending && !settled) {
-          // Not yet broadcast (Active): the duration runs from the
-          // broadcast, not from now — "7 days from broadcast".
-          fbText += ' from broadcast';
-        }
-        body.appendChild(kvRow('tx-fallback', 'Public Fallback', fbText));
+        var fbRow = kvRow('tx-fallback', 'Public Fallback', txFallbackText(tx, st));
+        fallbackValueEl = fbRow.children[1];
+        body.appendChild(fbRow);
       }
       if (tx.locktime > 0) {
         body.appendChild(kvRow('', 'Locktime', String(tx.locktime)));
@@ -1739,6 +1841,7 @@
           var maraLine = document.createElement('p');
           maraLine.className = 'tx-mara';
           maraLine.textContent = mara;
+          maraEl = maraLine;
           body.appendChild(maraLine);
         }
       }
@@ -1919,7 +2022,7 @@
           row.appendChild(warnLine);
         });
       }
-      txCardEls[tx.id] = { row: row, sentLine: sentLine, pill: pill };
+      txCardEls[tx.id] = { row: row, sentLine: sentLine, pill: pill, rules: ruleEls, feeVerdictEl: feeVerdictEl, maraEl: maraEl, fallbackValueEl: fallbackValueEl };
       (settled ? archivedList : (pending ? pendingList : activeList)).appendChild(row);
     });
     // A list with nothing in it yet says so, instead of sitting empty
@@ -3179,6 +3282,384 @@
   }
   setInterval(refreshConfirmations, 60 * 1000);
 
+  // ---------- live view (0.8.5) ----------
+  // The page updates itself: pills, prices, fees, block height,
+  // check-in bars — without a manual reload, and without
+  // interrupting anything the owner is doing. Two parts:
+  //   - a 1-second timer (liveSecondTick) that recomputes
+  //     the check-in countdown from the clock (no fetch),
+  //     and triggers a server refresh once per check cadence;
+  //   - the server refresh (liveRefresh), which fetches the
+  //     state and patches changed VALUES in place. A structural
+  //     change — a tx added, removed, or moved between the
+  //     staged / pending / archived lists — waits for a safe
+  //     moment (no popup open, no field focused) and then does
+  //     a full load(); until then the values still update
+  //     behind the popup. Nothing here ever writes into an
+  //     input, a select, or a modal subtree.
+  // The refresh interval IS the check cadence (0.8.5): new server
+  // data only appears once per tick, so polling faster wastes
+  // fetches. Read live from settings, so a Settings change takes
+  // effect without restarting anything. Clamped to the server's
+  // own bounds (10–3600s, default 60).
+  function liveCadenceMs() {
+    var c = (S.settings && typeof S.settings.checkCadenceSeconds === 'number') ? S.settings.checkCadenceSeconds : 60;
+    if (!isFinite(c)) c = 60;
+    c = Math.max(10, Math.min(3600, c));
+    return c * 1000;
+  }
+  // The structural signature (0.8.5): everything a values-only
+  // patch cannot change — the tx set and each tx's bucket, label,
+  // notes, trigger set, broadcast/release state, history length,
+  // and the render-relevant details; the shared-input map; the
+  // settings (a settings change rewrites input values, which the
+  // patch never touches); the check-in bar keys; the exchange
+  // source count; the check-in key ids. Everything else (prices,
+  // fees, tip height, pill states, rule slices, day counts,
+  // confirmations, last-checked times, node checks, grace text,
+  // log rows) is values and patches in place.
+  function liveSignature(state, status, keys) {
+    var txs = (state.bitcoin && state.bitcoin.txs) || [];
+    var sigTxs = txs.map(function (t) {
+      var st = txStatus(t);
+      return {
+        id: t.id, label: t.label || '', notes: t.notes || '', enabled: !!t.enabled,
+        txid: t.txid || '', inputs: t.inputs, outputs: t.outputs,
+        feeSats: (t.feeSats === null || t.feeSats === undefined) ? null : t.feeSats,
+        broadcastVia: t.broadcastVia || '', publicFallbackDays: (t.publicFallbackDays === null || t.publicFallbackDays === undefined) ? null : t.publicFallbackDays,
+        locktime: t.locktime || 0,
+        trigger: triggerSetOf(t),
+        broadcasted: !!t.broadcasted,
+        releaseStatus: (t.release && t.release.status) || '',
+        historyLen: Array.isArray(t.history) ? t.history.length : 0,
+        bucket: st.settled ? 'settled' : (st.pending ? 'pending' : 'active'),
+      };
+    });
+    var bars = checkinBarsData(status).map(function (b) { return b.id + ':' + (typeof b.ruleIndex === 'number' ? b.ruleIndex : 0); });
+    return JSON.stringify({
+      txs: sigTxs,
+      overlaps: (state.bitcoin && state.bitcoin.overlaps) || [],
+      settings: state.settings || {},
+      bars: bars,
+      exSources: ((state.bitcoin && state.bitcoin.exchangeStatus && state.bitcoin.exchangeStatus.sources) || []).length,
+      keys: (keys || []).map(function (k) { return k.id; }),
+    });
+  }
+  // A full re-render is only safe when nothing the owner is
+  // doing can be clobbered: no popup open (Add / Edit / confirm
+  // — including the details pop-out and the new-key pop-out,
+  // which both use the confirm modal) and no field focused.
+  // The in-place patch never needs this — it touches neither.
+  function anyModalOpen() {
+    return ['add-modal', 'edit-modal', 'confirm-modal'].some(function (id) {
+      var m = $(id);
+      return m && m.classList && m.classList.contains('open');
+    });
+  }
+  function safeToRestructure() {
+    if (stateErrorShown) return false;
+    if (anyModalOpen()) return false;
+    var ae = (typeof document !== 'undefined') ? document.activeElement : null;
+    if (ae && ae.tagName && /^(INPUT|SELECT|TEXTAREA)$/.test(ae.tagName)) return false;
+    return true;
+  }
+  // Patch the check-in bars in place (0.8.5): same numbers as
+  // renderDashboard builds — matched by tx + rule index, so a
+  // bar never moves or rebuilds, only its fill, colour, and
+  // caption change.
+  function patchCheckinBars(status) {
+    var barsEl = $('checkin-tx-bars');
+    if (!barsEl) return;
+    var bars = checkinBarsData(status);
+    var byKey = {};
+    var barsById = {};
+    bars.forEach(function (b) {
+      byKey[b.id + ':' + (typeof b.ruleIndex === 'number' ? b.ruleIndex : 0)] = b;
+      barsById[b.id] = (barsById[b.id] || 0) + 1;
+    });
+    Array.prototype.forEach.call(barsEl.children || [], function (block) {
+      if (!(block.className || '').split(' ').includes('ck-tx')) return;
+      var key = (block.dataset && block.dataset.txId) + ':' + ((block.dataset && block.dataset.ruleIndex !== undefined) ? block.dataset.ruleIndex : 0);
+      var b = byKey[key];
+      if (!b) return;
+      var daysSince = b.daysSince || 0;
+      var windowDays = (typeof b.windowDays === 'number' && b.windowDays > 0) ? b.windowDays : (b.thresholdDays || 35);
+      var frozen = b.enabled === false;
+      block.className = 'ck-tx' + (frozen ? ' frozen' : '');
+      block.dataset.windowDays = windowDays;
+      var label = block.children[0];
+      if (label) label.textContent = (b.label || 'Untitled transaction') + ((barsById[b.id] || 0) > 1 && typeof b.ruleIndex === 'number' ? ' — Rule ' + (b.ruleIndex + 1) : '');
+      var bar = block.children[1];
+      var fill = bar && bar.children[0];
+      if (fill) {
+        fill.style.width = (Math.min(1, Math.max(0, daysSince / windowDays)) * 100) + '%';
+        var remaining = (windowDays - daysSince) / windowDays;
+        fill.style.background = frozen ? 'var(--muted)' : remaining > 0.75 ? 'var(--ok)' : remaining > 0.25 ? 'var(--warn)' : 'var(--bad)';
+      }
+      var cap = block.children[2];
+      if (cap) cap.textContent = daysSince + ' of ' + windowDays + ' days elapsed' + (frozen ? ' — disarmed, frozen' : '');
+    });
+  }
+  // Patch the readiness rows in place (0.8.5): the status pill
+  // and the fee pill per active tx. A fee pill appears or
+  // disappears with the verdict (cold fee data hides it, exactly
+  // like a fresh render); the condition line never changes
+  // without a trigger change, which is structural.
+  function patchReadinessRows() {
+    var activeTxs = (S.bitcoin.txs || []).filter(function (t) { return !txStatus(t).settled && !txStatus(t).pending; });
+    activeTxs.forEach(function (t) {
+      var entry = readinessEls[t.id];
+      if (!entry) return;
+      var st = txStatus(t);
+      entry.pill.textContent = txPillText(t, st);
+      entry.pill.className = 'pill ' + st.cls;
+      var fv = txFeeVerdict(t);
+      if (fv) {
+        if (entry.feePill) {
+          entry.feePill.textContent = feePillText(fv);
+          entry.feePill.className = 'pill fee-pill ' + feeVerdictCls(fv);
+        } else {
+          var fpill = document.createElement('span');
+          fpill.className = 'pill fee-pill ' + feeVerdictCls(fv);
+          fpill.textContent = feePillText(fv);
+          entry.row.appendChild(fpill);
+          entry.feePill = fpill;
+        }
+      } else if (entry.feePill) {
+        if (Array.prototype.indexOf.call(entry.row.children, entry.feePill) !== -1) entry.row.removeChild(entry.feePill);
+        entry.feePill = null;
+      }
+    });
+  }
+  // Patch one tx card in place (0.8.5): the header pill, every
+  // rule pill + state line, the sent line, the fee-verdict
+  // suffix, the Slipstream queue line, and the fallback
+  // countdown. The label, amount, trigger conditions (a trigger
+  // change is structural), toggle, and Details rows are never
+  // touched here.
+  function patchTxCard(tx, overlapsByTx) {
+    var card = txCardEls[tx.id];
+    if (!card) return;
+    var st = txStatus(tx);
+    var pillCls = st.cls;
+    if (pillCls === 'ok' && overlapsByTx[tx.id] && overlapsByTx[tx.id].length) pillCls = 'warn';
+    card.pill.textContent = txPillText(tx, st);
+    card.pill.className = 'pill ' + pillCls;
+    var ruleSet = triggerSetOf(tx);
+    var ruleStates = triggerStatesOf(tx);
+    (card.rules || []).forEach(function (r, i) {
+      var rule = ruleSet.rules[i];
+      var ts = ruleStates[i] || {};
+      if (r.pillEl) {
+        var rp = rule ? ruleStatePill(rule, ts) : null;
+        if (rp) { r.pillEl.textContent = rp.text; r.pillEl.className = 'pill ' + rp.cls; }
+      }
+      if (r.condEl && rule) r.condEl.textContent = triggerCondition(rule);
+      if (r.nowEl && rule) r.nowEl.textContent = triggerStateLine(rule, ts);
+    });
+    if (card.sentLine) card.sentLine.textContent = txReleaseLine(tx);
+    if (card.feeVerdictEl) {
+      var fv = txFeeVerdict(tx);
+      if (fv) {
+        card.feeVerdictEl.textContent = ' — ' + fv;
+        card.feeVerdictEl.className = 'fee-verdict ' + feeVerdictCls(fv);
+      } else {
+        card.feeVerdictEl.textContent = '';
+      }
+    }
+    if (card.maraEl) {
+      var ml = txMaraLine(tx);
+      card.maraEl.textContent = ml;
+      card.maraEl.style.display = ml ? '' : 'none';
+    }
+    if (card.fallbackValueEl) card.fallbackValueEl.textContent = txFallbackText(tx, st);
+  }
+  // The values-only patch (0.8.5): every live value on the page,
+  // updated in place from the freshly fetched state. S and
+  // lastStatus are already the new data when this runs. It never
+  // rebuilds a list, never writes an input value, and never
+  // touches a modal subtree — so it runs on every tick, even
+  // while the owner is typing.
+  function patchLive(status, checkins, blog) {
+    renderStatusHead(status);
+    renderGraceCard();
+    var anyStaged = (S.bitcoin.txs || []).some(function (t) { return !txStatus(t).settled && !txStatus(t).pending; });
+    var gsCard = $('getting-started-card');
+    if (gsCard) gsCard.style.display = anyStaged ? 'none' : '';
+    var anyCheckinActive = (S.bitcoin.txs || []).some(function (t) { return hasRuleType(t, 'checkin') && !txStatus(t).settled && !txStatus(t).pending; });
+    var showCheckin = anyCheckinActive || !(S.bitcoin.txs || []).length;
+    $('checkin-card').style.display = showCheckin ? '' : 'none';
+    patchCheckinBars(status);
+    patchReadinessRows();
+    var conn = (S.bitcoin && S.bitcoin.connection) || {};
+    renderNodeStatus('readiness-', 'primary', status.primaryApiUrl, conn);
+    renderNodeStatus('readiness-', 'secondary', status.secondaryApiUrl, conn);
+    renderExchangeRows(status);
+    // The Logs tab has no inputs in it — rebuilding its rows is
+    // safe any time, even with a pop-out open over it.
+    renderLogs(checkins, blog);
+    var overlapsByTx = computeOverlaps();
+    (S.bitcoin.txs || []).forEach(function (tx) { patchTxCard(tx, overlapsByTx); });
+    // Settings live bits are text only, never input values:
+    // node rows, price-source rows (they read the dropdowns,
+    // never write them), the agreement span, and the fee zone
+    // bar (it reads the two number inputs and moves the ranges).
+    renderNodeStatus('btc-', 'primary', S.settings.primaryApiUrl, conn);
+    renderNodeStatus('btc-', 'secondary', S.settings.secondaryApiUrl, conn);
+    refreshPriceSourceRow(1);
+    refreshPriceSourceRow(2);
+    var agreeSpan = $('price-sources-agreement');
+    if (agreeSpan) agreeSpan.textContent = ((S.settings && typeof S.settings.priceAgreementPct === 'number') ? S.settings.priceAgreementPct : 5) + '%';
+    updateFeeZoneBar();
+  }
+  // Whole days since the last check-in, measured from the
+  // EFFECTIVE last check-in (the real one plus the frozen time)
+  // — the same math as the server's checkinClock, so a disarmed
+  // or vacation-frozen clock stays put while a live one
+  // advances. Null when no check-in is recorded yet.
+  function checkinDaysSince(tx, nowMs) {
+    var last = (S.checkin && S.checkin.lastCheckinAt) ? new Date(S.checkin.lastCheckinAt).getTime() : NaN;
+    if (!isFinite(last)) return null;
+    var effLast = last + liveOffsetMs(tx);
+    return Math.max(0, Math.floor((nowMs - effLast) / 86400000));
+  }
+  // The check-in countdown, ticked locally every second (0.8.5):
+  // pure clock math, no fetch. The dashboard bars (fill, colour,
+  // caption) and the check-in rules' third rows on the tx cards
+  // recompute from the cached last check-in — so a day boundary
+  // lands within a second instead of waiting for the next server
+  // refresh. Only the day count moves (whole days, like the
+  // server); the pill / met status still comes from the server
+  // on the tick.
+  function tickCheckinCountdownLocal() {
+    if (!S || !lastStatus) return;
+    var nowMs = Date.now();
+    var barsEl = $('checkin-tx-bars');
+    if (barsEl) {
+      Array.prototype.forEach.call(barsEl.children || [], function (block) {
+        if (!(block.className || '').split(' ').includes('ck-tx')) return;
+        var tx = (S.bitcoin.txs || []).find(function (t) { return t.id === (block.dataset && block.dataset.txId); });
+        if (!tx) return;
+        var windowDays = block.dataset && Number(block.dataset.windowDays);
+        if (!windowDays || windowDays <= 0) return;
+        var d = checkinDaysSince(tx, nowMs);
+        if (d === null) return;
+        var frozen = (block.className || '').split(' ').includes('frozen');
+        var fill = block.children[1] && block.children[1].children[0];
+        if (fill) {
+          fill.style.width = (Math.min(1, Math.max(0, d / windowDays)) * 100) + '%';
+          var remaining = (windowDays - d) / windowDays;
+          fill.style.background = frozen ? 'var(--muted)' : remaining > 0.75 ? 'var(--ok)' : remaining > 0.25 ? 'var(--warn)' : 'var(--bad)';
+        }
+        var cap = block.children[2];
+        if (cap) cap.textContent = d + ' of ' + windowDays + ' days elapsed' + (frozen ? ' — disarmed, frozen' : '');
+      });
+    }
+    (S.bitcoin.txs || []).forEach(function (tx) {
+      var card = txCardEls[tx.id];
+      if (!card || !card.rules) return;
+      var ruleSet = triggerSetOf(tx);
+      var ruleStates = triggerStatesOf(tx);
+      card.rules.forEach(function (r, i) {
+        var rule = ruleSet.rules[i];
+        var ts = ruleStates[i] || {};
+        if (!rule || rule.type !== 'checkin' || !r.nowEl) return;
+        if (ts.status !== 'on-track' && ts.status !== 'held') return;
+        var d = checkinDaysSince(tx, nowMs);
+        if (d === null) return;
+        var w = (typeof ts.windowDays === 'number' && ts.windowDays > 0) ? ts.windowDays : (rule.params.thresholdDays || 35);
+        r.nowEl.textContent = ts.status === 'on-track'
+          ? d + ' of ' + w + ' days since last check-in'
+          : d + ' of ' + w + ' days elapsed';
+      });
+    });
+  }
+  // A full re-render can shift the page (a card moving lists
+  // changes the heights above the viewport) — hold the scroll
+  // position across it. Only used on the structural path, which
+  // never runs while the owner is typing. The in-place patch
+  // never scrolls anything, so it needs no help.
+  async function loadPreservingScroll() {
+    var y = (typeof window !== 'undefined' && typeof window.scrollY === 'number') ? window.scrollY : 0;
+    await load();
+    if (typeof window !== 'undefined' && typeof window.scrollTo === 'function') window.scrollTo(0, y);
+  }
+  // One server refresh (0.8.5): fetch the state, then either
+  // patch the values in place (same structure) or, for a
+  // structural change, do a full load when it is safe — or defer
+  // it and patch the values anyway when it is not. A failed
+  // fetch leaves the last known values on screen; the next tick
+  // retries.
+  async function liveRefresh() {
+    if (liveRefreshInFlight) return;
+    liveRefreshInFlight = true;
+    try {
+      var ns = await api('GET', '/api/state');
+      var nstatus = await api('GET', '/api/status');
+      var ncheckins = await api('GET', '/api/checkins');
+      var nblog = await api('GET', '/api/broadcast/log');
+      var nkeys = apiKeys;
+      try { nkeys = await api('GET', '/api/checkin-keys'); } catch (e) { nkeys = apiKeys; }
+      // Commit the fresh data first — the signature and every
+      // patch below read S / lastStatus.
+      S = ns;
+      lastStatus = nstatus;
+      apiKeys = nkeys;
+      lastFetchAt = Date.now();
+      var sig = liveSignature(S, nstatus, nkeys);
+      if (sig === lastLiveSignature) {
+        patchLive(nstatus, ncheckins, nblog);
+        pendingStructural = false;
+      } else if (safeToRestructure()) {
+        await loadPreservingScroll();
+        pendingStructural = false;
+      } else {
+        // Values still update behind the popup / while typing;
+        // the structure (new or moved cards) waits for a safe
+        // moment. lastLiveSignature stays at the rendered
+        // structure, so the wait ends the moment it is safe.
+        patchLive(nstatus, ncheckins, nblog);
+        pendingStructural = true;
+      }
+    } catch (e) {
+      /* the last known values stay on screen; the next tick retries */
+    } finally {
+      liveRefreshInFlight = false;
+    }
+  }
+  // The 1-second timer (0.8.5): the check-in countdown
+  // updates every second from the clock; a server refresh runs
+  // once per check cadence; a deferred structural change
+  // re-renders the moment it is safe. Paused while the tab is
+  // hidden — on return the cadence gate is already open, so the
+  // refresh fires at once.
+  async function liveSecondTick() {
+    if (liveTickRunning) return;
+    if (!S || stateErrorShown) return;
+    if (typeof document !== 'undefined' && document.hidden) return;
+    liveTickRunning = true;
+    try {
+      tickCheckinCountdownLocal();
+      if (pendingStructural && safeToRestructure()) {
+        pendingStructural = false;
+        try { await loadPreservingScroll(); } catch (e) { /* a failed load leaves the values stale; the next tick retries */ }
+        return;
+      }
+      if (!liveRefreshInFlight && lastFetchAt && (Date.now() - lastFetchAt >= liveCadenceMs())) {
+        await liveRefresh();
+      }
+    } finally {
+      liveTickRunning = false;
+    }
+  }
+  // Live view (0.8.5): one 1-second timer drives the local
+  // countdown and triggers a server refresh once per check
+  // cadence (see liveSecondTick). A single timer (not a cadence
+  // interval) so a Settings change to the cadence takes effect
+  // without restarting anything, and the countdown keeps ticking
+  // between server refreshes.
+  setInterval(liveSecondTick, 1000);
+
   // ---------- settings ----------
   function renderSettings() {
     $('set-vacation').checked = !!S.settings.vacationMode;
@@ -3596,7 +4077,7 @@
     },
     cadence: {
       title: 'Check cadence',
-      body: 'How often every trigger is checked. Standby evaluates all triggers — check-in, price, UTXO, block-height, set-date, and fee-market — together every X seconds. Faster catches an unconfirmed spend, a brief price spike, a block height, and a fee move sooner; slower means fewer API calls. The price and fee caches match this interval so a faster cadence fetches fresher readings.',
+      body: 'How often every trigger is checked. Standby evaluates all triggers — check-in, price, UTXO, block-height, set-date, and fee-market — together every X seconds. Faster catches an unconfirmed spend, a brief price spike, and a block height sooner; slower means fewer API calls. The price cache refreshes on this interval too, so a faster cadence fetches fresher prices. The fee-market cache does not: it refreshes once every 5 minutes regardless of this setting, so a fee move is only detected within 5 minutes.',
       triggers: ['price', 'utxo', 'blockheight', 'setdate', 'feemarket'],
     },
     fee: {

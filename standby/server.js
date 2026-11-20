@@ -59,7 +59,7 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 // (last.json). Absent on a plain `node server.js` run — the key
 // feature is dormant then; every file access is guarded.
 const CHECKIN_DIR = process.env.CHECKIN_DIR || '/checkin';
-const VERSION = '0.8.4';
+const VERSION = '0.8.5';
 const MAX_BODY = 1024 * 1024; // 1 MB
 
 const MIME = {
@@ -1126,16 +1126,18 @@ async function fetchPriceCached(sources, cadenceSeconds) {
 }
 
 // The fee cache for the fee-market trigger (0.8.1): the economy
-// fee from BOTH configured nodes (per endpoint, TTL = the check
-// cadence — Settings: Check cadence, default 60 seconds) — the
-// same cadence as the price cache, so the fee trigger is
-// evaluated on data no older than one tick. This is separate
-// from the hourly currentFeesCache (used by the fee verdict):
-// the verdict only needs an hourly fee, but a trigger that
-// should fire when fees drop needs to see the drop within a
-// tick. The cache is keyed by the endpoint URLs — a settings
-// change makes it stale, so the next read fetches the new nodes
-// instead of serving the old ones. readings is
+// fee from BOTH configured nodes (per endpoint, TTL = a fixed
+// 5 minutes — NODE_FEE_CACHE_TTL_MS below). The TTL is NOT the
+// check cadence: the market fee moves slowly (a low-fee window
+// lasts longer than 5 minutes), so one fetch per 5 minutes for
+// ALL fee rules combined is the intended tradeoff — the trigger
+// may fire up to 5 minutes late, and the fee pill shows a fee
+// up to 5 minutes old, the same trust-the-warm-cache philosophy
+// as the 0.8.4 fee-pill fix. This is separate from the hourly
+// currentFeesCache (used by the fee verdict): the verdict only
+// needs an hourly fee. The cache is keyed by the endpoint URLs
+// — a settings change makes it stale, so the next read fetches
+// the new nodes instead of serving the old ones. readings is
 // { [label]: { endpoint, fee|null, source|null, error|null } }.
 // A failed fetch does NOT throw — the readings carry the error
 // per node, and the caller combines them (the primary node's
@@ -1144,11 +1146,13 @@ async function fetchPriceCached(sources, cadenceSeconds) {
 // never a fire.
 let nodeFeeCache = { readings: null, fetchedAt: null, primary: null, secondary: null };
 
-async function fetchNodeFeesCached(endpoints, cadenceSeconds) {
+const NODE_FEE_CACHE_TTL_MS = 5 * 60 * 1000; // (0.8.5) one fee fetch per 5 minutes, shared across all fee rules
+
+async function fetchNodeFeesCached(endpoints) {
   const eps = (endpoints && endpoints.length) ? endpoints : bitcoin.endpointsFor({ primaryApiUrl: 'https://mempool.space', secondaryApiUrl: 'https://blockstream.info/api' });
   const primary = eps[0] ? eps[0].base : null;
   const secondary = eps[1] ? eps[1].base : null;
-  const ttlMs = ((typeof cadenceSeconds === 'number' && Number.isFinite(cadenceSeconds) && cadenceSeconds > 0) ? cadenceSeconds : CHECK_CADENCE_SECONDS_DEFAULT) * 1000;
+  const ttlMs = NODE_FEE_CACHE_TTL_MS;
   const nowMs = Date.now();
   if (nodeFeeCache.fetchedAt && nodeFeeCache.primary === primary && nodeFeeCache.secondary === secondary
       && nodeFeeCache.readings && Object.keys(nodeFeeCache.readings).length
@@ -1157,6 +1161,31 @@ async function fetchNodeFeesCached(endpoints, cadenceSeconds) {
   }
   const readings = await bitcoin.fetchNodeFeeReadings(eps);
   nodeFeeCache = { readings, fetchedAt: new Date(nowMs).toISOString(), primary, secondary };
+  return readings;
+}
+
+// The tip heights as fetched from the nodes, cached for one tick
+// (0.8.5) — the same pattern as nodeFeeCache: N blockheight rules
+// in one tick cost ONE tip fetch, not N. The cache is keyed by
+// endpoint bases (a settings change busts it) and its TTL is the
+// check cadence. A cached read makes no HTTP request, so it does
+// not re-stamp the per-endpoint checked times — the stamps record
+// when each endpoint was actually asked.
+let nodeTipCache = { readings: null, fetchedAt: null, primary: null, secondary: null };
+
+async function fetchTipHeightsCached(endpoints, cadenceSeconds) {
+  const eps = (endpoints && endpoints.length) ? endpoints : bitcoin.endpointsFor({ primaryApiUrl: 'https://mempool.space', secondaryApiUrl: 'https://blockstream.info/api' });
+  const primary = eps[0] ? eps[0].base : null;
+  const secondary = eps[1] ? eps[1].base : null;
+  const ttlMs = ((typeof cadenceSeconds === 'number' && Number.isFinite(cadenceSeconds) && cadenceSeconds > 0) ? cadenceSeconds : CHECK_CADENCE_SECONDS_DEFAULT) * 1000;
+  const nowMs = Date.now();
+  if (nodeTipCache.fetchedAt && nodeTipCache.primary === primary && nodeTipCache.secondary === secondary
+      && nodeTipCache.readings && Object.keys(nodeTipCache.readings).length
+      && (nowMs - new Date(nodeTipCache.fetchedAt).getTime()) < ttlMs) {
+    return nodeTipCache.readings;
+  }
+  const readings = await bitcoin.fetchTipHeights(eps);
+  nodeTipCache = { readings, fetchedAt: new Date(nowMs).toISOString(), primary, secondary };
   return readings;
 }
 
@@ -1532,20 +1561,19 @@ async function checkUtxoRule(state, rule, now, ctx) {
 // genuinely reached.
 async function checkBlockHeightRule(state, rule, now, ctx) {
   const target = rule.params.targetHeight;
-  const endpoints = bitcoin.endpointsFor(state.settings);
   let comb;
-  try { comb = bitcoin.combineTipHeights(await bitcoin.fetchTipHeights(endpoints)); }
+  try { comb = bitcoin.combineTipHeights(await fetchTipHeightsCached(bitcoin.endpointsFor(state.settings), checkCadenceSecondsOf(state.settings))); }
   catch (e) {
     return {
       fire: false, status: 'unknown', reason: 'could not fetch the tip height — will retry',
-      slice: { ...freshTriggerState(now, 'unknown', 'could not fetch the tip height — will retry'), lastError: e.message },
+      slice: { ...freshTriggerState(now, 'unknown', 'could not fetch the tip height — will retry'), lastError: e.message, tipMode: 'none', tipNote: '' },
       detail: { error: e.message }, warning: null,
     };
   }
   if (!comb.valid) {
     return {
       fire: false, status: 'unknown', reason: comb.reason,
-      slice: { ...freshTriggerState(now, 'unknown', comb.reason), lastError: comb.reason },
+      slice: { ...freshTriggerState(now, 'unknown', comb.reason), lastError: comb.reason, tipMode: comb.mode, tipNote: '' },
       detail: { error: comb.reason }, warning: null,
     };
   }
@@ -1553,21 +1581,21 @@ async function checkBlockHeightRule(state, rule, now, ctx) {
   if (typeof tip !== 'number' || !Number.isFinite(tip) || tip < 0) {
     return {
       fire: false, status: 'unknown', reason: 'tip height unreadable — will retry',
-      slice: { ...freshTriggerState(now, 'unknown', 'tip height unreadable — will retry'), lastError: 'tip height is not a number: ' + String(tip) },
+      slice: { ...freshTriggerState(now, 'unknown', 'tip height unreadable — will retry'), lastError: 'tip height is not a number: ' + String(tip), tipMode: comb.mode, tipNote: comb.note },
       detail: { tip: String(tip) }, warning: null,
     };
   }
   if (tip >= target) {
     return {
       fire: true, status: 'due', reason: 'block ' + tip.toLocaleString('en-US') + ' reached — firing',
-      slice: { ...freshTriggerState(now, 'due', 'block ' + tip.toLocaleString('en-US') + ' reached — firing'), lastTipHeight: tip, lastError: null },
+      slice: { ...freshTriggerState(now, 'due', 'block ' + tip.toLocaleString('en-US') + ' reached — firing'), lastTipHeight: tip, lastError: null, tipMode: comb.mode, tipNote: comb.note },
       detail: { tip, targetHeight: target },
       warning: 'This height has already been reached — it would fire on the next evaluation.',
     };
   }
   return {
     fire: false, status: 'watching', reason: 'block ' + tip.toLocaleString('en-US') + ' of ' + target.toLocaleString('en-US'),
-    slice: { ...freshTriggerState(now, 'watching', 'block ' + tip.toLocaleString('en-US') + ' of ' + target.toLocaleString('en-US')), lastTipHeight: tip, lastError: null },
+    slice: { ...freshTriggerState(now, 'watching', 'block ' + tip.toLocaleString('en-US') + ' of ' + target.toLocaleString('en-US')), lastTipHeight: tip, lastError: null, tipMode: comb.mode, tipNote: comb.note },
     detail: { tip, targetHeight: target }, warning: null,
   };
 }
@@ -1618,8 +1646,8 @@ function checkSetDateRule(state, rule, now, ctx) {
 // the other is used alone, with no agreement check. No 10x-jump
 // guard: fee spikes are real and are exactly what an 'above' rule
 // is for — the guard would block the trigger from doing its job.
-// The fee comes from the cached fetch (TTL = the check cadence),
-// so the trigger sees a move within a tick. Fail-safe: if no
+// The fee comes from the cached fetch (TTL = 5 minutes),
+// so the trigger may see a move up to 5 minutes late. Fail-safe: if no
 // usable fee can be read, the trigger is 'unknown' — it never
 // fires on data it cannot read. No grace period: the fee is a
 // live market reading, not a feed that can go stale in the
@@ -1636,7 +1664,7 @@ async function checkFeeMarketRule(state, rule, now, ctx) {
     lastEconomyFee: (typeof prev.lastEconomyFee === 'number' && Number.isFinite(prev.lastEconomyFee)) ? prev.lastEconomyFee : null,
   };
   let readings;
-  try { readings = await fetchNodeFeesCached(bitcoin.endpointsFor(state.settings), checkCadenceSecondsOf(state.settings)); }
+  try { readings = await fetchNodeFeesCached(bitcoin.endpointsFor(state.settings)); }
   catch (e) {
     return {
       fire: false, status: 'unknown', reason: 'fee unavailable — will retry',
@@ -2476,6 +2504,29 @@ let releaseEvaluationInFlight = false;
 // evaluateReleaseInner). One hour, hard-coded — the retry
 // cadence is a safety property, not a user setting.
 const BROADCAST_BACKOFF_MS = 60 * 60 * 1000;
+// Archived confirmations (0.8.5, Ryan's number): a broadcast
+// transaction at this many confirmations is done — its count is
+// final, so the hourly confirmation refresh never re-queries it,
+// and the tick never evaluates it (see terminalSkipReason below).
+const ARCHIVED_CONFIRMATIONS = 6;
+// (0.8.5) A transaction that can no longer broadcast is never
+// evaluated on the tick: its rules make no node requests and its
+// triggerState slice freezes at its last value. Broadcasted
+// (confirmed, unconfirmed, or not-found), stale, submitted to
+// Slipstream, or a broadcast release record with no broadcasted
+// fact. Still evaluated: staged txs (armed or disarmed — the
+// 0.8.4 evaluate-all promise stands), conflict txs (they can
+// still broadcast; the node is the arbiter), and failed txs (they
+// retry after the 1h backoff). Returns the skip reason, or null
+// when the tx is still evaluable.
+function terminalSkipReason(tx) {
+  if (tx.broadcasted) return 'already broadcast';
+  const st = tx.release && tx.release.status;
+  if (st === 'broadcast') return 'already broadcast';
+  if (st === 'stale') return 'transaction is stale — replace it to re-arm';
+  if (st === 'submitted-slipstream') return 'submitted to Slipstream — waiting on MARA';
+  return null;
+}
 // `options.automatic` (optional) marks a tick-driven evaluation —
 // the full tick passes { automatic: true }; the manual release
 // check passes nothing. The backoff guard in evaluateReleaseInner
@@ -2609,6 +2660,16 @@ async function evaluateReleaseInner(automatic) {
   const wasDueById = new Map();
   const evById = new Map();
   for (const tx of all) {
+    // (0.8.5) Terminal first: a tx that can no longer broadcast
+    // is not evaluated at all — no tip fetch, no outspend check,
+    // no fee/price evaluation attributable to it. Its slice
+    // freezes; its card still reads its settled state from the
+    // broadcasted/release facts (txStatus), not the frozen slice.
+    const terminalReason = terminalSkipReason(tx);
+    if (terminalReason) {
+      results.push({ id: tx.id, txid: tx.txid, label: tx.label || '', action: 'skipped', reason: terminalReason, trigger: triggerTypesLabel(tx) });
+      continue;
+    }
     wasDueById.set(tx.id, storedCombinedDue(tx));
     let ev;
     try { ev = await evaluateTrigger(state, tx, now); }
@@ -2675,6 +2736,7 @@ async function evaluateReleaseInner(automatic) {
         pushHistory(ftx, 'fired', firedDetail(store.triggerOf(tx), ev.ruleResults, ev.firedIndexes));
       }
     }
+    mergeNodeStamps(fresh);
     store.saveState(DATA_DIR, fresh);
   } catch (e) { console.error('trigger state save failed:', e); }
 
@@ -2766,6 +2828,15 @@ async function refreshConfirmations(state, maxAgeSec) {
   const updates = [];
   for (const tx of (state.bitcoin.txs || []).filter((t) => t.broadcasted)) {
     const b = tx.broadcasted;
+    // (0.8.5) A broadcast tx at ARCHIVED_CONFIRMATIONS is done —
+    // its count is final, so it is never re-queried. Below 6
+    // (pending, unconfirmed, not-found) it still refreshes
+    // hourly: 2 requests each (tx status + tip height,
+    // primary-first).
+    if (typeof b.confirmations === 'number' && b.confirmations >= ARCHIVED_CONFIRMATIONS) {
+      out.push({ id: tx.id, txid: tx.txid, confirmations: b.confirmations, blockHeight: b.blockHeight ?? null, found: b.found !== false, checkedAt: b.checkedAt });
+      continue;
+    }
     const ageSec = b.checkedAt ? (nowMs - new Date(b.checkedAt).getTime()) / 1000 : Infinity;
     if (ageSec < maxAgeSec && b.confirmations !== null) {
       out.push({ id: tx.id, txid: tx.txid, confirmations: b.confirmations, blockHeight: b.blockHeight ?? null, found: b.found !== false, checkedAt: b.checkedAt });
@@ -2810,7 +2881,7 @@ async function refreshConfirmations(state, maxAgeSec) {
         changed = true;
       }
     }
-    if (changed) store.saveState(DATA_DIR, fresh);
+    if (changed) { mergeNodeStamps(fresh); store.saveState(DATA_DIR, fresh); }
   }
   return out;
 }
@@ -3147,6 +3218,7 @@ async function runFullTick() {
     // never lingers past the next tick.
     expireVacation(st0, now);
     st0.checkin.lastOnlineAt = now.toISOString();
+    mergeNodeStamps(st0);
     store.saveState(DATA_DIR, st0);
   } catch (e) { console.error('offline-hold / lastOnlineAt update failed:', e); }
   // A receiver check-in lands in the clock before the release is
@@ -3216,6 +3288,34 @@ async function runHourlyTick() {
   try { await refreshCurrentFeesIfStale(); } catch (e) { console.error('current-fees refresh failed:', e); }
 }
 
+// Per-endpoint "last checked" stamps (0.8.5): the tick asks the
+// primary every time and the secondary only on fallback, so the
+// two node rows need their own times. bitcoin.js stamps each
+// endpoint base whenever it answers a request; this folds the
+// live stamps into the stored connection object (keyed by
+// endpoint label) before a save. A stamp the live map doesn't
+// have yet keeps its stored value — a fresh boot never wipes a
+// recorded check, and an endpoint never asked stays null (its
+// row shows no time rather than an invented one). Call before
+// an existing save; it never saves by itself.
+function mergeNodeStamps(state) {
+  if (!state.bitcoin || typeof state.bitcoin !== 'object') state.bitcoin = {};
+  if (!state.bitcoin.connection || typeof state.bitcoin.connection !== 'object') {
+    state.bitcoin.connection = { ok: null, checkedAt: null, detail: '' };
+  }
+  const conn = state.bitcoin.connection;
+  const cur = (conn.nodeCheckedAt && typeof conn.nodeCheckedAt === 'object') ? conn.nodeCheckedAt : null;
+  conn.nodeCheckedAt = {
+    primary: (cur && cur.primary) || null,
+    secondary: (cur && cur.secondary) || null,
+  };
+  const stamps = bitcoin.nodeCheckedAt ? bitcoin.nodeCheckedAt() : {};
+  for (const ep of bitcoin.endpointsFor(state.settings)) {
+    const at = stamps[ep.base];
+    if (at) conn.nodeCheckedAt[ep.label] = at;
+  }
+}
+
 // Test both nodes and save the per-endpoint results, so the Dashboard
 // can show each node's own status. The full result (endpoint, base,
 // ok, detail) is stored — the Dashboard only trusts a result measured
@@ -3230,7 +3330,15 @@ async function testNodes() {
   // configured, so a result measured against just-replaced endpoints
   // is ignored, not misattributed.
   const fresh = store.loadState(DATA_DIR);
+  // (0.8.5) The connection object is rebuilt, so the per-endpoint
+  // stamps ride over explicitly — a test that could not reach an
+  // endpoint keeps that endpoint's last-answered time instead of
+  // losing it. The live stamps (the test just asked both
+  // endpoints) overwrite them below.
+  const prevStamps = (fresh.bitcoin.connection && fresh.bitcoin.connection.nodeCheckedAt) || null;
   fresh.bitcoin.connection = { ok: r.ok, checkedAt: new Date().toISOString(), detail: r.detail, results: r.results };
+  if (prevStamps) fresh.bitcoin.connection.nodeCheckedAt = { primary: prevStamps.primary || null, secondary: prevStamps.secondary || null };
+  mergeNodeStamps(fresh);
   store.saveState(DATA_DIR, fresh);
 }
 
@@ -5019,7 +5127,15 @@ async function handleApi(req, res, pathname) {
     const conn = { ok: r.ok, checkedAt: now.toISOString(), detail: r.detail, results: r.results };
     // (0.8.1, audit finding 4) The node test awaited the network —
     // only the connection result rides into FRESH state.
-    saveMutation((f) => { f.bitcoin.connection = conn; });
+    // (0.8.5) The per-endpoint stamps ride over from the stored
+    // connection, then the live stamps (the test just asked both
+    // endpoints) overwrite them.
+    saveMutation((f) => {
+      const prev = (f.bitcoin.connection && f.bitcoin.connection.nodeCheckedAt) || null;
+      f.bitcoin.connection = conn;
+      if (prev) f.bitcoin.connection.nodeCheckedAt = { primary: prev.primary || null, secondary: prev.secondary || null };
+      mergeNodeStamps(f);
+    });
     return sendJson(res, 200, { ok: r.ok, detail: r.detail, results: r.results });
   }
 
