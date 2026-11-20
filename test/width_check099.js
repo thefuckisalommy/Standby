@@ -628,6 +628,8 @@ function check(name, cond, detail) {
   // pinned to the right edge.
   await checkEl('width dashboard: Exchange Status CoinGecko row fits', '#readiness-exchange-1');
   await checkEl('width dashboard: Exchange Status Coinbase row fits', '#readiness-exchange-2');
+  await checkEl('width dashboard: Node Status primary row checked time fits', '#readiness-primary-checked');
+  await checkEl('width dashboard: Node Status secondary row checked time fits', '#readiness-secondary-checked');
   await checkEl('width dashboard: Exchange Status CoinGecko row pill fits', '#readiness-exchange-1-status');
   await checkEl('width dashboard: Exchange Status Coinbase row pill fits', '#readiness-exchange-2-status');
   await checkEl('width dashboard: Exchange Status CoinGecko row price fits', '#readiness-exchange-1-price');

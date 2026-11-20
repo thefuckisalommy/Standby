@@ -89,8 +89,12 @@ function defaultState() {
     // broadcasted is the permanent fact that the tx went out (a
     // check-in never clears it; replacing the hex does).
     // Connection is the last Test-connection result { ok, checkedAt,
-    // detail } or { ok: null, ... } if untested.
-    bitcoin: { txs: [], connection: { ok: null, checkedAt: null, detail: '' } },
+    // detail } or { ok: null, ... } if untested. nodeCheckedAt is
+    // each endpoint's own last-answered time { primary, secondary }
+    // (0.8.5) — the tick asks the primary every time and the
+    // secondary only on fallback, so the two stamps diverge; null
+    // means that endpoint has never answered.
+    bitcoin: { txs: [], connection: { ok: null, checkedAt: null, detail: '', nodeCheckedAt: { primary: null, secondary: null } } },
     // The check-in clock: lastCheckinAt is the last recorded
     // check-in, totalCheckins counts them. lastOnlineAt (0.7.22)
     // is the last time the app itself was alive — written on every

@@ -5,8 +5,10 @@ manifestVersion: 1
 id: standby
 category: automation
 name: Standby
-version: "0.8.4"
+version: "0.8.5"
 releaseNotes: |-
+  0.8.5 — Live view: pills, prices, fees and block height update on their own now — the page refreshes at the check cadence, and the check-in countdown ticks every second without a fetch. Typing and popups are never interrupted: values update in place, and a new or moved transaction waits until no popup is open. Each node and exchange row carries its own last-checked time. Archived transactions no longer cause any network activity — a broadcast transaction is only re-checked until it reaches 6 confirmations — and the block-height tip is fetched once per tick from the primary node, so the node traffic no longer grows with the number of transactions. The fee trigger now fetches the market fee once per 5 minutes, shared across all fee transactions.
+
   0.8.4 — Fee rule pill stays live — reads the last known fee like price does. Trigger statuses stay live for disarmed transactions — evaluated for display, never broadcast unless armed. Block-height trigger no longer latches — judged fresh each tick like every other rule.
 
   0.8.3 — Persistence hardening: rotating state backups, recovery from a corrupt state file, and check-in key verification on startup.

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Standby 0.8.0 local verification: per-transaction triggers.
-Boots the branch-0.8.4 app (port 3448), the check-in receiver
+Boots the branch-0.8.5 app (port 3448), the check-in receiver
 (3449), and two mempool stubs — primary 18245 (STUB_CONFLICT_MODE=
 unconfirmed) and secondary 18246 (confirmed) — and checks the 0.8.0
 trigger work: trigger field + validation at add/edit, legacy migration
@@ -341,7 +341,7 @@ def main():
 
         # --- 1. health + endpoints -------------------------------------
         s, h = req('GET', '/api/health')
-        check('1 health reports version 0.8.4', h.get('version') == '0.8.4', h)
+        check('1 health reports version 0.8.5', h.get('version') == '0.8.5', h)
         s, st = req('GET', '/api/state')
         check('1 fresh state: no global threshold in settings, no txs',
               'thresholdDays' not in st.get('settings', {}) and st.get('bitcoin', {}).get('txs') == [], st.get('settings'))
@@ -440,14 +440,17 @@ def main():
               res.get(txc4b35))
         check('4 same clock 6 days back: the threshold-35 tx is still un-broadcast',
               not (state_tx(txc4b35) or {}).get('broadcasted'), state_tx(txc4b35))
-        # The evaluator runs first: at 6 days back the already-broadcast
-        # tx's trigger is on-track (not firing), so it is skipped with
-        # the eval reason — the firing loop's 'already broadcast' skip
-        # only applies when the trigger actually fires (covered just
-        # below, by backdating again).
-        check('4 already-broadcast check-in tx is skipped (trigger on-track, not re-sent)',
-              res.get(txc4a, {}).get('action') == 'skipped' and res.get(txc4a, {}).get('triggerStatus') == 'on-track'
-              and '6 of 35 days elapsed' in (res.get(txc4a, {}).get('reason') or ''), res.get(txc4a))
+        # (0.8.5) An already-broadcast tx is skipped before its rules
+        # are evaluated at all, so the clock no longer matters for
+        # it: at 6 days back it is skipped as already broadcast,
+        # exactly as at 100 days back below. The old eval-first
+        # behaviour — skipped with the live 'on-track' trigger
+        # status — is gone by design: an archived tx causes
+        # nothing to happen, and its release-check result carries
+        # no trigger status.
+        check('4 already-broadcast check-in tx is skipped (already broadcast, no trigger status)',
+              res.get(txc4a, {}).get('action') == 'skipped' and res.get(txc4a, {}).get('reason') == 'already broadcast'
+              and 'triggerStatus' not in (res.get(txc4a) or {}), res.get(txc4a))
         set_clock(100)
         s, r, res = release_results()
         check('4 backdated again: a firing trigger on an already-broadcast tx is skipped as already broadcast',

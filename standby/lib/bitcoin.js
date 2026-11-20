@@ -712,7 +712,8 @@ function requestText({ protocol, hostname, port, path: p, method, headers, body,
 
 function mempoolReq(path, method, body, base, timeoutMs) {
   const u = new URL(base || DEFAULT_PUBLIC_API_URL);
-  return requestText({
+  const key = base || DEFAULT_PUBLIC_API_URL;
+  const p = requestText({
     protocol: u.protocol,
     hostname: u.hostname,
     port: u.port ? parseInt(u.port, 10) : (u.protocol === 'https:' ? 443 : 80),
@@ -722,7 +723,24 @@ function mempoolReq(path, method, body, base, timeoutMs) {
     body,
     timeoutMs,
   });
+  // Stamp on ANY HTTP answer (any status, including a 429 or a
+  // 404 — the endpoint was asked and answered). A rejection
+  // (timeout, refused, DNS) is no answer and stamps nothing.
+  // The derived promise's rejection handler keeps it from
+  // becoming an unhandled rejection; the returned promise
+  // itself is untouched.
+  p.then(() => { nodeCheckedAtByBase[key] = new Date().toISOString(); }, () => {});
+  return p;
 }
+
+// Per-endpoint "last answered" stamps (0.8.5): the tick asks the
+// primary every time and the secondary only on fallback, so the
+// two node rows need their own times. mempoolReq stamps each
+// endpoint base above; the server folds the live stamps into the
+// stored connection object (keyed by endpoint label) before a
+// save, so each node row shows when THAT endpoint last answered.
+const nodeCheckedAtByBase = {};
+function nodeCheckedAt() { return { ...nodeCheckedAtByBase }; }
 
 // ---------------------------------------------------------------------------
 // Fee verdict (0.7.20): is a stored transaction's FIXED fee good
@@ -1930,25 +1948,46 @@ async function mempoolTipHeight(apiBase) {
   return h;
 }
 
-// Tip height from BOTH endpoints in parallel (0.8.1, block-height
-// trigger): both readings are fetched, and the PRIMARY node's tip
-// is the one that counts (the secondary is only a fallback if
-// the primary does not answer). One endpoint down never stops
-// the other. Mirrors
-// fetchNodeFeeReadings. Returns { primary: {...}, secondary: {...} }
-// keyed by endpoint label, each { endpoint, height, error }.
+// Tip height, PRIMARY-first (0.8.5, block-height trigger): the
+// primary is asked first and the secondary is asked ONLY if the
+// primary fails (throws, non-200, unparseable) or returns no
+// valid height. When the primary answers with a valid height the
+// secondary entry is { skipped: true } — the same convention as
+// the primary-first fee fetch. One endpoint down never stops
+// the other. Mirrors fetchNodeFeeReadings. Returns
+// { primary: {...}, secondary: {...} } keyed by endpoint label,
+// each { endpoint, height, error } (or { skipped: true }).
 async function fetchTipHeights(endpoints) {
-  const jobs = endpoints.map(async (ep) => {
+  const out = {};
+  if (!endpoints || !endpoints.length) return out;
+  const primary = endpoints[0];
+  let primaryReading;
+  try {
+    const h = await mempoolTipHeight(primary.base);
+    primaryReading = { endpoint: primary.label, height: h, error: null };
+  } catch (e) {
+    primaryReading = { endpoint: primary.label, height: null, error: e.message || String(e) };
+  }
+  out[primary.label] = primaryReading;
+  const primaryUsable = typeof primaryReading.height === 'number'
+    && Number.isFinite(primaryReading.height) && primaryReading.height >= 0;
+  for (let i = 1; i < endpoints.length; i++) {
+    const ep = endpoints[i];
+    if (primaryUsable) {
+      // The primary answered with a valid height — this endpoint
+      // is not needed this fetch. Recorded explicitly (not an
+      // error), so the combined note says so instead of
+      // 'unreachable'.
+      out[ep.label] = { endpoint: ep.label, height: null, error: null, skipped: true };
+      continue;
+    }
     try {
       const h = await mempoolTipHeight(ep.base);
-      return { endpoint: ep.label, height: h, error: null };
+      out[ep.label] = { endpoint: ep.label, height: h, error: null };
     } catch (e) {
-      return { endpoint: ep.label, height: null, error: e.message || String(e) };
+      out[ep.label] = { endpoint: ep.label, height: null, error: e.message || String(e) };
     }
-  });
-  const results = await Promise.all(jobs);
-  const out = {};
-  for (const r of results) out[r.endpoint] = r;
+  }
   return out;
 }
 
@@ -1974,7 +2013,12 @@ function combineTipHeights(readings) {
     const only = valid[0];
     const otherLabel = Object.keys(readings || {}).find((label) => label !== only.label) || 'the other node';
     const other = readings[otherLabel];
-    const otherWhy = (other && other.error) ? 'unreachable' : 'returned invalid data';
+    // (0.8.5) A secondary that was never asked — the primary
+    // already answered — is 'not needed', not 'unreachable': the
+    // fetch is primary-first, so the secondary is only queried
+    // when the primary cannot answer.
+    const otherWhy = (other && other.skipped) ? 'not needed'
+      : (other && other.error) ? 'unreachable' : 'returned invalid data';
     return { valid: true, tip: only.height, mode: 'single',
       note: only.label + ' only — ' + otherLabel + ' ' + otherWhy, reason: '', readings };
   }
@@ -2214,23 +2258,53 @@ async function testNodeFees(apiBase) {
   }
 }
 
-// Fetch the economy fee from both configured nodes, in parallel
-// (0.8.1): one reading per endpoint, keyed by endpoint label
-// ('primary'/'secondary'). Each reading is { fee, source } on
-// success or { fee: null, error } on failure — a failure on one
-// node never stops the other. Mirrors fetchPriceReadings.
+// Fetch the economy fee from the configured nodes, PRIMARY FIRST
+// (0.8.5): the primary node's reading is tried first and the
+// secondary is only asked when the primary cannot answer —
+// matching getTipHeight/checkOutspend/getConfirmations, which
+// are all primary-first with fallback only. The old parallel
+// fetch asked both nodes on every tick, which spent the
+// secondary's rate-limit budget (Blockstream caps unauthenticated
+// use at 700 requests/hour per IP) for a reading the primary
+// already provided. Returns one reading per endpoint, keyed by
+// endpoint label ('primary'/'secondary'). Each reading is
+// { fee, source } on success, { fee: null, error } on failure,
+// or { fee: null, skipped: true } when the endpoint was never
+// asked because the primary already answered. An implausible
+// primary fee (> FEE_IMPLAUSIBLE_SATVB) counts as the primary
+// not answering — the secondary is asked so a valid reading is
+// not lost to bad data. Mirrors fetchPriceReadings' shape, not
+// its parallel behavior.
 async function fetchNodeFeeReadings(endpoints) {
-  const jobs = endpoints.map(async (ep) => {
+  const out = {};
+  if (!endpoints || !endpoints.length) return out;
+  const primary = endpoints[0];
+  let primaryReading;
+  try {
+    const r = await fetchNodeFee(primary.base);
+    primaryReading = { endpoint: primary.label, fee: r.fee, source: r.source, error: null };
+  } catch (e) {
+    primaryReading = { endpoint: primary.label, fee: null, source: null, error: e.message || String(e) };
+  }
+  out[primary.label] = primaryReading;
+  const primaryUsable = typeof primaryReading.fee === 'number' && Number.isFinite(primaryReading.fee)
+    && primaryReading.fee >= 0 && primaryReading.fee <= FEE_IMPLAUSIBLE_SATVB;
+  for (let i = 1; i < endpoints.length; i++) {
+    const ep = endpoints[i];
+    if (primaryUsable) {
+      // The primary answered with a usable fee — this endpoint is
+      // not needed this fetch. Recorded explicitly (not an error),
+      // so the combined note says so instead of 'unreachable'.
+      out[ep.label] = { endpoint: ep.label, fee: null, source: null, error: null, skipped: true };
+      continue;
+    }
     try {
       const r = await fetchNodeFee(ep.base);
-      return { endpoint: ep.label, fee: r.fee, source: r.source, error: null };
+      out[ep.label] = { endpoint: ep.label, fee: r.fee, source: r.source, error: null };
     } catch (e) {
-      return { endpoint: ep.label, fee: null, source: null, error: e.message || String(e) };
+      out[ep.label] = { endpoint: ep.label, fee: null, source: null, error: e.message || String(e) };
     }
-  });
-  const results = await Promise.all(jobs);
-  const out = {};
-  for (const r of results) out[r.endpoint] = r;
+  }
   return out;
 }
 
@@ -2276,7 +2350,12 @@ function combineFeeReadings(readings) {
     const only = valid[0];
     const otherLabel = Object.keys(readings || {}).find((label) => label !== only.label) || 'the other node';
     const other = readings[otherLabel];
-    const otherWhy = (other && other.error) ? 'unreachable' : 'returned invalid data';
+    // (0.8.5) A secondary that was never asked — the primary
+    // already answered — is 'not needed', not 'unreachable': the
+    // fetch is primary-first, so the secondary is only queried
+    // when the primary cannot answer.
+    const otherWhy = (other && other.skipped) ? 'not needed'
+      : (other && other.error) ? 'unreachable' : 'returned invalid data';
     return { valid: true, fee: only.fee, mode: 'single',
       note: only.label + ' only — ' + otherLabel + ' ' + otherWhy, reason: '', readings };
   }
@@ -2320,7 +2399,7 @@ module.exports = {
   normalizePriceSourceValue, priceSourceKey, resolvePriceSource,
   fetchNodeFee, fetchNodeFeeReadings, combineFeeReadings, FEE_IMPLAUSIBLE_SATVB,
   fetchTipHeights, combineTipHeights,
-  normalizePublicApiUrl, mempoolBase, endpointsFor,
+  normalizePublicApiUrl, mempoolBase, endpointsFor, nodeCheckedAt,
   DEFAULT_PUBLIC_API_URL, DEFAULT_SECONDARY_API_URL,
   DEFAULT_SLIPSTREAM_API_URL,
 };

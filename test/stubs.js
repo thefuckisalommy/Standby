@@ -75,6 +75,13 @@ const rejectedOnce = new Set();
 //   GET  /__test__/broadcast-count — answers { count }
 let broadcastFail = false;
 let broadcastAttempts = 0;
+// Test hook (0.8.5, tip fetch): the tip-fail flag makes GET
+// /api/blocks/tip/height answer 500 while it is on, and
+// tipRequests counts every tip-height request this stub has
+// answered. Both are per stub process, runtime-settable via the
+// /__test__/tip-fail and /__test__/tip-count endpoints below.
+let tipFail = false;
+let tipRequests = 0;
 // Test hook (0.8.0, two-source 0.8.0): the BTC price feeds — one
 // per provider in the app's registry (CoinGecko, Coinbase,
 // Binance, Kraken, Bitstamp), each answering in the real
@@ -95,6 +102,14 @@ const PRICE_PROVIDERS = ['coingecko', 'coinbase', 'binance', 'kraken', 'bitstamp
 const priceState = {};
 // The economy fee this stub serves (0.8.1): settable via POST
 // /__test__/fees { economyFee }, default 1 sat/vB.
+// Test hook (0.8.5, fee fetch): feeRequests counts every
+// /api/v1/fees/recommended request this stub has answered —
+// the node fee fetch and the verdict's hourly current-fees
+// fetch both hit this route (FEE_RATES_URL points at the
+// primary stub), so a suite reads the count as a delta across
+// a controlled window. Runtime-readable via GET
+// /__test__/fee-count below.
+let feeRequests = 0;
 const feeState = { economyFee: 1 };
 // Test hook (0.8.0, UA fix): the User-Agent each price feed was
 // last fetched with, so a suite can prove the app identifies
@@ -216,6 +231,11 @@ const server = http.createServer((req, res) => {
   const u = new URL(req.url, 'http://localhost');
   const p = u.pathname;
   if (req.method === 'GET' && p === '/api/blocks/tip/height') {
+    tipRequests++;
+    if (tipFail) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'tip height unavailable (stub)' }));
+    }
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     return res.end(String(tipHeight));
   }
@@ -244,6 +264,7 @@ const server = http.createServer((req, res) => {
   // (0.8.1, two-node fee logic) — a suite can drive the two
   // nodes' fees apart, or make one implausible.
   if (req.method === 'GET' && p === '/api/v1/fees/recommended') {
+    feeRequests++;
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ fastestFee: feeState.economyFee, halfHourFee: feeState.economyFee, hourFee: feeState.economyFee, economyFee: feeState.economyFee, minimumFee: 1 }));
   }
@@ -272,6 +293,15 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
+  // Test hook (0.8.5, tip fetch): the tip-fail flag makes GET
+  // /api/blocks/tip/height answer 500 while it is on (a node
+  // failing the tip read, e.g. rate-limited), and tipRequests
+  // counts every tip-height request this stub has answered — so a
+  // suite can prove a primary-first fetch never asks the secondary
+  // and a per-tick cache fetches once per tick no matter how many
+  // blockheight rules there are. Runtime-settable, per stub process:
+  //   POST /__test__/tip-fail { fail: true|false } — answers { fail }
+  //   GET  /__test__/tip-count — answers { count }
   // Test control for the tip (0.8.1, block-height either-node):
   // POST /__test__/tip { height } sets this stub's tip height.
   // Answers the current tip.
@@ -307,6 +337,33 @@ const server = http.createServer((req, res) => {
   if (req.method === 'GET' && p === '/__test__/broadcast-count') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ ok: true, count: broadcastAttempts }));
+  }
+  // Test controls for the tip fetch (0.8.5): POST
+  // /__test__/tip-fail { fail } turns the 500 flag on/off; GET
+  // /__test__/tip-count answers how many tip-height requests
+  // this stub has answered.
+  if (req.method === 'POST' && p === '/__test__/tip-fail') {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      let b = {};
+      try { b = JSON.parse(body); } catch { b = {}; }
+      if (typeof b.fail === 'boolean') tipFail = b.fail;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ ok: true, fail: tipFail }));
+    });
+    return;
+  }
+  if (req.method === 'GET' && p === '/__test__/tip-count') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ ok: true, count: tipRequests }));
+  }
+  // Test control for the fee fetch (0.8.5): GET
+  // /__test__/fee-count answers how many recommended-fee
+  // requests this stub has answered.
+  if (req.method === 'GET' && p === '/__test__/fee-count') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ ok: true, count: feeRequests }));
   }
   // BTC price (0.8.0, two-source 0.8.0): one route per provider,
   // each in the real provider's shape. state.fail answers 500
