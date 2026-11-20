@@ -14,9 +14,12 @@ Boots the branch-0.8.4 app (port 3438), the check-in receiver
      manual release check (an already-reached height broadcasts, a
      future one does not), and the full tick (an armed block-height
      tx fires on the full tick).
-  2c. Block-height reorg latch (0.8.1, audit 1): once the chain has
-     been observed at the target, a later reorg below the target
-     must not un-fire the rule.
+  2c. Block-height: NO latch (0.8.4): the rule is judged fresh
+     every evaluation — a reorg below the target un-fires it
+     again, for the check endpoint, for a disarmed tx's tick
+     slices, and for an AND set; editing the target starts
+     fresh; a disarmed due tx still never broadcasts, and
+     re-arming it past the target broadcasts.
   3. Set-date trigger: validation (bad dates rejected), checkTriggerNow
      (a past date fires + warns, a future date watches), evaluation
      (a past date broadcasts, a future one does not), and the full
@@ -111,6 +114,10 @@ Boots the branch-0.8.4 app (port 3438), the check-in receiver
       check; re-arming it broadcasts on the next tick, with
       'fired' logged exactly once. A disarmed check-in tx's clock
       stays frozen while the tick evaluates it.
+  23. No block-height latch (0.8.4): covered by 2c above — the
+      latch is gone from the evaluator, the gate, and the
+      check endpoint, and no stored heightReachedFor is
+      honored anywhere.
 
 Ports: app 3438, receiver 3439, stubs 18235/18236 — no collision
 with the 095 suite (app 3388, receiver 3389, stubs 18175/18176) or
@@ -340,25 +347,92 @@ def main():
               t and t.get('triggerStatus', {}).get('status') == 'watching' and t.get('triggerStatus', {}).get('lastTipHeight') == STUB_TIP, t.get('triggerStatus') if t else None)
         delete_all_txs()
 
-        # --- 2c. block-height: the reorg latch (0.8.1, audit 1) --------
-        # Once the chain has been observed at the target, the rule has
-        # fired — a later reorg below the target must not un-fire it.
-        # The past-height tx broadcasts (latch set), the primary tip
-        # then drops below the target, and the rule must still fire.
-        s, r = add_tx('BH latch', {'type': 'blockheight', 'params': {'targetHeight': STUB_TIP - 100000}}, 110108, trigger_confirmed=True)
-        check('2c latch add: past height accepted with triggerConfirmed (201)', s == 201, (s, r))
-        bh_latch = r['tx']['id'] if s == 201 else None
-        s, r, res = release_results()
-        check('2c latch release: past height broadcasts (latch set)', s == 200 and res.get(bh_latch, {}).get('action') == 'broadcast', res.get(bh_latch))
+        # --- 2c. block-height: NO latch (0.8.4) -------------------------
+        # The one-way latch is gone: the rule is judged fresh every
+        # evaluation, like every other rule. A reorg that drops the
+        # tip below the target un-fires it again.
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 10})
+        check('2c tick: cadence set to 10 s', s == 200, (s, r))
+        # (a) The check endpoint judges the CURRENT tip: due above
+        # the target, watching again after a simulated reorg.
+        s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'blockheight', 'params': {'targetHeight': STUB_TIP - 100000}}})
+        check('2c no-latch check: tip above target fires', s == 200 and r.get('fire') is True and r.get('status') == 'due', r)
         s, r = req('POST', '/__test__/tip', {'height': STUB_TIP - 200000}, base=STUB_BASE_P)
         check('2c primary stub tip dropped to 700000', s == 200 and r.get('height') == STUB_TIP - 200000, r)
-        s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'blockheight', 'params': {'targetHeight': STUB_TIP - 100000}}, 'txId': bh_latch})
-        check('2c latch check: reorged tip still fires with the tx latch', s == 200 and r.get('fire') is True and r.get('status') == 'due', r)
-        s, r, res = release_results()
-        t = state_tx(bh_latch)
-        check('2c latch status: reorged tip still shows due', t and t.get('triggerStatus', {}).get('status') == 'due', t.get('triggerStatus') if t else None)
+        s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'blockheight', 'params': {'targetHeight': STUB_TIP - 100000}}})
+        check('2c no-latch check: reorged tip no longer fires', s == 200 and r.get('fire') is False and r.get('status') == 'watching', r)
         s, r = req('POST', '/__test__/tip', {'height': STUB_TIP}, base=STUB_BASE_P)
         check('2c primary stub tip restored to 900000', s == 200 and r.get('height') == STUB_TIP, r)
+        # (b) The tick writes fresh slices for a disarmed tx: due
+        # while the tip is past the target, watching after the reorg.
+        s, r = add_tx('BH nolatch', {'type': 'blockheight', 'params': {'targetHeight': STUB_TIP - 100000}}, 110108, trigger_confirmed=True)
+        check('2c no-latch add: past height accepted with triggerConfirmed (201)', s == 201, (s, r))
+        bh_nl = r['tx']['id'] if s == 201 else None
+        s, r = req('PUT', '/api/bitcoin/txs/' + bh_nl, {'enabled': False})
+        check('2c no-latch: disarmed at once (200)', s == 200, (s, r))
+        time.sleep(12)  # a full tick at the 10 s cadence
+        t = state_tx(bh_nl)
+        sl = rule_slice(t)
+        check('2c no-latch slice: disarmed tx is due with the tip past the target',
+              sl.get('status') == 'due' and sl.get('lastTipHeight') == STUB_TIP, sl)
+        check('2c no-latch status: live status is due (no latch needed)',
+              t and t.get('triggerStatus', {}).get('status') == 'due', t.get('triggerStatus') if t else None)
+        s, r = req('POST', '/__test__/tip', {'height': STUB_TIP - 200000}, base=STUB_BASE_P)
+        check('2c primary stub tip dropped to 700000 (again)', s == 200 and r.get('height') == STUB_TIP - 200000, r)
+        time.sleep(12)
+        t = state_tx(bh_nl)
+        sl = rule_slice(t)
+        check('2c no-latch slice: the reorg un-fires it (watching, tip 700000)',
+              sl.get('status') == 'watching' and sl.get('lastTipHeight') == STUB_TIP - 200000, sl)
+        check('2c no-latch status: live status is watching after the reorg',
+              t and t.get('triggerStatus', {}).get('status') == 'watching', t.get('triggerStatus') if t else None)
+        s, r = req('POST', '/__test__/tip', {'height': STUB_TIP}, base=STUB_BASE_P)
+        check('2c primary stub tip restored to 900000 (again)', s == 200 and r.get('height') == STUB_TIP, r)
+        # (c) An AND set [blockheight, price] stops firing when the
+        # tip drops: the height rule is judged fresh, so the set
+        # cannot fire on a stale latch.
+        and_bh = {'op': 'AND', 'rules': [{'type': 'blockheight', 'params': {'targetHeight': STUB_TIP - 100000}},
+                                       {'type': 'price', 'params': {'op': '>=', 'value': 90000}}]}
+        s, r = req('POST', '/api/triggers/check', {'trigger': and_bh})
+        check('2c no-latch AND check: height reached + price holding fires', s == 200 and r.get('fire') is True and r.get('status') == 'due', r)
+        s, r = req('POST', '/__test__/tip', {'height': STUB_TIP - 200000}, base=STUB_BASE_P)
+        check('2c primary stub tip dropped to 700000 (AND)', s == 200 and r.get('height') == STUB_TIP - 200000, r)
+        s, r = req('POST', '/api/triggers/check', {'trigger': and_bh})
+        check('2c no-latch AND check: reorged height un-fires the set', s == 200 and r.get('fire') is False and r.get('status') == 'watching', r)
+        s, r = req('POST', '/__test__/tip', {'height': STUB_TIP}, base=STUB_BASE_P)
+        check('2c primary stub tip restored to 900000 (AND)', s == 200 and r.get('height') == STUB_TIP, r)
+        # (d) Editing the target starts fresh: the edited rule is
+        # judged against the NEW target, with no memory of the old one.
+        s, r = req('PUT', '/api/bitcoin/txs/' + bh_nl, {'trigger': {'type': 'blockheight', 'params': {'targetHeight': STUB_TIP + 50000}}})
+        check('2c no-latch edit: retarget above the tip saves (200)', s == 200, (s, r))
+        time.sleep(12)
+        t = state_tx(bh_nl)
+        sl = rule_slice(t)
+        check('2c no-latch edit: retargeted rule is watching (tip 900000 of 950000)',
+              sl.get('status') == 'watching' and sl.get('lastTipHeight') == STUB_TIP, sl)
+        s, r = req('PUT', '/api/bitcoin/txs/' + bh_nl, {'trigger': {'type': 'blockheight', 'params': {'targetHeight': STUB_TIP - 100000}}, 'triggerConfirmed': True})
+        check('2c no-latch edit: retarget back below the tip saves with confirmation (200)', s == 200, (s, r))
+        time.sleep(12)
+        t = state_tx(bh_nl)
+        sl = rule_slice(t)
+        check('2c no-latch edit: retargeted rule is due again (tip 900000 of 800000)',
+              sl.get('status') == 'due' and sl.get('lastTipHeight') == STUB_TIP, sl)
+        # (e) Safety: the disarmed tx whose target is reached still
+        # does NOT broadcast; re-arming it after the tip is still
+        # past the target DOES broadcast on the next manual check.
+        s, r, res = release_results()
+        check('2c no-latch safety: manual check lists the disarmed due tx as skipped',
+              res.get(bh_nl, {}).get('action') == 'skipped', res.get(bh_nl))
+        t = state_tx(bh_nl)
+        check('2c no-latch safety: the disarmed due tx is still un-broadcast',
+              t is not None and not t.get('broadcasted') and not t.get('release'), t)
+        s, r = req('PUT', '/api/bitcoin/txs/' + bh_nl, {'enabled': True})
+        check('2c no-latch rearm: the tx re-arms (200)', s == 200 and r.get('tx', {}).get('enabled') is True, r)
+        s, r, res = release_results()
+        check('2c no-latch rearm: re-armed tx broadcasts with the tip past the target',
+              s == 200 and res.get(bh_nl, {}).get('action') == 'broadcast', res.get(bh_nl))
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 60})
+        check('2c tick: cadence restored to 60 s', s == 200, (s, r))
         delete_all_txs()
 
         # --- 2b. block-height: the PRIMARY node's tip decides ----------

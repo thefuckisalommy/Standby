@@ -1039,10 +1039,9 @@ function checkinStatus(state, now) {
 // this rule (null = keep the stored slice — a held rule writes
 // nothing); `detail` is the extra facts the gate answers with;
 // `warning` is the already-satisfied warning (the gate's text —
-// the evaluator ignores it). ctx is { prevSlice, liveOffsetMs,
-// latchedTarget }: the rule's stored slice (the price jump guard's
-// baseline, the block-height latch), the tx's frozen time (check-in
-// rules only), and a latched block height for the gate.
+// the evaluator ignores it). ctx is { prevSlice, liveOffsetMs }:
+// the rule's stored slice (the price jump guard's baseline) and
+// the tx's frozen time (check-in rules only).
 // evaluateTrigger(state, tx, now) evaluates each rule
 // and combines by the set's op (see combineOutcomes). triggerStatusFor
 // (state, tx, now) is the UI-facing status, computed from the STORED
@@ -1520,37 +1519,19 @@ async function checkUtxoRule(state, rule, now, ctx) {
 // reaches params.targetHeight — the PRIMARY node's tip is the one
 // that counts (the secondary is only a fallback if the primary
 // does not answer; a node a block or two ahead is normal
-// propagation lag). Deterministic: the tip height comes from
-// the nodes' own chains, and a reorg cannot un-fire it — once the
-// tip has reached the height, the rule has fired (the release is
-// one-shot; a later reorg does not retract a broadcast). Fail-safe:
-// if neither node answers, the trigger is 'unknown' — it never
-// fires on data it cannot read. No grace period: the tip height is
-// the chain's own state, not a feed that can go stale — an offline
-// gap that ends past the height means the height was genuinely reached.
+// propagation lag). Judged fresh every evaluation, like every
+// other rule (0.8.4: the one-way latch is gone at Ryan's call —
+// a reorg that drops the tip below the target un-fires the rule
+// again, so a height reached while disarmed, in backoff, or while
+// an AND set waits on another rule can be missed). A broadcast
+// that already happened is one-shot and never retracted.
+// Fail-safe: if neither node answers, the trigger is 'unknown' —
+// it never fires on data it cannot read. No grace period: the tip
+// height is the chain's own state, not a feed that can go stale —
+// an offline gap that ends past the height means the height was
+// genuinely reached.
 async function checkBlockHeightRule(state, rule, now, ctx) {
   const target = rule.params.targetHeight;
-  // (0.8.1, audit finding 1) One-way latch: once the chain has been
-  // observed at or past the target, the rule has fired — a later
-  // reorg that drops the tip below the target, or a node outage,
-  // cannot un-fire it. Without this, a broadcast that failed while
-  // the tip was past the target would never be retried after a
-  // reorg, because the next evaluation would say 'watching'. The
-  // latch is keyed to the target height, so editing the rule to a
-  // different height starts fresh (the edit path also clears
-  // triggerState on a trigger change). The latch arrives in
-  // ctx.latchedTarget — the evaluator reads it from the rule's
-  // stored slice, the gate from the tx being edited.
-  const prev = (ctx && ctx.prevSlice && typeof ctx.prevSlice === 'object') ? ctx.prevSlice : {};
-  const latchedTarget = (ctx && typeof ctx.latchedTarget === 'number') ? ctx.latchedTarget : null;
-  if (latchedTarget === target) {
-    return {
-      fire: true, status: 'due', reason: 'block ' + target.toLocaleString('en-US') + ' reached — firing',
-      slice: { ...freshTriggerState(now, 'due', 'block ' + target.toLocaleString('en-US') + ' reached — firing'), lastTipHeight: (typeof prev.lastTipHeight === 'number' ? prev.lastTipHeight : target), lastError: null, heightReachedFor: target },
-      detail: { tip: null, targetHeight: target, latched: true },
-      warning: 'This height has already been reached — it would fire on the next evaluation.',
-    };
-  }
   const endpoints = bitcoin.endpointsFor(state.settings);
   let comb;
   try { comb = bitcoin.combineTipHeights(await bitcoin.fetchTipHeights(endpoints)); }
@@ -1579,7 +1560,7 @@ async function checkBlockHeightRule(state, rule, now, ctx) {
   if (tip >= target) {
     return {
       fire: true, status: 'due', reason: 'block ' + tip.toLocaleString('en-US') + ' reached — firing',
-      slice: { ...freshTriggerState(now, 'due', 'block ' + tip.toLocaleString('en-US') + ' reached — firing'), lastTipHeight: tip, lastError: null, heightReachedFor: target },
+      slice: { ...freshTriggerState(now, 'due', 'block ' + tip.toLocaleString('en-US') + ' reached — firing'), lastTipHeight: tip, lastError: null },
       detail: { tip, targetHeight: target },
       warning: 'This height has already been reached — it would fire on the next evaluation.',
     };
@@ -1747,7 +1728,6 @@ async function evaluateRule(state, tx, ruleIndex, now) {
   const r = await checkRule(state, rule, now, {
     prevSlice,
     liveOffsetMs: checkinLiveOffsetMs(tx, now),
-    latchedTarget: (prevSlice && typeof prevSlice.heightReachedFor === 'number') ? prevSlice.heightReachedFor : null,
   });
   if (r.slice) setRuleTriggerState(tx, ruleIndex, r.slice);
   return { rule, fire: r.fire, status: r.status, reason: r.reason, held: null, slice: r.slice || null };
@@ -1768,9 +1748,8 @@ async function evaluateRule(state, tx, ruleIndex, now) {
 //     ignored — a setdate rule still fires while its sibling price
 //     rule cannot be read.
 //   AND: fire iff EVERY rule is SATISFIED at this same tick —
-//     "all at once" (Ryan, Nov 18), no per-rule latching (the
-//     block-height latch is that rule type's own one-way semantics,
-//     not latching). Any UNKNOWN, HELD, or SKIPPED rule blocks it.
+//     "all at once" (Ryan, Nov 18), no per-rule latching.
+//     Any UNKNOWN, HELD, or SKIPPED rule blocks it.
 // The combined status is the tx-level word: a one-rule set reads
 // exactly as its single rule did ('on-track', 'grace', 'due',
 // ...); a multi-rule set reads 'due' | 'unknown' | 'grace' |
@@ -2025,26 +2004,20 @@ function triggerStatusFor(state, tx, now) {
 // already met, so adding the rule would fire on the next evaluation
 // once the hold lifts. That is the gate's conservative block, and
 // it is deliberate: the evaluator (evaluateRule) is the only path
-// that applies the holds. `ctx` is { liveOffsetMs, latchedTargets }:
-// the tx's frozen time for a check-in rule (a txId the caller
-// passes), and one latched block height per rule (0.8.1, audit
-// finding 1) — a latched rule fires even if the tip has since
-// reorged below it; the add/edit gates pass none (a new rule has
-// no latch). A one-rule set answers exactly as its single rule
-// did (same status / reason / warning / detail); a multi-rule set
+// that applies the holds. `ctx` is { liveOffsetMs }: the tx's
+// frozen time for a check-in rule (a txId the caller passes).
+// A one-rule set answers exactly as its single rule did (same status / reason / warning / detail); a multi-rule set
 // answers the combined fire with the per-rule results in
 // detail.rules.
 async function checkTriggerNow(trgSet, state, now, ctx) {
   const set = toTriggerSet(trgSet);
   const liveOff = (ctx && typeof ctx.liveOffsetMs === 'number' && Number.isFinite(ctx.liveOffsetMs)) ? ctx.liveOffsetMs : 0;
-  const latched = (ctx && Array.isArray(ctx.latchedTargets)) ? ctx.latchedTargets : [];
   const ruleResults = [];
   for (let i = 0; i < set.rules.length; i++) {
     const rule = set.rules[i];
     const r = await checkRule(state, rule, now, {
       prevSlice: null,
       liveOffsetMs: liveOff,
-      latchedTarget: (typeof latched[i] === 'number') ? latched[i] : null,
     });
     ruleResults.push({
       index: i, rule, fire: r.fire, status: r.status,
@@ -3604,25 +3577,15 @@ async function handleApi(req, res, pathname) {
     // The frozen time for the tx being edited, if any — only a
     // check-in rule reads it (checkTriggerNow takes it as the
     // clock's live offset); a price or UTXO rule ignores it.
-    // A latched block-height rule (0.8.1, audit finding 1) is
-    // passed the same way, one latch per rule, so the check
-    // answers what the evaluator would answer for this tx.
     let liveOff = 0;
-    let latchedTargets = null;
     if (typeof body.txId === 'string' && body.txId) {
       const etx = (state.bitcoin.txs || []).find((t) => t.id === body.txId);
       if (etx) {
         liveOff = checkinLiveOffsetMs(etx, now);
-        const slices = Array.isArray(etx.triggerState) ? etx.triggerState
-          : (etx.triggerState && typeof etx.triggerState === 'object' ? [etx.triggerState] : []);
-        latchedTargets = v.trigger.rules.map((_, i) => {
-          const s = slices[i];
-          return (s && typeof s.heightReachedFor === 'number') ? s.heightReachedFor : null;
-        });
       }
     }
     try {
-      const r = await checkTriggerNow(v.trigger, state, now, { liveOffsetMs: liveOff, latchedTargets });
+      const r = await checkTriggerNow(v.trigger, state, now, { liveOffsetMs: liveOff });
       return sendJson(res, 200, { ...r, trigger: store.serveTrigger(v.trigger) });
     } catch (e) {
       // Belt-and-braces: checkTriggerNow already answers 'unknown'
