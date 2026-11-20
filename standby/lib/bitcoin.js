@@ -1420,6 +1420,17 @@ async function getSlipstreamTxStatus(txid) {
 // unspent, never permission to fire.
 const outspendCache = new Map(); // key -> { fetchedAtMs, result }
 const OUTSPEND_CACHE_DEFAULT_TTL_MS = 60 * 1000;
+// (0.8.6 fold-in, audit finding 3) In-flight dedup: a request
+// already on the wire for an outpoint — or for a funding tx's
+// batch — is shared, not re-issued, so two evaluations that
+// overlap (tick + manual check / dry-run) ask once. The entry is
+// removed the moment the fetch settles, so a failure can never
+// poison later lookups: a failed request is never cached, and the
+// next lookup fetches fresh. (A 404 resolves, not rejects —
+// sharing that answer within the same instant is fine, and it is
+// still never written to the result cache.)
+const outspendInflight = new Map(); // key -> Promise<parsed|null>
+const outspendsInflight = new Map(); // key -> Promise<array|null>
 
 function outspendCacheKey(apiBase, prevTxid, prevVout) {
   return apiBase + '|' + prevTxid + ':' + prevVout;
@@ -1448,12 +1459,20 @@ function outspendCachePut(apiBase, prevTxid, prevVout, result) {
 async function mempoolOutspend(prevTxid, prevVout, apiBase, ttlMs) {
   const cached = outspendCacheGet(apiBase, prevTxid, prevVout, ttlMs);
   if (cached !== undefined) return cached;
-  const res = await mempoolReq('/api/tx/' + prevTxid + '/outspend/' + prevVout, 'GET', undefined, apiBase);
-  if (res.status === 404) return null; // unknown — cannot prove spent or unspent; NEVER cached
-  if (res.status !== 200) throw new Error('mempool outspend check failed (HTTP ' + res.status + ')');
-  const parsed = JSON.parse(res.body);
-  outspendCachePut(apiBase, prevTxid, prevVout, parsed);
-  return parsed;
+  const key = outspendCacheKey(apiBase, prevTxid, prevVout);
+  const inflight = outspendInflight.get(key);
+  if (inflight) return inflight;
+  const p = (async () => {
+    const res = await mempoolReq('/api/tx/' + prevTxid + '/outspend/' + prevVout, 'GET', undefined, apiBase);
+    if (res.status === 404) return null; // unknown — cannot prove spent or unspent; NEVER cached
+    if (res.status !== 200) throw new Error('mempool outspend check failed (HTTP ' + res.status + ')');
+    const parsed = JSON.parse(res.body);
+    outspendCachePut(apiBase, prevTxid, prevVout, parsed);
+    return parsed;
+  })();
+  outspendInflight.set(key, p);
+  try { return await p; }
+  finally { if (outspendInflight.get(key) === p) outspendInflight.delete(key); }
 }
 
 // mempool API: GET /api/tx/:txid/outspends (0.8.6, audit proposal 2)
@@ -1463,16 +1482,24 @@ async function mempoolOutspend(prevTxid, prevVout, apiBase, ttlMs) {
 //   singular lookup of one of those outpoints hits the cache.
 //   A 404 is never cached (same rule as the singular call).
 async function mempoolOutspends(prevTxid, apiBase, ttlMs) {
-  const res = await mempoolReq('/api/tx/' + prevTxid + '/outspends', 'GET', undefined, apiBase);
-  if (res.status === 404) return null; // unknown — NEVER cached
-  if (res.status !== 200) throw new Error('mempool outspends check failed (HTTP ' + res.status + ')');
-  const arr = JSON.parse(res.body);
-  if (Array.isArray(arr)) {
-    arr.forEach((entry, i) => {
-      if (entry && typeof entry === 'object') outspendCachePut(apiBase, prevTxid, i, entry);
-    });
-  }
-  return arr;
+  const key = apiBase + '|' + prevTxid;
+  const inflight = outspendsInflight.get(key);
+  if (inflight) return inflight;
+  const p = (async () => {
+    const res = await mempoolReq('/api/tx/' + prevTxid + '/outspends', 'GET', undefined, apiBase);
+    if (res.status === 404) return null; // unknown — NEVER cached
+    if (res.status !== 200) throw new Error('mempool outspends check failed (HTTP ' + res.status + ')');
+    const arr = JSON.parse(res.body);
+    if (Array.isArray(arr)) {
+      arr.forEach((entry, i) => {
+        if (entry && typeof entry === 'object') outspendCachePut(apiBase, prevTxid, i, entry);
+      });
+    }
+    return arr;
+  })();
+  outspendsInflight.set(key, p);
+  try { return await p; }
+  finally { if (outspendsInflight.get(key) === p) outspendsInflight.delete(key); }
 }
 
 // Batch outspend check against the endpoints, primary-first — the
@@ -1522,10 +1549,37 @@ function createOutspendBatch(plan, endpoints, ttlMs) {
       return !!s && s.size >= 2;
     },
     fetch(txid) {
-      if (!fetched.has(txid)) fetched.set(txid, checkOutspends(txid, endpoints, ttlMs));
+      if (!fetched.has(txid)) fetched.set(txid, checkOutspendsCached(txid, endpoints, ttlMs, plan.get(txid)));
       return fetched.get(txid);
     },
   };
+}
+
+// (0.8.6 fold-in, audit finding 1) A batch fetch consults the
+// per-outpoint cache first: when EVERY watched output of this
+// funding tx is fresh in the cache, the batch is assembled from
+// the cache with no HTTP request. Only the PRIMARY endpoint's
+// entries count — the primary decides when it answers, so a
+// secondary answer must never stand in for it. If any watched
+// output is missing or stale, the batch is fetched as before
+// (which repopulates the cache). A missing entry is unknown,
+// never unspent — only watched vouts are ever read from the
+// assembled array.
+async function checkOutspendsCached(prevTxid, endpoints, ttlMs, watched) {
+  const primary = endpoints && endpoints[0];
+  if (primary && watched && watched.size > 0) {
+    const results = [];
+    let allFresh = true;
+    for (const vout of watched) {
+      const entry = outspendCacheGet(primary.base, prevTxid, vout, ttlMs);
+      if (entry === undefined) { allFresh = false; break; }
+      results[vout] = entry;
+    }
+    if (allFresh) {
+      return { txid: prevTxid, results, unknown: false, checkedVia: primary.label, checkedBase: primary.base };
+    }
+  }
+  return checkOutspends(prevTxid, endpoints, ttlMs);
 }
 
 // One outspend answer (singular or one batch entry) in the shape

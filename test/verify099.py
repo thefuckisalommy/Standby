@@ -128,6 +128,15 @@ Boots the branch-0.8.5 app (port 3438), the check-in receiver
       that appears after the parent was unknown is detected on
       the next evaluation; a confirmed-spend UTXO rule reuses
       the shared per-tick tip cache.
+  26. Batch cache consult + in-flight dedup (0.8.6 fold-in):
+      a batch lookup whose watched outputs are all fresh in the
+      per-outpoint cache costs zero requests; two simultaneous
+      singular lookups of one outpoint cost one request; two
+      simultaneous batch lookups cost one request (module-level
+      check — the app's single-flight lock means two batch
+      fetches can never overlap through the HTTP API); a failed
+      request does not poison later lookups — the retry fetches
+      fresh and can succeed.
 
 Ports: app 3438, receiver 3439, stubs 18235/18236 — no collision
 with the 095 suite (app 3388, receiver 3389, stubs 18175/18176) or
@@ -2991,6 +3000,146 @@ def main():
         # Cleanup: cadence back to 60.
         s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 60})
         check('25 cleanup: cadence restored to 60 s', s == 200, (s, r))
+        delete_all_txs()
+        # --- 26. Batch cache consult + in-flight dedup (0.8.6 fold-in) ---
+        # Audit findings 1 and 3: (a) a batch lookup whose watched
+        # outputs are all fresh in the per-outpoint cache costs ZERO
+        # requests — the batch consults the cache before fetching;
+        # (b) two simultaneous singular lookups of one outpoint
+        # cost ONE request (in-flight dedup); (c) two simultaneous
+        # batch lookups cost ONE request (in-flight dedup, proven
+        # at the module level — the app's single-flight evaluation
+        # lock means two batch fetches can never overlap through
+        # the HTTP API, so this one calls lib/bitcoin.js directly
+        # with node); (d) a failed request does not poison the
+        # in-flight map — the retry fetches fresh and can succeed.
+        # Cadence is parked at 3600 s again so the TTL window is
+        # wide and only this section's evaluations move the
+        # counters. The stub delay/fail hooks are cleared at the
+        # end so nothing leaks into later sections.
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 3600})
+        check('26 setup: cadence parked at 3600 s', s == 200, (s, r))
+        # (a) Batch re-evaluation inside the cache window costs
+        # nothing — the startup tick's batch fetch populated the
+        # per-output cache, and the release check's batch consults
+        # it before fetching.
+        s, r = add_tx('UTXO 26a', {'type': 'utxo', 'params': {'outpoint': FINNEY + ':0', 'confirmations': 1}}, 111600, True)
+        check('26 batch-cache: first same-funding-tx tx adds (trigger confirmed)', s == 201, (s, r))
+        utxo_a1 = r['tx']['id'] if s == 201 else None
+        s, r = add_tx('UTXO 26b', {'type': 'utxo', 'params': {'outpoint': FINNEY + ':1', 'confirmations': 1}}, 111601)
+        check('26 batch-cache: second same-funding-tx tx adds', s == 201, (s, r))
+        utxo_a2 = r['tx']['id'] if s == 201 else None
+        for tid in (utxo_a1, utxo_a2):
+            s, r = req('PUT', '/api/bitcoin/txs/' + tid, {'enabled': False})
+        check('26 batch-cache: both txs disarm', s == 200, (s, r))
+        p0, s0, bp0, bs0 = outspend_counts()
+        check('26 batch-cache: app restarted (startup tick is the measured batch fetch)', restart())
+        p1, s1, bp1, bs1 = outspend_counts()
+        check('26 batch-cache: startup tick costs ONE batch request, primary only, zero singular',
+              (p1, s1, bp1, bs1) == (p0, s0, bp0 + 1, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        s, r, res = release_results()
+        check('26 batch-cache: release check runs', s == 200, (s, r))
+        p2, s2, bp2, bs2 = outspend_counts()
+        check('26 batch-cache: re-evaluation inside the cache window costs ZERO batch AND zero singular requests',
+              (p2, s2, bp2, bs2) == (p1, s1, bp1, bs1), ((p1, s1, bp1, bs1), (p2, s2, bp2, bs2)))
+        t = state_tx(utxo_a1)
+        check('26 batch-cache: the spent output still reads due from the cached batch',
+              rule_slice(t).get('status') == 'due', rule_slice(t))
+        delete_all_txs()
+        # (b) Two simultaneous singular lookups of one outpoint
+        # cost ONE request: the stub delays its answer 400 ms so
+        # the second lookup lands while the first is still in
+        # flight, and the in-flight map shares it. A restart
+        # first, for a cold cache — otherwise the cache alone
+        # would answer both for free and prove nothing.
+        check('26 inflight: app restarted for a cold outpoint cache', restart())
+        s, r = req('POST', '/__test__/outspend-delay', {'ms': 400}, base=STUB_BASE_P)
+        check('26 inflight: primary stub delays outspend answers 400 ms', s == 200 and r.get('delayMs') == 400, r)
+        s, r = req('POST', '/__test__/outspend-delay', {'ms': 400}, base=STUB_BASE_S)
+        check('26 inflight: secondary stub delays outspend answers 400 ms', s == 200 and r.get('delayMs') == 400, r)
+        p0, s0, bp0, bs0 = outspend_counts()
+        results_26 = []
+        def _trigger_check_26():
+            results_26.append(req('POST', '/api/triggers/check', {'trigger': {'type': 'utxo', 'params': {'outpoint': FINNEY + ':1', 'confirmations': 1}}}))
+        threads_26 = [threading.Thread(target=_trigger_check_26) for _ in range(2)]
+        for th in threads_26: th.start()
+        for th in threads_26: th.join()
+        check('26 inflight: both simultaneous trigger checks answer', len(results_26) == 2 and all(x[0] == 200 for x in results_26), results_26)
+        check('26 inflight: both read the same answer (watching, unspent)',
+              all(x[1].get('status') == 'watching' and x[1].get('fire') is False for x in results_26), results_26)
+        p1, s1, bp1, bs1 = outspend_counts()
+        check('26 inflight: two simultaneous singular lookups cost ONE request, primary only, zero batch',
+              (p1, s1, bp1, bs1) == (p0 + 1, s0, bp0, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        s, r = req('POST', '/__test__/outspend-delay', {'ms': 0}, base=STUB_BASE_P)
+        s, r = req('POST', '/__test__/outspend-delay', {'ms': 0}, base=STUB_BASE_S)
+        check('26 inflight: stub delays cleared', s == 200, (s, r))
+        # (c) Two simultaneous batch lookups cost ONE request.
+        # Module-level, not HTTP: the app's single-flight
+        # evaluation lock means two batch fetches can never
+        # overlap through the API (the second release check is
+        # skipped outright), so the in-flight map for batches is
+        # defense-in-depth — and only a direct call to
+        # lib/bitcoin.js can put two of them in flight at once.
+        # The probe calls the exported checkOutspends twice
+        # concurrently against the primary stub; the counter must
+        # move by exactly one.
+        node_probe_26 = '/tmp/heirloom099-batch-inflight.js'
+        with open(node_probe_26, 'w') as f:
+            f.write("const bitcoin = require('" + APP + "/lib/bitcoin.js');\n"
+                    "(async () => {\n"
+                    "  const eps = [{ label: 'primary', base: process.argv[2] }];\n"
+                    "  const [a, b] = await Promise.all([\n"
+                    "    bitcoin.checkOutspends(process.argv[3], eps, 60000),\n"
+                    "    bitcoin.checkOutspends(process.argv[3], eps, 60000),\n"
+                    "  ]);\n"
+                    "  console.log(JSON.stringify({ aUnknown: a.unknown, bUnknown: b.unknown,\n"
+                    "    aLen: Array.isArray(a.results) ? a.results.length : -1,\n"
+                    "    bLen: Array.isArray(b.results) ? b.results.length : -1 }));\n"
+                    "})().catch((e) => { console.error(e); process.exit(1); });\n")
+        _, bp0_26 = req('GET', '/__test__/outspends-count', base=STUB_BASE_P)
+        bp0_26 = bp0_26.get('count', -1)
+        cp = subprocess.run(['node', node_probe_26, STUB_BASE_P, FINNEY], capture_output=True, text=True, timeout=30)
+        check('26 batch-inflight: node probe runs', cp.returncode == 0, (cp.returncode, cp.stdout, cp.stderr))
+        probe_26 = json.loads(cp.stdout) if cp.returncode == 0 and cp.stdout.strip() else {}
+        check('26 batch-inflight: both concurrent batch lookups answer (2 outputs, not unknown)',
+              probe_26.get('aUnknown') is False and probe_26.get('bUnknown') is False
+              and probe_26.get('aLen') == 2 and probe_26.get('bLen') == 2, probe_26)
+        _, bp1_26 = req('GET', '/__test__/outspends-count', base=STUB_BASE_P)
+        bp1_26 = bp1_26.get('count', -1)
+        check('26 batch-inflight: two simultaneous batch lookups cost ONE batch request',
+              bp1_26 == bp0_26 + 1, (bp0_26, bp1_26))
+        # (d) A failed request does not poison the in-flight map:
+        # with both stubs answering 500, a singular lookup fails
+        # (unknown, never cached); with the failure cleared, the
+        # retry fetches fresh and reads the real answer. If the
+        # rejected promise stayed in the map, the retry would
+        # return the same failure without a new request.
+        check('26 fail: app restarted for a cold outpoint cache', restart())
+        s, r = req('POST', '/__test__/outspend-fail', {'fail': True}, base=STUB_BASE_P)
+        check('26 fail: primary stub fails outspend requests', s == 200 and r.get('fail') is True, r)
+        s, r = req('POST', '/__test__/outspend-fail', {'fail': True}, base=STUB_BASE_S)
+        check('26 fail: secondary stub fails outspend requests', s == 200 and r.get('fail') is True, r)
+        p0, s0, bp0, bs0 = outspend_counts()
+        s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'utxo', 'params': {'outpoint': FINNEY + ':1', 'confirmations': 1}}})
+        check('26 fail: trigger check runs while both stubs fail', s == 200, (s, r))
+        check('26 fail: the rule reads unknown while both nodes fail', r.get('status') == 'unknown', r)
+        p1, s1, bp1, bs1 = outspend_counts()
+        check('26 fail: the failed lookup tried both endpoints (one request each)',
+              (p1, s1, bp1, bs1) == (p0 + 1, s0 + 1, bp0, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        s, r = req('POST', '/__test__/outspend-fail', {'fail': False}, base=STUB_BASE_P)
+        s, r = req('POST', '/__test__/outspend-fail', {'fail': False}, base=STUB_BASE_S)
+        check('26 fail: stub failures cleared', s == 200, (s, r))
+        p0, s0, bp0, bs0 = outspend_counts()
+        s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'utxo', 'params': {'outpoint': FINNEY + ':1', 'confirmations': 1}}})
+        check('26 fail: retry trigger check runs', s == 200, (s, r))
+        check('26 fail: the retry reads the real answer (watching, unspent)',
+              r.get('status') == 'watching' and r.get('fire') is False, r)
+        p1, s1, bp1, bs1 = outspend_counts()
+        check('26 fail: the retry issues a FRESH request (the failure did not poison the map)',
+              (p1, s1, bp1, bs1) == (p0 + 1, s0, bp0, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        # Cleanup: cadence back to 60.
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 60})
+        check('26 cleanup: cadence restored to 60 s', s == 200, (s, r))
         delete_all_txs()
     finally:
         for p in list(v.procs):

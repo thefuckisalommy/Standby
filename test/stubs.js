@@ -120,6 +120,15 @@ const feeState = { economyFee: 1 };
 // /__test__/outspend-count and /__test__/outspends-count below.
 let outspendRequests = 0;
 let outspendsRequests = 0;
+// Test hook (0.8.6 fold-in): outspendDelayMs delays every
+// outspend answer (singular + batch) by that many ms — mutable
+// via POST /__test__/outspend-delay, default from
+// STUB_OUTSPEND_DELAY_MS; outspendFail makes both outspend
+// routes answer 500 — mutable via POST /__test__/outspend-fail.
+// Both exist so a suite can hold a request in flight, or make
+// one fail, and prove the app dedupes / retries correctly.
+let outspendDelayMs = parseInt(process.env.STUB_OUTSPEND_DELAY_MS || '0', 10) || 0;
+let outspendFail = false;
 // Test hook (0.8.0, UA fix): the User-Agent each price feed was
 // last fetched with, so a suite can prove the app identifies
 // itself (CoinGecko 403s a missing/non-descriptive UA).
@@ -386,6 +395,37 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ ok: true, count: outspendsRequests }));
   }
+  // Test control (0.8.6 fold-in): POST /__test__/outspend-delay
+  // {ms} delays every outspend answer (singular + batch) by that
+  // many ms — so a suite can hold a request in flight while a
+  // second one starts, proving in-flight dedup; {ms: 0} clears
+  // it. POST /__test__/outspend-fail {fail} makes both routes
+  // answer 500 — so a suite can prove a failed request does not
+  // poison later lookups.
+  if (req.method === 'POST' && p === '/__test__/outspend-delay') {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      let b = {};
+      try { b = JSON.parse(body); } catch { b = {}; }
+      if (typeof b.ms === 'number' && Number.isFinite(b.ms) && b.ms >= 0) outspendDelayMs = b.ms;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ ok: true, delayMs: outspendDelayMs }));
+    });
+    return;
+  }
+  if (req.method === 'POST' && p === '/__test__/outspend-fail') {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      let b = {};
+      try { b = JSON.parse(body); } catch { b = {}; }
+      if (typeof b.fail === 'boolean') outspendFail = b.fail;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ ok: true, fail: outspendFail }));
+    });
+    return;
+  }
   // BTC price (0.8.0, two-source 0.8.0): one route per provider,
   // each in the real provider's shape. state.fail answers 500
   // (a dead feed); state.bad answers a malformed reading. The
@@ -517,20 +557,25 @@ const server = http.createServer((req, res) => {
   const outs = p.match(/^\/api\/tx\/([0-9a-fA-F]+)\/outspends$/);
   if (req.method === 'GET' && outs) {
     outspendsRequests++;
+    if (outspendFail) { res.writeHead(500, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: 'outspend down (stub)' })); }
     const txid = outs[1].toLowerCase();
     const nouts = txid === FINNEY ? 2 : 1;
-    const entries = [];
-    for (let i = 0; i < nouts; i++) entries.push(outspendEntry(txid, String(i)));
-    if (entries.some((e) => e === null)) { res.writeHead(404); return res.end(); }
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify(entries));
+    const answer = () => {
+      const entries = [];
+      for (let i = 0; i < nouts; i++) entries.push(outspendEntry(txid, String(i)));
+      if (entries.some((e) => e === null)) { res.writeHead(404); return res.end(); }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(entries));
+    };
+    if (outspendDelayMs > 0) return setTimeout(answer, outspendDelayMs);
+    return answer();
   }
   const out = p.match(/^\/api\/tx\/([0-9a-fA-F]+)\/outspend\/(\d+)$/);
   if (req.method === 'GET' && out) {
     outspendRequests++;
+    if (outspendFail) { res.writeHead(500, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: 'outspend down (stub)' })); }
     const txid = out[1].toLowerCase();
     const vout = out[2];
-    const delay = parseInt(process.env.STUB_OUTSPEND_DELAY_MS || '0', 10);
     const answer = () => {
       const big = parseInt(process.env.STUB_BIG_RESPONSE_BYTES || '0', 10);
       if (big > 0) {
@@ -542,7 +587,7 @@ const server = http.createServer((req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify(entry));
     };
-    if (delay > 0) return setTimeout(answer, delay);
+    if (outspendDelayMs > 0) return setTimeout(answer, outspendDelayMs);
     return answer();
   }
   const lookup = p.match(/^\/api\/tx\/([0-9a-fA-F]+)$/);
