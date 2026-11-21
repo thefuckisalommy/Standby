@@ -7,7 +7,7 @@ Boots the branch-0.8.5 app (port 3438), the check-in receiver
 (both fixed: tip height 900000, economy fee 1 sat/vB, price 98200)
 — and checks the 0.8.1 trigger work:
 
-  1. health reports version 0.8.5.
+  1. health reports version 0.8.7.
   2. Block-height trigger: validation at add (bad heights rejected,
      good ones accepted), checkTriggerNow (a height already reached
      fires + warns, a future height watches), evaluation via the
@@ -137,6 +137,16 @@ Boots the branch-0.8.5 app (port 3438), the check-in receiver
       fetches can never overlap through the HTTP API); a failed
       request does not poison later lookups — the retry fetches
       fresh and can succeed.
+  27. Shared trigger sets (0.8.7): one label, one arm/disarm,
+      one rule set driving several transactions — the set's
+      triggers are evaluated ONCE per tick (shared across
+      members), and on fire ALL attached members broadcast
+      through the existing per-tx path; a disarmed set is
+      evaluated but never broadcasts; a stale member is skipped
+      (its subcard carries a 'stale' pill) and the set keeps
+      firing for its non-stale members — only when EVERY member
+      is stale does the set archive; deleting a set returns its
+      txs to standalone; a pre-set state file loads with sets [].
 
 Ports: app 3438, receiver 3439, stubs 18235/18236 — no collision
 with the 095 suite (app 3388, receiver 3389, stubs 18175/18176) or
@@ -325,7 +335,7 @@ def main():
 
         # --- 1. health + version ----------------------------------------
         s, h = req('GET', '/api/health')
-        check('1 health reports version 0.8.6', h.get('version') == '0.8.6', h)
+        check('1 health reports version 0.8.7', h.get('version') == '0.8.7', h)
 
         # --- 2. block-height trigger --------------------------------------
         # Validation at add: bad heights rejected, good ones accepted.
@@ -3140,6 +3150,424 @@ def main():
         # Cleanup: cadence back to 60.
         s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 60})
         check('26 cleanup: cadence restored to 60 s', s == 200, (s, r))
+        delete_all_txs()
+        # --- 27. Shared trigger sets (0.8.7) ---
+        # One label, one arm/disarm, one rule set driving several
+        # transactions: the set's triggers are evaluated ONCE per
+        # tick (shared across members), and on fire ALL attached
+        # members broadcast through the existing per-tx path. A
+        # stale member is skipped (its subcard carries a 'stale'
+        # pill) and the set keeps firing for its non-stale
+        # members — only when EVERY member is stale does the set
+        # archive. Deleting a set returns its txs to standalone —
+        # it never deletes them.
+        # Cadence is parked at 3600 s so only this section's
+        # evaluations move the stub counters; the startup tick
+        # (5 s) is the single evaluation each sub-part measures.
+        def state_set(set_id, base=BASE):
+            s, st = req('GET', '/api/state', base=base)
+            for x in st.get('bitcoin', {}).get('sets', []):
+                if x.get('id') == set_id:
+                    return x
+            return None
+        def state_sets(base=BASE):
+            s, st = req('GET', '/api/state', base=base)
+            return st.get('bitcoin', {}).get('sets', [])
+        def add_tx_vout(label, trigger, vout, value, prev=FINNEY, trigger_confirmed=False):
+            body = {'txHex': craft_prev(prev, vout, value), 'label': label, 'notes': '', 'trigger': trigger}
+            if trigger_confirmed:
+                body['triggerConfirmed'] = True
+            return req('POST', '/api/bitcoin/txs', body)
+        def broadcast_counts():
+            _, rp = req('GET', '/__test__/broadcast-count', base=STUB_BASE_P)
+            _, rs = req('GET', '/__test__/broadcast-count', base=STUB_BASE_S)
+            return rp.get('count', -1), rs.get('count', -1)
+        def set_rule_slice(x, i=0):
+            ts = (x or {}).get('triggerState')
+            if isinstance(ts, list):
+                return ts[i] if i < len(ts) else {}
+            return ts if isinstance(ts, dict) else {}
+        def delete_all_sets(base=BASE):
+            for x in state_sets(base):
+                req('DELETE', '/api/bitcoin/sets/' + x['id'], base=base)
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 3600})
+        check('27 setup: cadence parked at 3600 s', s == 200, (s, r))
+        # (a) Create + attach, and the single evaluation: three
+        # members, each with its own past setdate trigger that
+        # WOULD fire standalone, attached to a set whose one
+        # shared rule is a UTXO watch on FINNEY:1 (unspent). The
+        # startup tick evaluates the set once — one singular
+        # outspend request, primary only — and the members' own
+        # triggers are never evaluated (their triggerState stays
+        # null, nothing broadcasts).
+        s, r = add_tx_vout('Set 27a m1', {'type': 'setdate', 'params': {'fireAt': '2020-01-01T00:00:00.000Z'}}, 1, 112700, trigger_confirmed=True)
+        check('27 single: member 1 adds (own past setdate trigger)', s == 201, (s, r))
+        m1 = r['tx']['id'] if s == 201 else None
+        s, r = add_tx_vout('Set 27a m2', {'type': 'setdate', 'params': {'fireAt': '2020-01-01T00:00:00.000Z'}}, 2, 112701, trigger_confirmed=True)
+        check('27 single: member 2 adds (own past setdate trigger)', s == 201, (s, r))
+        m2 = r['tx']['id'] if s == 201 else None
+        s, r = add_tx_vout('Set 27a m3', {'type': 'setdate', 'params': {'fireAt': '2020-01-01T00:00:00.000Z'}}, 0, 112702, prev=SECOND, trigger_confirmed=True)
+        check('27 single: member 3 adds (own past setdate trigger, SECOND:0)', s == 201, (s, r))
+        m3 = r['tx']['id'] if s == 201 else None
+        s, r = req('POST', '/api/bitcoin/sets', {'label': 'Set 27a', 'txIds': [m1, m2, m3],
+                  'trigger': {'type': 'utxo', 'params': {'outpoint': FINNEY + ':1', 'confirmations': 1}}})
+        check('27 single: set created with 3 members (201)', s == 201, (s, r))
+        set27a = r.get('set', {}).get('id') if s == 201 else None
+        # (0.8.7, round 9) Single history: the set's trail opens
+        # with each member's 'added' event (tagged with the member
+        # label, oldest first) and the creation event closes it.
+        hist27a = r.get('set', {}).get('history', []) if s == 201 else []
+        check('27 single: set serves its label, members, arm, and backfilled history',
+              s == 201 and r.get('set', {}).get('label') == 'Set 27a'
+              and r.get('set', {}).get('txIds') == [m1, m2, m3]
+              and r.get('set', {}).get('enabled') is True
+              and [e.get('type') for e in hist27a] == ['added', 'added', 'added', 'added']
+              and hist27a[-1].get('detail') == 'Set created with 3 transactions'
+              and {'Set 27a m1', 'Set 27a m2', 'Set 27a m3'} == {e.get('detail', '').split(':')[0] for e in hist27a[:3]}
+              and [e.get('ts') for e in hist27a] == sorted(e.get('ts') for e in hist27a), r.get('set'))
+        p0, s0, bp0, bs0 = outspend_counts()
+        bc0 = broadcast_counts()
+        check('27 single: app restarted (startup tick is the measured evaluation)', restart())
+        p1, s1, bp1, bs1 = outspend_counts()
+        check('27 single: one shared UTXO rule costs ONE singular request, primary only, no batch',
+              (p1, s1, bp1, bs1) == (p0 + 1, s0, bp0, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        bc1 = broadcast_counts()
+        check('27 single: the startup tick broadcast nothing', bc1 == bc0, (bc0, bc1))
+        x = state_set(set27a)
+        check('27 single: the set rule reads watching (FINNEY:1 still unspent)',
+              set_rule_slice(x).get('status') == 'watching' and set_rule_slice(x).get('reason') == 'still unspent', set_rule_slice(x))
+        for mid in (m1, m2, m3):
+            t = state_tx(mid)
+            check('27 single: member own trigger never evaluated (triggerState stays null)',
+                  t is not None and t.get('triggerState') is None, (t or {}).get('triggerState'))
+        # (b) Fire broadcasts ALL members: retarget the set to a
+        # past setdate, then a manual release check sends all
+        # three through the per-tx broadcast path.
+        s, r = req('PUT', '/api/bitcoin/sets/' + set27a,
+                   {'trigger': {'type': 'setdate', 'params': {'fireAt': '2020-01-01T00:00:00.000Z'}}, 'triggerConfirmed': True})
+        check('27 fire: set retargeted to a past setdate (trigger confirmed)', s == 200, (s, r))
+        bc0 = broadcast_counts()
+        s, r, res = release_results()
+        check('27 fire: release check runs', s == 200, (s, r))
+        check('27 fire: release action is broadcast', r.get('action') == 'broadcast', r.get('action'))
+        bc1 = broadcast_counts()
+        check('27 fire: all three members broadcast via the primary (3 attempts, none secondary)',
+              bc1 == (bc0[0] + 3, bc0[1]), (bc0, bc1))
+        for mid in (m1, m2, m3):
+            check('27 fire: member broadcast', res.get(mid, {}).get('action') == 'broadcast', res.get(mid))
+            t = state_tx(mid)
+            check('27 fire: member recorded broadcast', t is not None and bool(t.get('broadcasted')), (t or {}).get('broadcasted'))
+        x = state_set(set27a)
+        check('27 fire: the set history records the firing',
+              [e.get('type') for e in (x or {}).get('history', [])].count('fired') == 1, (x or {}).get('history'))
+        delete_all_txs()
+        check('27 fire: cleanup leaves no sets (empty sets go with their last tx)',
+              state_sets() == [], state_sets())
+        # (c) A disarmed set is evaluated but never broadcasts.
+        s, r = add_tx_vout('Set 27c m1', {'type': 'setdate', 'params': {'fireAt': '2020-01-01T00:00:00.000Z'}}, 1, 112710, trigger_confirmed=True)
+        check('27 disarmed: member 1 adds', s == 201, (s, r))
+        n1 = r['tx']['id'] if s == 201 else None
+        s, r = add_tx_vout('Set 27c m2', {'type': 'setdate', 'params': {'fireAt': '2020-01-01T00:00:00.000Z'}}, 2, 112711, trigger_confirmed=True)
+        check('27 disarmed: member 2 adds', s == 201, (s, r))
+        n2 = r['tx']['id'] if s == 201 else None
+        s, r = req('POST', '/api/bitcoin/sets', {'label': 'Set 27c', 'txIds': [n1, n2],
+                  'trigger': {'type': 'setdate', 'params': {'fireAt': '2020-01-01T00:00:00.000Z'}}, 'triggerConfirmed': True})
+        check('27 disarmed: set created with a past setdate trigger', s == 201, (s, r))
+        set27c = r.get('set', {}).get('id') if s == 201 else None
+        s, r = req('PUT', '/api/bitcoin/sets/' + set27c, {'enabled': False})
+        check('27 disarmed: set disarmed', s == 200 and r.get('set', {}).get('enabled') is False, (s, r))
+        bc0 = broadcast_counts()
+        s, r, res = release_results()
+        check('27 disarmed: release check runs', s == 200, (s, r))
+        check('27 disarmed: the set result is skipped (disarmed)',
+              res.get(set27c, {}).get('action') == 'skipped' and 'disarmed' in (res.get(set27c, {}).get('reason') or ''), res.get(set27c))
+        check('27 disarmed: nothing broadcast', broadcast_counts() == bc0, (bc0, broadcast_counts()))
+        x = state_set(set27c)
+        check('27 disarmed: the set IS evaluated (triggerState due)',
+              set_rule_slice(x).get('status') == 'due', set_rule_slice(x))
+        for mid in (n1, n2):
+            t = state_tx(mid)
+            check('27 disarmed: member not broadcast', t is not None and not t.get('broadcasted'), (t or {}).get('broadcasted'))
+        delete_all_txs()
+        # (d) Detach: PUT txIds drops a member, and deleting the
+        # set returns its txs to standalone — each with its own
+        # trigger live again.
+        s, r = add_tx_vout('Set 27d m1', {'type': 'setdate', 'params': {'fireAt': '2020-01-01T00:00:00.000Z'}}, 1, 112720, trigger_confirmed=True)
+        check('27 detach: member 1 adds', s == 201, (s, r))
+        d1 = r['tx']['id'] if s == 201 else None
+        s, r = add_tx_vout('Set 27d m2', {'type': 'setdate', 'params': {'fireAt': '2020-01-01T00:00:00.000Z'}}, 2, 112721, trigger_confirmed=True)
+        check('27 detach: member 2 adds', s == 201, (s, r))
+        d2 = r['tx']['id'] if s == 201 else None
+        s, r = req('POST', '/api/bitcoin/sets', {'label': 'Set 27d', 'txIds': [d1, d2],
+                  'trigger': {'type': 'setdate', 'params': {'fireAt': '2999-01-01T00:00:00.000Z'}}})
+        check('27 detach: set created with a future setdate trigger', s == 201, (s, r))
+        set27d = r.get('set', {}).get('id') if s == 201 else None
+        s, r = req('PUT', '/api/bitcoin/sets/' + set27d, {'txIds': [d1]})
+        check('27 detach: PUT txIds drops member 2', s == 200 and r.get('set', {}).get('txIds') == [d1], (s, r))
+        s, r, res = release_results()
+        check('27 detach: release check runs', s == 200, (s, r))
+        check('27 detach: the dropped member fires on its own trigger now',
+              res.get(d2, {}).get('action') == 'broadcast', res.get(d2))
+        t = state_tx(d1)
+        check('27 detach: the kept member does not broadcast (set trigger is future)',
+              t is not None and not t.get('broadcasted'), (t or {}).get('broadcasted'))
+        s, r = req('DELETE', '/api/bitcoin/sets/' + set27d)
+        check('27 detach: set deleted', s == 200, (s, r))
+        check('27 detach: the kept tx survives the set delete (standalone again)',
+              state_tx(d1) is not None and state_sets() == [], (state_tx(d1), state_sets()))
+        s, r, res = release_results()
+        check('27 detach: release check runs after the delete', s == 200, (s, r))
+        check('27 detach: the freed member fires on its own trigger now',
+              res.get(d1, {}).get('action') == 'broadcast', res.get(d1))
+        delete_all_txs()
+        # (e) Stale member (0.8.7, revised rule): member 1 is fine
+        # (FINNEY:1), member 2 spends FINNEY:0 (confirmed spent).
+        # The set fires: the fine member broadcasts, the spent
+        # member is marked stale and skipped — the set itself
+        # stays live for the member that is left. Only when EVERY
+        # member is stale does the set archive (see (g)).
+        s, r = add_tx_vout('Set 27e m1', {'type': 'setdate', 'params': {'fireAt': '2999-01-01T00:00:00.000Z'}}, 1, 112730)
+        check('27 stale: member 1 adds (FINNEY:1, fine)', s == 201, (s, r))
+        e1 = r['tx']['id'] if s == 201 else None
+        s, r = add_tx_vout('Set 27e m2', {'type': 'setdate', 'params': {'fireAt': '2999-01-01T00:00:00.000Z'}}, 0, 112731)
+        check('27 stale: member 2 adds (FINNEY:0, confirmed spent)', s == 201, (s, r))
+        e2 = r['tx']['id'] if s == 201 else None
+        s, r = req('POST', '/api/bitcoin/sets', {'label': 'Set 27e', 'txIds': [e1, e2],
+                  'trigger': {'type': 'setdate', 'params': {'fireAt': '2020-01-01T00:00:00.000Z'}}, 'triggerConfirmed': True})
+        check('27 stale: set created with a past setdate trigger', s == 201, (s, r))
+        set27e = r.get('set', {}).get('id') if s == 201 else None
+        bc0 = broadcast_counts()
+        s, r, res = release_results()
+        check('27 stale: release check runs', s == 200, (s, r))
+        check('27 stale: release action is broadcast (the live member goes out)', r.get('action') == 'broadcast', r.get('action'))
+        bc1 = broadcast_counts()
+        check('27 stale: exactly one broadcast, via the primary (the stale member is excluded from the firing set)',
+              bc1 == (bc0[0] + 1, bc0[1]), (bc0, bc1))
+        check('27 stale: the fine member broadcasts', res.get(e1, {}).get('action') == 'broadcast', res.get(e1))
+        check('27 stale: the spent member reads stale', res.get(e2, {}).get('action') == 'stale', res.get(e2))
+        t = state_tx(e1)
+        check('27 stale: the fine member is recorded broadcast', t is not None and bool(t.get('broadcasted')), (t or {}).get('broadcasted'))
+        t = state_tx(e2)
+        check('27 stale: only the spent member is recorded stale',
+              t is not None and (t.get('release') or {}).get('status') == 'stale', (t or {}).get('release'))
+        x = state_set(set27e)
+        check('27 stale: the set is NOT archived (still present, still live for its remaining member)',
+              x is not None and x.get('txIds') == [e1, e2], x)
+        check('27 stale: the set history records the member going stale',
+              [ev.get('type') for ev in (x or {}).get('history', [])].count('stale') == 1
+              and any('Set 27e m2' in (ev.get('detail') or '') for ev in (x or {}).get('history', []) if ev.get('type') == 'stale'), (x or {}).get('history'))
+        delete_all_txs()
+        # (g) All members stale archives the set: both members
+        # spend FINNEY:0 (confirmed spent). The set fires, the
+        # pre-check finds both stale, and NOTHING broadcasts.
+        # A second release check then reads the set as archived
+        # (skipped — all members are stale).
+        s, r = add_tx_vout('Set 27g m1', {'type': 'setdate', 'params': {'fireAt': '2999-01-01T00:00:00.000Z'}}, 0, 112750)
+        check('27 all-stale: member 1 adds (FINNEY:0, confirmed spent)', s == 201, (s, r))
+        g1 = r['tx']['id'] if s == 201 else None
+        s, r = add_tx_vout('Set 27g m2', {'type': 'setdate', 'params': {'fireAt': '2999-01-01T00:00:00.000Z'}}, 0, 112751)
+        check('27 all-stale: member 2 adds (FINNEY:0, confirmed spent)', s == 201, (s, r))
+        g2 = r['tx']['id'] if s == 201 else None
+        s, r = req('POST', '/api/bitcoin/sets', {'label': 'Set 27g', 'txIds': [g1, g2],
+                  'trigger': {'type': 'setdate', 'params': {'fireAt': '2020-01-01T00:00:00.000Z'}}, 'triggerConfirmed': True})
+        check('27 all-stale: set created with a past setdate trigger', s == 201, (s, r))
+        set27g = r.get('set', {}).get('id') if s == 201 else None
+        bc0 = broadcast_counts()
+        s, r, res = release_results()
+        check('27 all-stale: release check runs', s == 200, (s, r))
+        check('27 all-stale: release action is stale', r.get('action') == 'stale', r.get('action'))
+        check('27 all-stale: nothing broadcast', broadcast_counts() == bc0, (bc0, broadcast_counts()))
+        for mid in (g1, g2):
+            check('27 all-stale: member reads stale', res.get(mid, {}).get('action') == 'stale', res.get(mid))
+            t = state_tx(mid)
+            check('27 all-stale: member recorded stale',
+                  t is not None and (t.get('release') or {}).get('status') == 'stale', (t or {}).get('release'))
+        s, r, res = release_results()
+        check('27 all-stale: second release check runs', s == 200, (s, r))
+        check('27 all-stale: the set reads archived (skipped — all members are stale)',
+              res.get(set27g, {}).get('action') == 'skipped' and 'all members are stale' in (res.get(set27g, {}).get('reason') or ''), res.get(set27g))
+        check('27 all-stale: the set still exists in state (archived, not deleted)',
+              state_set(set27g) is not None, state_sets())
+        delete_all_txs()
+        # (f) Migration / compat: a pre-set state file (no `sets`
+        # key at all) loads as sets [], and a hand-edited set
+        # with a dangling member and a member claimed by two sets
+        # is sanitized on load — the dangling id is pruned, the
+        # duplicate stays only in the first set.
+        stj = load_state_file()
+        stj['bitcoin'].pop('sets', None)
+        save_state_file(stj)
+        check('27 migrate: app restarted with a pre-set state file', restart())
+        check('27 migrate: pre-set state loads with sets == []', state_sets() == [], state_sets())
+        s, r = add_tx_vout('Set 27f m1', {'type': 'setdate', 'params': {'fireAt': '2999-01-01T00:00:00.000Z'}}, 1, 112740)
+        check('27 migrate: member adds', s == 201, (s, r))
+        f1 = r['tx']['id'] if s == 201 else None
+        stj = load_state_file()
+        stj['bitcoin']['sets'] = [
+            {'id': 'set_hand1', 'label': 'Hand 1', 'enabled': True, 'txIds': [f1, 'tx_missing'],
+             'trigger': {'type': 'setdate', 'params': {'fireAt': '2999-01-01T00:00:00.000Z'}}},
+            {'id': 'set_hand2', 'label': 'Hand 2', 'enabled': True, 'txIds': [f1],
+             'trigger': {'type': 'setdate', 'params': {'fireAt': '2999-01-01T00:00:00.000Z'}}},
+        ]
+        save_state_file(stj)
+        check('27 migrate: app restarted with hand-edited sets', restart())
+        sets27f = {x['id']: x for x in state_sets()}
+        check('27 migrate: the dangling member is pruned, the real one kept',
+              sets27f.get('set_hand1', {}).get('txIds') == [f1], sets27f.get('set_hand1'))
+        check('27 migrate: a tx in two sets stays only in the first',
+              sets27f.get('set_hand2', {}).get('txIds') == [], sets27f.get('set_hand2'))
+        # (0.8.7, round 9) The load-time backfill runs for a
+        # hand-edited set too: the seeded creation event plus the
+        # member's own 'added' event, tagged with its label.
+        handHist27f = sets27f.get('set_hand1', {}).get('history', [])
+        check('27 migrate: missing fields defaulted (history seeded + member backfilled, enabled true)',
+              sets27f.get('set_hand1', {}).get('enabled') is True
+              and [e.get('type') for e in handHist27f] == ['added', 'added']
+              and any(e.get('detail') == 'Set created with 1 transaction' for e in handHist27f)
+              and any('Set 27f m1' in e.get('detail', '') for e in handHist27f), sets27f.get('set_hand1'))
+        # (h) Add flow IS "add trigger set" (0.8.7 fix, round 3):
+        # one Save creates ALL filled entries — each POSTed with
+        # the SHARED trigger in its own record (it stays dormant
+        # while the tx is in the set, and it is what the tx falls
+        # back to if the set is ever deleted) — then creates the
+        # set in ONE POST with the one label, the members, and
+        # the same shared trigger. Create a set with two such
+        # txs, then edit it to add a third and drop one (the
+        # dropped tx returns to standalone, never deleted), then
+        # delete the set and confirm the remaining members fall
+        # back to their own trigger. This is the exact sequence
+        # the Add modal's Save runs.
+        shared27h = {'op': 'OR', 'rules': [{'type': 'setdate', 'params': {'fireAt': '2999-01-01T00:00:00.000Z'}}]}
+        # Dual-shape serving: a one-rule set is SERVED as its
+        # single rule (serveTx / serveSet unwrap it), so the
+        # served trigger reads as the rule, not the wrapper.
+        shared_rule27h = {'type': 'setdate', 'params': {'fireAt': '2999-01-01T00:00:00.000Z'}}
+        s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft_prev(FINNEY, 1, 112760), 'trigger': shared27h})
+        check('27 add-set: member 1 adds with the SHARED trigger in the body (201)', s == 201, (s, r))
+        h1 = r['tx']['id'] if s == 201 else None
+        t = state_tx(h1) if h1 else None
+        check('27 add-set: member 1 keeps the shared trigger (not the 35-day default)',
+              t is not None and t.get('trigger') == shared_rule27h, (t or {}).get('trigger'))
+        s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft_prev(FINNEY, 2, 112761), 'trigger': shared27h})
+        check('27 add-set: member 2 adds with the SHARED trigger in the body (201)', s == 201, (s, r))
+        h2 = r['tx']['id'] if s == 201 else None
+        s, r = req('POST', '/api/bitcoin/sets', {'label': 'Set 27h', 'txIds': [h1, h2], 'trigger': shared27h, 'enabled': True})
+        check('27 add-set: set created with BOTH members and the ONE label in one call (201)', s == 201, (s, r))
+        set27h = r.get('set', {}).get('id') if s == 201 else None
+        x = state_set(set27h) if set27h else None
+        check('27 add-set: the set serves both members under that label',
+              x is not None and x.get('txIds') == [h1, h2] and x.get('label') == 'Set 27h', (x or {}).get('txIds'))
+        check('27 add-set: the set carries the shared trigger',
+              x is not None and x.get('trigger') == shared_rule27h, (x or {}).get('trigger'))
+        s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft_prev(FINNEY, 1, 112762), 'trigger': shared27h})
+        check('27 add-set: member 3 adds with the SHARED trigger in the body (201)', s == 201, (s, r))
+        h3 = r['tx']['id'] if s == 201 else None
+        s, r = req('PUT', '/api/bitcoin/sets/' + set27h, {'txIds': [h1, h2, h3]})
+        check('27 add-set: edit adds a third member (PUT txIds, 200)', s == 200 and r.get('set', {}).get('txIds') == [h1, h2, h3], (s, r))
+        s, r = req('PUT', '/api/bitcoin/sets/' + set27h, {'txIds': [h1, h3]})
+        check('27 add-set: edit drops member 2 (PUT txIds, 200)', s == 200 and r.get('set', {}).get('txIds') == [h1, h3], (s, r))
+        t = state_tx(h2)
+        check('27 add-set: the dropped member is standalone again with its own trigger, never deleted',
+              t is not None and t.get('trigger') == shared_rule27h, (t or {}).get('trigger'))
+        s, r = req('DELETE', '/api/bitcoin/sets/' + set27h)
+        check('27 add-set: deleting the set (200)', s == 200, (s, r))
+        t1 = state_tx(h1); t3 = state_tx(h3)
+        check('27 add-set: the remaining members fall back to their own trigger after the set is deleted',
+              t1 is not None and t1.get('trigger') == shared_rule27h
+              and t3 is not None and t3.get('trigger') == shared_rule27h
+              and not any(h1 in (x.get('txIds') or []) or h3 in (x.get('txIds') or []) for x in state_sets()),
+              ((t1 or {}).get('trigger'), (t3 or {}).get('trigger')))
+        delete_all_txs()
+        delete_all_sets()
+        # (i) Single history (0.8.7, round 9): ONE history per
+        # card — the set's. A member's events are forwarded to
+        # it tagged with the member's label; a set's trail opens
+        # with its members' existing histories (creation and
+        # attach backfill); the member's own history keeps
+        # recording and survives the set's delete.
+        s, r = add_tx_vout('Dom Single M1', {'type': 'setdate', 'params': {'fireAt': '2999-01-01T00:00:00.000Z'}}, 1, 112800)
+        check('27 single-hist: member 1 adds (future setdate)', s == 201, (s, r))
+        i1 = r['tx']['id'] if s == 201 else None
+        s, r = add_tx_vout('Dom Single M2', {'type': 'setdate', 'params': {'fireAt': '2999-01-01T00:00:00.000Z'}}, 2, 112801)
+        check('27 single-hist: member 2 adds (future setdate)', s == 201, (s, r))
+        i2 = r['tx']['id'] if s == 201 else None
+        s, r = req('POST', '/api/bitcoin/sets', {'label': 'Dom Single Set', 'txIds': [i1, i2],
+                  'trigger': {'type': 'setdate', 'params': {'fireAt': '2999-01-01T00:00:00.000Z'}}})
+        check('27 single-hist: set created with 2 members (201)', s == 201, (s, r))
+        set27i = r.get('set', {}).get('id') if s == 201 else None
+        hist27i = r.get('set', {}).get('history', []) if s == 201 else []
+        check('27 single-hist: creation backfills both members, creation event last, chronological',
+              [e.get('type') for e in hist27i] == ['added', 'added', 'added']
+              and hist27i[-1].get('detail') == 'Set created with 2 transactions'
+              and {'Dom Single M1', 'Dom Single M2'} == {e.get('detail', '').split(':')[0] for e in hist27i[:2]}
+              and [e.get('ts') for e in hist27i] == sorted(e.get('ts') for e in hist27i), hist27i)
+        s, r = req('PUT', '/api/bitcoin/txs/' + i1, {'notes': 'edited note'})
+        check('27 single-hist: member 1 notes edited (200)', s == 200, (s, r))
+        t = state_tx(i1)
+        check('27 single-hist: the edit lands on the member own history',
+              t is not None and any(e.get('type') == 'edited' and e.get('detail') == 'Notes changed' for e in (t or {}).get('history', [])), (t or {}).get('history'))
+        x = state_set(set27i)
+        check('27 single-hist: the edit is forwarded to the set history, tagged, exactly once',
+              x is not None and [e.get('detail') for e in (x or {}).get('history', []) if e.get('type') == 'edited'].count('Dom Single M1: Notes changed') == 1, (x or {}).get('history'))
+        s, r = req('PUT', '/api/bitcoin/sets/' + set27i, {'enabled': False})
+        check('27 single-hist: set disarmed', s == 200 and r.get('set', {}).get('enabled') is False, (s, r))
+        s, r = req('PUT', '/api/bitcoin/sets/' + set27i, {'enabled': True})
+        check('27 single-hist: set re-armed', s == 200 and r.get('set', {}).get('enabled') is True, (s, r))
+        x = state_set(set27i)
+        check('27 single-hist: arm/disarm logs once each on the set history, never member-tagged',
+              x is not None
+              and [e.get('type') for e in (x or {}).get('history', [])].count('disarmed') == 1
+              and [e.get('type') for e in (x or {}).get('history', [])].count('armed') == 1
+              and all(e.get('detail') == '' for e in (x or {}).get('history', []) if e.get('type') in ('armed', 'disarmed')), (x or {}).get('history'))
+        s, r = add_tx_vout('Dom Single M3', {'type': 'setdate', 'params': {'fireAt': '2999-01-01T00:00:00.000Z'}}, 3, 112802)
+        check('27 single-hist: member 3 adds (future setdate)', s == 201, (s, r))
+        i3 = r['tx']['id'] if s == 201 else None
+        s, r = req('PUT', '/api/bitcoin/txs/' + i3, {'notes': 'third note'})
+        check('27 single-hist: member 3 notes edited (200)', s == 200, (s, r))
+        s, r = req('PUT', '/api/bitcoin/sets/' + set27i, {'txIds': [i1, i2, i3]})
+        check('27 single-hist: edit attaches member 3 (PUT txIds, 200)', s == 200 and r.get('set', {}).get('txIds') == [i1, i2, i3], (s, r))
+        x = state_set(set27i)
+        hist27i = (x or {}).get('history', [])
+        check('27 single-hist: attach backfills member 3 history before the Members changed event',
+              any('Dom Single M3' in e.get('detail', '') and e.get('type') == 'added' for e in hist27i)
+              and any(e.get('detail') == 'Dom Single M3: Notes changed' for e in hist27i)
+              and hist27i[-1].get('type') == 'edited' and 'Members changed (+1)' in hist27i[-1].get('detail', ''), hist27i)
+        s, r = req('PUT', '/api/bitcoin/sets/' + set27i, {'txIds': [i1, i2]})
+        check('27 single-hist: edit drops member 3 (PUT txIds, 200)', s == 200 and r.get('set', {}).get('txIds') == [i1, i2], (s, r))
+        s, r = req('PUT', '/api/bitcoin/sets/' + set27i, {'txIds': [i1, i2, i3]})
+        check('27 single-hist: edit re-attaches member 3 (PUT txIds, 200)', s == 200 and r.get('set', {}).get('txIds') == [i1, i2, i3], (s, r))
+        x = state_set(set27i)
+        hist27i = (x or {}).get('history', [])
+        check('27 single-hist: re-attach does NOT duplicate member 3 history',
+              sum(1 for e in hist27i if e.get('detail', '').startswith('Dom Single M3')) == 2, hist27i)
+        s, r = req('PUT', '/api/bitcoin/sets/' + set27i, {'txIds': [i1, i2]})
+        check('27 single-hist: member 3 dropped again before the fire (PUT txIds, 200)', s == 200 and r.get('set', {}).get('txIds') == [i1, i2], (s, r))
+        s, r = req('PUT', '/api/bitcoin/sets/' + set27i,
+                   {'trigger': {'type': 'setdate', 'params': {'fireAt': '2020-01-01T00:00:00.000Z'}}, 'triggerConfirmed': True})
+        check('27 single-hist: set retargeted to a past setdate (trigger confirmed)', s == 200, (s, r))
+        s, r, res = release_results()
+        check('27 single-hist: release check runs', s == 200, (s, r))
+        check('27 single-hist: release action is broadcast', r.get('action') == 'broadcast', r.get('action'))
+        x = state_set(set27i)
+        hist27i = (x or {}).get('history', [])
+        check('27 single-hist: both member broadcasts are forwarded, tagged',
+              [e.get('type') for e in hist27i].count('broadcast') == 2
+              and {'Dom Single M1', 'Dom Single M2'} == {e.get('detail', '').split(':')[0] for e in hist27i if e.get('type') == 'broadcast'}, hist27i)
+        check('27 single-hist: exactly ONE fired event (no duplicate from member forwarding)',
+              [e.get('type') for e in hist27i].count('fired') == 1, hist27i)
+        s, r = req('DELETE', '/api/bitcoin/sets/' + set27i)
+        check('27 single-hist: set deleted', s == 200, (s, r))
+        t1 = state_tx(i1); t2 = state_tx(i2); t3 = state_tx(i3)
+        check('27 single-hist: deleting the set leaves each member own history intact and full',
+              t1 is not None and [e.get('type') for e in t1.get('history', [])] == ['added', 'edited', 'broadcast']
+              and t2 is not None and [e.get('type') for e in t2.get('history', [])] == ['added', 'broadcast']
+              and t3 is not None and [e.get('type') for e in t3.get('history', [])] == ['added', 'edited'],
+              ((t1 or {}).get('history'), (t2 or {}).get('history'), (t3 or {}).get('history')))
+        delete_all_txs()
+        delete_all_sets()
+        # Cleanup: cadence back to 60.
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 60})
+        check('27 cleanup: cadence restored to 60 s', s == 200, (s, r))
         delete_all_txs()
     finally:
         for p in list(v.procs):

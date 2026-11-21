@@ -1,5 +1,5 @@
 // Standby 0.8.2 DOM checks — block-height, set-date, and fee-market triggers.
-// Runs public/app.js from branch-0.8.6 in Node with the
+// Runs public/app.js from branch-0.8.7 in Node with the
 // minimal DOM shim from dom_check094.js (same El class, same
 // document/window/fetch/setInterval stubs) and verifies the 0.8.0
 // trigger UI only — the 094 suite still owns everything else.
@@ -13,9 +13,10 @@
 //     spent + confirmations), for manual "Waiting for manual
 //     broadcast". The state comes from tx.triggerStatus
 //   - the readiness card renders one .readiness-tx block per active
-//     tx: label + status pill (+ fee pill) on one line — the label
-//     truncates with an ellipsis so the status never wraps — with
-//     the tx card's condition summary on the line underneath
+//     trigger set: label + status pill (+ fee pill on a standalone
+//     tx row only) on one line — the label truncates with an
+//     ellipsis so the status never wraps — with the tx card's
+//     condition summary on the line underneath
 //     ("Fires when ..."), and NO trigger-type mode pill
 //   - the per-exchange rows sit in a .node-lines container, the
 //     same class/structure as the Node Status rows, so their
@@ -160,7 +161,40 @@ function cardStatus(card) {
 }
 function cardDetails(card) {
   for (const c of card.children) { if (c.className === 'tx-details') return c; }
+  // (0.8.7 fix, round 3) A standalone tx's Details lives inside
+  // its blue tx subcard now, not at card level and NOT inside a
+  // trigger subcard — so this card-level lookup returns null
+  // for it; use txItemDetails below. A set card has no
+  // card-level Details either (each member's lives in its own
+  // subcard), so this still returns null for sets.
+  for (const c of card.children) {
+    if (c.className === 'tx-trigger') {
+      for (const b of c.children) { if (b.className === 'tx-details') return b; }
+    }
+  }
   return null;
+}
+// (0.8.7 fix, round 3) Every card is a trigger set: the Details
+// of a standalone transaction lives inside its blue .tx-item
+// subcard (the same subcard a set member gets), above the
+// trigger subcards — never inside a trigger subcard.
+function txItemDetails(card) {
+  for (const c of card.children) {
+    if ((c.className || '').split(' ').includes('tx-item')) {
+      for (const b of c.children) { if (b.className === 'tx-details') return b; }
+    }
+  }
+  return null;
+}
+// (0.8.7 fix, round 3) Details NEVER lives inside a trigger
+// subcard any more — it lives in the blue tx subcard. This
+// helper now reads null on every card, and the checks below
+// assert exactly that.
+function detailsInTriggerBox(card) {
+  const boxes = triggerBoxes(card);
+  if (!boxes.length) return null;
+  const box = boxes[boxes.length - 1];
+  return box.children.find((c) => c.className === 'tx-details') || null;
 }
 // Simulate a user toggling a <details> open/closed (0.7.18): the
 // shim has no native <details> behaviour, so set .open by hand and
@@ -172,15 +206,24 @@ function toggleDetails(el, open) {
 }
 // True when the card's Details element itself holds a direct child
 // with the given class — i.e. the line lives INSIDE the Details
-// rather than below the buttons on the card.
+// rather than below the buttons on the card. (0.8.7 fix, round 3)
+// The Details lives in the blue tx subcard, so read it there.
 function detailsContains(card, cls) {
-  const d = cardDetails(card);
+  const d = txItemDetails(card);
   return !!d && d.children.some((x) => (x.className || '').split(' ').includes(cls));
 }
 // The index of a direct child of the card with the given class, or
 // -1 — so a check can prove one line sits below another on the card.
 function cardChildIndex(card, cls) {
   return card.children.findIndex((x) => (x.className || '').split(' ').includes(cls));
+}
+// (0.8.7 fix, round 3) The index of a direct child with EXACTLY
+// the given class — cardChildIndex's includes() match cannot tell
+// a plain trigger box ('tx-trigger') from the tx subcard
+// ('tx-trigger tx-item'), so a check that needs the first plain
+// trigger box uses this.
+function cardChildExactIndex(card, cls) {
+  return card.children.findIndex((x) => x.className === cls);
 }
 function listCards(id) {
   return (els[id] && els[id].children || []).filter((c) => c.className && c.className.split(' ').includes('tx-card'));
@@ -218,9 +261,11 @@ function triggerParts(card) {
 function cardFaceText(card) {
   return card.children.filter((c) => c.className !== 'tx-details').map(elText).join(' ');
 }
-// The readiness blocks (0.8.0): one .readiness-tx per ACTIVE tx —
-// a .readiness-tx-row (label <b> + trigger-mode pill + status pill
-// + optional fee pill) and a .readiness-tx-state line underneath.
+// The readiness blocks (0.8.0): one .readiness-tx per ACTIVE
+// trigger set (0.8.7, round 10) — a .readiness-tx-row (label <b>
+// + trigger-mode pill + status pill + optional fee pill on a
+// standalone tx row only) and a .readiness-tx-state line
+// underneath.
 // The 094 readinessRows() helper does not fit this shape (it read
 // a flat row), so this replaces it for 0.8.0.
 function readinessBlocks() {
@@ -246,6 +291,28 @@ function readinessBlocks() {
 function readinessBlock(label) {
   const blocks = readinessBlocks();
   return blocks && blocks.find((x) => x.label === label);
+}
+// The member lines under a set's readiness header (0.8.7,
+// round 12): children[2+] of the block, each a
+// .readiness-tx-member with the "Tx N — <short txid>…" label
+// span + the amount span pinned right — no pill at all, so
+// exactly 2 children and neither is a .pill.
+function readinessMembers(label) {
+  const txs = els['readiness-txs'];
+  if (!txs) return null;
+  const block = txs.children.find((b) => (b.className || '').split(' ').includes('readiness-tx')
+    && ((b.children[0] || {}).children[0] || {}).textContent === label);
+  if (!block) return null;
+  return block.children.slice(2)
+    .filter((c) => (c.className || '').split(' ').includes('readiness-tx-member'))
+    .map((c) => ({
+      left: (c.children[0] || {}).textContent || '',
+      leftCls: (c.children[0] || {}).className || '',
+      amt: (c.children[1] || {}).textContent || '',
+      amtCls: (c.children[1] || {}).className || '',
+      hasPill: (c.children || []).some((k) => (k.className || '').split(' ').includes('pill')),
+      kids: (c.children || []).length,
+    }));
 }
 // The per-tx check-in bars (0.8.0): one .ck-tx block per active
 // check-in tx inside #checkin-tx-bars — label, bar fill width,
@@ -386,7 +453,11 @@ function triggerBoxes(card) {
 function boxHeadParts(box) {
   const head = box && box.children[0];
   if (!head || !(head.className || '').split(' ').includes('tx-trigger-head')) return { k: '', pill: null, pillCls: null };
-  const pillEl = head.children[1];
+  // (0.8.7 fix, round 6) The pill is found by class, not by
+  // position: since round 5 the tx-item head also carries the
+  // right-aligned BTC amount (.tx-item-amt), so children[1]
+  // is the amount — not a pill — when the subcard has none.
+  const pillEl = (head.children || []).find((c) => (c.className || '').split(' ').includes('pill'));
   return {
     k: (head.children[0] && head.children[0].textContent) || '',
     pill: pillEl ? (pillEl.textContent || '') : null,
@@ -456,7 +527,23 @@ class El {
   change() { (this.listeners.change || []).forEach((f) => f({ target: this, preventDefault: function () {} })); }
   fire(ev) { (this.listeners[ev] || []).forEach((f) => f({ target: this, preventDefault: function () {} })); }
   closest() { return this; }
-  querySelectorAll() { return []; }
+  querySelectorAll(sel) {
+    // The one element-level selector the app uses:
+    // setTxIdsFromForm reads the checked checkboxes inside the
+    // set modal's checklist. Walk descendants and match inputs
+    // by type, honouring :checked. Anything else stays empty,
+    // as before.
+    const out = [];
+    const wantChecked = sel.indexOf(':checked') !== -1;
+    const walk = (el) => {
+      (el.children || []).forEach((c) => {
+        if (c.tagName === 'INPUT' && c.type === 'checkbox' && (!wantChecked || c.checked)) out.push(c);
+        walk(c);
+      });
+    };
+    if (sel.indexOf('input[type="checkbox"]') !== -1) walk(this);
+    return out;
+  }
 }
 
 // The tab bar, the tab sections and the burger links, modelled so
@@ -535,6 +622,7 @@ function check(name, cond, detail) {
 (async () => {
   const appJs = await realFetch(BASE + '/app.js').then((r) => r.text());
   const idx = await realFetch(BASE + '/').then((r) => r.text());
+  const css = await realFetch(BASE + '/style.css').then((r) => r.text());
   eval(appJs);
   await new Promise((r) => setTimeout(r, 900)); // load() fetches state + renders
   const st0 = await (await fetch('/api/state')).json();
@@ -584,15 +672,17 @@ function check(name, cond, detail) {
     const parts = card && triggerParts(card);
     const exp = trigExpect[label];
     check('trigger 0.8.0: "' + label + '" subcard has exactly 3 rows (header / condition / state)',
-      !!parts && parts.box && parts.box.children.length === 3,
+      !!parts && parts.box && parts.box.children.filter((c) => c.className !== 'tx-details').length === 3,
       parts ? 'children=' + parts.box.children.length : 'no subcard');
+    check('details in tx subcard: "' + label + '" Details lives inside its blue tx subcard, never inside a trigger subcard (0.8.7 fix, round 3)',
+      !!card && !!txItemDetails(card) && !detailsInTriggerBox(card), '');
     check('trigger 0.8.0: "' + label + '" has the type label "' + exp.k + '"', !!parts && parts.k === exp.k, parts ? parts.k : 'no subcard');
     check('trigger 0.8.0: "' + label + '" condition reads "' + exp.cond + '"', !!parts && parts.cond === exp.cond, parts ? parts.cond : 'no subcard');
     check('trigger 0.8.0: "' + label + '" state line reads "' + exp.now + '"', !!parts && parts.now.indexOf(exp.now) !== -1, parts ? parts.now : 'no subcard');
   }
-  check('trigger 0.8.0: the subcard sits after the amount and before Details on every card',
-    cards0.length === 7 && cards0.every((c) => cardChildIndex(c, 'tx-amount') === 1 && cardChildIndex(c, 'tx-trigger') === 2 && cardChildIndex(c, 'tx-details') === 3),
-    cards0.map((c) => cardChildIndex(c, 'tx-amount') + '/' + cardChildIndex(c, 'tx-trigger') + '/' + cardChildIndex(c, 'tx-details')).join(' '));
+  check('trigger 0.8.0: the card is a trigger set — amount, then the sub-line, then the blue tx subcard with Details inside it, then the trigger subcard(s)',
+    cards0.length === 7 && cards0.every((c) => cardChildIndex(c, 'tx-amount') === 1 && cardChildIndex(c, 'tx-item') === 3 && cardChildExactIndex(c, 'tx-trigger') === 4 && !!txItemDetails(c) && !detailsInTriggerBox(c) && cardChildIndex(c, 'tx-details') === -1),
+    cards0.map((c) => cardChildIndex(c, 'tx-amount') + '/' + cardChildIndex(c, 'tx-item') + '/' + cardChildExactIndex(c, 'tx-trigger') + '/' + cardChildIndex(c, 'tx-details')).join(' '));
 
   // --- 2. the readiness card: one block per armed tx ---
   const blocks = readinessBlocks();
@@ -640,12 +730,12 @@ function check(name, cond, detail) {
     const hasFeeRow = faceKids.some((c) => (c.className || '').split(' ').includes('tx-fee'));
     const hasRouteRow = faceKids.some((c) => (c.className || '').split(' ').includes('tx-route'));
     check('details 0.8.1: "' + label + '" face has no Fee row and no Broadcast via row', !!card && !hasFeeRow && !hasRouteRow, faceKids.map((c) => c.className).join(','));
-    const det = card && cardDetails(card);
+    const det = card && txItemDetails(card);
     check('details 0.8.0: "' + label + '" Details exists and starts collapsed', !!det && det.open === false, det ? 'open=' + det.open : 'no Details');
     if (det) toggleDetails(det, true);
     check('details 0.8.0: "' + label + '" Details holds the Fee row and the Broadcast via row once opened',
       !!card && detailsContains(card, 'tx-fee') && detailsContains(card, 'tx-route'),
-      card ? cardDetails(card).children.map((x) => x.className).join(',') : 'no card');
+      card ? (txItemDetails(card) ? txItemDetails(card).children.map((x) => x.className).join(',') : 'no tx-item Details') : 'no card');
   }
 
   // --- 4. the check-in strip is visible with an armed check-in tx ---
@@ -1388,7 +1478,7 @@ function check(name, cond, detail) {
   const priceCard2 = cardByTitle('Dom Price');
   const partsPrice = priceCard2 && triggerParts(priceCard2);
   check('exchange status: the Dom Price subcard has exactly 3 rows',
-    !!partsPrice && partsPrice.box && partsPrice.box.children.length === 3,
+    !!partsPrice && partsPrice.box && partsPrice.box.children.filter((c) => c.className !== 'tx-details').length === 3,
     partsPrice ? 'children=' + partsPrice.box.children.length : 'no subcard');
   check('exchange status: the Dom Price subcard row 1 is the header "TRIGGER - BTC PRICE"',
     !!partsPrice && partsPrice.k === 'TRIGGER - BTC PRICE', partsPrice ? partsPrice.k : 'no subcard');
@@ -1410,7 +1500,17 @@ function check(name, cond, detail) {
   const priceCard3 = cardByTitle('Dom Price');
   let dryLine = '';
   if (priceCard3) {
+    // (0.8.7 fix, round 3) The dry-run line lives inside the
+    // blue tx subcard now, under its Details — not at card
+    // level. Look there as well as at card level.
+    const dryKids = [];
     for (const c of priceCard3.children) {
+      dryKids.push(c);
+      if ((c.className || '').split(' ').includes('tx-item')) {
+        for (const b of c.children) dryKids.push(b);
+      }
+    }
+    for (const c of dryKids) {
       if (c.className && c.className.split(' ').includes('tx-dryrun')) dryLine = c.textContent || '';
     }
   }
@@ -1606,6 +1706,8 @@ function check(name, cond, detail) {
     idx.indexOf('btn-btc-broadcast-all') === -1 && idx.indexOf('Broadcast all') === -1, '');
   check('add popup static: "Broadcast armed" stays',
     idx.indexOf('id="btn-btc-broadcast-armed"') !== -1, '');
+  check('add popup static: "+ New trigger set" button is gone (removed Nov 21 — "+ Add Tx" is the way to create a set)',
+    idx.indexOf('btn-btc-new-set') === -1 && idx.indexOf('New trigger set') === -1, '');
   // The pill opens the popup. Its click is stopped before it reaches
   // the summary, so the card stays open.
   els['btn-btc-add-pill'].click();
@@ -2808,8 +2910,8 @@ function check(name, cond, detail) {
     && idx.indexOf('Installed version:') !== -1 && idx.indexOf('id="app-version"') !== -1, '');
   check('app version static: the card has no "?" button and no details (just the version line)',
     idx.indexOf('id="help-version"') === -1, '');
-  check('app version: the installed version reads 0.8.6 (from /api/health)',
-    els['app-version'] && els['app-version'].textContent === '0.8.6',
+  check('app version: the installed version reads 0.8.7 (from /api/health)',
+    els['app-version'] && els['app-version'].textContent === '0.8.7',
     els['app-version'] && els['app-version'].textContent);
   setFilter('general');
   check('app version: the card is visible under General',
@@ -2825,10 +2927,9 @@ function check(name, cond, detail) {
   // arm-all disarm + re-arm logged a 'disarmed' and an 'armed'
   // event on every one after that.
   function cardHistory(card) {
-    for (const c of card.children) {
-      if (c.className !== 'tx-details') continue;
-      for (const d of c.children) { if (d.className === 'tx-history') return d; }
-    }
+    const det = txItemDetails(card);
+    if (!det) return null;
+    for (const d of det.children) { if (d.className === 'tx-history') return d; }
     return null;
   }
   function histRows(card) {
@@ -2848,14 +2949,11 @@ function check(name, cond, detail) {
   check('history 0.8.2: History is nested inside Details, last child of it',
     !!histCard && !!cardHistory(histCard)
     && (() => {
-      for (const c of histCard.children) {
-        if (c.className !== 'tx-details') continue;
-        return c.children[c.children.length - 1] === cardHistory(histCard);
-      }
-      return false;
+      const det = txItemDetails(histCard);
+      return !!det && det.children[det.children.length - 1] === cardHistory(histCard);
     })()
-    && cardChildIndex(histCard, 'tx-details') < cardChildIndex(histCard, 'tx-actions'),
-    histCard ? 'details=' + cardChildIndex(histCard, 'tx-details') + ' actions=' + cardChildIndex(histCard, 'tx-actions') : 'no card');
+    && cardChildIndex(histCard, 'tx-trigger') < cardChildIndex(histCard, 'tx-actions'),
+    histCard ? 'trigger=' + cardChildIndex(histCard, 'tx-trigger') + ' actions=' + cardChildIndex(histCard, 'tx-actions') : 'no card');
   const hRows = histCard ? histRows(histCard) : null;
   const hTypes = hRows ? hRows.map((r) => elText(r.children[1])) : [];
   check('history 0.8.2: oldest first — the first row is the added event',
@@ -3182,7 +3280,7 @@ function check(name, cond, detail) {
     !!parts26a && parts26a.now.indexOf('$98,200') !== -1, parts26a ? parts26a.now : 'no box');
   const rRow26 = priceCard26 ? (els['readiness-txs'].children || []).find((c) => c.dataset && c.dataset.txId === domPrice26.id) : null;
   check('live view: the Dom Price readiness row exists', !!rRow26, '');
-  const det26 = priceCard26 ? cardDetails(priceCard26) : null;
+  const det26 = priceCard26 ? txItemDetails(priceCard26) : null;
   if (det26) toggleDetails(det26, true);
   check('live view: the Dom Price Details open before the tick', !!det26 && det26.open === true, det26 ? 'open=' + det26.open : 'no details');
   // Open the cadence gate: the last fetch was the re-render load.
@@ -3346,6 +3444,831 @@ function check(name, cond, detail) {
   if (arch27Id) {
     const delArch27 = await fetch('/api/bitcoin/txs/' + arch27Id, { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
     check('archived row: the tx is removed again (fixture restored)', delArch27.status === 200, 'status=' + delArch27.status);
+  }
+  await rerender(appJs);
+
+  // --- §28 (0.8.7): a shared trigger set renders as one card ---
+  // One label, the BTC total up top, one arm/disarm, the
+  // transactions ABOVE the triggers as blue-edged subcards
+  // (.tx-item) each with its own Details + per-tx note, the
+  // trigger subcards verbatim, ONE shared History as its own
+  // collapsible (collapsed by default), and the actions row —
+  // like a tx card. Members have no standalone card. A standalone tx
+  // renders alongside, exactly as before. The release check
+  // here is safe for the §26 fixtures: Dom Price and Dom
+  // Rules OR are disarmed until the restore block below, and
+  // the check-in clock reads 0 days elapsed.
+  // (0.8.7 fix, round 10) Baseline for the readiness delta
+  // below: the set and the solo add two rows, not three.
+  const rbBefore28 = (readinessBlocks() || []).length;
+  const addSetM1 = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ txHex: craftHex(1, 140001), label: 'Dom Set M1', notes: 'M1 note', trigger: { type: 'setdate', params: { fireAt: '2020-01-01T00:00:00.000Z' } }, triggerConfirmed: true }) });
+  check('set card: member 1 adds (own past setdate trigger)', addSetM1.status === 201, 'status=' + addSetM1.status);
+  const addSetM1Json = addSetM1.status === 201 ? await addSetM1.json() : {};
+  const setM1Id = (addSetM1Json.tx || {}).id || null;
+  const setM1Txid = (addSetM1Json.tx || {}).txid || '';
+  const addSetM2 = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ txHex: craftHex(2, 420002), label: 'Dom Set M2', notes: 'M2 note', trigger: { type: 'setdate', params: { fireAt: '2020-01-01T00:00:00.000Z' } }, triggerConfirmed: true }) });
+  check('set card: member 2 adds (own past setdate trigger)', addSetM2.status === 201, 'status=' + addSetM2.status);
+  const addSetM2Json = addSetM2.status === 201 ? await addSetM2.json() : {};
+  const setM2Id = (addSetM2Json.tx || {}).id || null;
+  const setM2Txid = (addSetM2Json.tx || {}).txid || '';
+  const addSolo28 = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ txHex: craftHex(3, 430003), label: 'Dom Solo', trigger: { type: 'manual', params: {} } }) });
+  check('set card: the standalone tx adds', addSolo28.status === 201, 'status=' + addSolo28.status);
+  const addSolo28Json = addSolo28.status === 201 ? await addSolo28.json() : {};
+  const solo28Id = (addSolo28Json.tx || {}).id || null;
+  const addSet28 = await fetch('/api/bitcoin/sets', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ label: 'Dom Set', txIds: [setM1Id, setM2Id], trigger: { type: 'setdate', params: { fireAt: '2999-01-01T00:00:00.000Z' } } }) });
+  check('set card: the set creates', addSet28.status === 201, 'status=' + addSet28.status);
+  const addSet28Json = addSet28.status === 201 ? await addSet28.json() : {};
+  const set28Id = (addSet28Json.set || {}).id || null;
+  const rel28 = await fetch('/api/release/check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+  check('set card: the release check runs (evaluates the set trigger)', rel28.status === 200, 'status=' + rel28.status);
+  await rerender(appJs);
+  // (0.8.7 fix, round 10) Release readiness: ONE card per
+  // trigger set, headed by the set's label with the set's pill
+  // — not one row per member. A member's frozen triggerState
+  // used to read Unknown, and a label-less member rendered as
+  // "Untitled transaction".
+  const rbDomSet = readinessBlock('Dom Set');
+  check('readiness set: exactly ONE row headed by the set label', !!rbDomSet, (readinessBlocks() || []).map((b) => b.label).join(','));
+  check('readiness set: the set row pill matches the set card (armed)',
+    !!rbDomSet && rbDomSet.status === 'armed', rbDomSet ? rbDomSet.status : 'no block');
+  check('readiness set: the set row pill class is ok',
+    !!rbDomSet && rbDomSet.statusCls === 'pill ok', rbDomSet ? rbDomSet.statusCls : 'no block');
+  check('readiness set: the set row state line is the set condition ("Fires on Dec 31, 2998, 7:00 PM")',
+    !!rbDomSet && rbDomSet.state.indexOf('Fires on Dec 31, 2998, 7:00 PM') !== -1, rbDomSet ? rbDomSet.state : 'no block');
+  check('readiness set: the set row carries NO fee pill (the fee is per tx, in Details)',
+    !!rbDomSet && rbDomSet.fee === '', rbDomSet ? 'fee=' + rbDomSet.fee : 'no block');
+  check('readiness set: no readiness row for either member',
+    !readinessBlock('Dom Set M1') && !readinessBlock('Dom Set M2'), '');
+  check('readiness set: the standalone tx still has its own row',
+    !!readinessBlock('Dom Solo'), '');
+  check('readiness set: two new rows for three new txs (the set counts once, not per member)',
+    (readinessBlocks() || []).length === rbBefore28 + 2,
+    'before=' + rbBefore28 + ' after=' + (readinessBlocks() || []).length);
+  const setCard28 = listCards('btc-active-list').find((c) => cardTitle(c) === 'Dom Set');
+  check('set card: the set renders in the Staged Transactions card', !!setCard28,
+    listCards('btc-active-list').map((c) => cardTitle(c)).join(','));
+  check('set card: its face shows the summed total (0.00560003 BTC)',
+    !!setCard28 && cardFaceText(setCard28).indexOf('0.00560003 BTC') !== -1, setCard28 ? cardFaceText(setCard28) : 'no card');
+  check('set card: its face reads armed',
+    !!setCard28 && cardFaceText(setCard28).indexOf('armed') !== -1, setCard28 ? cardFaceText(setCard28) : 'no card');
+  check('set card: its face names 2 transactions and 1 shared trigger',
+    !!setCard28 && cardFaceText(setCard28).indexOf('2 transactions \u00b7 1 shared trigger') !== -1, setCard28 ? cardFaceText(setCard28) : 'no card');
+  check('set card: members have no standalone card',
+    !cardByTitle('Dom Set M1') && !cardByTitle('Dom Set M2'), '');
+  check('set card: the standalone tx still renders alongside',
+    !!cardByTitle('Dom Solo'), '');
+  const items28 = setCard28 ? setCard28.children.filter((c) => (c.className || '').split(' ').includes('tx-item')) : [];
+  check('set card: two blue-edged transaction subcards', items28.length === 2, 'got ' + items28.length);
+  check('set card: the transaction subcards sit ABOVE the trigger subcard',
+    !!setCard28 && items28.length === 2
+    && setCard28.children.findIndex((x) => (x.className || '').split(' ').includes('tx-item')) !== -1
+    && setCard28.children.findIndex((x) => (x.className || '').split(' ').includes('tx-item'))
+      < setCard28.children.findIndex((x) => x.className === 'tx-trigger'), '');
+  const itemHead28 = items28.length ? elText(items28[0].children[0]) : '';
+  check('set card: member 1 subcard names its txid',
+    itemHead28.indexOf(setM1Txid.slice(0, 16)) !== -1, itemHead28);
+  const itemHead28b = items28.length > 1 ? elText(items28[1].children[0]) : '';
+  check('set card: member 2 subcard names its txid',
+    itemHead28b.indexOf(setM2Txid.slice(0, 16)) !== -1, itemHead28b);
+  const itemDet28 = items28.length ? items28[0].children.find((x) => x.className === 'tx-details') : null;
+  check('set card: member 1 subcard has its own Details dropdown', !!itemDet28, '');
+  check('set card: the member Details carries the per-tx note',
+    !!itemDet28 && elText(itemDet28).indexOf('M1 note') !== -1, itemDet28 ? elText(itemDet28) : 'no details');
+  check('set card: member 1 subcard head has no Fee line (fee lives in Details)',
+    !!items28.length && items28[0].children.filter((x) => x.className !== 'tx-details').every((x) => elText(x).indexOf('Fee ') === -1),
+    items28.length ? items28[0].children.map((x) => x.className).join(',') : 'no items');
+  check('set card: member 1 Details holds the Fee row',
+    detailsContains(setCard28, 'tx-fee'), '');
+  // (0.8.7 fix, round 9) Single history: a set card shows ONE
+  // History — the set's. Member subcards carry NO History of
+  // their own (round 7's member History is reverted); the
+  // member's trail lives on the set's History instead, tagged
+  // with the member's label.
+  const itemHist28 = itemDet28 ? itemDet28.children.find((x) => x.className === 'tx-history') : null;
+  check('set card: member 1 Details carries NO History (single history — the set own)',
+    !itemHist28, itemDet28 ? 'children=' + itemDet28.children.map((x) => x.className).join(',') : 'no details');
+  const itemDet28b = items28.length > 1 ? items28[1].children.find((x) => x.className === 'tx-details') : null;
+  const itemHist28b = itemDet28b ? itemDet28b.children.find((x) => x.className === 'tx-history') : null;
+  check('set card: member 2 Details carries NO History either',
+    !itemHist28b, itemDet28b ? 'children=' + itemDet28b.children.map((x) => x.className).join(',') : 'no details');
+  check('set card: member 1 subcard head carries its BTC amount (0.00140001 BTC, right-aligned in the head)',
+    !!items28.length && elText(items28[0].children[0]).indexOf('0.00140001 BTC') !== -1,
+    items28.length ? elText(items28[0].children[0]) : 'no items');
+  check('set card: member 1 subcard has no separate amount row (the head is followed straight by Details)',
+    !!items28.length && items28[0].children[1] && items28[0].children[1].className === 'tx-details',
+    items28.length ? items28[0].children.map((x) => x.className).join(',') : 'no items');
+  const trig28 = setCard28 ? triggerBoxes(setCard28) : [];
+  check('set card: exactly one verbatim trigger subcard', trig28.length === 1, 'got ' + trig28.length);
+  const trigParts28 = trig28.length ? boxParts(trig28[0]) : null;
+  check('set card: the trigger subcard reads SET DATE',
+    !!trigParts28 && trigParts28.k.indexOf('SET DATE') !== -1, trigParts28 ? trigParts28.k : 'no box');
+  check('set card: the trigger pill reads Not met (future date)',
+    !!trigParts28 && trigParts28.pill === 'Not met', trigParts28 ? trigParts28.pill : 'no box');
+  // (0.8.7 fix, round 8) The set's shared History — the
+  // history of the entire set — is its own collapsible,
+  // collapsed by default like the per-tx History, above the
+  // actions row. It was a plain always-expanded section in
+  // the 0.8.7 base (a v6 mockup choice); Ryan asked for the
+  // collapsible back. (0.8.7 fix, round 9) It is the ONLY
+  // History on the card now: member histories (round 7) are
+  // gone, and the members' trails are backfilled into this
+  // one, tagged with the member's label.
+  const hist28 = setCard28 ? setCard28.children.find((x) => x.className === 'tx-history') : null;
+  check('set card: ONE shared History as its own collapsible', !!hist28, '');
+  check('set card: the shared History is collapsed by default',
+    !!hist28 && hist28.open === false, hist28 ? 'open=' + hist28.open : 'no history');
+  check('set card: the History names the creation',
+    !!hist28 && elText(hist28).indexOf('Set created with 2 transactions') !== -1, hist28 ? elText(hist28) : 'no history');
+  check('set card: the shared History sits above the actions row',
+    !!setCard28 && !!hist28
+    && setCard28.children.findIndex((x) => x === hist28) !== -1
+    && setCard28.children.findIndex((x) => x === hist28) < setCard28.children.findIndex((x) => x.className === 'tx-actions'), '');
+  if (hist28) toggleDetails(hist28, true);
+  check('set card: toggling the shared History open flips it',
+    !!hist28 && hist28.open === true, hist28 ? 'open=' + hist28.open : 'no history');
+  check('set card: the shared History shows the backfilled member trails, tagged',
+    !!hist28 && elText(hist28).indexOf('Dom Set M1') !== -1 && elText(hist28).indexOf('Dom Set M2') !== -1, hist28 ? elText(hist28) : 'no history');
+  check('set card: exactly ONE History at card level (the set own)',
+    !!setCard28 && setCard28.children.filter((x) => x.className === 'tx-history').length === 1, '');
+  check('set card: the standalone tx keeps its own History in its Details',
+    !!cardByTitle('Dom Solo') && detailsContains(cardByTitle('Dom Solo'), 'tx-history'), '');
+  check('set card: no set-level Details dropdown',
+    !!setCard28 && !cardDetails(setCard28), '');
+  check('set card: the actions row has Dry-run / Edit / Delete / Broadcast Now',
+    !!setCard28 && ['Dry-run', 'Edit', 'Delete', 'Broadcast Now'].every((b) => !!cardButton(setCard28, b)), '');
+  const head28 = setCard28 ? setCard28.children.find((x) => x.className === 'tx-head') : null;
+  check('set card: one arm/disarm toggle in the header',
+    !!head28 && head28.children.some((x) => (x.className || '').split(' ').includes('switch')), '');
+  const tick28 = liveTickFn();
+  if (tick28) await tick28();
+  check('set card: the live tick patches in place (same element)',
+    !!setCard28 && cardByTitle('Dom Set') === setCard28, '');
+  if (set28Id) {
+    const delSet28 = await fetch('/api/bitcoin/sets/' + set28Id, { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
+    check('set card: the set deletes', delSet28.status === 200, 'status=' + delSet28.status);
+  }
+  await rerender(appJs);
+  check('set card: the set card is gone after the delete', !cardByTitle('Dom Set'), '');
+  check('set card: the members render standalone again',
+    !!cardByTitle('Dom Set M1') && !!cardByTitle('Dom Set M2'), '');
+  check('set card: the freed members show their own History again (their trails survived the set)',
+    !!cardByTitle('Dom Set M1') && detailsContains(cardByTitle('Dom Set M1'), 'tx-history')
+    && !!cardByTitle('Dom Set M2') && detailsContains(cardByTitle('Dom Set M2'), 'tx-history'), '');
+  for (const id of [setM1Id, setM2Id, solo28Id]) {
+    if (!id) continue;
+    const del28 = await fetch('/api/bitcoin/txs/' + id, { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
+    check('set card: fixture tx removed', del28.status === 200, 'status=' + del28.status);
+  }
+  await rerender(appJs);
+
+  // --- §28b (0.8.7, revised stale rule): a stale member gets a
+  // 'stale' pill on its subcard, and the set stays live for its
+  // non-stale members. A dry-run marks the spent member stale —
+  // no trigger is evaluated, so nothing can fire here.
+  const addStaleM1 = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ txHex: craftHex(0, 440004), label: 'Dom Stale M1', trigger: { type: 'manual', params: {} } }) });
+  check('set stale pill: the spent member adds (FINNEY:0)', addStaleM1.status === 201, 'status=' + addStaleM1.status);
+  const addStaleM1Json = addStaleM1.status === 201 ? await addStaleM1.json() : {};
+  const staleM1Id = (addStaleM1Json.tx || {}).id || null;
+  const addStaleM2 = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ txHex: craftHex(2, 440005), label: 'Dom Stale M2', trigger: { type: 'manual', params: {} } }) });
+  check('set stale pill: the live member adds (FINNEY:2)', addStaleM2.status === 201, 'status=' + addStaleM2.status);
+  const addStaleM2Json = addStaleM2.status === 201 ? await addStaleM2.json() : {};
+  const staleM2Id = (addStaleM2Json.tx || {}).id || null;
+  const addStaleSet = await fetch('/api/bitcoin/sets', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ label: 'Dom Stale Set', txIds: [staleM1Id, staleM2Id], trigger: { type: 'setdate', params: { fireAt: '2999-01-01T00:00:00.000Z' } } }) });
+  check('set stale pill: the set creates', addStaleSet.status === 201, 'status=' + addStaleSet.status);
+  const addStaleSetJson = addStaleSet.status === 201 ? await addStaleSet.json() : {};
+  const staleSet28Id = (addStaleSetJson.set || {}).id || null;
+  const dryStale = await fetch('/api/broadcast/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ setId: staleSet28Id }) });
+  check('set stale pill: the set dry-run runs', dryStale.status === 200, 'status=' + dryStale.status);
+  await rerender(appJs);
+  const staleCard28 = listCards('btc-active-list').find((c) => cardTitle(c) === 'Dom Stale Set');
+  check('set stale pill: the set stays in the Staged Transactions card (not archived)',
+    !!staleCard28, listCards('btc-active-list').map((c) => cardTitle(c)).join(','));
+  check('set stale pill: the set is NOT in the Archived Transactions card',
+    !listCards('btc-archived-list').some((c) => cardTitle(c) === 'Dom Stale Set'), '');
+  check('set stale pill: the set face still reads armed',
+    !!staleCard28 && cardFaceText(staleCard28).indexOf('armed') !== -1, staleCard28 ? cardFaceText(staleCard28) : 'no card');
+  const staleItems28 = staleCard28 ? staleCard28.children.filter((c) => (c.className || '').split(' ').includes('tx-item')) : [];
+  check('set stale pill: two transaction subcards', staleItems28.length === 2, 'got ' + staleItems28.length);
+  const staleHead28 = staleItems28.length ? boxHeadParts(staleItems28[0]) : null;
+  check('set stale pill: the spent member subcard carries a pill saying stale',
+    !!staleHead28 && staleHead28.pill === 'stale', staleHead28 ? staleHead28.pill : 'no head');
+  check('set stale pill: the stale pill is red',
+    !!staleHead28 && staleHead28.pillCls === 'pill bad', staleHead28 ? staleHead28.pillCls : 'no head');
+  const liveHead28 = staleItems28.length > 1 ? boxHeadParts(staleItems28[1]) : null;
+  check('set stale pill: the live member subcard carries no pill',
+    !!liveHead28 && liveHead28.pill === null, liveHead28 ? liveHead28.pill : 'no head');
+  if (staleSet28Id) {
+    const delStaleSet = await fetch('/api/bitcoin/sets/' + staleSet28Id, { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
+    check('set stale pill: the set deletes', delStaleSet.status === 200, 'status=' + delStaleSet.status);
+  }
+  for (const id of [staleM1Id, staleM2Id]) {
+    if (!id) continue;
+    const delStale = await fetch('/api/bitcoin/txs/' + id, { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
+    check('set stale pill: fixture tx removed', delStale.status === 200, 'status=' + delStale.status);
+  }
+  await rerender(appJs);
+
+  // --- §28c (0.8.7 fix, round 3): "+ Add Tx" IS "add trigger
+  // set" — one save creates a COMPLETE INDEPENDENT new trigger
+  // set. ONE label sits above the tx inputs (the set's label —
+  // no per-entry label, no set picker); repeatable entries
+  // (notes + hex each), "+ Add another transaction" appends
+  // one; then the shared triggers / route below. Saving renders
+  // a set card with N blue tx subcards (each holding its own
+  // Details) and M orange trigger subcards. A standalone one-tx
+  // card renders the same shape — a set of one — with its blue
+  // tx subcard and Details inside it, never inside a trigger
+  // subcard. The set modal gained a Transactions section in
+  // round 5 (Edit can add a transaction); the modal shading
+  // stays as rounds 1–2 built it.
+  // The one label's element is reached through
+  // getElementById, not els[...] — the app only touches it in
+  // the save/reset paths, so els['btc-set-label'] is undefined
+  // until something calls getElementById on it (reading .value
+  // off undefined throws and kills the whole DOM run).
+  const setLabelEl28c = () => document.getElementById('btc-set-label');
+  check('add trigger set: the Add modal has ONE label above the tx inputs (static HTML)',
+    idx.indexOf('id="btc-set-label"') !== -1 && idx.indexOf('id="btc-tx-list"') !== -1
+    && idx.indexOf('id="btc-set-label"') < idx.indexOf('id="btc-tx-list"'), '');
+  check('add trigger set: the Add modal has NO set picker any more (static HTML)',
+    idx.indexOf('id="btc-set"') === -1, '');
+  check('add trigger set: the Add modal has NO per-entry label any more (static HTML)',
+    idx.indexOf('add-tx-label') === -1, '');
+  check('add trigger set: the Add modal has a repeatable entry list (static HTML)',
+    idx.indexOf('id="btc-tx-list"') !== -1 && idx.indexOf('id="btn-btc-add-entry"') !== -1
+    && idx.indexOf('id="btc-hex"') !== -1, '');
+  check('add trigger set: the set modal has no transaction checklist any more (grouping removed Nov 21 — membership is fixed at creation)',
+    idx.indexOf('set-txs-section') === -1 && idx.indexOf('set-txs-list') === -1, '');
+  check('add trigger set: the set modal keeps its orange Triggers section (static HTML)',
+    idx.indexOf('id="set-triggers-section" class="tx-trigger"') !== -1, '');
+  check('add trigger set: the set modal has a Transactions section with an Add button (round 5 — Edit can add a transaction)',
+    idx.indexOf('id="set-new-txs-section"') !== -1 && idx.indexOf('id="btn-set-add-tx"') !== -1, '');
+  check('add trigger set: the import button lives inside a transaction entry, not as a global button (round 5)',
+    idx.indexOf('id="btn-btc-import-file"') !== -1
+    && idx.indexOf('id="btn-btc-import-file"') > idx.indexOf('id="btc-tx-list"')
+    && idx.indexOf('id="btn-btc-import-file"') < idx.indexOf('id="btn-btc-add-entry"'), '');
+  check('add trigger set: the Add label has breathing room above the transaction list (CSS)',
+    css.indexOf('#btc-tx-list { margin-top: 12px; }') !== -1, '');
+  check('add trigger set: the edit modal is set-shaped too — Transactions blue, Triggers orange (static HTML)',
+    idx.indexOf('id="edit-txs-section" class="tx-trigger tx-item"') !== -1
+    && idx.indexOf('id="edit-triggers-section" class="tx-trigger"') !== -1, '');
+  check('add trigger set: no standalone accent class left in the CSS (blue belongs to the tx subcard)',
+    css.indexOf('.tx-card.tx-single') === -1 && css.indexOf('.tx-trigger.tx-item { border-left-color: #60a5fa; }') !== -1, '');
+  // The Add form's rule list is whatever §25 left (up to three
+  // panels) — narrow it to the one default check-in rule, so
+  // the new txs get the 35-day check-in trigger (dormant in
+  // the set) and no confirm can appear (0 days elapsed).
+  while (rulePanels('btc').length > 1) panelRemoveBtn(rulePanels('btc')[rulePanels('btc').length - 1]).click();
+  selectAddTrigger('checkin');
+  check('add trigger set: the Add form is back to one check-in rule', rulePanels('btc').length === 1
+    && panelTypeSelect(rulePanels('btc')[0]).value === 'checkin', 'panels=' + rulePanels('btc').length);
+  els['btn-btc-add-open'].click();
+  check('add trigger set: the Add popup opens', els['add-modal'] && els['add-modal'].classList.contains('open'), '');
+  check('add trigger set: the one label starts blank', setLabelEl28c().value === '', 'value=' + setLabelEl28c().value);
+  // The static first entry is not modelled as a child in the
+  // shim — its fields are the standalone btc-* els — while
+  // JS-built entries hang off #btc-tx-list. Appending twice
+  // then removing one proves the repeatable entries work.
+  const entryField28c = (entry, cls) => {
+    let found = null;
+    const walk = (el) => { (el.children || []).forEach((c) => { if ((c.className || '').split(' ').indexOf(cls) !== -1) found = c; walk(c); }); };
+    walk(entry);
+    return found;
+  };
+  const entryTitle28c = (entry) => entry.children[0] && entry.children[0].children[0] && entry.children[0].children[0].textContent;
+  const entryRemove28c = (entry) => entry.children[0] && entry.children[0].children[1];
+  els['btn-btc-add-entry'].click();
+  els['btn-btc-add-entry'].click();
+  check('add trigger set: "+ Add another" appends entries (two JS entries)',
+    els['btc-tx-list'].children.length === 2, 'children=' + els['btc-tx-list'].children.length);
+  check('add trigger set: the appended entries are titled Transaction 2 and 3',
+    entryTitle28c(els['btc-tx-list'].children[0]) === 'Transaction 2'
+    && entryTitle28c(els['btc-tx-list'].children[1]) === 'Transaction 3', '');
+  entryRemove28c(els['btc-tx-list'].children[1]).click();
+  check('add trigger set: removing an entry drops it and renumbers',
+    els['btc-tx-list'].children.length === 1
+    && entryTitle28c(els['btc-tx-list'].children[0]) === 'Transaction 2', 'children=' + els['btc-tx-list'].children.length);
+  check('add trigger set: each appended entry has its own import button (round 5)',
+    !!entryField28c(els['btc-tx-list'].children[0], 'btc-tx-import'), '');
+  setLabelEl28c().value = 'Dom Add Set';
+  els['btc-notes'].value = 'M1 note';
+  els['btc-hex'].value = craftHex(1, 450001);
+  const entry228c = els['btc-tx-list'].children[0];
+  entryField28c(entry228c, 'add-tx-notes').value = 'M2 note';
+  entryField28c(entry228c, 'add-tx-hex').value = craftHex(2, 450002);
+  els['btn-btc-add'].click();
+  await new Promise((r) => setTimeout(r, 900));
+  check('add trigger set: the popup closes on save',
+    els['add-modal'] && !els['add-modal'].classList.contains('open'), '');
+  check('add trigger set: the confirmation names the new set and both transactions',
+    els['btc-all-msg'] && els['btc-all-msg'].textContent.indexOf('Trigger set "Dom Add Set" created with 2 transactions and armed') !== -1,
+    els['btc-all-msg'] && els['btc-all-msg'].textContent);
+  check('add trigger set: the form resets to one blank entry and a blank label',
+    els['btc-hex'].value === '' && els['btc-tx-list'].children.length === 0 && setLabelEl28c().value === '',
+    'hex=' + (els['btc-hex'] && els['btc-hex'].value) + ' children=' + els['btc-tx-list'].children.length + ' label=' + setLabelEl28c().value);
+  await rerender(appJs);
+  const addCard28c = listCards('btc-active-list').find((c) => cardTitle(c) === 'Dom Add Set');
+  check('add trigger set: the set renders in the Staged Transactions card', !!addCard28c,
+    listCards('btc-active-list').map((c) => cardTitle(c)).join(','));
+  check('add trigger set: its face shows the summed total (0.00900003 BTC)',
+    !!addCard28c && cardFaceText(addCard28c).indexOf('0.00900003 BTC') !== -1,
+    addCard28c ? cardFaceText(addCard28c) : 'no card');
+  const addItems28c = addCard28c ? addCard28c.children.filter((c) => (c.className || '').split(' ').includes('tx-item')) : [];
+  check('add trigger set: two blue-edged transaction subcards', addItems28c.length === 2, 'got ' + addItems28c.length);
+  check('add trigger set: each tx subcard holds its own Details',
+    addItems28c.length === 2 && addItems28c.every((it) => !!it.children.find((x) => x.className === 'tx-details')), '');
+  check('add trigger set: one orange trigger subcard below them, holding no Details',
+    !!addCard28c && triggerBoxes(addCard28c).length === 1 && !detailsInTriggerBox(addCard28c),
+    addCard28c ? 'boxes=' + triggerBoxes(addCard28c).length : 'no card');
+  // (0.8.7 fix, round 5) The set modal's Edit can add a
+  // transaction: its Transactions section lists the members
+  // and "+ Add transaction" appends a blank entry (numbered
+  // after the members) with its own import button. Cancel
+  // closes without saving anything.
+  const editBtn28c = addCard28c ? cardButton(addCard28c, 'Edit') : null;
+  if (editBtn28c) editBtn28c.click();
+  check('add trigger set: Edit opens the set modal',
+    els['set-modal'] && els['set-modal'].classList.contains('open'), '');
+  check('add trigger set: the set modal lists the two members',
+    els['set-members-list'] && els['set-members-list'].children.length === 2,
+    els['set-members-list'] ? 'children=' + els['set-members-list'].children.length : 'no list');
+  els['btn-set-add-tx'].click();
+  check('add trigger set: "+ Add transaction" appends a blank entry in the set modal',
+    els['set-new-txs-list'] && els['set-new-txs-list'].children.length === 1,
+    els['set-new-txs-list'] ? 'children=' + els['set-new-txs-list'].children.length : 'no list');
+  check('add trigger set: the set-modal entry is numbered Transaction 3 (after the two members)',
+    els['set-new-txs-list'] && els['set-new-txs-list'].children.length === 1
+    && entryTitle28c(els['set-new-txs-list'].children[0]) === 'Transaction 3', '');
+  check('add trigger set: the set-modal entry has its own import button',
+    els['set-new-txs-list'] && els['set-new-txs-list'].children.length === 1
+    && !!entryField28c(els['set-new-txs-list'].children[0], 'set-new-tx-import'), '');
+  els['btn-set-cancel'].click();
+  check('add trigger set: cancelling the set edit closes the modal',
+    els['set-modal'] && !els['set-modal'].classList.contains('open'), '');
+  const st28c = await (await fetch('/api/state')).json();
+  const set28c = (st28c.bitcoin.sets || []).find((x) => x.label === 'Dom Add Set');
+  const mem28c = set28c ? (st28c.bitcoin.txs || []).filter((t) => set28c.txIds.indexOf(t.id) !== -1) : [];
+  check('add trigger set: the set serves both members',
+    !!set28c && set28c.txIds.length === 2 && mem28c.length === 2, set28c ? set28c.txIds.join(',') : 'no set');
+  check('add trigger set: the new txs carry the shared 35-day check-in trigger',
+    mem28c.length === 2 && mem28c.every((t) => t.trigger
+      && t.trigger.type === 'checkin' && t.trigger.params && t.trigger.params.thresholdDays === 35),
+    JSON.stringify(mem28c.map((t) => t.trigger)));
+  // The members carry no label of their own — the set's label
+  // is the card's label.
+  check('add trigger set: the members carry no per-tx label',
+    mem28c.length === 2 && mem28c.every((t) => !t.label), JSON.stringify(mem28c.map((t) => t.label)));
+  const m2tx28c = mem28c.find((t) => (t.notes || '') === 'M2 note');
+  const m2prefix28c = m2tx28c ? m2tx28c.txid.slice(0, 16) : null;
+  if (set28c) {
+    const delAddSet = await fetch('/api/bitcoin/sets/' + set28c.id, { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
+    check('add trigger set: the set deletes', delAddSet.status === 200, 'status=' + delAddSet.status);
+  }
+  await rerender(appJs);
+  // A freed member is a set of one: the same card shape, with
+  // its own blue tx subcard (Details inside it) above its
+  // orange trigger subcard — no .tx-single, no Details inside
+  // a trigger box.
+  const solo28c = m2prefix28c ? listCards('btc-active-list').find((c) => cardFaceText(c).indexOf(m2prefix28c) !== -1) : null;
+  check('add trigger set: the freed member renders standalone again', !!solo28c, '');
+  check('add trigger set: the standalone card is titled "Untitled transaction" (no per-tx label)',
+    !!solo28c && cardTitle(solo28c) === 'Untitled transaction', solo28c ? cardTitle(solo28c) : 'no card');
+  check('add trigger set: a standalone card carries NO .tx-single class any more',
+    !!solo28c && !(solo28c.className || '').split(' ').includes('tx-single'), solo28c ? solo28c.className : 'no card');
+  const soloItems28c = solo28c ? solo28c.children.filter((c) => (c.className || '').split(' ').includes('tx-item')) : [];
+  check('add trigger set: the standalone card has ONE blue tx subcard', soloItems28c.length === 1, 'got ' + soloItems28c.length);
+  check('add trigger set: the standalone Details lives inside its tx subcard',
+    soloItems28c.length === 1 && !!txItemDetails(solo28c), '');
+  check('add trigger set: the standalone trigger subcard holds no Details',
+    !!solo28c && triggerBoxes(solo28c).length === 1 && !detailsInTriggerBox(solo28c), '');
+  // Editing the standalone tx opens the set-shaped edit: its
+  // own fields (notes, hex) in the Transactions section, its
+  // own rules in the Triggers section.
+  const soloEdit28c = solo28c && cardButton(solo28c, 'Edit');
+  check('add trigger set: the standalone card has an Edit button', !!soloEdit28c, '');
+  if (soloEdit28c) soloEdit28c.click();
+  check('add trigger set: opening Edit on the standalone tx opens the modal',
+    els['edit-modal'] && els['edit-modal'].classList.contains('open'), '');
+  check('add trigger set: the edit form shows the tx\'s own notes',
+    els['edit-notes'] && els['edit-notes'].value === 'M2 note', els['edit-notes'] && els['edit-notes'].value);
+  check('add trigger set: the edit form shows the tx\'s own check-in rule (35 days)',
+    !!panelTypeSelect(rulePanels('edit')[0]) && panelTypeSelect(rulePanels('edit')[0]).value === 'checkin'
+    && !!findById(rulePanels('edit')[0], 'edit-rule-0-threshold') && findById(rulePanels('edit')[0], 'edit-rule-0-threshold').value === '35',
+    'trigger=' + (panelTypeSelect(rulePanels('edit')[0]) && panelTypeSelect(rulePanels('edit')[0]).value));
+  els['btn-edit-cancel'].click();
+  check('add trigger set: cancelling the edit closes the modal',
+    els['edit-modal'] && !els['edit-modal'].classList.contains('open'), '');
+
+  // --- §28d (0.8.7 fix, round 6): one construct — the
+  // single-transaction edit can add transactions (promoting
+  // the card to a set), and both edit modals can remove
+  // members, never the last one. Same Transactions section
+  // (member list + add + remove + import) above the same
+  // Triggers section, same wording — no "single" vs "set".
+  check('one construct: the edit modal is titled "Edit trigger set" (static HTML)',
+    idx.indexOf('id="edit-form-title">Edit trigger set<') !== -1, '');
+  check('one construct: no "Edit transaction" wording left in the page (static HTML)',
+    idx.indexOf('Edit transaction') === -1, '');
+  check('one construct: the edit modal has a member list, a new-entry list and an Add button (static HTML)',
+    idx.indexOf('id="edit-members-list"') !== -1 && idx.indexOf('id="edit-new-txs-list"') !== -1
+    && idx.indexOf('id="btn-edit-add-tx"') !== -1, '');
+  check('one construct: the edit modal\'s import button lives inside the member entry (static HTML)',
+    idx.indexOf('id="edit-members-list"') < idx.indexOf('id="btn-edit-import-file"')
+    && idx.indexOf('id="btn-edit-import-file"') < idx.indexOf('id="edit-new-txs-list"'), '');
+  check('one construct: the edit modal\'s rules cap note says "per trigger set" (static HTML)',
+    idx.indexOf('id="edit-rules-cap-note" class="muted" style="display:none">Maximum 5 rules per trigger set.') !== -1, '');
+  check('one construct: the set modal\'s save button says "Save changes" (static HTML)',
+    idx.indexOf('id="btn-set-save" class="primary">Save changes<') !== -1, '');
+  const solo28d = listCards('btc-active-list').find((c) => cardTitle(c) === 'Untitled transaction');
+  check('one construct: the standalone card is still there to edit', !!solo28d, '');
+  const soloEdit28d = solo28d && cardButton(solo28d, 'Edit');
+  if (soloEdit28d) soloEdit28d.click();
+  check('one construct: opening Edit on the standalone tx opens the modal',
+    els['edit-modal'] && els['edit-modal'].classList.contains('open'), '');
+  check('one construct: the edit modal is titled "Edit trigger set"',
+    els['edit-form-title'] && els['edit-form-title'].textContent === 'Edit trigger set',
+    els['edit-form-title'] && els['edit-form-title'].textContent);
+  check('one construct: the original transaction\'s remove is disabled while it is the only member',
+    els['btn-edit-remove-tx'] && els['btn-edit-remove-tx'].disabled === true, '');
+  els['btn-edit-add-tx'].click();
+  check('one construct: "+ Add transaction" appends a blank entry in the edit modal',
+    els['edit-new-txs-list'] && els['edit-new-txs-list'].children.length === 1,
+    els['edit-new-txs-list'] ? 'children=' + els['edit-new-txs-list'].children.length : 'no list');
+  check('one construct: the edit-modal entry is numbered Transaction 2 (after the original)',
+    els['edit-new-txs-list'] && els['edit-new-txs-list'].children.length === 1
+    && entryTitle28c(els['edit-new-txs-list'].children[0]) === 'Transaction 2', '');
+  check('one construct: the edit-modal entry has its own import button',
+    els['edit-new-txs-list'] && els['edit-new-txs-list'].children.length === 1
+    && !!entryField28c(els['edit-new-txs-list'].children[0], 'edit-new-tx-import'), '');
+  // Removing a blank entry is always free.
+  entryRemove28c(els['edit-new-txs-list'].children[0]).click();
+  check('one construct: removing a blank entry drops it',
+    els['edit-new-txs-list'] && els['edit-new-txs-list'].children.length === 0, '');
+  els['btn-edit-add-tx'].click();
+  const entry28d = els['edit-new-txs-list'].children[0];
+  entryField28c(entry28d, 'edit-new-tx-notes').value = 'M3 note';
+  entryField28c(entry28d, 'edit-new-tx-hex').value = craftHex(5, 140001);
+  entryField28c(entry28d, 'edit-new-tx-hex').fire('input');
+  check('one construct: once a second transaction exists, the original\'s remove is enabled',
+    els['btn-edit-remove-tx'] && els['btn-edit-remove-tx'].disabled === false, '');
+  els['btn-edit-save'].click();
+  await new Promise((r) => setTimeout(r, 900));
+  check('one construct: the popup closes on save',
+    els['edit-modal'] && !els['edit-modal'].classList.contains('open'), '');
+  check('one construct: the confirmation says the card is now a trigger set',
+    els['btc-msg'] && els['btc-msg'].textContent.indexOf('this is now a trigger set') !== -1,
+    els['btc-msg'] && els['btc-msg'].textContent);
+  const st28d = await (await fetch('/api/state')).json();
+  const m2tx28d = (st28d.bitcoin.txs || []).find((t) => (t.notes || '') === 'M2 note');
+  const m3tx28d = (st28d.bitcoin.txs || []).find((t) => (t.notes || '') === 'M3 note');
+  const set28d = (st28d.bitcoin.sets || []).find((x) => x.txIds && m2tx28d && x.txIds.indexOf(m2tx28d.id) !== -1);
+  check('one construct: saving promoted the card to a set holding both transactions',
+    !!set28d && !!m2tx28d && !!m3tx28d && set28d.txIds.length === 2
+    && set28d.txIds.indexOf(m3tx28d.id) !== -1,
+    set28d ? set28d.txIds.join(',') : 'no set');
+  check('one construct: the new transaction carries the shared 35-day check-in trigger',
+    !!m3tx28d && m3tx28d.trigger && m3tx28d.trigger.type === 'checkin'
+    && m3tx28d.trigger.params && m3tx28d.trigger.params.thresholdDays === 35,
+    m3tx28d ? JSON.stringify(m3tx28d.trigger) : 'no tx');
+  check('one construct: the original transaction keeps its own trigger as the dormant fallback',
+    !!m2tx28d && m2tx28d.trigger && m2tx28d.trigger.type === 'checkin'
+    && m2tx28d.trigger.params && m2tx28d.trigger.params.thresholdDays === 35,
+    m2tx28d ? JSON.stringify(m2tx28d.trigger) : 'no tx');
+  await rerender(appJs);
+  const promo28d = set28d ? listCards('btc-active-list').find((c) => cardTitle(c) === 'Untitled set') : null;
+  check('one construct: the promoted card renders as a set card', !!promo28d, '');
+  check('one construct: the promoted card shows the summed total (0.00590003 BTC)',
+    !!promo28d && cardFaceText(promo28d).indexOf('0.00590003 BTC') !== -1,
+    promo28d ? cardFaceText(promo28d) : 'no card');
+  const promoItems28d = promo28d ? promo28d.children.filter((c) => (c.className || '').split(' ').includes('tx-item')) : [];
+  check('one construct: the promoted card has two blue tx subcards', promoItems28d.length === 2, 'got ' + promoItems28d.length);
+  check('one construct: the promoted card says "2 transactions · 1 shared trigger"',
+    !!promo28d && cardFaceText(promo28d).indexOf('2 transactions · 1 shared trigger') !== -1,
+    promo28d ? cardFaceText(promo28d) : 'no card');
+  // Removing a member from the set: the set keeps the rest,
+  // the removed transaction returns to standalone.
+  const promoEdit28d = promo28d && cardButton(promo28d, 'Edit');
+  if (promoEdit28d) promoEdit28d.click();
+  check('one construct: Edit opens the set modal on the promoted card',
+    els['set-modal'] && els['set-modal'].classList.contains('open'), '');
+  check('one construct: the set modal lists the two members',
+    els['set-members-list'] && els['set-members-list'].children.length === 2,
+    els['set-members-list'] ? 'children=' + els['set-members-list'].children.length : 'no list');
+  const memberRemove28d = (line) => {
+    let found = null;
+    (line.children || []).forEach((c) => { if ((c.className || '').split(' ').indexOf('set-member-remove') !== -1) found = c; });
+    return found;
+  };
+  const firstLine28d = els['set-members-list'].children[0];
+  if (memberRemove28d(firstLine28d)) memberRemove28d(firstLine28d).click();
+  check('one construct: removing a member drops its line and renumbers',
+    els['set-members-list'] && els['set-members-list'].children.length === 1,
+    els['set-members-list'] ? 'children=' + els['set-members-list'].children.length : 'no list');
+  els['btn-set-save'].click();
+  await new Promise((r) => setTimeout(r, 900));
+  check('one construct: the set edit closes on save',
+    els['set-modal'] && !els['set-modal'].classList.contains('open'), '');
+  check('one construct: the confirmation names the removed transaction',
+    els['btc-msg'] && els['btc-msg'].textContent.indexOf('Removed 1 transaction') !== -1,
+    els['btc-msg'] && els['btc-msg'].textContent);
+  const st28d2 = await (await fetch('/api/state')).json();
+  const set28d2 = set28d ? (st28d2.bitcoin.sets || []).find((x) => x.id === set28d.id) : null;
+  const m2after28d = (st28d2.bitcoin.txs || []).find((t) => (t.notes || '') === 'M2 note');
+  check('one construct: the set keeps one member after the removal',
+    !!set28d2 && set28d2.txIds.length === 1 && set28d2.txIds[0] === (m3tx28d && m3tx28d.id),
+    set28d2 ? set28d2.txIds.join(',') : 'no set');
+  check('one construct: the removed transaction is standalone again (in no set)',
+    !!m2after28d && !(st28d2.bitcoin.sets || []).some((x) => (x.txIds || []).indexOf(m2after28d.id) !== -1), '');
+  await rerender(appJs);
+  // The last-member guard: with one member left, its remove
+  // is disabled, and clicking it anyway leaves the set
+  // untouched with a message.
+  const one28d = listCards('btc-active-list').find((c) => cardTitle(c) === 'Untitled set');
+  const oneEdit28d = one28d && cardButton(one28d, 'Edit');
+  if (oneEdit28d) oneEdit28d.click();
+  check('one construct: the one-member set modal lists one member',
+    els['set-members-list'] && els['set-members-list'].children.length === 1, '');
+  const lastLine28d = els['set-members-list'] && els['set-members-list'].children[0];
+  const lastRm28d = lastLine28d ? memberRemove28d(lastLine28d) : null;
+  check('one construct: the last member\'s remove is disabled',
+    !!lastRm28d && lastRm28d.disabled === true, '');
+  if (lastRm28d) lastRm28d.click();
+  check('one construct: clicking the last member\'s remove is refused with a message',
+    els['set-msg'] && els['set-msg'].textContent.indexOf('last transaction') !== -1
+    && els['set-members-list'].children.length === 1,
+    els['set-msg'] && els['set-msg'].textContent);
+  els['btn-set-cancel'].click();
+  check('one construct: cancelling the set edit closes the modal',
+    els['set-modal'] && !els['set-modal'].classList.contains('open'), '');
+  const st28c2 = await (await fetch('/api/state')).json();
+  const gone28c = (st28c2.bitcoin.txs || []).filter((t) => (t.notes || '') === 'M1 note' || (t.notes || '') === 'M2 note' || (t.notes || '') === 'M3 note');
+  // (§28d) The promoted set still holds M3 — delete the set
+  // first (its members return to standalone), then the txs.
+  for (const s of (st28c2.bitcoin.sets || [])) {
+    if ((s.txIds || []).some((id) => gone28c.some((t) => t.id === id))) {
+      const delSet28c = await fetch('/api/bitcoin/sets/' + s.id, { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
+      check('add trigger set: fixture set removed', delSet28c.status === 200, 'status=' + delSet28c.status);
+    }
+  }
+  for (const t of gone28c) {
+    const del28c = await fetch('/api/bitcoin/txs/' + t.id, { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
+    check('add trigger set: fixture tx removed', del28c.status === 200, 'status=' + del28c.status);
+  }
+  await rerender(appJs);
+
+  // --- §28e (0.8.7 fix, round 10): release readiness, one
+  // card per trigger set — Ryan's case. The members were
+  // created inside the set, so they carry NO label of their
+  // own: before this fix the second one showed up on the
+  // Dashboard as "Untitled transaction" with an Unknown pill
+  // from its frozen triggerState, and the set itself got no
+  // row at all. The cadence is still 10s here (the restore
+  // block below puts it back to 60), so an 11s sleep opens
+  // the tick's server-refresh gate.
+  check('readiness set: no "Untitled transaction" row before the fixtures',
+    !(readinessBlocks() || []).some((b) => b.label === 'Untitled transaction'),
+    (readinessBlocks() || []).map((b) => b.label).join(','));
+  const addRdyM1 = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ txHex: craftHex(4, 440006), trigger: { type: 'manual', params: {} } }) });
+  check('readiness set: label-less member 1 adds', addRdyM1.status === 201, 'status=' + addRdyM1.status);
+  const addRdyM1Json = addRdyM1.status === 201 ? await addRdyM1.json() : {};
+  const rdyM1Id = (addRdyM1Json.tx || {}).id || null;
+  const addRdyM2 = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ txHex: craftHex(5, 440007), trigger: { type: 'manual', params: {} } }) });
+  check('readiness set: label-less member 2 adds', addRdyM2.status === 201, 'status=' + addRdyM2.status);
+  const addRdyM2Json = addRdyM2.status === 201 ? await addRdyM2.json() : {};
+  const rdyM2Id = (addRdyM2Json.tx || {}).id || null;
+  const addRdySet = await fetch('/api/bitcoin/sets', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ label: 'Dom Ready Set', txIds: [rdyM1Id, rdyM2Id], trigger: { type: 'setdate', params: { fireAt: '2999-01-01T00:00:00.000Z' } } }) });
+  check('readiness set: the set creates', addRdySet.status === 201, 'status=' + addRdySet.status);
+  const addRdySetJson = addRdySet.status === 201 ? await addRdySet.json() : {};
+  const rdySetId = (addRdySetJson.set || {}).id || null;
+  await rerender(appJs);
+  const rbReady = readinessBlock('Dom Ready Set');
+  check('readiness set: ONE row headed by the set label', !!rbReady, (readinessBlocks() || []).map((b) => b.label).join(','));
+  check('readiness set: the row pill reads armed (the set card pill)',
+    !!rbReady && rbReady.status === 'armed', rbReady ? rbReady.status : 'no block');
+  check('readiness set: the row state line is the set condition ("Fires on Dec 31, 2998, 7:00 PM")',
+    !!rbReady && rbReady.state.indexOf('Fires on Dec 31, 2998, 7:00 PM') !== -1, rbReady ? rbReady.state : 'no block');
+  check('readiness set: the row carries NO fee pill',
+    !!rbReady && rbReady.fee === '', rbReady ? 'fee=' + rbReady.fee : 'no block');
+  check('readiness set: NO "Untitled transaction" row for the label-less members',
+    !(readinessBlocks() || []).some((b) => b.label === 'Untitled transaction'),
+    (readinessBlocks() || []).map((b) => b.label).join(','));
+  // The live tick patches the set row's pill in place: disarm
+  // the set behind an open modal, so the changed signature
+  // takes the values-only patch path instead of a re-render.
+  const rdyRowEl = (els['readiness-txs'].children || []).find((c) => c.dataset && c.dataset.setId === rdySetId);
+  check('readiness set: the set row element exists', !!rdyRowEl, '');
+  els['btn-btc-add-pill'].click();
+  check('readiness set: the Add modal opens (structural changes defer to the patch)',
+    els['add-modal'] && els['add-modal'].classList.contains('open'),
+    els['add-modal'] ? 'open=' + els['add-modal'].classList.contains('open') : 'no add-modal');
+  const disRdy = await fetch('/api/bitcoin/sets/' + rdySetId, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: false }) });
+  check('readiness set: the set disarms', disRdy.status === 200, 'status=' + disRdy.status);
+  await sleep26(11000);
+  const tickRdy = liveTickFn();
+  check('readiness set: the app registers a 1-second live timer', !!tickRdy, '');
+  if (tickRdy) await tickRdy();
+  check('readiness set: the tick patches the set row in place (same element, no rebuild)',
+    !!rdyRowEl && (els['readiness-txs'].children || []).indexOf(rdyRowEl) !== -1, '');
+  const rbReadyAfter = readinessBlock('Dom Ready Set');
+  check('readiness set: after the tick the set row pill reads unarmed',
+    !!rbReadyAfter && rbReadyAfter.status === 'unarmed', rbReadyAfter ? rbReadyAfter.status : 'no block');
+  check('readiness set: still exactly ONE row for the set after the tick (no member row resurrected)',
+    (readinessBlocks() || []).filter((b) => b.label === 'Dom Ready Set').length === 1
+    && !(readinessBlocks() || []).some((b) => b.label === 'Untitled transaction'),
+    (readinessBlocks() || []).map((b) => b.label).join(','));
+  els['add-modal-x'].click();
+  check('readiness set: the Add modal closes',
+    els['add-modal'] && !els['add-modal'].classList.contains('open'),
+    els['add-modal'] ? 'open=' + els['add-modal'].classList.contains('open') : 'no add-modal');
+  if (rdySetId) {
+    const delRdySet = await fetch('/api/bitcoin/sets/' + rdySetId, { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
+    check('readiness set: the set deletes', delRdySet.status === 200, 'status=' + delRdySet.status);
+  }
+  for (const id of [rdyM1Id, rdyM2Id]) {
+    if (!id) continue;
+    const delRdy = await fetch('/api/bitcoin/txs/' + id, { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
+    check('readiness set: fixture tx removed', delRdy.status === 200, 'status=' + delRdy.status);
+  }
+  await rerender(appJs);
+  check('readiness set: the set row is gone after the delete', !readinessBlock('Dom Ready Set'), '');
+
+  // --- §28f (0.8.7 fix, round 12): release readiness lists
+  // each member tx under its set's main label as "Tx N —
+  // <first 16 of the txid>… <amount> BTC", amount right-aligned,
+  // pill only on the set header. Two label-less members with
+  // distinct amounts (0.001 / 0.0025 BTC), grouped into 'Dom
+  // Ready Members', plus a standalone 'Dom Ready Solo' (0.0005
+  // BTC) that keeps its own single row. The cadence is still
+  // 10s here (the restore block below puts it back to 60), so
+  // an 11s sleep opens the tick's server-refresh gate, as in
+  // §28e.
+  const addRdyM1f = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ txHex: craftHex(6, 100000), trigger: { type: 'manual', params: {} } }) });
+  check('readiness members: label-less member 1 adds', addRdyM1f.status === 201, 'status=' + addRdyM1f.status);
+  const addRdyM1fJson = addRdyM1f.status === 201 ? await addRdyM1f.json() : {};
+  const rdyM1fId = (addRdyM1fJson.tx || {}).id || null;
+  const addRdyM2f = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ txHex: craftHex(7, 250000), trigger: { type: 'manual', params: {} } }) });
+  check('readiness members: label-less member 2 adds', addRdyM2f.status === 201, 'status=' + addRdyM2f.status);
+  const addRdyM2fJson = addRdyM2f.status === 201 ? await addRdyM2f.json() : {};
+  const rdyM2fId = (addRdyM2fJson.tx || {}).id || null;
+  // The members' txids, from the state — the expected member
+  // lines are built from these, not from a re-derived hash.
+  const stRdyF = await (await fetch('/api/state')).json();
+  const rdyTx1f = (stRdyF.bitcoin.txs || []).find((t) => t.id === rdyM1fId) || {};
+  const rdyTx2f = (stRdyF.bitcoin.txs || []).find((t) => t.id === rdyM2fId) || {};
+  const rdyShort1 = (rdyTx1f.txid || '').slice(0, 16);
+  const rdyShort2 = (rdyTx2f.txid || '').slice(0, 16);
+  check('readiness members: member 1 has a txid to shorten', rdyShort1.length === 16, rdyShort1);
+  check('readiness members: member 2 has a txid to shorten', rdyShort2.length === 16, rdyShort2);
+  const addRdySolo = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ txHex: craftHex(8, 50000), label: 'Dom Ready Solo', trigger: { type: 'manual', params: {} } }) });
+  check('readiness members: the standalone tx adds', addRdySolo.status === 201, 'status=' + addRdySolo.status);
+  const addRdySoloJson = addRdySolo.status === 201 ? await addRdySolo.json() : {};
+  const rdySoloId = (addRdySoloJson.tx || {}).id || null;
+  const addRdySetF = await fetch('/api/bitcoin/sets', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ label: 'Dom Ready Members', txIds: [rdyM1fId, rdyM2fId], trigger: { type: 'setdate', params: { fireAt: '2999-01-01T00:00:00.000Z' } } }) });
+  check('readiness members: the set creates', addRdySetF.status === 201, 'status=' + addRdySetF.status);
+  const addRdySetFJson = addRdySetF.status === 201 ? await addRdySetF.json() : {};
+  const rdySetFId = (addRdySetFJson.set || {}).id || null;
+  await rerender(appJs);
+  const rbMembers = readinessBlock('Dom Ready Members');
+  check('readiness members: ONE header headed by the set label', !!rbMembers, (readinessBlocks() || []).map((b) => b.label).join(','));
+  check('readiness members: the header pill reads armed',
+    !!rbMembers && rbMembers.status === 'armed', rbMembers ? rbMembers.status : 'no block');
+  check('readiness members: the header state line is the set condition ("Fires on Dec 31, 2998, 7:00 PM")',
+    !!rbMembers && rbMembers.state.indexOf('Fires on Dec 31, 2998, 7:00 PM') !== -1, rbMembers ? rbMembers.state : 'no block');
+  check('readiness members: the header carries NO fee pill',
+    !!rbMembers && rbMembers.fee === '', rbMembers ? 'fee=' + rbMembers.fee : 'no block');
+  const rdyLines = readinessMembers('Dom Ready Members');
+  check('readiness members: exactly 2 member lines under the header',
+    !!rdyLines && rdyLines.length === 2, rdyLines ? 'got ' + rdyLines.length : 'no lines');
+  check('readiness members: member 1 line reads "Tx 1 — <first 16 of txid>…"',
+    !!rdyLines && rdyLines[0].left === 'Tx 1 \u2014 ' + rdyShort1 + '\u2026', rdyLines ? rdyLines[0].left : 'no lines');
+  check('readiness members: member 1 line reads its amount (0.001 BTC)',
+    !!rdyLines && rdyLines[0].amt === '0.001 BTC', rdyLines ? rdyLines[0].amt : 'no lines');
+  check('readiness members: member 2 line reads "Tx 2 — <first 16 of txid>…"',
+    !!rdyLines && rdyLines[1].left === 'Tx 2 \u2014 ' + rdyShort2 + '\u2026', rdyLines ? rdyLines[1].left : 'no lines');
+  check('readiness members: member 2 line reads its amount (0.0025 BTC)',
+    !!rdyLines && rdyLines[1].amt === '0.0025 BTC', rdyLines ? rdyLines[1].amt : 'no lines');
+  check('readiness members: member lines are label span + amount span (exactly 2 children each)',
+    !!rdyLines && rdyLines.every((l) => l.kids === 2), rdyLines ? rdyLines.map((l) => l.kids).join(',') : 'no lines');
+  check('readiness members: member lines carry NO pill at all',
+    !!rdyLines && rdyLines.every((l) => !l.hasPill), rdyLines ? rdyLines.map((l) => l.hasPill).join(',') : 'no lines');
+  check('readiness members: the left span is the label class, the right span the amount class',
+    !!rdyLines && rdyLines.every((l) => l.leftCls === 'readiness-tx-member-label' && l.amtCls === 'readiness-tx-member-amt'),
+    rdyLines ? rdyLines.map((l) => l.leftCls + '/' + l.amtCls).join(',') : 'no lines');
+  // Right alignment is a CSS fact, not a DOM one: the amount
+  // span is pinned to the right edge by flex-shrink: 0 after
+  // the label span takes the free space (flex: 1 1 auto).
+  const cssRdyF = await realFetch(BASE + '/style.css').then((r) => r.text());
+  check('readiness members: the amount span is pinned right (flex-shrink: 0 in its CSS rule)',
+    /\.readiness-tx-member-amt\s*\{[^}]*flex-shrink:\s*0/.test(cssRdyF), '');
+  check('readiness members: the label span takes the free space (flex: 1 1 auto in its CSS rule)',
+    /\.readiness-tx-member-label\s*\{[^}]*flex:\s*1 1 auto/.test(cssRdyF), '');
+  check('readiness members: NO "Untitled" text anywhere in the readiness list',
+    !((readinessBlocks() || []).map((b) => b.label + ' ' + b.state).join(' ')
+      + ' ' + ((rdyLines || []).map((l) => l.left + ' ' + l.amt).join(' '))).includes('Untitled'),
+    (readinessBlocks() || []).map((b) => b.label).join(','));
+  const rbSolo = readinessBlock('Dom Ready Solo');
+  check('readiness members: the standalone tx keeps its own single row',
+    !!rbSolo && rbSolo.status === 'armed', rbSolo ? rbSolo.status : 'no block');
+  // The live tick patches the header in place and keeps the
+  // member lines' text in step: disarm the set behind an open
+  // modal, so the changed signature takes the values-only
+  // patch path instead of a re-render.
+  const rdyFRowEl = (els['readiness-txs'].children || []).find((c) => c.dataset && c.dataset.setId === rdySetFId);
+  check('readiness members: the set row element exists', !!rdyFRowEl, '');
+  const rdyFLineEls = (rdyFRowEl ? rdyFRowEl.children : []).filter((c) => (c.className || '').split(' ').includes('readiness-tx-member'));
+  check('readiness members: the two member line elements exist',
+    rdyFLineEls.length === 2, 'got ' + rdyFLineEls.length);
+  els['btn-btc-add-pill'].click();
+  check('readiness members: the Add modal opens (structural changes defer to the patch)',
+    els['add-modal'] && els['add-modal'].classList.contains('open'),
+    els['add-modal'] ? 'open=' + els['add-modal'].classList.contains('open') : 'no add-modal');
+  const disRdyF = await fetch('/api/bitcoin/sets/' + rdySetFId, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: false }) });
+  check('readiness members: the set disarms', disRdyF.status === 200, 'status=' + disRdyF.status);
+  await sleep26(11000);
+  const tickRdyF = liveTickFn();
+  check('readiness members: the app registers a 1-second live timer', !!tickRdyF, '');
+  if (tickRdyF) await tickRdyF();
+  check('readiness members: the tick patches the set row in place (same element, no rebuild)',
+    !!rdyFRowEl && (els['readiness-txs'].children || []).indexOf(rdyFRowEl) !== -1, '');
+  const rbMembersAfter = readinessBlock('Dom Ready Members');
+  check('readiness members: after the tick the header pill reads unarmed',
+    !!rbMembersAfter && rbMembersAfter.status === 'unarmed', rbMembersAfter ? rbMembersAfter.status : 'no block');
+  const rdyLinesAfter = readinessMembers('Dom Ready Members');
+  check('readiness members: after the tick the member lines are the SAME elements (patched, not rebuilt)',
+    !!rdyLinesAfter && rdyLinesAfter.length === 2
+    && (rdyFRowEl.children || []).filter((c) => (c.className || '').split(' ').includes('readiness-tx-member')).every((c, i) => c === rdyFLineEls[i]),
+    rdyLinesAfter ? 'got ' + rdyLinesAfter.length : 'no lines');
+  check('readiness members: after the tick member 1 line text is unchanged',
+    !!rdyLinesAfter && rdyLinesAfter[0].left === 'Tx 1 \u2014 ' + rdyShort1 + '\u2026' && rdyLinesAfter[0].amt === '0.001 BTC',
+    rdyLinesAfter ? rdyLinesAfter[0].left + ' / ' + rdyLinesAfter[0].amt : 'no lines');
+  check('readiness members: after the tick member 2 line text is unchanged',
+    !!rdyLinesAfter && rdyLinesAfter[1].left === 'Tx 2 \u2014 ' + rdyShort2 + '\u2026' && rdyLinesAfter[1].amt === '0.0025 BTC',
+    rdyLinesAfter ? rdyLinesAfter[1].left + ' / ' + rdyLinesAfter[1].amt : 'no lines');
+  check('readiness members: after the tick member lines still carry NO pill',
+    !!rdyLinesAfter && rdyLinesAfter.every((l) => !l.hasPill), rdyLinesAfter ? rdyLinesAfter.map((l) => l.hasPill).join(',') : 'no lines');
+  check('readiness members: after the tick still exactly 2 member lines (none duplicated, none resurrected)',
+    !!rdyLinesAfter && rdyLinesAfter.length === 2, rdyLinesAfter ? 'got ' + rdyLinesAfter.length : 'no lines');
+  els['add-modal-x'].click();
+  check('readiness members: the Add modal closes',
+    els['add-modal'] && !els['add-modal'].classList.contains('open'),
+    els['add-modal'] ? 'open=' + els['add-modal'].classList.contains('open') : 'no add-modal');
+  if (rdySetFId) {
+    const delRdySetF = await fetch('/api/bitcoin/sets/' + rdySetFId, { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
+    check('readiness members: the set deletes', delRdySetF.status === 200, 'status=' + delRdySetF.status);
+  }
+  for (const id of [rdyM1fId, rdyM2fId, rdySoloId]) {
+    if (!id) continue;
+    const delRdyF = await fetch('/api/bitcoin/txs/' + id, { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
+    check('readiness members: fixture tx removed', delRdyF.status === 200, 'status=' + delRdyF.status);
+  }
+  await rerender(appJs);
+  check('readiness members: the set row is gone after the delete', !readinessBlock('Dom Ready Members'), '');
+  // A set whose members are ALL stale gets no readiness card
+  // at all (round 10 behavior): both members spend FINNEY:0,
+  // confirmed spent, so a set dry-run marks them both stale —
+  // no trigger is evaluated, so nothing can fire here.
+  const addStaleR1 = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ txHex: craftHex(0, 440008), trigger: { type: 'manual', params: {} } }) });
+  check('readiness members: all-stale member 1 adds (FINNEY:0)', addStaleR1.status === 201, 'status=' + addStaleR1.status);
+  const addStaleR1Json = addStaleR1.status === 201 ? await addStaleR1.json() : {};
+  const staleR1Id = (addStaleR1Json.tx || {}).id || null;
+  const addStaleR2 = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ txHex: craftHex(0, 440009), trigger: { type: 'manual', params: {} } }) });
+  check('readiness members: all-stale member 2 adds (FINNEY:0)', addStaleR2.status === 201, 'status=' + addStaleR2.status);
+  const addStaleR2Json = addStaleR2.status === 201 ? await addStaleR2.json() : {};
+  const staleR2Id = (addStaleR2Json.tx || {}).id || null;
+  const addStaleRSet = await fetch('/api/bitcoin/sets', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ label: 'Dom Ready Stale Set', txIds: [staleR1Id, staleR2Id], trigger: { type: 'setdate', params: { fireAt: '2999-01-01T00:00:00.000Z' } } }) });
+  check('readiness members: the all-stale set creates', addStaleRSet.status === 201, 'status=' + addStaleRSet.status);
+  const addStaleRSetJson = addStaleRSet.status === 201 ? await addStaleRSet.json() : {};
+  const staleRSetId = (addStaleRSetJson.set || {}).id || null;
+  const dryStaleR = await fetch('/api/broadcast/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ setId: staleRSetId }) });
+  check('readiness members: the all-stale set dry-run runs', dryStaleR.status === 200, 'status=' + dryStaleR.status);
+  await rerender(appJs);
+  check('readiness members: NO readiness card for the all-stale set',
+    !readinessBlock('Dom Ready Stale Set'), (readinessBlocks() || []).map((b) => b.label).join(','));
+  if (staleRSetId) {
+    const delStaleRSet = await fetch('/api/bitcoin/sets/' + staleRSetId, { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
+    check('readiness members: the all-stale set deletes', delStaleRSet.status === 200, 'status=' + delStaleRSet.status);
+  }
+  for (const id of [staleR1Id, staleR2Id]) {
+    if (!id) continue;
+    const delStaleR = await fetch('/api/bitcoin/txs/' + id, { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
+    check('readiness members: all-stale fixture tx removed', delStaleR.status === 200, 'status=' + delStaleR.status);
   }
   await rerender(appJs);
 

@@ -421,14 +421,34 @@
 <div id="edit-modal" class="modal-overlay">
   <div class="modal" role="dialog" aria-modal="true">
     <button id="edit-modal-x" class="modal-x" aria-label="Close">×</button>
-    <h3 id="edit-form-title">Edit transaction</h3>
+    <h3 id="edit-form-title">Edit trigger set</h3>
     <p id="edit-locked-note" class="muted" style="display:none">The hex and broadcast route cannot be changed once the transaction has been broadcast.</p>
     <label for="edit-label">Label (optional)</label>
     <input id="edit-label" type="text" placeholder="e.g. Move 0.5 BTC to the heir's wallet">
-    <label for="edit-notes">Notes (optional)</label>
-    <textarea id="edit-notes" class="plain" style="min-height:56px" placeholder="What is this one for?"></textarea>
-    <label for="edit-hex">Signed transaction (hex or PSBT)</label>
-    <textarea id="edit-hex" class="plain" style="min-height:120px" placeholder="02000000…" spellcheck="false"></textarea>
+    <!-- (0.8.7 fix, round 6) One construct: every card is a
+         trigger set, so this modal is the same shape as the set
+         modal — a Transactions section (the transaction being
+         edited, as a member entry, plus blank entries appended
+         with "+ Add transaction") above a Triggers section. The
+         label above is the card's label. Saving with new
+         entries promotes the card to a set holding them all. -->
+    <div id="edit-txs-section" class="tx-trigger tx-item">
+      <span class="tx-trigger-k">Transactions</span>
+      <div id="edit-members-list">
+        <div class="edit-tx-entry" id="edit-member-entry">
+          <div class="rule-head"><b>Transaction 1</b><button type="button" id="btn-edit-remove-tx" class="rule-remove">× Remove</button></div>
+          <label for="edit-notes">Notes (optional)</label>
+          <textarea id="edit-notes" class="plain" style="min-height:56px" placeholder="What is this one for?"></textarea>
+          <label for="edit-hex">Signed transaction (hex or PSBT)</label>
+          <textarea id="edit-hex" class="plain" style="min-height:120px" placeholder="02000000…" spellcheck="false"></textarea>
+          <button type="button" id="btn-edit-import-file">Import from file…</button>
+        </div>
+      </div>
+      <div id="edit-new-txs-list"></div>
+      <p><button type="button" id="btn-edit-add-tx" class="rule-add">+ Add transaction</button></p>
+    </div>
+    <div id="edit-triggers-section" class="tx-trigger">
+      <span class="tx-trigger-k">Triggers</span>
     <div class="op-section" id="edit-op-section">
       <label>How the rules combine</label>
       <button type="button" id="edit-op-any" class="op-card selected"><span class="op-radio"></span><span class="op-card-text"><b>Any rule fires</b><span>Broadcasts when any one rule is met</span></span></button>
@@ -440,7 +460,8 @@
     </div>
     <div id="edit-rules-list"></div>
     <p><button type="button" id="edit-add-rule" class="rule-add">+ Add rule</button></p>
-    <p id="edit-rules-cap-note" class="muted" style="display:none">Maximum 5 rules per transaction.</p>
+    <p id="edit-rules-cap-note" class="muted" style="display:none">Maximum 5 rules per trigger set.</p>
+    </div>
     <label for="edit-route">Broadcast via</label>
     <select id="edit-route">
       <option value="public" selected>Public mempool</option>
@@ -462,11 +483,63 @@
     </div>
     <p>
       <button id="btn-edit-save" class="primary">Save changes</button>
-      <button id="btn-edit-import-file">Import from file…</button>
       <input type="file" id="edit-file" accept=".txt,.hex,.psbt,text/plain" style="display:none">
       <button id="btn-edit-cancel">Cancel</button>
     </p>
     <p id="edit-msg" class="muted"></p>
+  </div>
+</div>
+
+<!-- Edit trigger-set popup (0.8.7): one label and the ONE
+     rule set that drives the set's transactions. The
+     Transactions section lists the current members — each
+     with a remove button (removed members return to
+     standalone on save) — and "+ Add transaction" appends a
+     blank entry (notes + hex), created on save with the set's
+     shared trigger and attached to the set. The rule form
+     reuses the same machinery as the Add/Edit modals, with
+     the prefix 'set'. -->
+<div id="set-modal" class="modal-overlay">
+  <div class="modal" role="dialog" aria-modal="true">
+    <button id="set-modal-x" class="modal-x" aria-label="Close">×</button>
+    <h3 id="set-form-title">Edit trigger set</h3>
+    <div class="set-head-row">
+      <div class="set-label-wrap">
+        <label for="set-label">Label (optional)</label>
+        <input id="set-label" type="text" placeholder="e.g. Move everything to the heir's wallet">
+      </div>
+      <label class="switch green" id="set-enabled-wrap" title="Armed — will broadcast at release">
+        <input type="checkbox" id="set-enabled" checked>
+        <span class="slider"></span>
+        <span id="set-enabled-text">Armed</span>
+      </label>
+    </div>
+    <div id="set-new-txs-section" class="tx-trigger tx-item">
+      <span class="tx-trigger-k">Transactions</span>
+      <div id="set-members-list"></div>
+      <div id="set-new-txs-list"></div>
+      <p><button type="button" id="btn-set-add-tx" class="rule-add">+ Add transaction</button></p>
+    </div>
+    <div id="set-triggers-section" class="tx-trigger">
+      <span class="tx-trigger-k">Triggers</span>
+      <div class="op-section" id="set-op-section">
+      <label>How the rules combine</label>
+      <button type="button" id="set-op-any" class="op-card selected"><span class="op-radio"></span><span class="op-card-text"><b>Any rule fires</b><span>Broadcasts when any one rule is met</span></span></button>
+      <button type="button" id="set-op-all" class="op-card"><span class="op-radio"></span><span class="op-card-text"><b>All rules hold</b><span>Broadcasts when all rules are simultaneously met</span></span></button>
+      <p id="set-op-note" class="op-note" style="display:none">With one rule this doesn’t change anything — it matters once you add a second rule.</p>
+    </div>
+    <div class="rules-label-row">
+      <label>Rules</label>
+    </div>
+    <div id="set-rules-list"></div>
+    <p><button type="button" id="set-add-rule" class="rule-add">+ Add rule</button></p>
+    <p id="set-rules-cap-note" class="muted" style="display:none">Maximum 5 rules per trigger set.</p>
+    </div>
+    <p>
+      <button id="btn-set-save" class="primary">Save changes</button>
+      <button id="btn-set-cancel">Cancel</button>
+    </p>
+    <p id="set-msg" class="muted"></p>
   </div>
 </div>
 
@@ -482,12 +555,30 @@
   <div class="modal" role="dialog" aria-modal="true">
     <button id="add-modal-x" class="modal-x" aria-label="Close">×</button>
     <h3 id="btc-form-title">Add a transaction</h3>
-    <label for="btc-label">Label (optional)</label>
-    <input id="btc-label" type="text" placeholder="e.g. Move 0.5 BTC to the heir's wallet">
-    <label for="btc-notes">Notes (optional)</label>
-    <textarea id="btc-notes" class="plain" style="min-height:56px" placeholder="What is this one for? e.g. Pays the mortgage from the joint wallet; signed Oct 2026, RBF on."></textarea>
-    <label for="btc-hex">Signed transaction (hex or PSBT)</label>
-    <textarea id="btc-hex" class="plain" style="min-height:120px" placeholder="02000000…" spellcheck="false"></textarea>
+    <!-- (0.8.7 fix, round 3) "+ Add Tx" IS "add trigger set":
+         one save creates a COMPLETE INDEPENDENT new trigger
+         set — ONE label for the set, above the transaction
+         inputs; repeatable tx entries (notes + hex each) inside
+         #btc-tx-list, appended with "+ Add another
+         transaction"; then the shared triggers / route below.
+         No set picker: the entries always become a NEW set.
+         The first entry keeps the old static ids (btc-notes,
+         btc-hex) so the import-file path and the untouched-form
+         check keep working; extra entries are built in JS with
+         the same field classes. -->
+    <label for="btc-set-label">Label (optional)</label>
+    <input id="btc-set-label" type="text" placeholder="e.g. Move everything to the heir's wallet">
+    <div id="btc-tx-list">
+      <div class="btc-tx-entry">
+        <div class="rule-head"><b>Transaction 1</b><button type="button" class="rule-remove btc-tx-remove" style="display:none">× Remove</button></div>
+        <label for="btc-notes">Notes (optional)</label>
+        <textarea id="btc-notes" class="plain add-tx-notes" style="min-height:56px" placeholder="What is this one for? e.g. Pays the mortgage from the joint wallet; signed Oct 2026, RBF on."></textarea>
+        <label for="btc-hex">Signed transaction (hex or PSBT)</label>
+        <textarea id="btc-hex" class="plain add-tx-hex" style="min-height:120px" placeholder="02000000…" spellcheck="false"></textarea>
+        <button type="button" id="btn-btc-import-file" class="btc-tx-import">Import from file…</button>
+      </div>
+    </div>
+    <p><button type="button" id="btn-btc-add-entry" class="rule-add">+ Add another transaction</button></p>
     <div class="op-section" id="btc-op-section">
       <label>How the rules combine</label>
       <button type="button" id="btc-op-any" class="op-card selected"><span class="op-radio"></span><span class="op-card-text"><b>Any rule fires</b><span>Broadcasts when any one rule is met</span></span></button>
@@ -521,7 +612,6 @@
     </div>
     <p>
       <button id="btn-btc-add" class="primary">+ Add transaction</button>
-      <button id="btn-btc-import-file">Import from file…</button>
       <button id="btn-btc-add-cancel">Cancel</button>
       <input type="file" id="btc-file" accept=".txt,.hex,.psbt,text/plain" style="display:none">
     </p>

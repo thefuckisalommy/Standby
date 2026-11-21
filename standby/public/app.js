@@ -685,7 +685,13 @@
       // that rule's triggerState slice — the same shape the
       // server sends in status.checkinTxs.
       bars = [];
+      // (0.8.7) Set members get no bar of their own — their own
+      // check-in triggers are dormant while attached; the SET
+      // gets one bar per check-in rule, like a tx.
+      var memberIds = {};
+      (S.bitcoin.sets || []).forEach(function (s) { (s.txIds || []).forEach(function (id) { memberIds[id] = true; }); });
       (S.bitcoin.txs || []).forEach(function (t) {
+        if (memberIds[t.id]) return;
         if (txStatus(t).settled || txStatus(t).pending) return;
         var bset = triggerSetOf(t);
         var bstates = triggerStatesOf(t);
@@ -703,11 +709,29 @@
           });
         });
       });
+      (S.bitcoin.sets || []).forEach(function (s) {
+        if (setStatus(s).settled || setStatus(s).pending) return;
+        var sset = triggerSetOf(s);
+        var sstates = triggerStatesOf(s);
+        sset.rules.forEach(function (rule, i) {
+          if (rule.type !== 'checkin') return;
+          var sts = sstates[i] || {};
+          var sth = rule.params.thresholdDays;
+          bars.push({
+            id: s.id, label: s.label || '', ruleIndex: i,
+            thresholdDays: sth,
+            daysSince: (typeof sts.daysSince === 'number') ? sts.daysSince : 0,
+            windowDays: (typeof sts.windowDays === 'number' && sts.windowDays > 0) ? sts.windowDays : sth,
+            nextDue: sts.nextDue || null, state: sts.status || 'not-started',
+            enabled: !!s.enabled,
+          });
+        });
+      });
     }
     return bars;
   }
 
-  var readinessEls = {}; // tx id -> { item, row, pill, feePill }: the readiness row, so the live tick can patch its pills in place
+  var readinessEls = {}; // entry key -> { item, row, pill, feePill }: the readiness row, so the live tick can patch its pills in place. A standalone tx keys by its tx id; a set keys by 'set:' + its set id. A set's member lines key by their tx id (0.8.7, round 11).
   // Exchange Status rows (0.8.0): one row per configured price
   // source, each with its own status pill and last price.
   // There is NO overall agreement pill next to the header:
@@ -722,7 +746,10 @@
   // Exchange Status (0.8.0): one row per configured price
   // source, with the live price and the last-checked time.
   function renderExchangeRows(status) {
-    var hasPriceTx = (S.bitcoin.txs || []).some(function (t) { return hasRuleType(t, 'price'); });
+    // (0.8.7) A set's price rule counts too — its members'
+    // own price rules are dormant while attached.
+    var hasPriceTx = (S.bitcoin.txs || []).some(function (t) { return hasRuleType(t, 'price') && !setOfTxId(t.id); })
+      || (S.bitcoin.sets || []).some(function (s) { return hasRuleType(s, 'price'); });
     var exItem = $('readiness-exchange-item');
     if (exItem) exItem.style.display = hasPriceTx ? '' : 'none';
     if (hasPriceTx) {
@@ -746,6 +773,64 @@
         else { pill.textContent = 'Not tested'; pill.className = 'pill muted'; }
       });
     }
+  }
+
+  // The member line's text (0.8.7, round 12): "Tx N — <first 16
+  // of the txid>…" on the left, the amount ("0.00013681 BTC",
+  // the same value the tx subcard head shows) on the right.
+  // Members have no label, so the number + short txid is the
+  // identifier — never "Untitled transaction" or any invented
+  // label. N is the member's 1-based index in the set's stored
+  // member order, so the number stays put if a member goes
+  // stale. A tx with no txid falls back to "Tx N" on the left;
+  // a tx with no parseable amount leaves the amount blank. The
+  // status pill lives ONLY on the set header row — member lines
+  // carry no pill at all (round 11's per-member pill is gone,
+  // and with it the set-arm gate for member pills).
+  function readinessMemberParts(tx, index) {
+    var short = (tx.txid || '').slice(0, 16);
+    var left = 'Tx ' + index + (short ? ' \u2014 ' + short + '\u2026' : '');
+    var sats = (tx.totalOutSats === null || tx.totalOutSats === undefined) ? '' : String(tx.totalOutSats);
+    var amt = /^\d+$/.test(sats) ? fmtBtc(sats) + ' BTC' : '';
+    return { left: left, amt: amt };
+  }
+
+  // The release-readiness entries (0.8.7, round 10): ONE entry
+  // per trigger set, not one per transaction. A set's members
+  // share one trigger set, so they share one readiness row —
+  // headed by the SET's label, with the SET's pill (the same
+  // pill the set card shows) and the set's condition line. A
+  // member tx has no label of its own (the label lives on the
+  // set since round 3), so per-member rows rendered it as
+  // "Untitled transaction" with an Unknown pill from its frozen
+  // triggerState — and the set itself got no row at all.
+  // Standalone txs (sets of one) render exactly as before.
+  // Entries walk the txs in stored order, emitting a set at its
+  // first member's position, so the list keeps the order the
+  // owner added things in. A set gets a row iff it has a live
+  // member (not settled, not pending) — a set whose members are
+  // all pending or archived has nothing left to broadcast, and
+  // an empty set has nothing at all. A mixed set (one member
+  // pending, the rest live) still gets a row, with the set
+  // card's own pill ('Broadcast').
+  function readinessEntries() {
+    var entries = [];
+    var seenSets = {};
+    (S.bitcoin.txs || []).forEach(function (t) {
+      var set = setOfTxId(t.id);
+      if (set) {
+        if (seenSets[set.id]) return;
+        seenSets[set.id] = true;
+        var live = setMembersOf(set).some(function (m) { var ms = txStatus(m); return !ms.settled && !ms.pending; });
+        if (!live) return;
+        entries.push({ kind: 'set', set: set });
+        return;
+      }
+      var st = txStatus(t);
+      if (st.settled || st.pending) return;
+      entries.push({ kind: 'tx', tx: t });
+    });
+    return entries;
   }
 
   function renderDashboard(status) {
@@ -773,7 +858,8 @@
     // The one exception is a fresh install with no
     // transactions at all: the card stays visible so the clock
     // can be started before the first rule exists.
-    var anyCheckinActive = (S.bitcoin.txs || []).some(function (t) { return hasRuleType(t, 'checkin') && !txStatus(t).settled && !txStatus(t).pending; });
+    var anyCheckinActive = (S.bitcoin.txs || []).some(function (t) { return hasRuleType(t, 'checkin') && !txStatus(t).settled && !txStatus(t).pending && !setOfTxId(t.id); })
+      || (S.bitcoin.sets || []).some(function (s) { return hasRuleType(s, 'checkin') && !setStatus(s).settled && !setStatus(s).pending; });
     var showCheckin = anyCheckinActive || !(S.bitcoin.txs || []).length;
     $('checkin-card').style.display = showCheckin ? '' : 'none';
     renderStatusHead(status);
@@ -843,38 +929,62 @@
     // colour-coded like the status pill. No verdict when the fee
     // rate is unknown or the 90-day peak has not been fetched — the
     // row then shows only the status pill.
-    var activeTxs = (S.bitcoin.txs || []).filter(function (t) { return !txStatus(t).settled && !txStatus(t).pending; });
+    // (0.8.7, round 10) One row per trigger set, not per
+    // transaction: a set renders once, headed by the SET's label
+    // with the SET's pill (setPillText / setStatus — the same
+    // pill the set card shows) and the set's condition line. A
+    // set row carries NO fee pill: the fee is per transaction,
+    // and it lives inside each member's Details on the tx card.
+    // (0.8.7, round 11) Under the header, one sub-line per LIVE
+    // member: the member's amount + its own pill (never a label
+    // — members have none). Settled / pending members are
+    // omitted; they already show on the tx card / Pending
+    // Transactions card. No fee pill on member lines either.
+    var entries = readinessEntries();
     var txsEl = $('readiness-txs');
     txsEl.innerHTML = '';
     readinessEls = {};
-    if (activeTxs.length) {
-      activeTxs.forEach(function (t) {
-        var st = txStatus(t);
+    if (entries.length) {
+      entries.forEach(function (e) {
         // (0.8.0) One block per armed rule: the label + the status
-        // pill on the first line (and the fee pill, unchanged), the
-        // trigger's condition on the second line — the same summary
-        // the tx card shows ("Fires when ...") — so the dashboard
-        // reads as a list of RULES, not just transactions. The
-        // current value lives on the tx card's third row, not here.
+        // pill on the first line (and the fee pill, unchanged, on
+        // a standalone tx row), the trigger's condition on the
+        // second line — the same summary the tx card shows
+        // ("Fires when ...") — so the dashboard reads as a list
+        // of RULES, not just transactions. The current value
+        // lives on the tx card's third row, not here.
         var item = document.createElement('div');
         item.className = 'readiness-tx';
-        item.dataset.txId = t.id;
         var row = document.createElement('div');
         row.className = 'readiness-tx-row';
         var label = document.createElement('b');
-        label.textContent = t.label || 'Untitled transaction';
-        row.appendChild(label);
         var pill = document.createElement('span');
-        pill.className = 'pill ' + st.cls;
-        pill.textContent = txPillText(t, st);
-        row.appendChild(pill);
-        var fv = txFeeVerdict(t);
-        if (fv) {
-          var fpill = document.createElement('span');
-          fpill.className = 'pill fee-pill ' + feeVerdictCls(fv);
-          fpill.textContent = feePillText(fv);
-          row.appendChild(fpill);
+        var fpill = null;
+        var key;
+        if (e.kind === 'set') {
+          key = 'set:' + e.set.id;
+          item.dataset.setId = e.set.id;
+          label.textContent = e.set.label || 'Untitled set';
+          var sst = setStatus(e.set);
+          pill.className = 'pill ' + sst.cls;
+          pill.textContent = setPillText(e.set, sst);
+        } else {
+          key = e.tx.id;
+          item.dataset.txId = e.tx.id;
+          label.textContent = e.tx.label || 'Untitled transaction';
+          var st = txStatus(e.tx);
+          pill.className = 'pill ' + st.cls;
+          pill.textContent = txPillText(e.tx, st);
+          var fv = txFeeVerdict(e.tx);
+          if (fv) {
+            fpill = document.createElement('span');
+            fpill.className = 'pill fee-pill ' + feeVerdictCls(fv);
+            fpill.textContent = feePillText(fv);
+          }
         }
+        row.appendChild(label);
+        row.appendChild(pill);
+        if (fpill) row.appendChild(fpill);
         item.appendChild(row);
         var stateLine = document.createElement('div');
         stateLine.className = 'readiness-tx-state';
@@ -884,11 +994,31 @@
         // readiness list stays one row per rule. The live current
         // value is not repeated here; it lives on the tx card's
         // third row and in the Exchange / Node Status sections.
-        stateLine.textContent = triggerSetCondition(t);
+        stateLine.textContent = triggerSetCondition(e.kind === 'set' ? e.set : e.tx);
         item.appendChild(stateLine);
+        if (e.kind === 'set') {
+          setMembersOf(e.set).forEach(function (m, i) {
+            var mst = txStatus(m);
+            if (mst.settled || mst.pending) return;
+            var parts = readinessMemberParts(m, i + 1);
+            var mrow = document.createElement('div');
+            mrow.className = 'readiness-tx-member';
+            mrow.dataset.txId = m.id;
+            var mleft = document.createElement('span');
+            mleft.className = 'readiness-tx-member-label';
+            mleft.textContent = parts.left;
+            var mamt = document.createElement('span');
+            mamt.className = 'readiness-tx-member-amt';
+            mamt.textContent = parts.amt;
+            mrow.appendChild(mleft);
+            mrow.appendChild(mamt);
+            item.appendChild(mrow);
+            readinessEls[m.id] = { item: mrow, left: mleft, amt: mamt };
+          });
+        }
         txsEl.appendChild(item);
         // (0.8.5) The live tick patches this row's pills in place.
-        readinessEls[t.id] = { item: item, row: row, pill: pill, feePill: (typeof fpill !== 'undefined' && fpill) ? fpill : null };
+        readinessEls[key] = { item: item, row: row, pill: pill, feePill: fpill };
       });
     } else {
       txsEl.textContent = (S.bitcoin.txs || []).length
@@ -995,6 +1125,196 @@
     var m = $('add-modal');
     if (m) m.classList.remove('open');
   }
+
+  // ---------- Add modal: repeatable transactions, one set label (0.8.7 fix, round 3) ----------
+  // "+ Add Tx" IS "add trigger set": one save creates a COMPLETE
+  // INDEPENDENT new trigger set. ONE label sits above the tx
+  // inputs (the set's label — there is no per-entry label); each
+  // entry in #btc-tx-list is one tx (notes + hex), "+ Add another
+  // transaction" appends one, and the single Save creates all of
+  // them with the shared rules / route below, then creates the
+  // set holding them. The first entry is static HTML (it keeps
+  // the btc-notes / btc-hex ids); extra entries are built here.
+  // Entries are collected by walking children, never
+  // querySelectorAll — the DOM shim only implements the
+  // checkbox selector. The shim does not model static-HTML
+  // children, so the first entry's fields are also reachable
+  // as the standalone btc-* els: a child list whose first entry
+  // is NOT the static one (its hex field is not $('btc-hex'))
+  // gets the static entry prepended.
+  function isAddTxEntryEl(c) {
+    return (c.className || '').split(' ').indexOf('btc-tx-entry') !== -1;
+  }
+  function addTxEntryFields(entry) {
+    return txEntryFields(entry, 'add-tx-notes', 'add-tx-hex');
+  }
+  function staticAddTxEntrySet() {
+    return { root: null, fields: { notes: $('btc-notes'), hex: $('btc-hex') }, titleEl: null, removeBtn: null };
+  }
+  function addTxEntrySets() {
+    var list = $('btc-tx-list');
+    var kids = list ? Array.prototype.filter.call(list.children || [], isAddTxEntryEl) : [];
+    if (!kids.length) return [staticAddTxEntrySet()];
+    var sets = [];
+    if (addTxEntryFields(kids[0]).hex !== $('btc-hex')) sets.push(staticAddTxEntrySet());
+    kids.forEach(function (e) {
+      sets.push({ root: e, fields: addTxEntryFields(e), titleEl: e.__titleEl || null, removeBtn: e.__removeBtn || null });
+    });
+    return sets;
+  }
+  function syncAddTxEntries() {
+    var sets = addTxEntrySets();
+    sets.forEach(function (s, i) {
+      if (s.titleEl) s.titleEl.textContent = 'Transaction ' + (i + 1);
+      if (s.removeBtn) s.removeBtn.style.display = sets.length > 1 ? '' : 'none';
+    });
+  }
+  // (0.8.7 fix, round 6) One builder for a blank
+  // new-transaction entry — the same construct in the Add
+  // modal, the set modal, and the single-transaction edit
+  // modal: notes + hex + a per-entry import button + a
+  // remove button. cfg carries the class names (each modal
+  // keeps its own, so the DOM walkers and tests keep
+  // working), the message element id for import errors, and
+  // the remove / hex-input callbacks. The import button only
+  // records its target; the one hidden file input (#btc-file)
+  // does the reading.
+  function buildTxEntry(cfg) {
+    var entry = mkEl('div', cfg.entryCls);
+    var head = mkEl('div', 'rule-head');
+    var title = mkEl('b', null, 'Transaction');
+    entry.__titleEl = title;
+    head.appendChild(title);
+    var rm = mkEl('button', 'rule-remove' + (cfg.removeCls ? ' ' + cfg.removeCls : ''), '\u00d7 Remove');
+    rm.type = 'button';
+    entry.__removeBtn = rm;
+    rm.addEventListener('click', function () { if (cfg.onRemove) cfg.onRemove(entry); });
+    head.appendChild(rm);
+    entry.appendChild(head);
+    entry.appendChild(mkEl('label', null, 'Notes (optional)'));
+    var notes = document.createElement('textarea');
+    notes.className = 'plain ' + cfg.notesCls;
+    notes.style.minHeight = '56px';
+    notes.placeholder = cfg.notesPlaceholder || 'What is this one for?';
+    entry.appendChild(notes);
+    entry.appendChild(mkEl('label', null, 'Signed transaction (hex or PSBT)'));
+    var hex = document.createElement('textarea');
+    hex.className = 'plain ' + cfg.hexCls;
+    hex.style.minHeight = '120px';
+    hex.placeholder = '02000000\u2026';
+    hex.spellcheck = false;
+    if (cfg.onHexInput) hex.addEventListener('input', cfg.onHexInput);
+    entry.appendChild(hex);
+    var imp = mkEl('button', cfg.importCls, 'Import from file\u2026');
+    imp.type = 'button';
+    imp.addEventListener('click', function () {
+      pendingImportTarget = { hex: hex, msg: $(cfg.msgId) };
+      $('btc-file').click();
+    });
+    entry.appendChild(imp);
+    return entry;
+  }
+  // The walk over a list of such entries: the same shape the
+  // Add modal's addTxEntrySets returns (root, fields, titleEl,
+  // removeBtn), so the save paths read them identically.
+  function txEntryFields(entry, notesCls, hexCls) {
+    var out = { notes: null, hex: null };
+    function walk(el) {
+      Array.prototype.forEach.call(el.children || [], function (c) {
+        var cls = (c.className || '').split(' ');
+        if (cls.indexOf(notesCls) !== -1) out.notes = c;
+        else if (cls.indexOf(hexCls) !== -1) out.hex = c;
+        walk(c);
+      });
+    }
+    walk(entry);
+    return out;
+  }
+  function txEntrySets(listEl, entryCls, notesCls, hexCls) {
+    var kids = listEl ? Array.prototype.filter.call(listEl.children || [], function (c) {
+      return (c.className || '').split(' ').indexOf(entryCls) !== -1;
+    }) : [];
+    return kids.map(function (e) {
+      return { root: e, fields: txEntryFields(e, notesCls, hexCls), titleEl: e.__titleEl || null, removeBtn: e.__removeBtn || null };
+    });
+  }
+  // New-transaction entries, collected the same way in both
+  // edit modals: blank entries ignored, notes-without-hex
+  // blocks the save (same message as the Add form). `n` is the
+  // entry's position, for the message.
+  function collectNewTxEntries(sets) {
+    var snap = sets.map(function (s, i) {
+      return {
+        notes: s.fields.notes ? s.fields.notes.value.trim() : '',
+        hex: s.fields.hex ? s.fields.hex.value.trim() : '',
+        n: i + 1
+      };
+    });
+    var filled = snap.filter(function (e) { return !!e.hex; });
+    var noteless = snap.filter(function (e) { return !e.hex && e.notes !== ''; })[0];
+    return { filled: filled, noteless: noteless || null };
+  }
+  function buildAddTxEntry() {
+    return buildTxEntry({
+      entryCls: 'btc-tx-entry', notesCls: 'add-tx-notes', hexCls: 'add-tx-hex',
+      importCls: 'btc-tx-import', removeCls: 'btc-tx-remove',
+      notesPlaceholder: 'What is this one for? e.g. Pays the mortgage from the joint wallet; signed Oct 2026, RBF on.',
+      msgId: 'btc-msg', onRemove: removeAddTxEntry
+    });
+  }
+  function removeAddTxEntry(entry) {
+    if (addTxEntrySets().length <= 1) return;
+    var list = $('btc-tx-list');
+    if (list) list.removeChild(entry);
+    syncAddTxEntries();
+  }
+  // After a successful add the form resets to one blank entry,
+  // ready for the next batch — same as the old single-tx reset,
+  // plus the one set label above the entries.
+  function resetAddTxEntries() {
+    var list = $('btc-tx-list');
+    if (list) {
+      var kids = Array.prototype.filter.call(list.children || [], isAddTxEntryEl);
+      var keepFirst = kids.length && addTxEntryFields(kids[0]).hex === $('btc-hex');
+      kids.forEach(function (e, i) { if (!keepFirst || i > 0) list.removeChild(e); });
+    }
+    var lab = $('btc-set-label');
+    if (lab) lab.value = '';
+    var f = staticAddTxEntrySet().fields;
+    if (f.notes) f.notes.value = '';
+    if (f.hex) f.hex.value = '';
+    syncAddTxEntries();
+  }
+  // Wire the static first entry (its title + remove button live
+  // in the HTML, not built here) so renumbering reaches it, and
+  // the "+ Add another transaction" button. In the DOM shim the
+  // static entry has no children to walk, so this is a no-op
+  // there — the fallback in addTxEntrySets covers it.
+  (function () {
+    var list = $('btc-tx-list');
+    var kids = list ? Array.prototype.filter.call(list.children || [], isAddTxEntryEl) : [];
+    if (kids.length && addTxEntryFields(kids[0]).hex === $('btc-hex')) {
+      var first = kids[0];
+      Array.prototype.forEach.call(first.children || [], function (c) {
+        if ((c.className || '').split(' ').indexOf('rule-head') !== -1) {
+          Array.prototype.forEach.call(c.children || [], function (h) {
+            if (h.tagName === 'B') first.__titleEl = h;
+            if ((h.className || '').split(' ').indexOf('btc-tx-remove') !== -1) first.__removeBtn = h;
+          });
+        }
+      });
+      if (first.__removeBtn) first.__removeBtn.addEventListener('click', function () { removeAddTxEntry(first); });
+    }
+    var addEntryBtn = $('btn-btc-add-entry');
+    if (addEntryBtn) addEntryBtn.addEventListener('click', function () {
+      var entry = buildAddTxEntry();
+      if (list) list.appendChild(entry);
+      syncAddTxEntries();
+      var f = addTxEntryFields(entry);
+      if (f.hex && f.hex.focus) f.hex.focus();
+    });
+    syncAddTxEntries();
+  })();
   $('btn-getting-started-add').addEventListener('click', function () { openAddModal(); });
   $('btn-btc-add-open').addEventListener('click', function () { openAddModal(); });
   // The pill lives inside the Staged Transactions <summary>: a click
@@ -1084,6 +1404,7 @@
     return fbText;
   }
   var txCardEls = {}; // tx id -> { row, sentLine, pill, rules, feeVerdictEl, maraEl, fallbackValueEl }: the rendered card, so the confirmations poll and the live tick can update it in place
+  var setCardEls = {}; // set id -> { row, pill, rules }: the rendered set card, for the live tick (0.8.7)
 
   function hostOf(u) { try { return new URL(u).host; } catch (e) { return u || ''; } }
   // One node's row — the host, plus a pill for the last test of that
@@ -1514,6 +1835,555 @@
     return overlapsByTx;
   }
 
+  // The trigger subcards (0.8.2): one 3-row box per rule,
+  // with the combination line above them for a multi-rule
+  // set. Shared by tx cards and set cards (0.8.7) — `holder`
+  // is a tx or a set; both carry trigger + triggerState +
+  // triggerStatus. Returns the per-rule element refs for
+  // the live tick. `parent` is the card the boxes go into.
+  function appendTriggerBoxes(parent, holder) {
+    var ruleEls = [];
+  var ruleSet = triggerSetOf(holder);
+  var ruleStates = triggerStatesOf(holder);
+  if (ruleSet.rules.length > 1) {
+    var combo = document.createElement('div');
+    combo.className = 'tx-rules-combo';
+    combo.appendChild(document.createElement('span')).textContent = 'Broadcasts when ';
+    var comboOp = document.createElement('strong');
+    comboOp.textContent = ruleSet.op === 'AND' ? 'ALL' : 'ANY';
+    combo.appendChild(comboOp);
+    combo.appendChild(document.createElement('span')).textContent = ruleSet.op === 'AND' ? ' rules hold' : ' rule fires';
+    parent.appendChild(combo);
+  }
+  ruleSet.rules.forEach(function (rule, ri) {
+    var trigBox = document.createElement('div');
+    trigBox.className = 'tx-trigger';
+    var trigK = document.createElement('span');
+    trigK.className = ruleSet.rules.length > 1 ? 'tx-trigger-k rule-k' : 'tx-trigger-k';
+    trigK.textContent = ruleSet.rules.length > 1 ? 'Rule ' + (ri + 1) + ' \u2014 ' + triggerLabel(rule) : 'TRIGGER - ' + triggerLabel(rule).toUpperCase();
+    var trigHead = document.createElement('span');
+    trigHead.className = 'tx-trigger-head';
+    trigHead.appendChild(trigK);
+    // (0.8.2 v2) The per-rule state pill in the subcard
+    // header — Met / Not met / Unknown / Held, or no pill
+    // on a manual rule. On every subcard, including a
+    // one-rule tx's.
+    var trigPill = ruleStatePill(rule, ruleStates[ri] || {});
+    if (trigPill) {
+      var trigPillEl = document.createElement('span');
+      trigPillEl.className = 'pill ' + trigPill.cls;
+      trigPillEl.textContent = trigPill.text;
+      trigHead.appendChild(trigPillEl);
+    }
+    trigBox.appendChild(trigHead);
+    var trigCond = document.createElement('span');
+    trigCond.textContent = triggerCondition(rule);
+    trigBox.appendChild(trigCond);
+    var trigNow = document.createElement('span');
+    trigNow.className = 'now';
+    trigNow.textContent = triggerStateLine(rule, ruleStates[ri] || {});
+    trigBox.appendChild(trigNow);
+    parent.appendChild(trigBox);
+    ruleEls.push({ pillEl: (typeof trigPillEl !== 'undefined' && trigPillEl) ? trigPillEl : null, condEl: trigCond, nowEl: trigNow });
+  });
+    return ruleEls;
+  }
+
+  // One history timeline (0.8.2): the event trail as a <ul>,
+  // oldest first. Shared by a tx card (nested inside Details)
+  // and a set card (a plain section above the actions, 0.8.7).
+  function buildHistoryList(hist) {
+    var tl = document.createElement('ul');
+    tl.className = 'timeline';
+    hist.forEach(function (ev) {
+      var li = document.createElement('li');
+      var dot = document.createElement('span');
+      var dotCls = histDotCls(ev.type);
+      dot.className = 'dot' + (dotCls ? ' ' + dotCls : '');
+      li.appendChild(dot);
+      var evEl = document.createElement('div');
+      evEl.className = 'ev';
+      evEl.textContent = histTitle(ev.type);
+      var tEl = document.createElement('span');
+      tEl.className = 't';
+      tEl.textContent = fmtHistTime(ev.ts);
+      evEl.appendChild(tEl);
+      li.appendChild(evEl);
+      if (ev.detail) {
+        var det = document.createElement('div');
+        det.className = 'det';
+        det.textContent = ev.detail;
+        li.appendChild(det);
+      }
+      tl.appendChild(li);
+    });
+    return tl;
+  }
+
+  // The Details for one transaction (0.8.7, extracted from
+  // renderBitcoin): Inputs/Outputs, fee, TXID, route,
+  // fallback, locktime, Created, the MARA line, notes, the
+  // sent line, and the tx's own History collapsible, nested
+  // inside Details — for set members AND standalone cards
+  // alike. The set card ADDITIONALLY carries ONE shared
+  // history, as its own collapsible on the card itself.
+  // `uiKey` is the txUiState key for the open states.
+  // Returns { details, feeVerdictEl, maraEl,
+  // fallbackValueEl, sentLine } for the live tick.
+  function buildTxDetails(tx, st, uiKey, includeHistory) {
+    var feeVerdictEl = null;
+    var maraEl = null;
+    var fallbackValueEl = null;
+  var ui = txUiState[uiKey] || {};
+  var details = document.createElement('details');
+  details.className = 'tx-details';
+  details.open = ui.detailsOpen !== undefined ? ui.detailsOpen : false;
+  details.addEventListener('toggle', function () {
+    (txUiState[uiKey] = txUiState[uiKey] || {}).detailsOpen = details.open;
+  });
+  var sum = document.createElement('summary');
+  sum.textContent = 'Details';
+  details.appendChild(sum);
+  var body = details;
+  // The Inputs and Outputs (0.7.18 refinement): a drop-down
+  // only when there is more than one entry on that side —
+  // with exactly one input (or output) there is no drop-down
+  // at all, just the single entry as a normal kv row inline
+  // (round 10). Each drop-down is collapsed by default, its
+  // summary shows only its count — no BTC amount in a summary
+  // — and expanding one lists every entry as a kv row
+  // (round 8): the label ("Input 1", "Output 1") in the 120px
+  // label column, the content on the same line in the value
+  // column, left-aligned with every other Details value. The
+  // content is truncated to one line and clickable — tapping
+  // it opens a pop-out with the full info instead of expanding
+  // inline. Inputs list each input's outpoint (and its value
+  // when known); Outputs list each output's value and
+  // destination address (or its script type when no address
+  // can be derived). The detail comes from the server (GET
+  // /api/state derives it from the stored hex); without it
+  // the rows fall back to the plain counts.
+  var io = tx.detail;
+  if (io && Array.isArray(io.inputs) && Array.isArray(io.outputs)) {
+    if (io.inputs.length === 1) {
+      var inp0 = io.inputs[0];
+      var shortIn = shortInput(inp0.prevTxid + ':' + inp0.prevVout) + '…'
+        + ((inp0.valueSats !== null && inp0.valueSats !== undefined) ? ' · ' + fmtBtc(inp0.valueSats) + ' BTC' : '');
+      body.appendChild(ioEntryRow('Input', shortIn, 'tx-io-value', 'Click to show full input', function () { showInputPopout(tx, inp0, 0); }));
+    } else {
+      var inDet = document.createElement('details');
+      inDet.className = 'tx-io';
+      inDet.open = ui.inputsOpen === true;
+      inDet.addEventListener('toggle', function () {
+        (txUiState[uiKey] = txUiState[uiKey] || {}).inputsOpen = inDet.open;
+      });
+      var inSum = document.createElement('summary');
+      inSum.textContent = 'Inputs: ' + tx.inputs;
+      inDet.appendChild(inSum);
+      io.inputs.forEach(function (inp, i) {
+        var shortText = shortInput(inp.prevTxid + ':' + inp.prevVout) + '…'
+          + ((inp.valueSats !== null && inp.valueSats !== undefined) ? ' · ' + fmtBtc(inp.valueSats) + ' BTC' : '');
+        inDet.appendChild(ioEntryRow('Input ' + (i + 1), shortText, 'tx-io-value', 'Click to show full input', function () { showInputPopout(tx, inp, i); }));
+      });
+      body.appendChild(inDet);
+    }
+    if (io.outputs.length === 1) {
+      var out0 = io.outputs[0];
+      var shortOut = fmtBtc(out0.valueSats) + ' BTC (' + fmtSats(out0.valueSats) + ' sats)'
+        + (out0.address ? ' → ' + out0.address.slice(0, 12) + '…' : ' · ' + out0.type);
+      body.appendChild(ioEntryRow('Output', shortOut, 'tx-io-value', 'Click to show full output', function () { showOutputPopout(tx, out0, 0); }));
+    } else {
+      var outDet = document.createElement('details');
+      outDet.className = 'tx-io';
+      outDet.open = ui.outputsOpen === true;
+      outDet.addEventListener('toggle', function () {
+        (txUiState[uiKey] = txUiState[uiKey] || {}).outputsOpen = outDet.open;
+      });
+      var outSum = document.createElement('summary');
+      outSum.textContent = 'Outputs: ' + tx.outputs;
+      outDet.appendChild(outSum);
+      io.outputs.forEach(function (out, i) {
+        var shortText = fmtBtc(out.valueSats) + ' BTC (' + fmtSats(out.valueSats) + ' sats)'
+          + (out.address ? ' → ' + out.address.slice(0, 12) + '…' : ' · ' + out.type);
+        outDet.appendChild(ioEntryRow('Output ' + (i + 1), shortText, 'tx-io-value', 'Click to show full output', function () { showOutputPopout(tx, out, i); }));
+      });
+      body.appendChild(outDet);
+    }
+  } else {
+    body.appendChild(kvRow('', 'Inputs', String(tx.inputs)));
+    body.appendChild(kvRow('', 'Outputs', String(tx.outputs)));
+  }
+  // The fee (0.7.18): stored at add time when the node could
+  // answer the parent lookup. The row hides entirely when the
+  // fee is unknown — no "—" fee. The row uses the standard
+  // 120px label column like every other Details row (round 7),
+  // so its value starts exactly where the others' do. The
+  // value drops the redundant "sats" — the rate's "sat/vB"
+  // carries the unit — so even a 50,000-sat fee fits on one
+  // line in the 162px left after the column on a phone.
+  // (0.7.20) The fee verdict rides on the same line as a short
+  // colour-coded suffix — " — Low Risk" / " — Medium Risk" /
+  // " — High Risk" — for an ACTIVE tx only (a broadcast or
+  // archived tx's fee is moot, and a pending one is already
+  // submitted). No verdict when the fee rate is unknown or the
+  // 90-day peak has not been fetched: the line stays exactly
+  // as it was, rather than showing a wrong one.
+  if (tx.feeSats !== null && tx.feeSats !== undefined) {
+    var feeRow = kvRow('tx-fee', 'Fee', fmtSats(tx.feeSats) + ' · ' + fmtRate(tx.feeRateSatVb) + ' sat/vB');
+    var fv = txFeeVerdict(tx);
+    if (fv) {
+      var fvs = document.createElement('span');
+      fvs.className = 'fee-verdict ' + feeVerdictCls(fv);
+      fvs.textContent = ' — ' + fv;
+      feeRow.children[1].appendChild(fvs);
+      feeVerdictEl = fvs;
+      // The Fee line is clickable (0.7.21): tapping it opens
+      // the fee-risk pop-out, which explains how the verdict
+      // was calculated. The pointer cursor and the title say
+      // it is clickable, like the TXID value below. Only
+      // when there is a verdict to explain — a tx with no
+      // verdict has nothing to pop out.
+      feeRow.children[1].className = 'tx-kv-v tx-fee-value';
+      feeRow.children[1].title = 'Click to see how this risk was calculated';
+      feeRow.children[1].addEventListener('click', function () { showFeePopout(tx, txFeeVerdict(tx) || fv); });
+    }
+    body.appendChild(feeRow);
+  }
+  // The TXID, truncated — clickable to open a pop-out with the
+  // full 64-hex value (0.7.18 round 8: it used to expand inline,
+  // which grew the card and wrapped the hex under the label;
+  // the pop-out leaves the card exactly as it is). A display
+  // action only: it changes nothing about the tx. The pointer
+  // cursor and the title say it is clickable.
+  var txidRow = document.createElement('div');
+  txidRow.className = 'tx-kv tx-txid';
+  var txidK = document.createElement('span');
+  txidK.className = 'tx-kv-k';
+  txidK.textContent = 'TXID: ';
+  var txidV = document.createElement('span');
+  txidV.className = 'tx-kv-v tx-txid-value';
+  txidV.textContent = tx.txid.slice(0, 16) + '…';
+  txidV.title = 'Click to show full TXID';
+  txidV.addEventListener('click', function () { showTxidPopout(tx); });
+  txidRow.appendChild(txidK);
+  txidRow.appendChild(txidV);
+  body.appendChild(txidRow);
+  body.appendChild(kvRow('tx-route', 'Broadcast via', tx.broadcastVia === 'slipstream' ? 'Slipstream (MARA)' : 'Public mempool'));
+  // The public fallback (0.7.17): a per-transaction opt-in
+  // timer, shown only while the route is Slipstream AND a
+  // fallback is set — when the route is public the setting is
+  // stored but ignored, and when it is Never there is nothing
+  // to show. On a Slipstream-pending card the countdown rides
+  // on the same row. The duration is changed in the Edit popup,
+  // not on the card. Changing it only moves the deadline: it is
+  // counted from when MARA first received the transaction, and
+  // setting it sooner or later does not change the count.
+  if (tx.broadcastVia === 'slipstream' && tx.publicFallbackDays !== null && tx.publicFallbackDays !== undefined) {
+    var fbRow = kvRow('tx-fallback', 'Public Fallback', txFallbackText(tx, st));
+    fallbackValueEl = fbRow.children[1];
+    body.appendChild(fbRow);
+  }
+  if (tx.locktime > 0) {
+    body.appendChild(kvRow('', 'Locktime', String(tx.locktime)));
+  }
+  body.appendChild(kvRow('', 'Created', fmtDate(tx.createdAt)));
+  // The MARA queue line for a Slipstream-pending card: where
+  // it sits in MARA's queue and how likely it is to be mined
+  // soon. Its own row, not folded into the submission line.
+  if (st.pending && tx.release && tx.release.status === 'submitted-slipstream') {
+    var mara = txMaraLine(tx);
+    if (mara) {
+      var maraLine = document.createElement('p');
+      maraLine.className = 'tx-mara';
+      maraLine.textContent = mara;
+      maraEl = maraLine;
+      body.appendChild(maraLine);
+    }
+  }
+  if (tx.notes) {
+    var notes = document.createElement('p');
+    notes.className = 'tx-notes';
+    notes.textContent = tx.notes;
+    body.appendChild(notes);
+  }
+  var sentLine = null;
+  if (tx.release || tx.broadcasted) {
+    var rel = document.createElement('p');
+    rel.className = tx.broadcasted ? 'tx-sent' : 'muted';
+    rel.textContent = txReleaseLine(tx);
+    body.appendChild(rel);
+    if (tx.broadcasted) sentLine = rel;
+  }
+  // The History (0.8.2): the tx's own event trail — added,
+  // fired, broadcast, confirmed, stale, failed, edited,
+  // armed, disarmed — oldest first, in a collapsible of its
+  // own nested inside Details, collapsed by default. Only transitions
+  // are logged, never the routine release evaluations. The open state
+  // is remembered like Details (txUiState). Hidden entirely
+  // when the tx has no history (a hand-edited state — every tx
+  // the app writes carries at least the 'added' event).
+  var hist = tx.history;
+  if (includeHistory && Array.isArray(hist) && hist.length) {
+    var histDet = document.createElement('details');
+    histDet.className = 'tx-history';
+    histDet.open = ui.historyOpen === true;
+    histDet.addEventListener('toggle', function () {
+      (txUiState[uiKey] = txUiState[uiKey] || {}).historyOpen = histDet.open;
+    });
+    var histSum = document.createElement('summary');
+    histSum.textContent = 'History';
+    histDet.appendChild(histSum);
+    histDet.appendChild(buildHistoryList(hist));
+    details.appendChild(histDet);
+  }
+    return { details: details, feeVerdictEl: feeVerdictEl, maraEl: maraEl, fallbackValueEl: fallbackValueEl, sentLine: sentLine };
+  }
+
+  // Trigger sets (0.8.7): one label, one arm/disarm, one rule set
+  // driving several transactions. A set's members are the txs in
+  // its txIds, in the set's own order; a tx in a set has no
+  // standalone card (its own trigger is dormant while attached).
+  function setOfTxId(txId) {
+    return ((S.bitcoin.sets || []).find(function (s) { return (s.txIds || []).indexOf(txId) !== -1; })) || null;
+  }
+  function setMembersOf(set) {
+    var txs = S.bitcoin.txs || [];
+    return (set.txIds || []).map(function (id) {
+      return txs.filter(function (t) { return t.id === id; })[0];
+    }).filter(function (t) { return !!t; });
+  }
+  // The set's aggregate status (0.8.7): the same three buckets as
+  // a tx — active, pending, settled — from its members. Only when
+  // EVERY member is stale does the set read Stale (archived); one
+  // stale member leaves the set live for the rest. All members
+  // settled is Broadcasted; any member pending (broadcast but
+  // unconfirmed, or waiting on MARA) is Broadcast; otherwise the
+  // set reads like a tx — unarmed, Grace, or Ready.
+  function setStatus(set) {
+    var members = setMembersOf(set);
+    if (!members.length) return { label: 'Empty', cls: 'muted', settled: false, pending: false };
+    var sts = members.map(function (t) { return txStatus(t); });
+    // (0.8.7, revised) Only when EVERY member is stale does the
+    // set read Stale (archived). One stale member leaves the set
+    // live for the rest — the stale member just carries its own
+    // 'stale' pill on its subcard.
+    if (sts.every(function (s) { return s.label === 'Stale'; })) return { label: 'Stale', cls: 'bad', settled: true, pending: false };
+    if (sts.every(function (s) { return s.settled; })) return { label: 'Broadcasted', cls: 'ok', settled: true, pending: false };
+    if (sts.some(function (s) { return s.pending; })) return { label: 'Broadcast', cls: 'warn', settled: false, pending: true };
+    if (!set.enabled) return { label: 'unarmed', cls: 'muted', settled: false, pending: false };
+    if (graceActive() && (hasRuleType(set, 'price') || hasRuleType(set, 'utxo'))) return { label: 'Grace', cls: 'warn', settled: false, pending: false };
+    return { label: 'Ready', cls: 'ok', settled: false, pending: false };
+  }
+  // The set card's pill text — the txPillText rule, at set level.
+  function setPillText(set, st) {
+    if (st.settled || st.pending) return st.label;
+    if (!set.enabled) return 'unarmed';
+    if (st.label === 'Grace') return 'Grace';
+    if (st.label === 'Ready') return 'armed';
+    return st.label + ' + armed';
+  }
+  function setTotalSats(set) {
+    return setMembersOf(set).reduce(function (a, t) { return a + (Number(t.totalOutSats) || 0); }, 0);
+  }
+
+  // One transaction subcard (0.8.7 fix, round 3): the blue
+  // .tx-item every card carries for each of its transactions —
+  // set members AND a standalone transaction alike. Every card
+  // is a trigger set, so a standalone tx renders as a set of
+  // one: the same subcard, in the same spot (above the trigger
+  // subcards), with its own Details dropdown INSIDE it (plus
+  // the per-tx note, the last dry-run line, and any shared-input
+  // warnings). Details NEVER lives inside a trigger subcard.
+  // `idx` numbers the subcard ("Tx 1", "Tx 2", ...); `uiKey`
+  // is the txUiState key for the Details open state;
+  // `includeHistory` puts the tx's own History collapsible
+  // inside its Details — standalone cards pass true. Set
+  // members pass false (0.8.7, round 9: single history — the
+  // set's ONE shared History is the only trail on a set card;
+  // a member's own history keeps recording in state, it is
+  // just never rendered while the tx is attached). Returns the
+  // element plus the buildTxDetails refs (fee verdict, MARA
+  // line, fallback, sent line) the live tick patches.
+  function buildTxItem(tx, st, uiKey, includeHistory, idx, overlapsByTx) {
+    var item = document.createElement('div');
+    item.className = 'tx-trigger tx-item';
+    var itemHead = document.createElement('span');
+    itemHead.className = 'tx-trigger-head';
+    var itemK = document.createElement('span');
+    itemK.className = 'tx-trigger-k rule-k';
+    itemK.textContent = 'Tx ' + (idx + 1) + ' — ' + tx.txid.slice(0, 16) + '…';
+    itemHead.appendChild(itemK);
+    // (0.8.7, revised) The stale member gets a pill saying
+    // 'stale' — the only per-member pill on a subcard. A live
+    // member carries no pill: the card's own pill says armed.
+    if (st.label === 'Stale') {
+      var itemPill = document.createElement('span');
+      itemPill.className = 'pill bad';
+      itemPill.textContent = 'stale';
+      itemHead.appendChild(itemPill);
+    }
+    // (0.8.7 fix, round 5) The BTC amount lives in the head
+    // line, right-aligned — no separate amount row below it.
+    // The head is flex (space-between), so the amount sits at
+    // the right end; the fee stays inside Details.
+    var itemAmt = document.createElement('span');
+    itemAmt.className = 'tx-item-amt';
+    itemAmt.textContent = fmtBtc(tx.totalOutSats) + ' BTC';
+    itemHead.appendChild(itemAmt);
+    item.appendChild(itemHead);
+    // The fee is NOT shown here: it lives inside Details
+    // (the Fee row in buildTxDetails, same numbers + verdict)
+    // and only shows when Details is expanded.
+    var detOut = buildTxDetails(tx, st, uiKey, includeHistory);
+    item.appendChild(detOut.details);
+    // The last dry-run result for THIS transaction, under its
+    // Details — visible without expanding anything.
+    var dr = dryRunResults[tx.id];
+    if (dr) {
+      var dryLine = document.createElement('p');
+      dryLine.className = dr.verdict === 'timelocked' ? 'tx-dryrun tx-warn' : 'tx-dryrun muted';
+      dryLine.textContent = dr.text;
+      item.appendChild(dryLine);
+    }
+    // Shared-input warnings: this tx spends an input another
+    // stored tx also spends, so only one of them can ever be
+    // confirmed.
+    var ow = overlapsByTx[tx.id];
+    if (ow && ow.length) {
+      ow.forEach(function (w) {
+        var warnLine = document.createElement('p');
+        warnLine.className = 'tx-warn';
+        warnLine.textContent = 'Warning: shares input ' + shortInput(w.input) + ' with ' + w.others + ' — only one of them can ever be confirmed.';
+        item.appendChild(warnLine);
+      });
+    }
+    return { el: item, detOut: detOut };
+  }
+
+  // One set card (0.8.7, mockup v6): it reads as a tx card — a
+  // single label in the header with the BTC total in the amount
+  // spot, a single arm/disarm in the same spot as a tx card —
+  // then the transactions ABOVE the triggers, each as a compact
+  // subcard in the same shape/size as a trigger subcard but with
+  // a BLUE left border (.tx-item) vs the triggers' orange, each
+  // with its own Details dropdown + per-tx note; then the trigger
+  // subcards verbatim; then the ONE shared History as its own
+  // collapsible, collapsed by default (no Created row); then the
+  // actions row (Dry-run / Edit / Delete / Broadcast Now), like
+  // a tx card. There is no set-level Details dropdown, and no per-card
+  // "staged" pill anywhere — the mockup's muted "staged" pill
+  // was mockup shorthand, not a real pill.
+  function renderSetCard(set, overlapsByTx) {
+    var members = setMembersOf(set);
+    var st = setStatus(set);
+    var settled = st.settled;
+    var pending = st.pending;
+    var row = document.createElement('div');
+    row.className = 'tx-card tx-sub';
+    var head = document.createElement('div');
+    head.className = 'tx-head';
+    var title = document.createElement('b');
+    title.textContent = set.label || 'Untitled set';
+    var pill = document.createElement('span');
+    pill.className = 'pill ' + st.cls;
+    pill.textContent = setPillText(set, st);
+    head.appendChild(title); head.appendChild(pill);
+    if (!settled && !pending) {
+      var tog = document.createElement('label');
+      tog.className = 'switch green';
+      tog.title = set.enabled ? 'Armed — will broadcast at release' : 'Unarmed — will not broadcast at release';
+      var cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = !!set.enabled;
+      cb.addEventListener('change', function () { toggleSet(set.id, cb.checked); });
+      var slider = document.createElement('span');
+      slider.className = 'slider';
+      tog.appendChild(cb); tog.appendChild(slider);
+      head.appendChild(tog);
+    }
+    row.appendChild(head);
+    var total = setTotalSats(set);
+    var amount = document.createElement('div');
+    amount.className = 'tx-amount';
+    var btcAmt = document.createElement('span');
+    btcAmt.textContent = fmtBtc(total) + ' BTC';
+    var satsAmt = document.createElement('span');
+    satsAmt.className = 'tx-amount-sats';
+    satsAmt.textContent = fmtSats(total) + ' sats';
+    amount.appendChild(btcAmt); amount.appendChild(satsAmt);
+    row.appendChild(amount);
+    var sub = document.createElement('p');
+    sub.className = 'muted';
+    sub.style.margin = '6px 0 0';
+    var ruleCount = triggerSetOf(set).rules.length;
+    sub.textContent = members.length + (members.length === 1 ? ' transaction' : ' transactions') + ' · ' + ruleCount + (ruleCount === 1 ? ' shared trigger' : ' shared triggers');
+    row.appendChild(sub);
+    // The transaction subcards, above the triggers. Members
+    // carry no History of their own (0.8.7, round 9: single
+    // history — the set's shared History below is the only
+    // trail on the card).
+    members.forEach(function (tx, i) {
+      var mst = txStatus(tx);
+      var built = buildTxItem(tx, mst, 'set:' + set.id + ':' + tx.id, false, i, overlapsByTx);
+      row.appendChild(built.el);
+    });
+    // The shared triggers, verbatim trigger subcards.
+    var ruleEls = appendTriggerBoxes(row, set);
+    // The ONE shared History, as its own collapsible (0.8.7
+    // fix, round 8) — the history of the entire set, collapsed
+    // by default like the per-tx History, in the same place it
+    // sat as a plain section: above the actions row. There is
+    // still no set-level Details dropdown. The open state is
+    // remembered in txUiState under 'set:<id>' like the per-tx
+    // histories, so a re-render keeps it open.
+    var hist = set.history;
+    if (Array.isArray(hist) && hist.length) {
+      var histDet = document.createElement('details');
+      histDet.className = 'tx-history';
+      var setUi = txUiState['set:' + set.id] || {};
+      histDet.open = setUi.historyOpen === true;
+      histDet.addEventListener('toggle', function () {
+        (txUiState['set:' + set.id] = txUiState['set:' + set.id] || {}).historyOpen = histDet.open;
+      });
+      var histSum = document.createElement('summary');
+      histSum.textContent = 'History';
+      histDet.appendChild(histSum);
+      histDet.appendChild(buildHistoryList(hist));
+      row.appendChild(histDet);
+    }
+    var actions = document.createElement('div');
+    actions.className = 'tx-actions';
+    var dryBtn = document.createElement('button');
+    dryBtn.textContent = 'Dry-run';
+    dryBtn.disabled = settled || pending;
+    if (settled || pending) dryBtn.title = 'Set already broadcast or submitted';
+    dryBtn.addEventListener('click', function () { dryRunSet(set.id); });
+    var editBtn = document.createElement('button');
+    editBtn.textContent = 'Edit';
+    editBtn.addEventListener('click', function () { startEditSet(set); });
+    var delBtn = document.createElement('button');
+    delBtn.textContent = 'Delete';
+    delBtn.className = 'danger';
+    delBtn.addEventListener('click', function () {
+      var label = set.label || 'Untitled set';
+      showConfirm('Delete this trigger set?',
+        'This deletes "' + label + '" from Standby. Its ' + members.length + (members.length === 1 ? ' transaction returns' : ' transactions return') + ' to standalone — they are NOT deleted, and each keeps its own trigger. The set\'s shared history goes with it.' + (settled ? ' Transactions already broadcast cannot be recalled by deleting the set.' : ''),
+        function () { deleteSet(set.id); },
+        'Delete');
+    });
+    var bcBtn = document.createElement('button');
+    bcBtn.textContent = 'Broadcast Now';
+    bcBtn.className = 'danger';
+    bcBtn.disabled = settled || pending;
+    if (settled) bcBtn.title = 'Stale — inputs spent';
+    else if (pending) bcBtn.title = 'Already broadcast or submitted';
+    else bcBtn.addEventListener('click', function () { broadcastSetNow(set.id); });
+    actions.appendChild(dryBtn); actions.appendChild(editBtn); actions.appendChild(delBtn); actions.appendChild(bcBtn);
+    row.appendChild(actions);
+    setCardEls[set.id] = { row: row, pill: pill, rules: ruleEls };
+    return row;
+  }
+
   function renderBitcoin() {
     $('btc-primary-url').value = S.settings.primaryApiUrl || 'https://mempool.space';
     $('btc-secondary-url').value = S.settings.secondaryApiUrl || '';
@@ -1536,18 +2406,51 @@
     pendingList.innerHTML = '';
     archivedList.innerHTML = '';
     txCardEls = {};
-    // Newest first. The sort is render-time only: the release still
-    // evaluates stored transactions in stored order. Active first,
-    // then pending, then archived.
+    setCardEls = {};
+    // (0.8.7) Standalone txs and sets share the three lists: a
+    // set's members have no standalone card, and a set card takes
+    // its bucket from its members (see setStatus). Newest first
+    // within a bucket, by creation time — the sort is render-time
+    // only: the release still evaluates in stored order.
+    var memberIds = {};
+    (S.bitcoin.sets || []).forEach(function (s) {
+      (s.txIds || []).forEach(function (id) { memberIds[id] = true; });
+    });
+    function setBucket(s) {
+      var sst = setStatus(s);
+      return sst.settled ? 2 : (sst.pending ? 1 : 0);
+    }
     function bucketRank(t) {
       var st = txStatus(t);
       return st.settled ? 2 : (st.pending ? 1 : 0);
     }
-    var sorted = txs.slice().reverse().sort(function (a, b) {
-      return bucketRank(a) - bucketRank(b);
+    var items = txs.filter(function (t) { return !memberIds[t.id]; }).map(function (t) {
+      return { kind: 'tx', tx: t, at: t.createdAt || '' };
+    }).concat((S.bitcoin.sets || []).map(function (s) {
+      return { kind: 'set', set: s, at: s.createdAt || '' };
+    }));
+    var sorted = items.sort(function (a, b) {
+      var ba = a.kind === 'tx' ? bucketRank(a.tx) : setBucket(a.set);
+      var bb = b.kind === 'tx' ? bucketRank(b.tx) : setBucket(b.set);
+      if (ba !== bb) return ba - bb;
+      return (b.at < a.at) ? -1 : (b.at > a.at) ? 1 : 0;
     });
-    sorted.forEach(function (tx) {
+    sorted.forEach(function (item) {
+      if (item.kind === 'set') {
+        var setRow = renderSetCard(item.set, overlapsByTx);
+        var sst = setStatus(item.set);
+        (sst.settled ? archivedList : (sst.pending ? pendingList : activeList)).appendChild(setRow);
+        return;
+      }
+      var tx = item.tx;
       var row = document.createElement('div');
+      // (0.8.7 fix, round 3) A standalone transaction IS a
+      // trigger set of one: it renders exactly like a set card
+      // — label + total + toggle in the header, then ONE blue
+      // tx subcard (its own Details inside it), then its trigger
+      // subcards in orange below. No .tx-single any more: the
+      // blue accent belongs to the tx subcard, and the trigger
+      // subcards keep the orange border on every card.
       row.className = 'tx-card tx-sub';
       var st = txStatus(tx);
       var settled = st.settled;
@@ -1559,6 +2462,7 @@
       var feeVerdictEl = null; // the " — Low Risk" suffix span, when rendered
       var maraEl = null; // the Slipstream queue line, when rendered
       var fallbackValueEl = null; // the Public Fallback value span, when rendered
+      var sentLine = null; // the sent/broadcast line inside Details, when rendered
       // Header: label (bold) + status pill, and on an Active card
       // the arm/disarm toggle immediately to the right of the pill.
       // The pill carries the armed state as text ("armed" when
@@ -1608,7 +2512,23 @@
       satsAmt.textContent = fmtSats(tx.totalOutSats) + ' sats';
       amount.appendChild(btcAmt); amount.appendChild(satsAmt);
       row.appendChild(amount);
-      // The trigger subcard (0.8.0): the rule that fires this
+      // The sub-line, like a set card's: one transaction, N
+      // triggers — the card is a trigger set of one.
+      var sub = document.createElement('p');
+      sub.className = 'muted';
+      sub.style.margin = '6px 0 0';
+      var ruleCount = triggerSetOf(tx).rules.length;
+      sub.textContent = '1 transaction · ' + ruleCount + (ruleCount === 1 ? ' trigger' : ' triggers');
+      row.appendChild(sub);
+      // The transaction subcard — the same blue .tx-item a set
+      // member gets, with this tx's own Details (and its History)
+      // inside it. The dry-run line and shared-input warnings
+      // live in there too, like a set member's.
+      var built = buildTxItem(tx, st, tx.id, true, 0, overlapsByTx);
+      row.appendChild(built.el);
+      var detOut = built.detOut;
+      feeVerdictEl = detOut.feeVerdictEl; maraEl = detOut.maraEl; fallbackValueEl = detOut.fallbackValueEl; sentLine = detOut.sentLine;
+      // The trigger subcards (0.8.0): the rule(s) that fire this
       // transaction — an amber-edged box with the trigger type, the
       // condition, and the current state — so the condition is
       // visible without opening Details, on every card (active,
@@ -1629,282 +2549,7 @@
       // Every subcard header also carries the per-rule state
       // pill (ruleStatePill) — Met / Not met / Unknown / Held,
       // or no pill on a manual rule — including a one-rule tx's.
-      var ruleSet = triggerSetOf(tx);
-      var ruleStates = triggerStatesOf(tx);
-      if (ruleSet.rules.length > 1) {
-        var combo = document.createElement('div');
-        combo.className = 'tx-rules-combo';
-        combo.appendChild(document.createElement('span')).textContent = 'Broadcasts when ';
-        var comboOp = document.createElement('strong');
-        comboOp.textContent = ruleSet.op === 'AND' ? 'ALL' : 'ANY';
-        combo.appendChild(comboOp);
-        combo.appendChild(document.createElement('span')).textContent = ruleSet.op === 'AND' ? ' rules hold' : ' rule fires';
-        row.appendChild(combo);
-      }
-      ruleSet.rules.forEach(function (rule, ri) {
-        var trigBox = document.createElement('div');
-        trigBox.className = 'tx-trigger';
-        var trigK = document.createElement('span');
-        trigK.className = ruleSet.rules.length > 1 ? 'tx-trigger-k rule-k' : 'tx-trigger-k';
-        trigK.textContent = ruleSet.rules.length > 1 ? 'Rule ' + (ri + 1) + ' \u2014 ' + triggerLabel(rule) : 'TRIGGER - ' + triggerLabel(rule).toUpperCase();
-        var trigHead = document.createElement('span');
-        trigHead.className = 'tx-trigger-head';
-        trigHead.appendChild(trigK);
-        // (0.8.2 v2) The per-rule state pill in the subcard
-        // header — Met / Not met / Unknown / Held, or no pill
-        // on a manual rule. On every subcard, including a
-        // one-rule tx's.
-        var trigPill = ruleStatePill(rule, ruleStates[ri] || {});
-        if (trigPill) {
-          var trigPillEl = document.createElement('span');
-          trigPillEl.className = 'pill ' + trigPill.cls;
-          trigPillEl.textContent = trigPill.text;
-          trigHead.appendChild(trigPillEl);
-        }
-        trigBox.appendChild(trigHead);
-        var trigCond = document.createElement('span');
-        trigCond.textContent = triggerCondition(rule);
-        trigBox.appendChild(trigCond);
-        var trigNow = document.createElement('span');
-        trigNow.className = 'now';
-        trigNow.textContent = triggerStateLine(rule, ruleStates[ri] || {});
-        trigBox.appendChild(trigNow);
-        row.appendChild(trigBox);
-        ruleEls.push({ pillEl: (typeof trigPillEl !== 'undefined' && trigPillEl) ? trigPillEl : null, condEl: trigCond, nowEl: trigNow });
-      });
-      // The Details — collapsed by default on every card (round 12:
-      // Ryan decided all cards start collapsed). Everything but the
-      // title, status, amount, and actions lives here, one
-      // label/value row per piece of info. The open state is the
-      // user's when they have toggled it (txUiState), the default
-      // otherwise — a re-render restores it instead of resetting.
-      var ui = txUiState[tx.id] || {};
-      var details = document.createElement('details');
-      details.className = 'tx-details';
-      details.open = ui.detailsOpen !== undefined ? ui.detailsOpen : false;
-      details.addEventListener('toggle', function () {
-        (txUiState[tx.id] = txUiState[tx.id] || {}).detailsOpen = details.open;
-      });
-      var sum = document.createElement('summary');
-      sum.textContent = 'Details';
-      details.appendChild(sum);
-      row.appendChild(details);
-      var body = details;
-      // The Inputs and Outputs (0.7.18 refinement): a drop-down
-      // only when there is more than one entry on that side —
-      // with exactly one input (or output) there is no drop-down
-      // at all, just the single entry as a normal kv row inline
-      // (round 10). Each drop-down is collapsed by default, its
-      // summary shows only its count — no BTC amount in a summary
-      // — and expanding one lists every entry as a kv row
-      // (round 8): the label ("Input 1", "Output 1") in the 120px
-      // label column, the content on the same line in the value
-      // column, left-aligned with every other Details value. The
-      // content is truncated to one line and clickable — tapping
-      // it opens a pop-out with the full info instead of expanding
-      // inline. Inputs list each input's outpoint (and its value
-      // when known); Outputs list each output's value and
-      // destination address (or its script type when no address
-      // can be derived). The detail comes from the server (GET
-      // /api/state derives it from the stored hex); without it
-      // the rows fall back to the plain counts.
-      var io = tx.detail;
-      if (io && Array.isArray(io.inputs) && Array.isArray(io.outputs)) {
-        if (io.inputs.length === 1) {
-          var inp0 = io.inputs[0];
-          var shortIn = shortInput(inp0.prevTxid + ':' + inp0.prevVout) + '…'
-            + ((inp0.valueSats !== null && inp0.valueSats !== undefined) ? ' · ' + fmtBtc(inp0.valueSats) + ' BTC' : '');
-          body.appendChild(ioEntryRow('Input', shortIn, 'tx-io-value', 'Click to show full input', function () { showInputPopout(tx, inp0, 0); }));
-        } else {
-          var inDet = document.createElement('details');
-          inDet.className = 'tx-io';
-          inDet.open = ui.inputsOpen === true;
-          inDet.addEventListener('toggle', function () {
-            (txUiState[tx.id] = txUiState[tx.id] || {}).inputsOpen = inDet.open;
-          });
-          var inSum = document.createElement('summary');
-          inSum.textContent = 'Inputs: ' + tx.inputs;
-          inDet.appendChild(inSum);
-          io.inputs.forEach(function (inp, i) {
-            var shortText = shortInput(inp.prevTxid + ':' + inp.prevVout) + '…'
-              + ((inp.valueSats !== null && inp.valueSats !== undefined) ? ' · ' + fmtBtc(inp.valueSats) + ' BTC' : '');
-            inDet.appendChild(ioEntryRow('Input ' + (i + 1), shortText, 'tx-io-value', 'Click to show full input', function () { showInputPopout(tx, inp, i); }));
-          });
-          body.appendChild(inDet);
-        }
-        if (io.outputs.length === 1) {
-          var out0 = io.outputs[0];
-          var shortOut = fmtBtc(out0.valueSats) + ' BTC (' + fmtSats(out0.valueSats) + ' sats)'
-            + (out0.address ? ' → ' + out0.address.slice(0, 12) + '…' : ' · ' + out0.type);
-          body.appendChild(ioEntryRow('Output', shortOut, 'tx-io-value', 'Click to show full output', function () { showOutputPopout(tx, out0, 0); }));
-        } else {
-          var outDet = document.createElement('details');
-          outDet.className = 'tx-io';
-          outDet.open = ui.outputsOpen === true;
-          outDet.addEventListener('toggle', function () {
-            (txUiState[tx.id] = txUiState[tx.id] || {}).outputsOpen = outDet.open;
-          });
-          var outSum = document.createElement('summary');
-          outSum.textContent = 'Outputs: ' + tx.outputs;
-          outDet.appendChild(outSum);
-          io.outputs.forEach(function (out, i) {
-            var shortText = fmtBtc(out.valueSats) + ' BTC (' + fmtSats(out.valueSats) + ' sats)'
-              + (out.address ? ' → ' + out.address.slice(0, 12) + '…' : ' · ' + out.type);
-            outDet.appendChild(ioEntryRow('Output ' + (i + 1), shortText, 'tx-io-value', 'Click to show full output', function () { showOutputPopout(tx, out, i); }));
-          });
-          body.appendChild(outDet);
-        }
-      } else {
-        body.appendChild(kvRow('', 'Inputs', String(tx.inputs)));
-        body.appendChild(kvRow('', 'Outputs', String(tx.outputs)));
-      }
-      // The fee (0.7.18): stored at add time when the node could
-      // answer the parent lookup. The row hides entirely when the
-      // fee is unknown — no "—" fee. The row uses the standard
-      // 120px label column like every other Details row (round 7),
-      // so its value starts exactly where the others' do. The
-      // value drops the redundant "sats" — the rate's "sat/vB"
-      // carries the unit — so even a 50,000-sat fee fits on one
-      // line in the 162px left after the column on a phone.
-      // (0.7.20) The fee verdict rides on the same line as a short
-      // colour-coded suffix — " — Low Risk" / " — Medium Risk" /
-      // " — High Risk" — for an ACTIVE tx only (a broadcast or
-      // archived tx's fee is moot, and a pending one is already
-      // submitted). No verdict when the fee rate is unknown or the
-      // 90-day peak has not been fetched: the line stays exactly
-      // as it was, rather than showing a wrong one.
-      if (tx.feeSats !== null && tx.feeSats !== undefined) {
-        var feeRow = kvRow('tx-fee', 'Fee', fmtSats(tx.feeSats) + ' · ' + fmtRate(tx.feeRateSatVb) + ' sat/vB');
-        var fv = txFeeVerdict(tx);
-        if (fv) {
-          var fvs = document.createElement('span');
-          fvs.className = 'fee-verdict ' + feeVerdictCls(fv);
-          fvs.textContent = ' — ' + fv;
-          feeRow.children[1].appendChild(fvs);
-          feeVerdictEl = fvs;
-          // The Fee line is clickable (0.7.21): tapping it opens
-          // the fee-risk pop-out, which explains how the verdict
-          // was calculated. The pointer cursor and the title say
-          // it is clickable, like the TXID value below. Only
-          // when there is a verdict to explain — a tx with no
-          // verdict has nothing to pop out.
-          feeRow.children[1].className = 'tx-kv-v tx-fee-value';
-          feeRow.children[1].title = 'Click to see how this risk was calculated';
-          feeRow.children[1].addEventListener('click', function () { showFeePopout(tx, txFeeVerdict(tx) || fv); });
-        }
-        body.appendChild(feeRow);
-      }
-      // The TXID, truncated — clickable to open a pop-out with the
-      // full 64-hex value (0.7.18 round 8: it used to expand inline,
-      // which grew the card and wrapped the hex under the label;
-      // the pop-out leaves the card exactly as it is). A display
-      // action only: it changes nothing about the tx. The pointer
-      // cursor and the title say it is clickable.
-      var txidRow = document.createElement('div');
-      txidRow.className = 'tx-kv tx-txid';
-      var txidK = document.createElement('span');
-      txidK.className = 'tx-kv-k';
-      txidK.textContent = 'TXID: ';
-      var txidV = document.createElement('span');
-      txidV.className = 'tx-kv-v tx-txid-value';
-      txidV.textContent = tx.txid.slice(0, 16) + '…';
-      txidV.title = 'Click to show full TXID';
-      txidV.addEventListener('click', function () { showTxidPopout(tx); });
-      txidRow.appendChild(txidK);
-      txidRow.appendChild(txidV);
-      body.appendChild(txidRow);
-      body.appendChild(kvRow('tx-route', 'Broadcast via', tx.broadcastVia === 'slipstream' ? 'Slipstream (MARA)' : 'Public mempool'));
-      // The public fallback (0.7.17): a per-transaction opt-in
-      // timer, shown only while the route is Slipstream AND a
-      // fallback is set — when the route is public the setting is
-      // stored but ignored, and when it is Never there is nothing
-      // to show. On a Slipstream-pending card the countdown rides
-      // on the same row. The duration is changed in the Edit popup,
-      // not on the card. Changing it only moves the deadline: it is
-      // counted from when MARA first received the transaction, and
-      // setting it sooner or later does not change the count.
-      if (tx.broadcastVia === 'slipstream' && tx.publicFallbackDays !== null && tx.publicFallbackDays !== undefined) {
-        var fbRow = kvRow('tx-fallback', 'Public Fallback', txFallbackText(tx, st));
-        fallbackValueEl = fbRow.children[1];
-        body.appendChild(fbRow);
-      }
-      if (tx.locktime > 0) {
-        body.appendChild(kvRow('', 'Locktime', String(tx.locktime)));
-      }
-      body.appendChild(kvRow('', 'Created', fmtDate(tx.createdAt)));
-      // The MARA queue line for a Slipstream-pending card: where
-      // it sits in MARA's queue and how likely it is to be mined
-      // soon. Its own row, not folded into the submission line.
-      if (pending && tx.release && tx.release.status === 'submitted-slipstream') {
-        var mara = txMaraLine(tx);
-        if (mara) {
-          var maraLine = document.createElement('p');
-          maraLine.className = 'tx-mara';
-          maraLine.textContent = mara;
-          maraEl = maraLine;
-          body.appendChild(maraLine);
-        }
-      }
-      if (tx.notes) {
-        var notes = document.createElement('p');
-        notes.className = 'tx-notes';
-        notes.textContent = tx.notes;
-        body.appendChild(notes);
-      }
-      var sentLine = null;
-      if (tx.release || tx.broadcasted) {
-        var rel = document.createElement('p');
-        rel.className = tx.broadcasted ? 'tx-sent' : 'muted';
-        rel.textContent = txReleaseLine(tx);
-        body.appendChild(rel);
-        if (tx.broadcasted) sentLine = rel;
-      }
-      // The History (0.8.2): the tx's own event trail — added,
-      // fired, broadcast, confirmed, stale, failed, edited,
-      // armed, disarmed — oldest first, in a collapsible of its
-      // own nested inside Details, collapsed by default. Only transitions
-      // are logged, never the routine release evaluations. The open state
-      // is remembered like Details (txUiState). Hidden entirely
-      // when the tx has no history (a hand-edited state — every tx
-      // the app writes carries at least the 'added' event).
-      var hist = tx.history;
-      if (Array.isArray(hist) && hist.length) {
-        var histDet = document.createElement('details');
-        histDet.className = 'tx-history';
-        histDet.open = ui.historyOpen === true;
-        histDet.addEventListener('toggle', function () {
-          (txUiState[tx.id] = txUiState[tx.id] || {}).historyOpen = histDet.open;
-        });
-        var histSum = document.createElement('summary');
-        histSum.textContent = 'History';
-        histDet.appendChild(histSum);
-        var tl = document.createElement('ul');
-        tl.className = 'timeline';
-        hist.forEach(function (ev) {
-          var li = document.createElement('li');
-          var dot = document.createElement('span');
-          var dotCls = histDotCls(ev.type);
-          dot.className = 'dot' + (dotCls ? ' ' + dotCls : '');
-          li.appendChild(dot);
-          var evEl = document.createElement('div');
-          evEl.className = 'ev';
-          evEl.textContent = histTitle(ev.type);
-          var tEl = document.createElement('span');
-          tEl.className = 't';
-          tEl.textContent = fmtHistTime(ev.ts);
-          evEl.appendChild(tEl);
-          li.appendChild(evEl);
-          if (ev.detail) {
-            var det = document.createElement('div');
-            det.className = 'det';
-            det.textContent = ev.detail;
-            li.appendChild(det);
-          }
-          tl.appendChild(li);
-        });
-        histDet.appendChild(tl);
-        details.appendChild(histDet);
-      }
+      ruleEls = appendTriggerBoxes(row, tx);
       var actions = document.createElement('div');
       actions.className = 'tx-actions';
       var dryBtn = document.createElement('button');
@@ -1987,41 +2632,6 @@
         actions.appendChild(pubBtn);
       }
       row.appendChild(actions);
-      // The last dry-run result for THIS transaction, rendered in its own
-      // card — not in the add-transaction card below. The line itself is
-      // kept in page memory; the spent verdict behind it is recorded
-      // on the transaction server-side, so the Stale status survives
-      // a refresh even though this line does not reappear.
-      var dr = dryRunResults[tx.id];
-      if (dr) {
-        var dryLine = document.createElement('p');
-        // A timelocked dry-run is a warning, not a pass or a failure:
-        // yellow/orange (the same warn colour as the Timelocked
-        // pill), never green and never red. Keyed off the verdict,
-        // not wouldBroadcast — the release WILL attempt the
-        // broadcast, so wouldBroadcast is true here, and the line
-        // must not read as 'ready'. The line lives BELOW the buttons
-        // (0.7.18 refinement, as in 0.7.17) — never inside the
-        // Details, so it is visible without expanding anything.
-        dryLine.className = dr.verdict === 'timelocked' ? 'tx-dryrun tx-warn' : 'tx-dryrun muted';
-        dryLine.textContent = dr.text;
-        row.appendChild(dryLine);
-      }
-      // Shared-input warnings from the state (see renderBitcoin):
-      // this tx spends an input another stored tx also spends, so
-      // only one of them can ever be confirmed. The input is shown
-      // short so the line cannot overflow the card. Like the
-      // dry-run line, warnings live BELOW the buttons (0.7.18
-      // refinement, as in 0.7.17) — never inside the Details.
-      var ow = overlapsByTx[tx.id];
-      if (ow && ow.length) {
-        ow.forEach(function (w) {
-          var warnLine = document.createElement('p');
-          warnLine.className = 'tx-warn';
-          warnLine.textContent = 'Warning: shares input ' + shortInput(w.input) + ' with ' + w.others + ' — only one of them can ever be confirmed.';
-          row.appendChild(warnLine);
-        });
-      }
       txCardEls[tx.id] = { row: row, sentLine: sentLine, pill: pill, rules: ruleEls, feeVerdictEl: feeVerdictEl, maraEl: maraEl, fallbackValueEl: fallbackValueEl };
       (settled ? archivedList : (pending ? pendingList : activeList)).appendChild(row);
     });
@@ -2078,10 +2688,44 @@
     }
   }
 
+  // Arm/disarm a whole set (0.8.7): the set's toggle is the only
+  // arm its members have — a member's own `enabled` is ignored
+  // while it is attached. The danger-zone warn is the same as
+  // toggleTx's, at set level: arming a set whose shared rules
+  // include a check-in rule while the clock is in the danger zone
+  // would let the release fire soon after. minCheckinThreshold
+  // and liveOffsetMs read the set's own rule set and offset.
+  async function toggleSet(id, enabled) {
+    function doToggle() {
+      return (async function () {
+        try {
+          var r = await api('PUT', '/api/bitcoin/sets/' + encodeURIComponent(id), { enabled: enabled });
+          setMsg($('btc-msg'), enabled
+            ? 'Trigger set armed.' + (r && r.checkinReset ? ' Your check-in was reset to today.' : '')
+            : 'Trigger set unarmed.', true);
+          await load();
+        } catch (e) { setMsg($('btc-msg'), e.message, false); await load(); }
+      })();
+    }
+    var armSet = (S.bitcoin.sets || []).find(function (s) { return s.id === id; });
+    var armTh = (enabled && armSet) ? minCheckinThreshold(armSet) : null;
+    var dz = (armTh !== null) ? dangerZone(armTh, liveOffsetMs(armSet)) : null;
+    if (dz) {
+      showConfirm('Reset your check-in?',
+        dz.overdue
+          ? 'The release is due — your last check-in was ' + dz.daysSince + ' day' + (dz.daysSince === 1 ? '' : 's') + ' ago. Arming this trigger set will broadcast its transactions on the next check. Arming will reset your check-in to today and restart the countdown.'
+          : 'Only ' + dz.daysLeft + ' day' + (dz.daysLeft === 1 ? '' : 's') + ' left until the release is due. Arming will reset your check-in to today and restart the countdown.',
+        doToggle, 'Arm and reset', function () { load(); });
+    } else {
+      doToggle();
+    }
+  }
+
   // The ids of the transactions that are NOT active right now
   // (pending or archived) — the ones no longer in the Active list.
   // Used to detect, after a dry-run, which transactions just left
-  // the Active list.
+  // the Active list. A set member counts through its own tx, so a
+  // set dry-run that archives a whole set pops the members.
   function inactiveIds() {
     var ids = {};
     (S.bitcoin.txs || []).forEach(function (t) {
@@ -2162,6 +2806,37 @@
     }
   }
 
+  // Dry-run a whole set (0.8.7): every member is checked, armed
+  // or not, and each member's result lands under its own subcard.
+  // A member found stale is marked stale on its own (server-side)
+  // — the set keeps its other members — so the moved-to-archive
+  // notice names every member that left the Active list in this run.
+  async function dryRunSet(id) {
+    var set = (S.bitcoin.sets || []).find(function (s) { return s.id === id; });
+    if (!set) return;
+    var before = inactiveIds();
+    try {
+      var r = await api('POST', '/api/broadcast/test', { setId: id });
+      (r.results || []).forEach(function (one) {
+        if (one.id) dryRunResults[one.id] = { text: 'Dry-run: ' + (one.note || one.error || r.note || ''), ok: !!one.wouldBroadcast,
+          verdict: one.verdict || '',
+          spent: !!(one.spent && one.spent.length), unknown: !!(one.unknown && one.unknown.length), error: !!one.error };
+      });
+      await load();
+      var moved = (r.results || []).filter(function (one) { return one.spent && one.spent.length; })
+        .map(function (one) { return { id: one.id, label: one.label || '' }; });
+      noticeMovedToArchive(before, moved);
+      var movedOut = (r.results || []).filter(function (one) { return one.verdict === 'broadcast'; })
+        .map(function (one) { return { id: one.id, label: one.label || '' }; });
+      noticeMovedToArchive(before, movedOut, 'broadcast');
+    } catch (e) {
+      setMembersOf(set).forEach(function (t) {
+        dryRunResults[t.id] = { text: 'Dry-run failed: ' + e.message, ok: false, error: true };
+      });
+      await load();
+    }
+  }
+
   // A transaction is locked once it is out the door — broadcasted,
   // or submitted to Slipstream and waiting on MARA. Its hex (and
   // its route) cannot change; only the label and notes can.
@@ -2178,6 +2853,7 @@
   // edit is open" — the popup's Save button keys off it.
   function startEdit(tx) {
     editingId = tx.id;
+    editOriginalRemoved = false;
     $('edit-label').value = tx.label || '';
     $('edit-notes').value = tx.notes || '';
     $('edit-hex').value = tx.hex || '';
@@ -2212,19 +2888,24 @@
     // cannot change), and a note says so. The server enforces the
     // same rule (PUT rejects a hex change on a locked tx).
     var locked = isTxLocked(tx);
-    $('edit-hex').disabled = locked;
+    editLockedTx = locked;
     $('edit-hex').title = locked ? 'The transaction hex cannot be changed once it has been broadcast' : '';
-    $('edit-route').disabled = locked;
     $('edit-route').title = locked ? 'The broadcast route is locked once the transaction is out the door' : '';
-    $('btn-edit-import-file').disabled = locked;
     // The trigger is locked with the hex and route: the rule has
     // already fired, so the picker and its fields are disabled
     // with them.
     setRuleListLocked('edit', locked);
     $('edit-locked-note').style.display = locked ? '' : 'none';
-    $('edit-form-title').textContent = !locked ? 'Edit transaction'
-      : stEdit.settled ? 'Edit transaction — label and notes only'
-      : 'Edit transaction — label, notes and fallback only';
+    $('edit-form-title').textContent = !locked ? 'Edit trigger set'
+      : stEdit.settled ? 'Edit trigger set — label and notes only'
+      : 'Edit trigger set — label, notes and fallback only';
+    // (0.8.7 fix, round 6) A fresh Transactions section: the
+    // appended entries from any earlier edit are gone, and the
+    // original's remove/add state follows the lock.
+    var newList = $('edit-new-txs-list');
+    if (newList) newList.innerHTML = '';
+    syncEditOriginalEntry();
+    syncEditNewTxEntries();
     $('edit-msg').textContent = '';
     $('edit-modal').classList.add('open');
     $('edit-label').focus();
@@ -2232,6 +2913,8 @@
 
   function cancelEdit() {
     editingId = null;
+    editOriginalRemoved = false;
+    editLockedTx = false;
     $('edit-label').value = '';
     $('edit-notes').value = '';
     $('edit-hex').value = '';
@@ -2241,18 +2924,310 @@
     $('edit-fallback-note').style.display = 'none';
     // (0.8.2) Reset the rule list to one default check-in rule.
     resetRuleList('edit');
+    var newList = $('edit-new-txs-list');
+    if (newList) newList.innerHTML = '';
     // Re-enable the fields a locked edit disabled.
-    $('edit-hex').disabled = false;
     $('edit-hex').title = '';
-    $('edit-route').disabled = false;
     $('edit-route').title = '';
-    $('btn-edit-import-file').disabled = false;
     setRuleListLocked('edit', false);
     $('edit-locked-note').style.display = 'none';
-    $('edit-form-title').textContent = 'Edit transaction';
+    syncEditOriginalEntry();
+    $('edit-form-title').textContent = 'Edit trigger set';
     $('edit-msg').textContent = '';
     $('edit-modal').classList.remove('open');
   }
+
+  // The single-transaction edit's working state (0.8.7 fix,
+  // round 6): whether the transaction being edited was removed
+  // from the card in this modal (it stays standalone, and the
+  // new entries form a set on their own), and whether it is
+  // locked (broadcast/pending — no add, no remove, hex/route
+  // fixed).
+  var editOriginalRemoved = false;
+  var editLockedTx = false;
+
+  // The single-transaction edit's new-transaction entries: the
+  // same blank entry the set modal appends — notes + hex +
+  // per-entry import — numbered after the transaction being
+  // edited (Transaction 2, 3, ...; from 1 when the original
+  // was removed from the card).
+  function buildEditNewTxEntry() {
+    return buildTxEntry({
+      entryCls: 'edit-new-tx-entry', notesCls: 'edit-new-tx-notes', hexCls: 'edit-new-tx-hex',
+      importCls: 'edit-new-tx-import', removeCls: 'edit-new-tx-remove',
+      msgId: 'edit-msg', onRemove: removeEditNewTxEntry, onHexInput: syncEditRemoveButtons
+    });
+  }
+  function editNewTxEntrySets() {
+    return txEntrySets($('edit-new-txs-list'), 'edit-new-tx-entry', 'edit-new-tx-notes', 'edit-new-tx-hex');
+  }
+  function syncEditNewTxEntries() {
+    var base = editOriginalRemoved ? 0 : 1;
+    editNewTxEntrySets().forEach(function (s, i) {
+      if (s.titleEl) s.titleEl.textContent = 'Transaction ' + (base + i + 1);
+    });
+    syncEditRemoveButtons();
+  }
+  // The members the save would keep: the original (unless
+  // removed) plus the filled new entries. A blank entry is not
+  // a member yet.
+  function editRemainingMembers() {
+    return (editOriginalRemoved ? 0 : 1) + collectNewTxEntries(editNewTxEntrySets()).filled.length;
+  }
+  function removeEditNewTxEntry(entry) {
+    var f = txEntryFields(entry, 'edit-new-tx-notes', 'edit-new-tx-hex');
+    if (f.hex && f.hex.value.trim() && editRemainingMembers() <= 1) {
+      setMsg($('edit-msg'), 'This is the last transaction — use Delete to remove the whole card.', false);
+      return;
+    }
+    var list = $('edit-new-txs-list');
+    if (list) list.removeChild(entry);
+    syncEditNewTxEntries();
+  }
+  // The remove buttons' disabled state follows the same rule
+  // as the click guards: the original's remove is disabled
+  // while it is the last member the save would keep (its Undo
+  // state is always available), and a filled new entry's
+  // remove is disabled while it is the last one.
+  function syncEditRemoveButtons() {
+    var remaining = editRemainingMembers();
+    var origRm = $('btn-edit-remove-tx');
+    if (origRm) origRm.disabled = editLockedTx || (!editOriginalRemoved && remaining <= 1);
+    editNewTxEntrySets().forEach(function (s) {
+      var isFilled = !!(s.fields.hex && s.fields.hex.value.trim());
+      if (s.removeBtn) s.removeBtn.disabled = isFilled && remaining <= 1;
+    });
+  }
+  // The original transaction's entry, kept or removed: removed
+  // dims the entry and disables its fields, and its remove
+  // button becomes Undo. Removing it only takes effect on save
+  // — Cancel keeps everything.
+  function syncEditOriginalEntry() {
+    var entry = $('edit-member-entry');
+    if (entry) {
+      if (editOriginalRemoved) entry.classList.add('tx-entry-removed');
+      else entry.classList.remove('tx-entry-removed');
+    }
+    $('edit-notes').disabled = editOriginalRemoved;
+    $('edit-hex').disabled = editLockedTx || editOriginalRemoved;
+    $('edit-route').disabled = editLockedTx;
+    $('btn-edit-import-file').disabled = editLockedTx || editOriginalRemoved;
+    var rm = $('btn-edit-remove-tx');
+    if (rm) {
+      rm.textContent = editOriginalRemoved ? '\u21a9 Undo' : '\u00d7 Remove';
+      rm.disabled = editLockedTx || (!editOriginalRemoved && editRemainingMembers() <= 1);
+    }
+    var addBtn = $('btn-edit-add-tx');
+    if (addBtn) addBtn.disabled = editLockedTx;
+  }
+  function toggleEditOriginalRemoved() {
+    if (editLockedTx) {
+      setMsg($('edit-msg'), 'This transaction has already been broadcast — it can only change its label and notes.', false);
+      return;
+    }
+    if (!editOriginalRemoved && editRemainingMembers() <= 1) {
+      setMsg($('edit-msg'), 'This is the last transaction — use Delete to remove the whole card.', false);
+      return;
+    }
+    editOriginalRemoved = !editOriginalRemoved;
+    syncEditOriginalEntry();
+    syncEditNewTxEntries();
+  }
+
+  // ---------- trigger sets (0.8.7) ----------
+  // editingSetId is the single source of truth for "a set edit is
+  // open", mirroring editingId for transactions.
+  var editingSetId = null;
+  // The set modal's working member list (0.8.7 fix, round 6):
+  // startEditSet copies the set's members here, the member
+  // lines render from it, and removing one drops it from this
+  // list — the save sends the reduced txIds and the removed
+  // member returns to standalone. Cancel discards it.
+  var setEditMembers = [];
+
+  // The arm/disarm switch in the set modal's header row (the
+  // card header's toggle, in the modal): its text follows the
+  // switch, so the modal never needs a pill to say armed.
+  function syncSetEnabledText() {
+    var on = $('set-enabled').checked;
+    $('set-enabled-text').textContent = on ? 'Armed' : 'Unarmed';
+    $('set-enabled-wrap').title = on ? 'Armed — will broadcast at release' : 'Unarmed — will not broadcast at release';
+  }
+
+  function startEditSet(set) {
+    editingSetId = set.id;
+    $('set-form-title').textContent = 'Edit trigger set';
+    $('set-label').value = set.label || '';
+    $('set-enabled').checked = set.enabled !== false;
+    syncSetEnabledText();
+    // (0.8.7 fix, round 5) The Transactions section lists the
+    // current members (one line each: tx number, txid, amount,
+    // notes) so the owner can see what the set holds — and the
+    // "+ Add transaction" button below appends blank entries
+    // for new transactions, created on save. (Round 6) Each
+    // member line has a remove button; removed members return
+    // to standalone on save.
+    setEditMembers = setMembersOf(set).slice();
+    renderSetMembers();
+    var newList = $('set-new-txs-list');
+    if (newList) newList.innerHTML = '';
+    resetRuleList('set', triggerSetOf(set));
+    $('set-msg').textContent = '';
+    $('set-modal').classList.add('open');
+    $('set-label').focus();
+  }
+
+  // The set modal's new-transaction entries (0.8.7 fix, round
+  // 5): the same blank entry the Add modal appends (notes +
+  // hex + per-entry import), numbered after the existing
+  // members. Entries are built in JS and held by reference
+  // through the list's children — the same walk pattern as
+  // addTxEntrySets.
+  function setNewTxEntryFields(entry) {
+    return txEntryFields(entry, 'set-new-tx-notes', 'set-new-tx-hex');
+  }
+  function setNewTxEntrySets() {
+    return txEntrySets($('set-new-txs-list'), 'set-new-tx-entry', 'set-new-tx-notes', 'set-new-tx-hex');
+  }
+  function syncSetNewTxEntries() {
+    var base = setEditMembers.length;
+    setNewTxEntrySets().forEach(function (s, i) {
+      if (s.titleEl) s.titleEl.textContent = 'Transaction ' + (base + i + 1);
+    });
+    syncSetRemoveButtons();
+  }
+  function buildSetNewTxEntry() {
+    return buildTxEntry({
+      entryCls: 'set-new-tx-entry', notesCls: 'set-new-tx-notes', hexCls: 'set-new-tx-hex',
+      importCls: 'set-new-tx-import', removeCls: 'set-new-tx-remove',
+      msgId: 'set-msg', onRemove: removeSetNewTxEntry, onHexInput: syncSetRemoveButtons
+    });
+  }
+  function removeSetNewTxEntry(entry) {
+    var f = setNewTxEntryFields(entry);
+    if (f.hex && f.hex.value.trim() && setEditMembers.length + collectNewTxEntries(setNewTxEntrySets()).filled.length <= 1) {
+      setMsg($('set-msg'), 'This is the last transaction in the set — use Delete to remove the whole set.', false);
+      return;
+    }
+    var list = $('set-new-txs-list');
+    if (list) list.removeChild(entry);
+    syncSetNewTxEntries();
+  }
+
+  // The set modal's member lines (0.8.7 fix, round 6): one line
+  // per member — tx number, txid, amount, notes — with its own
+  // remove button. Rendered from setEditMembers so a removal
+  // renumbers the lines at once.
+  function renderSetMembers() {
+    var membersEl = $('set-members-list');
+    if (!membersEl) return;
+    membersEl.innerHTML = '';
+    setEditMembers.forEach(function (t, i) {
+      var line = document.createElement('p');
+      line.className = 'muted';
+      line.style.margin = '6px 0 0';
+      var span = document.createElement('span');
+      span.textContent = 'Tx ' + (i + 1) + ' — ' + t.txid.slice(0, 16) + '… · ' + fmtBtc(t.totalOutSats) + ' BTC' + (t.notes ? ' — ' + t.notes : '');
+      line.appendChild(span);
+      var rm = document.createElement('button');
+      rm.type = 'button';
+      rm.className = 'rule-remove set-member-remove';
+      rm.textContent = '\u00d7 Remove';
+      rm.addEventListener('click', function () { removeSetMember(t.id); });
+      line.appendChild(rm);
+      membersEl.appendChild(line);
+    });
+    syncSetRemoveButtons();
+  }
+  function removeSetMember(id) {
+    // The last remaining member cannot go — the card would
+    // have no transaction left. Delete removes the whole card.
+    var remaining = setEditMembers.length - 1 + collectNewTxEntries(setNewTxEntrySets()).filled.length;
+    if (remaining <= 0) {
+      setMsg($('set-msg'), 'This is the last transaction in the set — use Delete to remove the whole set.', false);
+      return;
+    }
+    setEditMembers = setEditMembers.filter(function (t) { return t.id !== id; });
+    renderSetMembers();
+    syncSetNewTxEntries();
+  }
+  // The remove buttons' disabled state follows the same rule
+  // as the click guards: a member's remove is disabled while
+  // it is the last member the save would keep, and a filled
+  // new entry's remove is disabled while it is the last one.
+  // The click handlers re-check, so a button left enabled by
+  // a typed-then-removed hex still cannot strand the card.
+  function syncSetRemoveButtons() {
+    var filled = collectNewTxEntries(setNewTxEntrySets()).filled.length;
+    var membersEl = $('set-members-list');
+    if (membersEl) {
+      Array.prototype.forEach.call(membersEl.children || [], function (line) {
+        Array.prototype.forEach.call(line.children || [], function (c) {
+          if ((c.className || '').split(' ').indexOf('set-member-remove') !== -1) {
+            c.disabled = setEditMembers.length <= 1 && filled === 0;
+          }
+        });
+      });
+    }
+    var remaining = setEditMembers.length + filled;
+    setNewTxEntrySets().forEach(function (s) {
+      var isFilled = !!(s.fields.hex && s.fields.hex.value.trim());
+      if (s.removeBtn) s.removeBtn.disabled = isFilled && remaining <= 1;
+    });
+  }
+
+  function cancelSet() {
+    editingSetId = null;
+    setEditMembers = [];
+    $('set-label').value = '';
+    $('set-enabled').checked = true;
+    syncSetEnabledText();
+    var membersEl = $('set-members-list');
+    if (membersEl) membersEl.innerHTML = '';
+    var newList = $('set-new-txs-list');
+    if (newList) newList.innerHTML = '';
+    resetRuleList('set');
+    $('set-msg').textContent = '';
+    $('set-modal').classList.remove('open');
+  }
+
+  // The set popup closes like the edit popup: Cancel, the X, or
+  // a click on the backdrop. Guarded like the set rule wiring
+  // above: a mixed tree has no set modal.
+  var btnSetCancel = $('btn-set-cancel');
+  if (btnSetCancel) btnSetCancel.addEventListener('click', function () { cancelSet(); });
+  var setEnabledCb = $('set-enabled');
+  if (setEnabledCb) setEnabledCb.addEventListener('change', function () { syncSetEnabledText(); });
+  // (0.8.7 fix, round 5) "+ Add transaction" appends a blank
+  // entry to the set modal's Transactions section. Guarded
+  // like the set rule wiring: a mixed tree has no such button.
+  var btnSetAddTx = $('btn-set-add-tx');
+  if (btnSetAddTx) btnSetAddTx.addEventListener('click', function () {
+    var list = $('set-new-txs-list');
+    if (!list) return;
+    var entry = buildSetNewTxEntry();
+    list.appendChild(entry);
+    syncSetNewTxEntries();
+    var f = setNewTxEntryFields(entry);
+    if (f.hex && f.hex.focus) f.hex.focus();
+  });
+  // (0.8.7 fix, round 6) The same pair in the edit modal:
+  // "+ Add transaction" appends a blank entry to its
+  // Transactions section, and the original transaction's
+  // remove button toggles its removal from the card. Guarded
+  // like the set modal's wiring.
+  var btnEditAddTx = $('btn-edit-add-tx');
+  if (btnEditAddTx) btnEditAddTx.addEventListener('click', function () {
+    var list = $('edit-new-txs-list');
+    if (!list) return;
+    var entry = buildEditNewTxEntry();
+    list.appendChild(entry);
+    syncEditNewTxEntries();
+    var f = txEntryFields(entry, 'edit-new-tx-notes', 'edit-new-tx-hex');
+    if (f.hex && f.hex.focus) f.hex.focus();
+  });
+  var btnEditRemoveTx = $('btn-edit-remove-tx');
+  if (btnEditRemoveTx) btnEditRemoveTx.addEventListener('click', function () { toggleEditOriginalRemoved(); });
 
   // The edit popup closes like the confirm modal: Cancel, the X,
   // or a click on the backdrop. Guarded like modal-x: a mixed tree
@@ -2282,7 +3257,7 @@
     { value: 'feemarket', label: 'Fee market' },
     { value: 'manual', label: 'Manual only — no trigger' },
   ];
-  var ruleLists = { btc: { op: 'OR', panels: [], nextIdx: 0 }, edit: { op: 'OR', panels: [], nextIdx: 0 } };
+  var ruleLists = { btc: { op: 'OR', panels: [], nextIdx: 0 }, edit: { op: 'OR', panels: [], nextIdx: 0 }, set: { op: 'OR', panels: [], nextIdx: 0 } };
   function mkEl(tag, cls, text) {
     var e = document.createElement(tag);
     if (cls) e.className = cls;
@@ -2673,6 +3648,15 @@
   $('edit-op-any').addEventListener('click', function () { ruleLists.edit.op = 'OR'; syncRuleListChrome('edit'); });
   $('edit-op-all').addEventListener('click', function () { ruleLists.edit.op = 'AND'; syncRuleListChrome('edit'); });
   $('edit-add-rule').addEventListener('click', function () { addRulePanel('edit'); });
+  // (0.8.7) The set modal's rule form is the same machinery,
+  // with the prefix 'set'. Guarded: a mixed tree (new script,
+  // old page) has no set modal — skip the wiring instead of dying.
+  if ($('set-rules-list')) {
+    $('set-op-any').addEventListener('click', function () { ruleLists.set.op = 'OR'; syncRuleListChrome('set'); });
+    $('set-op-all').addEventListener('click', function () { ruleLists.set.op = 'AND'; syncRuleListChrome('set'); });
+    $('set-add-rule').addEventListener('click', function () { addRulePanel('set'); });
+    resetRuleList('set');
+  }
   resetRuleList('btc');
   resetRuleList('edit');
   var editModalX = $('edit-modal-x');
@@ -2680,15 +3664,43 @@
   $('edit-modal').addEventListener('click', function (e) {
     if (e.target === $('edit-modal')) cancelEdit();
   });
+  // (0.8.7) The set popup's X and backdrop, guarded like the
+  // edit popup's: a mixed tree (new script, old page) must
+  // degrade to a missing X, not a dead page.
+  var setModalX = $('set-modal-x');
+  if (setModalX) setModalX.addEventListener('click', function () { cancelSet(); });
+  var setModalEl = $('set-modal');
+  if (setModalEl) setModalEl.addEventListener('click', function (e) {
+    if (e.target === setModalEl) cancelSet();
+  });
 
-  // Save the open edit: the PUT the Add button used to do. Errors
-  // stay in the popup (edit-msg) so the owner can fix them; on
-  // success the popup closes and the message lands on the Add
-  // card, which is visible after the popup closes.
+  // Save the open edit — the same construct as the set save:
+  // the Transactions section holds the transaction being edited
+  // plus any blank entries appended with "+ Add transaction".
+  // Saving with no new entries is the old single-tx PUT.
+  // Saving WITH new entries creates them first (with this
+  // card's trigger — dormant while attached — and its route),
+  // then promotes the card to a trigger set holding the kept
+  // original plus the new ones. If the original was removed
+  // from the card it stays staged standalone, untouched, and
+  // the new entries form the set on their own. A failure while
+  // creating stops the save and says so: txs already created
+  // stay staged standalone and the set is not created. Errors
+  // stay in the popup (edit-msg); on success the popup closes
+  // and the message lands on the Add card, which is visible
+  // after the popup closes.
   $('btn-edit-save').addEventListener('click', async function () {
     if (!editingId) return;
-    var hex = $('edit-hex').value.trim();
-    if (!hex) { setMsg($('edit-msg'), 'Paste the signed transaction hex first.', false); return; }
+    var origKept = !editOriginalRemoved;
+    var hex = origKept ? $('edit-hex').value.trim() : '';
+    if (origKept && !hex) { setMsg($('edit-msg'), 'Paste the signed transaction hex first.', false); return; }
+    // The new entries appended in the modal: blank entries are
+    // ignored; an entry with notes but no hex blocks the save,
+    // like the Add form.
+    var collected = collectNewTxEntries(editNewTxEntrySets());
+    if (collected.noteless) { setMsg($('edit-msg'), 'Transaction ' + collected.noteless.n + ' has notes but no signed transaction — paste its hex or remove the entry.', false); return; }
+    var newTxs = collected.filled;
+    if (!origKept && !newTxs.length) { setMsg($('edit-msg'), 'This trigger set needs at least one transaction — add one, or undo the removal.', false); return; }
     var eres = ruleSetFromForm('edit');
     var trig = eres.set;
     if (!trig) { setMsg($('edit-msg'), eres.error, false); return; }
@@ -2703,18 +3715,51 @@
     var triggerChanged = oldTx0 && (JSON.stringify(triggerSetOf(oldTx0)) !== JSON.stringify(trig));
     function doSave(triggerConfirmed) {
       return (async function () {
+        var originalUpdated = false;
+        var createdIds = [];
+        var checkinReset = false;
+        var triggerWarning = null;
+        var putRes = null;
         try {
           await saveBitcoinSettings();
           var oldTx = (S.bitcoin.txs || []).find(function (t) { return t.id === editingId; });
           var editFbVal = $('edit-fallback').value;
-          var body = { txHex: hex, label: $('edit-label').value, notes: $('edit-notes').value, broadcastVia: $('edit-route').value, publicFallbackDays: editFbVal === '' ? null : parseInt(editFbVal, 10), trigger: trig };
-          if (triggerConfirmed) body.triggerConfirmed = true;
-          var r = await api('PUT', '/api/bitcoin/txs/' + encodeURIComponent(editingId), body);
-          // A replaced hex makes the old dry-run result stale (the
-          // shared-input warning clears on its own — the server
-          // recomputes it from the new hexes on the next load).
-          if (oldTx && oldTx.hex !== hex) { delete dryRunResults[editingId]; }
-          setMsg($('btc-msg'), 'Transaction updated. TXID ' + r.tx.txid + '.' + (r && r.triggerWarning ? ' ' + r.triggerWarning : ''), true);
+          if (origKept) {
+            var body = { txHex: hex, label: $('edit-label').value, notes: $('edit-notes').value, broadcastVia: $('edit-route').value, publicFallbackDays: editFbVal === '' ? null : parseInt(editFbVal, 10), trigger: trig };
+            if (triggerConfirmed) body.triggerConfirmed = true;
+            putRes = await api('PUT', '/api/bitcoin/txs/' + encodeURIComponent(editingId), body);
+            originalUpdated = true;
+            if (putRes && putRes.triggerWarning) triggerWarning = putRes.triggerWarning;
+            // A replaced hex makes the old dry-run result stale (the
+            // shared-input warning clears on its own — the server
+            // recomputes it from the new hexes on the next load).
+            if (oldTx && oldTx.hex !== hex) { delete dryRunResults[editingId]; }
+          }
+          for (var i = 0; i < newTxs.length; i++) {
+            var txBody = { txHex: newTxs[i].hex, notes: newTxs[i].notes, broadcastVia: $('edit-route').value, publicFallbackDays: editFbVal === '' ? null : parseInt(editFbVal, 10), trigger: trig };
+            if (triggerConfirmed) txBody.triggerConfirmed = true;
+            var cr = await api('POST', '/api/bitcoin/txs', txBody);
+            createdIds.push(cr.tx.id);
+            if (cr.checkinReset) checkinReset = true;
+            if (cr.triggerWarning) triggerWarning = cr.triggerWarning;
+          }
+          var doneMsg;
+          if (createdIds.length) {
+            var allIds = (origKept ? [editingId] : []).concat(createdIds);
+            var setBody = { label: $('edit-label').value, txIds: allIds, trigger: trig, enabled: oldTx ? oldTx.enabled !== false : true };
+            if (triggerConfirmed) setBody.triggerConfirmed = true;
+            var sr = await api('POST', '/api/bitcoin/sets', setBody);
+            if (sr && sr.checkinReset) checkinReset = true;
+            if (sr && sr.triggerWarning) triggerWarning = sr.triggerWarning;
+            doneMsg = origKept
+              ? 'Transaction updated. Added ' + createdIds.length + (createdIds.length === 1 ? ' transaction — this is now a trigger set.' : ' transactions — this is now a trigger set.')
+              : 'Trigger set created with ' + createdIds.length + (createdIds.length === 1 ? ' transaction.' : ' transactions.') + ' The original transaction is staged standalone.';
+          } else {
+            doneMsg = 'Transaction updated. TXID ' + putRes.tx.txid + '.';
+          }
+          if (checkinReset) doneMsg += ' Your check-in was reset to today.';
+          if (triggerWarning) doneMsg += ' ' + triggerWarning;
+          setMsg($('btc-msg'), doneMsg, true);
           cancelEdit();
           await load();
         } catch (e) {
@@ -2723,14 +3768,157 @@
           // label-only edit on a rule that is already satisfied
           // hits it too, since the save always sends the trigger.
           // A gate 400 offers the same confirm instead of a dead
-          // error.
-          if (e.message && e.message.indexOf('would fire on the next evaluation') !== -1) {
+          // error — but only when nothing was created yet; a
+          // failure mid-batch is a partial save, reported as one.
+          if (createdIds.length === 0 && e.message && e.message.indexOf('would fire on the next evaluation') !== -1) {
             showConfirm(saveTitle, 'This rule is already satisfied — it would fire on the next evaluation. Save it anyway?', function () { doSave(true); }, 'Save anyway');
+            return;
+          }
+          if (createdIds.length) {
+            setMsg($('edit-msg'), 'Added ' + createdIds.length + ' of ' + newTxs.length + ' transactions before the error: ' + e.message
+              + ' The trigger set was not created — the added transactions are staged standalone.'
+              + (originalUpdated ? ' The original transaction was already updated.' : ''), false);
             return;
           }
           setMsg($('edit-msg'), e.message, false);
         }
       })();
+    }
+    // (0.7.22, scoped 0.8.0) A new tx with a CHECK-IN rule is
+    // armed by default — adding one while the clock is in the
+    // danger zone would let the release fire soon after, so
+    // warn first, like the Add form and the set save. Only when
+    // a transaction is actually being added.
+    if (newTxs.length) {
+      var editCkTh = minSetCheckinThreshold(trig);
+      if (editCkTh !== null) {
+        var dz = dangerZone(editCkTh);
+        if (dz) {
+          showConfirm('Reset your check-in?',
+            dz.overdue
+              ? 'The release is due — your last check-in was ' + dz.daysSince + ' day' + (dz.daysSince === 1 ? '' : 's') + ' ago. A new transaction is armed by default, so it would broadcast on the next check. Adding it will reset your check-in to today and restart the countdown.'
+              : 'Only ' + dz.daysLeft + ' day' + (dz.daysLeft === 1 ? '' : 's') + ' left until the release is due. Adding it will reset your check-in to today and restart the countdown.',
+            function () { doSave(); }, 'Add and reset');
+          return;
+        }
+      }
+    }
+    if (triggerChanged && trig.rules.some(function (r) { return r.type === 'price' || r.type === 'utxo' || r.type === 'blockheight' || r.type === 'setdate' || r.type === 'feemarket'; })) {
+      try {
+        var chk = await api('POST', '/api/triggers/check', { trigger: trig });
+        if (chk && chk.warning) {
+          showConfirm(saveTitle, chk.warning + ' Save it anyway?', function () { doSave(true); }, 'Save anyway');
+          return;
+        }
+      } catch (e) { /* the save proceeds — the server gates the price, UTXO, block-height, set-date, and fee-market cases */ }
+    }
+    doSave();
+  });
+
+  // Save a trigger set (0.8.7): edit-only (PUT) — the modal
+  // never creates a set (new sets come from "+ Add Tx"). New
+  // transactions appended in the modal (round 5) are created
+  // first with the set's shared trigger — dormant while
+  // attached, the same as the Add flow — then attached by
+  // sending the full txIds list (existing members + new
+  // ones); with no new transactions txIds is omitted and the
+  // server keeps the existing members. A failure while
+  // creating a new tx stops the save and says so in the
+  // popup: txs already created stay staged standalone, and
+  // the set itself is unchanged. The already-satisfied guard
+  // mirrors the Add/Edit transaction saves — a pre-check via
+  // /api/triggers/check, with the server's 400 as the
+  // backstop. Errors stay in the popup (set-msg).
+  // (0.8.7) Guarded like the set rule wiring: a mixed tree has
+  // no set modal.
+  var btnSetSave = $('btn-set-save');
+  if (btnSetSave) btnSetSave.addEventListener('click', async function () {
+    var sres = ruleSetFromForm('set');
+    var trig = sres.set;
+    if (!trig) { setMsg($('set-msg'), sres.error, false); return; }
+    var saveTitle = trig.rules.length > 1 ? 'Save a rule set that is already satisfied?' : 'Save a rule that is already satisfied?';
+    var oldSet = (S.bitcoin.sets || []).find(function (s) { return s.id === editingSetId; }) || null;
+    var triggerChanged = !oldSet || (JSON.stringify(triggerSetOf(oldSet)) !== JSON.stringify(trig));
+    // (0.8.7 fix, round 5) The new transactions appended in
+    // the modal: blank entries are ignored; an entry with
+    // notes but no hex blocks the save, like the Add form.
+    var collected = collectNewTxEntries(setNewTxEntrySets());
+    if (collected.noteless) { setMsg($('set-msg'), 'Transaction ' + collected.noteless.n + ' has notes but no signed transaction — paste its hex or remove the entry.', false); return; }
+    var newTxs = collected.filled;
+    // New transactions take the first member's broadcast
+    // route (the set itself has no route); a set with no
+    // members yet falls back to the public mempool.
+    var members0 = oldSet ? setMembersOf(oldSet) : [];
+    var newVia = (members0[0] && members0[0].broadcastVia) || 'public';
+    var newFb = (members0[0] && members0[0].publicFallbackDays !== undefined && members0[0].publicFallbackDays !== null) ? members0[0].publicFallbackDays : null;
+    function doSave(triggerConfirmed) {
+      return (async function () {
+        var createdIds = [];
+        var checkinReset = false;
+        try {
+          for (var i = 0; i < newTxs.length; i++) {
+            var txBody = { txHex: newTxs[i].hex, notes: newTxs[i].notes, broadcastVia: newVia, publicFallbackDays: newFb, trigger: trig };
+            if (triggerConfirmed) txBody.triggerConfirmed = true;
+            var cr = await api('POST', '/api/bitcoin/txs', txBody);
+            createdIds.push(cr.tx.id);
+            if (cr.checkinReset) checkinReset = true;
+          }
+          var body = { label: $('set-label').value, trigger: trig, enabled: $('set-enabled').checked };
+          // (0.8.7 fix, round 6) The kept members plus the new
+          // ones — members removed in the modal are left out,
+          // so they return to standalone; with nothing added or
+          // removed txIds is omitted and the server keeps them.
+          var keptIds = setEditMembers.map(function (t) { return t.id; });
+          var removedCount = oldSet ? (oldSet.txIds || []).filter(function (id) { return keptIds.indexOf(id) === -1; }).length : 0;
+          if (createdIds.length || removedCount) body.txIds = keptIds.concat(createdIds);
+          if (triggerConfirmed) body.triggerConfirmed = true;
+          var r = await api('PUT', '/api/bitcoin/sets/' + encodeURIComponent(editingSetId), body);
+          var doneMsg = 'Trigger set updated.'
+            + (createdIds.length ? ' Added ' + createdIds.length + (createdIds.length === 1 ? ' transaction.' : ' transactions.') : '')
+            + (removedCount ? ' Removed ' + removedCount + (removedCount === 1 ? ' transaction — it is staged standalone.' : ' transactions — they are staged standalone.') : '')
+            + (checkinReset ? ' Your check-in was reset to today.' : '')
+            + (r && r.triggerWarning ? ' ' + r.triggerWarning : '');
+          setMsg($('btc-msg'), doneMsg, true);
+          cancelSet();
+          await load();
+        } catch (e) {
+          // (0.8.0) The server's already-satisfied gate is the
+          // backstop for the pre-check below — but only when
+          // nothing was created yet; a failure mid-batch is a
+          // partial save, reported as one, and the set itself
+          // is left unchanged.
+          if (createdIds.length === 0 && e.message && e.message.indexOf('would fire on the next evaluation') !== -1) {
+            showConfirm(saveTitle, 'This rule is already satisfied — it would fire on the next evaluation. Save it anyway?', function () { doSave(true); }, 'Save anyway');
+            return;
+          }
+          if (createdIds.length) {
+            setMsg($('set-msg'), 'Added ' + createdIds.length + ' of ' + newTxs.length + ' transactions before the error: ' + e.message
+              + ' The added transactions are staged standalone — they were not attached to this set, and the set was not changed.', false);
+            return;
+          }
+          setMsg($('set-msg'), e.message, false);
+        }
+      })();
+    }
+    // (0.7.22, scoped 0.8.0) A new tx with a CHECK-IN rule is
+    // armed by default — adding one while the clock is in the
+    // danger zone would let the release fire soon after, so
+    // warn first, like the Add form. Only when a transaction
+    // is actually being added; editing the label or triggers
+    // of an already-armed set changes nothing about the clock.
+    if (newTxs.length) {
+      var setCkTh = minSetCheckinThreshold(trig);
+      if (setCkTh !== null) {
+        var dz = dangerZone(setCkTh);
+        if (dz) {
+          showConfirm('Reset your check-in?',
+            dz.overdue
+              ? 'The release is due — your last check-in was ' + dz.daysSince + ' day' + (dz.daysSince === 1 ? '' : 's') + ' ago. A new transaction is armed by default, so it would broadcast on the next check. Adding it will reset your check-in to today and restart the countdown.'
+              : 'Only ' + dz.daysLeft + ' day' + (dz.daysLeft === 1 ? '' : 's') + ' left until the release is due. Adding it will reset your check-in to today and restart the countdown.',
+            function () { doSave(); }, 'Add and reset');
+          return;
+        }
+      }
     }
     if (triggerChanged && trig.rules.some(function (r) { return r.type === 'price' || r.type === 'utxo' || r.type === 'blockheight' || r.type === 'setdate' || r.type === 'feemarket'; })) {
       try {
@@ -2750,6 +3938,18 @@
       delete dryRunResults[id];
       if (editingId === id) cancelEdit();
       setMsg($('btc-msg'), 'Transaction removed.', true);
+      await load();
+    } catch (e) { setMsg($('btc-msg'), e.message, false); }
+  }
+
+  // Delete a set (0.8.7): the set goes, its transactions do not —
+  // they return to standalone, each with its own trigger again.
+  // The set's shared history goes with it.
+  async function deleteSet(id) {
+    try {
+      await api('DELETE', '/api/bitcoin/sets/' + encodeURIComponent(id));
+      if (editingSetId === id) cancelSet();
+      setMsg($('btc-msg'), 'Trigger set removed. Its transactions are standalone again.', true);
       await load();
     } catch (e) { setMsg($('btc-msg'), e.message, false); }
   }
@@ -2795,11 +3995,36 @@
   $('btc-route').addEventListener('change', syncAddFallbackRow);
   $('btc-fallback').addEventListener('change', syncAddFallbackRow);
   // The Add card is add-only now (0.7.16 amendment): editing lives
-  // in the popup, so this button always POSTs a new transaction.
-  // After a successful add the form clears, ready for the next one.
+  // in the popup, so this button always POSTs new transactions.
+  // (0.8.7 fix, round 3) "+ Add Tx" IS "add trigger set": one
+  // Save creates ALL filled entries (notes + hex each, the
+  // shared rules and route below) and then creates a COMPLETE
+  // INDEPENDENT new trigger set holding them, with the ONE label
+  // above the entries. The txs carry the shared trigger in
+  // their own record too — it stays dormant while they are in
+  // the set, and it is what they fall back to if the set is
+  // ever deleted. Blank entries are skipped; an entry with
+  // notes but no hex is an error naming it. With one entry
+  // filled in, this is the one-transaction case of the same
+  // flow (same validation, same already-satisfied confirm,
+  // same success path). After a successful add the form clears,
+  // ready for the next set. A failure after some txs were
+  // created leaves those txs staged standalone — the error
+  // says so, and the set is not created.
   $('btn-btc-add').addEventListener('click', async function () {
-    var hex = $('btc-hex').value.trim();
-    if (!hex) { setMsg($('btc-msg'), 'Paste the signed transaction hex first.', false); return; }
+    var sets = addTxEntrySets();
+    var snap = sets.map(function (s, i) {
+      return {
+        n: i + 1,
+        notes: s.fields.notes ? s.fields.notes.value : '',
+        hex: s.fields.hex ? s.fields.hex.value.trim() : '',
+      };
+    });
+    var filled = snap.filter(function (e) { return !!e.hex; });
+    if (!filled.length) { setMsg($('btc-msg'), 'Paste the signed transaction hex first.', false); return; }
+    var noteless = snap.filter(function (e) { return !e.hex && e.notes.trim() !== ''; })[0];
+    if (noteless) { setMsg($('btc-msg'), 'Transaction ' + noteless.n + ' has notes but no signed transaction — paste its hex or remove the entry.', false); return; }
+    var setLabel = $('btc-set-label') ? $('btc-set-label').value : '';
     var res = ruleSetFromForm('btc');
     var trig = res.set;
     if (!trig) { setMsg($('btc-msg'), res.error, false); return; }
@@ -2808,21 +4033,44 @@
     var addTitle = trig.rules.length > 1 ? 'Add a rule set that is already satisfied?' : 'Add a rule that is already satisfied?';
     function doAdd(triggerConfirmed) {
       return (async function () {
+        var created = [];
+        var setCreated = false;
         try {
           await saveBitcoinSettings();
           var fbVal = $('btc-fallback').value;
-          var body = { txHex: hex, label: $('btc-label').value, notes: $('btc-notes').value, broadcastVia: $('btc-route').value, publicFallbackDays: fbVal === '' ? null : parseInt(fbVal, 10), trigger: trig };
-          if (triggerConfirmed) body.triggerConfirmed = true;
-          var r = await api('POST', '/api/bitcoin/txs', body);
+          var checkinReset = false;
+          var triggerWarning = null;
+          for (var i = 0; i < filled.length; i++) {
+            var body = { txHex: filled[i].hex, notes: filled[i].notes, broadcastVia: $('btc-route').value, publicFallbackDays: fbVal === '' ? null : parseInt(fbVal, 10), trigger: trig };
+            if (triggerConfirmed) body.triggerConfirmed = true;
+            var r = await api('POST', '/api/bitcoin/txs', body);
+            created.push(r.tx);
+            if (r.checkinReset) checkinReset = true;
+            if (r.triggerWarning) triggerWarning = r.triggerWarning;
+          }
+          // The set itself: one POST holding the new txs, the
+          // one label, and the shared triggers. The gate on the
+          // tx POSTs above runs first with the same trigger, so
+          // by here the already-satisfied case is either clear
+          // or confirmed (triggerConfirmed rides along).
+          var setBody = { label: setLabel, txIds: created.map(function (t) { return t.id; }), trigger: trig, enabled: true };
+          if (triggerConfirmed) setBody.triggerConfirmed = true;
+          var sr = await api('POST', '/api/bitcoin/sets', setBody);
+          setCreated = true;
+          if (sr && sr.checkinReset) checkinReset = true;
+          if (sr && sr.triggerWarning) triggerWarning = sr.triggerWarning;
           // The popup closes on success; the confirmation lands in
           // the Staged Transactions card (visible after the popup
           // closes). Errors stay in the popup (btc-msg) so the
           // owner can fix them without losing the form.
           closeAddModal();
-          setMsg($('btc-all-msg'), 'Transaction added and armed. TXID ' + r.tx.txid + ' — use the toggle to unarm it.' + (r && r.checkinReset ? ' Your check-in was reset to today.' : '') + (r && r.triggerWarning ? ' ' + r.triggerWarning : ''), true);
-          $('btc-label').value = '';
-          $('btc-notes').value = '';
-          $('btc-hex').value = '';
+          var doneMsg = 'Trigger set "' + (setLabel || 'Untitled set') + '" created with ' + created.length
+            + (created.length === 1 ? ' transaction' : ' transactions') + ' and armed. TXIDs '
+            + created.map(function (t) { return t.txid; }).join(', ') + ' — use the toggle to unarm it.';
+          if (checkinReset) doneMsg += ' Your check-in was reset to today.';
+          if (triggerWarning) doneMsg += ' ' + triggerWarning;
+          setMsg($('btc-all-msg'), doneMsg, true);
+          resetAddTxEntries();
           $('btc-route').value = 'public';
           $('btc-fallback').value = '';
           resetRuleList('btc');
@@ -2833,9 +4081,17 @@
           // UTXO) is the backstop for the pre-check above — the
           // price can cross, or the pre-check can fail, between
           // the check and the add. A gate 400 offers the same
-          // confirm instead of a dead error.
-          if (e.message && e.message.indexOf('would fire on the next evaluation') !== -1) {
+          // confirm instead of a dead error — but only when
+          // nothing was created yet; a failure mid-batch is a
+          // partial add, reported as one.
+          if (created.length === 0 && e.message && e.message.indexOf('would fire on the next evaluation') !== -1) {
             showConfirm(addTitle, 'This rule is already satisfied — it would fire on the next evaluation. Add it anyway?', function () { doAdd(true); }, 'Add anyway');
+            return;
+          }
+          if (created.length) {
+            await load();
+            setMsg($('btc-msg'), 'Added ' + created.length + ' of ' + filled.length + ' transactions before the error: ' + e.message
+              + (setCreated ? '' : ' The trigger set was not created — the added transactions are staged standalone.'), false);
             return;
           }
           setMsg($('btc-msg'), e.message, false);
@@ -2894,11 +4150,16 @@
   // a PSBT file is finalized server-side (preview endpoint) first
   // and the extracted raw hex goes in the box. A PSBT that is not
   // fully signed is rejected by the server with the inputs named,
-  // and the box is left alone. Shared by the Add card (btc-*) and
-  // the edit popup (edit-*) — hexId/msgId/fileId name the targets.
-  // A successful import just fills the hex box; there is no success
-  // message (the filled box is the confirmation). Errors still
-  // report through msgId.
+  // and the box is left alone. Shared by the Add card (btc-*), the
+  // edit popup (edit-*), and the set modal's new entries — hexEl /
+  // msgEl name the target elements, so each entry's own import
+  // button fills its own box. A successful import just fills the
+  // hex box; there is no success message (the filled box is the
+  // confirmation). Errors still report through msgEl.
+  // Which hex box the next file read fills: set by the import
+  // button that was clicked (each entry's button records its own
+  // box); the Add form's static first entry is the default.
+  var pendingImportTarget = null;
   function base64OfBytes(bytes) {
     var bin = '';
     var chunk = 0x8000;
@@ -2907,7 +4168,7 @@
     }
     return btoa(bin);
   }
-  function importTxFile(file, hexId, msgId, fileId) {
+  function importTxFile(file, hexEl, msgEl, fileId) {
     if (!file) return;
     var reader = new FileReader();
     reader.onload = async function () {
@@ -2916,13 +4177,13 @@
         var text = new TextDecoder('utf-8', { fatal: false }).decode(bytes).trim();
         if (/^[0-9a-fA-F]+$/.test(text) && text.length > 0 && text.length % 2 === 0) {
           // Hex file: put the hex straight in the box.
-          $(hexId).value = text;
+          hexEl.value = text;
         } else if (bytes.length >= 5 && bytes[0] === 0x70 && bytes[1] === 0x73 && bytes[2] === 0x62 && bytes[3] === 0x74 && bytes[4] === 0xff) {
           // Raw binary PSBT: finalize it server-side, then put the
           // extracted hex in the box. Base64-encoded here so it
           // survives the JSON body.
           var r = await api('POST', '/api/bitcoin/txs/preview', { format: 'psbt', data: base64OfBytes(bytes) });
-          $(hexId).value = r.hex;
+          hexEl.value = r.hex;
         } else {
           // Base64 PSBT text: finalize it server-side the same way.
           var b64 = text.replace(/\s+/g, '');
@@ -2932,26 +4193,34 @@
           }
           if (decodesToPsbt) {
             var r2 = await api('POST', '/api/bitcoin/txs/preview', { format: 'psbt', data: text });
-            $(hexId).value = r2.hex;
+            hexEl.value = r2.hex;
           } else {
             // Neither hex nor a PSBT — say so plainly instead of
             // sending it as a PSBT and getting a PSBT error back.
-            setMsg($(msgId), 'This file does not look like a signed transaction. Import a plain hex file or a fully-signed PSBT (.psbt).', false);
+            setMsg(msgEl, 'This file does not look like a signed transaction. Import a plain hex file or a fully-signed PSBT (.psbt).', false);
           }
         }
-      } catch (e) { setMsg($(msgId), e.message, false); }
+      } catch (e) { setMsg(msgEl, e.message, false); }
       $(fileId).value = '';
     };
-    reader.onerror = function () { setMsg($(msgId), 'Could not read that file.', false); $(fileId).value = ''; };
+    reader.onerror = function () { setMsg(msgEl, 'Could not read that file.', false); $(fileId).value = ''; };
     reader.readAsArrayBuffer(file);
   }
-  $('btn-btc-import-file').addEventListener('click', function () { $('btc-file').click(); });
+  // The static first entry's import button lives inside that
+  // entry now (round 5) — it records the static hex box as the
+  // target, like every entry's button records its own.
+  $('btn-btc-import-file').addEventListener('click', function () {
+    pendingImportTarget = { hex: $('btc-hex'), msg: $('btc-msg') };
+    $('btc-file').click();
+  });
   $('btc-file').addEventListener('change', function () {
-    importTxFile($('btc-file').files && $('btc-file').files[0], 'btc-hex', 'btc-msg', 'btc-file');
+    var t = pendingImportTarget || { hex: $('btc-hex'), msg: $('btc-msg') };
+    pendingImportTarget = null;
+    importTxFile($('btc-file').files && $('btc-file').files[0], t.hex, t.msg, 'btc-file');
   });
   $('btn-edit-import-file').addEventListener('click', function () { $('edit-file').click(); });
   $('edit-file').addEventListener('change', function () {
-    importTxFile($('edit-file').files && $('edit-file').files[0], 'edit-hex', 'edit-msg', 'edit-file');
+    importTxFile($('edit-file').files && $('edit-file').files[0], $('edit-hex'), $('edit-msg'), 'edit-file');
   });
 
   // The modal does double duty: a confirmation dialog (Broadcast Now,
@@ -3090,6 +4359,33 @@
       'Broadcast — I understand');
   }
 
+  // Broadcast a whole set now (0.8.7): every member, in the
+  // set's order. The confirm names the stale rule: a stale member
+  // is skipped, not sent — the rest still broadcast. Only a set
+  // whose every member is stale sends nothing at all.
+  async function broadcastSetNow(id) {
+    var set = (S.bitcoin.sets || []).find(function (s) { return s.id === id; });
+    if (!set) return;
+    var members = setMembersOf(set);
+    if (!members.length) return;
+    var label = set.label || 'Untitled set';
+    showConfirm('Broadcast this trigger set?',
+      'This will broadcast all ' + members.length + ' transaction' + (members.length === 1 ? '' : 's') + ' in "' + label + '" to the network for real — the funds move and it cannot be undone. The inputs are re-checked first: a stale member is skipped, not sent, and the rest still broadcast. Each one broadcasts via the primary node, falling back to the secondary if the primary does not answer.',
+      async function () {
+        try {
+          var r = await api('POST', '/api/bitcoin/sets/' + encodeURIComponent(id) + '/broadcast', {});
+          var sent = (r.results || []).filter(function (x) { return x.action === 'broadcast'; }).length;
+          var stale = (r.results || []).filter(function (x) { return x.action === 'stale'; }).length;
+          var failed = (r.results || []).filter(function (x) { return x.action === 'failed'; }).length;
+          var summary = 'Trigger set: ' + sent + ' broadcast' + (stale ? ', ' + stale + ' stale' : '') + (failed ? ', ' + failed + ' failed' : '') + '.';
+          setMsg($('btc-all-msg'), summary, failed === 0);
+          await load();
+          await refreshConfirmations();
+        } catch (e) { setMsg($('btc-all-msg'), e.message, false); }
+      },
+      'Broadcast — I understand');
+  }
+
   // The manual escape hatch for a slow MARA tx (0.7.16, Pending
   // card): broadcast a Slipstream-pending transaction publicly
   // instead. MANUAL ONLY — it is not part of Broadcast Armed or the
@@ -3137,8 +4433,12 @@
   // flag), so a stale or disarmed id in the request is still never
   // broadcast.
   async function broadcastArmed() {
-    var pending = (S.bitcoin.txs || []).filter(function (t) { return !txStatus(t).settled && !txStatus(t).pending; });
-    if (!pending.length) {
+    // (0.8.7) Set members are never broadcast as standalone txs:
+    // their arm lives on the set, so they are excluded here and
+    // the armed SETS are broadcast through their own endpoint.
+    var pending = (S.bitcoin.txs || []).filter(function (t) { return !txStatus(t).settled && !txStatus(t).pending && !setOfTxId(t.id); });
+    var armedSets = (S.bitcoin.sets || []).filter(function (s) { return s.enabled && !setStatus(s).settled && !setStatus(s).pending && setMembersOf(s).length; });
+    if (!pending.length && !armedSets.length) {
       setMsg($('btc-all-msg'),
         (S.bitcoin.txs || []).length
           ? 'Nothing to broadcast — every transaction is already archived or pending.'
@@ -3147,37 +4447,55 @@
       return;
     }
     var armed = pending.filter(function (t) { return t.enabled; });
-    if (!armed.length) {
+    if (!armed.length && !armedSets.length) {
       setMsg($('btc-all-msg'), 'Nothing to broadcast — no armed transactions to broadcast.', true);
       return;
     }
+    var parts = [];
+    if (armed.length) parts.push('the ' + armed.length + ' armed transaction(s)');
+    if (armedSets.length) parts.push('the ' + armedSets.length + ' armed trigger set(s) (' + armedSets.reduce(function (n, s) { return n + setMembersOf(s).length; }, 0) + ' transaction(s))');
     showConfirm('Broadcast armed transactions?',
-      'This will broadcast for real — the funds move and it cannot be undone. This sends only the ' + armed.length + ' armed transaction(s); unarmed ones are left alone. Each one is checked first (a stale one is skipped, not sent) and broadcasts via the primary node, falling back to the secondary if the primary does not answer.',
-      function () { runBroadcastAll(armed, true, 'Broadcast armed'); },
+      'This will broadcast for real — the funds move and it cannot be undone. This sends only ' + parts.join(' and ') + '; unarmed ones are left alone. Each one is checked first (a stale one is skipped, not sent) and broadcasts via the primary node, falling back to the secondary if the primary does not answer.',
+      function () { runBroadcastAll(armed, true, 'Broadcast armed', armedSets); },
       'Broadcast — I understand');
   }
 
   // The actual Broadcast Armed run: the progress pop-out, the POST
   // (armedOnly: true), the per-transaction results. Nothing is
   // broadcast until the owner confirms in the dialog.
-  async function runBroadcastAll(targets, armedOnly, label) {
-    if (!targets.length) {
+  // (0.8.7) `setTargets` are armed sets, broadcast one set at a
+  // time through their own endpoint; their member results join
+  // the same combined summary and pop-out as the tx results.
+  async function runBroadcastAll(targets, armedOnly, label, setTargets) {
+    setTargets = setTargets || [];
+    if (!targets.length && !setTargets.length) {
       setMsg($('btc-all-msg'), 'Nothing to broadcast — no armed transactions to broadcast.', true);
       return;
     }
     var names = targets.map(function (t) { return t.label || 'Untitled transaction'; });
+    setTargets.forEach(function (s) {
+      names.push((s.label || 'Untitled set') + ' (set: ' + setMembersOf(s).length + ' transactions)');
+    });
     showDetails(label + ' — broadcasting',
-      'Attempting to broadcast ' + targets.length + ' transaction(s)…',
+      'Attempting to broadcast ' + targets.length + ' transaction(s)' + (setTargets.length ? ' and ' + setTargets.length + ' trigger set(s)' : '') + '…',
       '<ul class="plain-list">' + names.map(function (n) {
         return '<li>' + escapeHtml(n) + ' — pending…</li>';
       }).join('') + '</ul>');
     try {
-      var body = { ids: targets.map(function (t) { return t.id; }) };
-      if (armedOnly) body.armedOnly = true;
-      var r = await api('POST', '/api/broadcast/all', body);
-      var sent = (r.results || []).filter(function (x) { return x.action === 'broadcast'; }).length;
-      var stale = (r.results || []).filter(function (x) { return x.action === 'stale'; }).length;
-      var failed = (r.results || []).filter(function (x) { return x.action === 'failed'; }).length;
+      var allResults = [];
+      if (targets.length) {
+        var body = { ids: targets.map(function (t) { return t.id; }) };
+        if (armedOnly) body.armedOnly = true;
+        var r = await api('POST', '/api/broadcast/all', body);
+        allResults = allResults.concat(r.results || []);
+      }
+      for (var si = 0; si < setTargets.length; si++) {
+        var sr = await api('POST', '/api/bitcoin/sets/' + encodeURIComponent(setTargets[si].id) + '/broadcast', {});
+        allResults = allResults.concat(sr.results || []);
+      }
+      var sent = allResults.filter(function (x) { return x.action === 'broadcast'; }).length;
+      var stale = allResults.filter(function (x) { return x.action === 'stale'; }).length;
+      var failed = allResults.filter(function (x) { return x.action === 'failed'; }).length;
       var summary = label + ': ' + sent + ' broadcast' + (stale ? ', ' + stale + ' stale' : '') + (failed ? ', ' + failed + ' failed' : '') + '.';
       setMsg($('btc-all-msg'), summary, failed === 0);
       await load();
@@ -3185,7 +4503,7 @@
       if ($('confirm-modal').classList.contains('open')) {
         showDetails(label + ' — ' + (failed ? 'finished with failures' : 'complete'),
           summary,
-          '<ul class="plain-list">' + (r.results || []).map(function (x) {
+          '<ul class="plain-list">' + allResults.map(function (x) {
             return '<li>' + escapeHtml(x.label || 'Untitled transaction') + ' — ' + escapeHtml(broadcastResultText(x)) + '</li>';
           }).join('') + '</ul>');
       }
@@ -3335,9 +4653,23 @@
         bucket: st.settled ? 'settled' : (st.pending ? 'pending' : 'active'),
       };
     });
+    // (0.8.7) Sets are structural too: the set itself and each
+    // set's bucket, label, arm, members, trigger set, and history
+    // length. A member's bucket is already in sigTxs above.
+    var sigSets = ((state.bitcoin && state.bitcoin.sets) || []).map(function (s) {
+      var sst = setStatus(s);
+      return {
+        id: s.id, label: s.label || '', enabled: !!s.enabled,
+        txIds: (s.txIds || []).slice(),
+        trigger: triggerSetOf(s),
+        historyLen: Array.isArray(s.history) ? s.history.length : 0,
+        bucket: sst.settled ? 'settled' : (sst.pending ? 'pending' : 'active'),
+      };
+    });
     var bars = checkinBarsData(status).map(function (b) { return b.id + ':' + (typeof b.ruleIndex === 'number' ? b.ruleIndex : 0); });
     return JSON.stringify({
       txs: sigTxs,
+      sets: sigSets,
       overlaps: (state.bitcoin && state.bitcoin.overlaps) || [],
       settings: state.settings || {},
       bars: bars,
@@ -3351,7 +4683,7 @@
   // which both use the confirm modal) and no field focused.
   // The in-place patch never needs this — it touches neither.
   function anyModalOpen() {
-    return ['add-modal', 'edit-modal', 'confirm-modal'].some(function (id) {
+    return ['add-modal', 'edit-modal', 'set-modal', 'confirm-modal'].some(function (id) {
       var m = $(id);
       return m && m.classList && m.classList.contains('open');
     });
@@ -3405,15 +4737,45 @@
   // disappears with the verdict (cold fee data hides it, exactly
   // like a fresh render); the condition line never changes
   // without a trigger change, which is structural.
+  // (0.8.7, round 10) Set rows patch by the same rule as the
+  // set card — setPillText / setStatus — keyed 'set:' + id.
+  // A set row has no fee pill to patch. Rows are rebuilt, never
+  // resurrected, by the patch: it only touches entries the
+  // render created, so a tick can never bring back a per-member
+  // row.
+  // (0.8.7, round 12) A set's member lines carry no pill any
+  // more — the patch keeps their text (number + short txid,
+  // amount) in step instead, keyed by tx id. The same rule:
+  // only lines the render created are touched, so a tick can
+  // neither duplicate a member line nor resurrect a removed
+  // one. A member that stopped being live (settled / pending)
+  // is a structural change — its line goes away on the next
+  // re-render, never here — and a newly live member never gains
+  // a line from the patch.
   function patchReadinessRows() {
-    var activeTxs = (S.bitcoin.txs || []).filter(function (t) { return !txStatus(t).settled && !txStatus(t).pending; });
-    activeTxs.forEach(function (t) {
-      var entry = readinessEls[t.id];
+    readinessEntries().forEach(function (e) {
+      var key = e.kind === 'set' ? 'set:' + e.set.id : e.tx.id;
+      var entry = readinessEls[key];
       if (!entry) return;
-      var st = txStatus(t);
-      entry.pill.textContent = txPillText(t, st);
+      if (e.kind === 'set') {
+        var sst = setStatus(e.set);
+        entry.pill.textContent = setPillText(e.set, sst);
+        entry.pill.className = 'pill ' + sst.cls;
+        setMembersOf(e.set).forEach(function (m, i) {
+          var mst = txStatus(m);
+          if (mst.settled || mst.pending) return;
+          var ment = readinessEls[m.id];
+          if (!ment) return;
+          var parts = readinessMemberParts(m, i + 1);
+          if (ment.left) ment.left.textContent = parts.left;
+          if (ment.amt) ment.amt.textContent = parts.amt;
+        });
+        return;
+      }
+      var st = txStatus(e.tx);
+      entry.pill.textContent = txPillText(e.tx, st);
       entry.pill.className = 'pill ' + st.cls;
-      var fv = txFeeVerdict(t);
+      var fv = txFeeVerdict(e.tx);
       if (fv) {
         if (entry.feePill) {
           entry.feePill.textContent = feePillText(fv);
@@ -3474,6 +4836,30 @@
     }
     if (card.fallbackValueEl) card.fallbackValueEl.textContent = txFallbackText(tx, st);
   }
+  // Patch one set card in place (0.8.7): the header pill and
+  // every shared-rule pill + state line — the mirror of
+  // patchTxCard, minus the per-tx lines (the set has no fee
+  // verdict, MARA line, fallback, or sent line of its own; its
+  // members' Details rows are never patched here).
+  function patchSetCard(set) {
+    var card = setCardEls[set.id];
+    if (!card) return;
+    var st = setStatus(set);
+    card.pill.textContent = setPillText(set, st);
+    card.pill.className = 'pill ' + st.cls;
+    var ruleSet = triggerSetOf(set);
+    var ruleStates = triggerStatesOf(set);
+    (card.rules || []).forEach(function (r, i) {
+      var rule = ruleSet.rules[i];
+      var ts = ruleStates[i] || {};
+      if (r.pillEl) {
+        var rp = rule ? ruleStatePill(rule, ts) : null;
+        if (rp) { r.pillEl.textContent = rp.text; r.pillEl.className = 'pill ' + rp.cls; }
+      }
+      if (r.condEl && rule) r.condEl.textContent = triggerCondition(rule);
+      if (r.nowEl && rule) r.nowEl.textContent = triggerStateLine(rule, ts);
+    });
+  }
   // The values-only patch (0.8.5): every live value on the page,
   // updated in place from the freshly fetched state. S and
   // lastStatus are already the new data when this runs. It never
@@ -3486,7 +4872,8 @@
     var anyStaged = (S.bitcoin.txs || []).some(function (t) { return !txStatus(t).settled && !txStatus(t).pending; });
     var gsCard = $('getting-started-card');
     if (gsCard) gsCard.style.display = anyStaged ? 'none' : '';
-    var anyCheckinActive = (S.bitcoin.txs || []).some(function (t) { return hasRuleType(t, 'checkin') && !txStatus(t).settled && !txStatus(t).pending; });
+    var anyCheckinActive = (S.bitcoin.txs || []).some(function (t) { return hasRuleType(t, 'checkin') && !txStatus(t).settled && !txStatus(t).pending && !setOfTxId(t.id); })
+      || (S.bitcoin.sets || []).some(function (s) { return hasRuleType(s, 'checkin') && !setStatus(s).settled && !setStatus(s).pending; });
     var showCheckin = anyCheckinActive || !(S.bitcoin.txs || []).length;
     $('checkin-card').style.display = showCheckin ? '' : 'none';
     patchCheckinBars(status);
@@ -3500,6 +4887,7 @@
     renderLogs(checkins, blog);
     var overlapsByTx = computeOverlaps();
     (S.bitcoin.txs || []).forEach(function (tx) { patchTxCard(tx, overlapsByTx); });
+    (S.bitcoin.sets || []).forEach(function (s) { patchSetCard(s); });
     // Settings live bits are text only, never input values:
     // node rows, price-source rows (they read the dropdowns,
     // never write them), the agreement span, and the fee zone
@@ -3538,7 +4926,10 @@
     if (barsEl) {
       Array.prototype.forEach.call(barsEl.children || [], function (block) {
         if (!(block.className || '').split(' ').includes('ck-tx')) return;
-        var tx = (S.bitcoin.txs || []).find(function (t) { return t.id === (block.dataset && block.dataset.txId); });
+        // (0.8.7) A bar's id is a tx id or a set id — a set bar
+        // ticks the same way, off the set's own offset.
+        var tx = (S.bitcoin.txs || []).find(function (t) { return t.id === (block.dataset && block.dataset.txId); })
+          || (S.bitcoin.sets || []).find(function (s) { return s.id === (block.dataset && block.dataset.txId); });
         if (!tx) return;
         var windowDays = block.dataset && Number(block.dataset.windowDays);
         if (!windowDays || windowDays <= 0) return;
@@ -3571,6 +4962,26 @@
         r.nowEl.textContent = ts.status === 'on-track'
           ? d + ' of ' + w + ' days since last check-in'
           : d + ' of ' + w + ' days elapsed';
+      });
+    });
+    // (0.8.7) The same local tick for a set card's shared
+    // check-in rule lines.
+    (S.bitcoin.sets || []).forEach(function (set) {
+      var scard = setCardEls[set.id];
+      if (!scard || !scard.rules) return;
+      var sruleSet = triggerSetOf(set);
+      var sruleStates = triggerStatesOf(set);
+      scard.rules.forEach(function (r, i) {
+        var srule = sruleSet.rules[i];
+        var sts = sruleStates[i] || {};
+        if (!srule || srule.type !== 'checkin' || !r.nowEl) return;
+        if (sts.status !== 'on-track' && sts.status !== 'held') return;
+        var sd = checkinDaysSince(set, nowMs);
+        if (sd === null) return;
+        var sw = (typeof sts.windowDays === 'number' && sts.windowDays > 0) ? sts.windowDays : (srule.params.thresholdDays || 35);
+        r.nowEl.textContent = sts.status === 'on-track'
+          ? sd + ' of ' + sw + ' days since last check-in'
+          : sd + ' of ' + sw + ' days elapsed';
       });
     });
   }
