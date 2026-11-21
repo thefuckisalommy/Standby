@@ -314,6 +314,23 @@ function readinessMembers(label) {
       kids: (c.children || []).length,
     }));
 }
+// The shared-input warnings on a card (0.8.7, round 13): the
+// .tx-warn lines inside each blue .tx-item subcard — one per
+// shared input, in stored order. Returns the line elements
+// themselves (so a tick test can prove the SAME element
+// persists) plus their text.
+function warnLines(card) {
+  if (!card) return null;
+  const out = [];
+  for (const c of card.children) {
+    if ((c.className || '').split(' ').includes('tx-item')) {
+      for (const k of c.children) {
+        if ((k.className || '').split(' ').includes('tx-warn')) out.push({ el: k, text: k.textContent || '' });
+      }
+    }
+  }
+  return out;
+}
 // The per-tx check-in bars (0.8.0): one .ck-tx block per active
 // check-in tx inside #checkin-tx-bars — label, bar fill width,
 // "X of N days elapsed" caption, and the block's class (a
@@ -3591,7 +3608,7 @@ function check(name, cond, detail) {
   check('set card: toggling the shared History open flips it',
     !!hist28 && hist28.open === true, hist28 ? 'open=' + hist28.open : 'no history');
   check('set card: the shared History shows the backfilled member trails, tagged',
-    !!hist28 && elText(hist28).indexOf('Dom Set M1') !== -1 && elText(hist28).indexOf('Dom Set M2') !== -1, hist28 ? elText(hist28) : 'no history');
+    !!hist28 && elText(hist28).indexOf('"Dom Set" - Tx 1') !== -1 && elText(hist28).indexOf('"Dom Set" - Tx 2') !== -1, hist28 ? elText(hist28) : 'no history');
   check('set card: exactly ONE History at card level (the set own)',
     !!setCard28 && setCard28.children.filter((x) => x.className === 'tx-history').length === 1, '');
   check('set card: the standalone tx keeps its own History in its Details',
@@ -3838,8 +3855,8 @@ function check(name, cond, detail) {
   // a trigger box.
   const solo28c = m2prefix28c ? listCards('btc-active-list').find((c) => cardFaceText(c).indexOf(m2prefix28c) !== -1) : null;
   check('add trigger set: the freed member renders standalone again', !!solo28c, '');
-  check('add trigger set: the standalone card is titled "Untitled transaction" (no per-tx label)',
-    !!solo28c && cardTitle(solo28c) === 'Untitled transaction', solo28c ? cardTitle(solo28c) : 'no card');
+  check('add trigger set: the standalone card is titled with its short txid (no per-tx label, never "Untitled transaction")',
+    !!solo28c && cardTitle(solo28c) === m2prefix28c + '…', solo28c ? cardTitle(solo28c) : 'no card');
   check('add trigger set: a standalone card carries NO .tx-single class any more',
     !!solo28c && !(solo28c.className || '').split(' ').includes('tx-single'), solo28c ? solo28c.className : 'no card');
   const soloItems28c = solo28c ? solo28c.children.filter((c) => (c.className || '').split(' ').includes('tx-item')) : [];
@@ -3886,7 +3903,7 @@ function check(name, cond, detail) {
     idx.indexOf('id="edit-rules-cap-note" class="muted" style="display:none">Maximum 5 rules per trigger set.') !== -1, '');
   check('one construct: the set modal\'s save button says "Save changes" (static HTML)',
     idx.indexOf('id="btn-set-save" class="primary">Save changes<') !== -1, '');
-  const solo28d = listCards('btc-active-list').find((c) => cardTitle(c) === 'Untitled transaction');
+  const solo28d = m2prefix28c ? listCards('btc-active-list').find((c) => cardTitle(c) === m2prefix28c + '…') : null;
   check('one construct: the standalone card is still there to edit', !!solo28d, '');
   const soloEdit28d = solo28d && cardButton(solo28d, 'Edit');
   if (soloEdit28d) soloEdit28d.click();
@@ -3966,8 +3983,8 @@ function check(name, cond, detail) {
     (line.children || []).forEach((c) => { if ((c.className || '').split(' ').indexOf('set-member-remove') !== -1) found = c; });
     return found;
   };
-  const firstLine28d = els['set-members-list'].children[0];
-  if (memberRemove28d(firstLine28d)) memberRemove28d(firstLine28d).click();
+  const firstLine28d = els['set-members-list'] ? els['set-members-list'].children[0] : null;
+  if (firstLine28d && memberRemove28d(firstLine28d)) memberRemove28d(firstLine28d).click();
   check('one construct: removing a member drops its line and renumbers',
     els['set-members-list'] && els['set-members-list'].children.length === 1,
     els['set-members-list'] ? 'children=' + els['set-members-list'].children.length : 'no list');
@@ -4271,6 +4288,127 @@ function check(name, cond, detail) {
     check('readiness members: all-stale fixture tx removed', delStaleR.status === 200, 'status=' + delStaleR.status);
   }
   await rerender(appJs);
+
+  // --- §28g (0.8.7 fix, round 13): warnings name a set member
+  // as '"<set label>" - Tx #', never "Untitled transaction".
+  // Two label-less members + one labeled standalone, all
+  // spending FINNEY:9 (a fresh vout — the seeded txs share
+  // FINNEY:1), grouped into 'Dom Warn Set'. The cadence is
+  // still 10s here (the restore block below puts it back to
+  // 60), so an 11s sleep opens the tick's server-refresh gate,
+  // as in §28e/§28f.
+  const addWarnM1 = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ txHex: craftHex(9, 100000), trigger: { type: 'manual', params: {} } }) });
+  check('warnings name members: label-less member 1 adds', addWarnM1.status === 201, 'status=' + addWarnM1.status);
+  const addWarnM1Json = addWarnM1.status === 201 ? await addWarnM1.json() : {};
+  const warnM1Id = (addWarnM1Json.tx || {}).id || null;
+  const addWarnM2 = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ txHex: craftHex(9, 250000), trigger: { type: 'manual', params: {} } }) });
+  check('warnings name members: label-less member 2 adds', addWarnM2.status === 201, 'status=' + addWarnM2.status);
+  const addWarnM2Json = addWarnM2.status === 201 ? await addWarnM2.json() : {};
+  const warnM2Id = (addWarnM2Json.tx || {}).id || null;
+  const addWarnSolo = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ txHex: craftHex(9, 50000), label: 'Dom Warn Solo', trigger: { type: 'manual', params: {} } }) });
+  check('warnings name members: the standalone sharing the input adds', addWarnSolo.status === 201, 'status=' + addWarnSolo.status);
+  const addWarnSoloJson = addWarnSolo.status === 201 ? await addWarnSolo.json() : {};
+  const warnSoloId = (addWarnSoloJson.tx || {}).id || null;
+  const addWarnSet = await fetch('/api/bitcoin/sets', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ label: 'Dom Warn Set', txIds: [warnM1Id, warnM2Id], trigger: { type: 'manual', params: {} } }) });
+  check('warnings name members: the set creates', addWarnSet.status === 201, 'status=' + addWarnSet.status);
+  const addWarnSetJson = addWarnSet.status === 201 ? await addWarnSet.json() : {};
+  const warnSetId = (addWarnSetJson.set || {}).id || null;
+  await rerender(appJs);
+  const warnSetCard = cardByTitle('Dom Warn Set');
+  const warnSetLines = warnLines(warnSetCard);
+  check('warnings name members: the set card carries 2 warning lines (one per member subcard)',
+    !!warnSetLines && warnSetLines.length === 2, warnSetLines ? 'got ' + warnSetLines.length : 'no lines');
+  check('warnings name members: member 1 names the other member as "Dom Warn Set" - Tx 2',
+    !!warnSetLines && warnSetLines[0].text === 'Warning: shares input f4184fc59640:9 with "Dom Warn Set" - Tx 2, "Dom Warn Solo" — only one of them can ever be confirmed.',
+    warnSetLines ? warnSetLines[0].text : 'no lines');
+  check('warnings name members: member 2 names the other member as "Dom Warn Set" - Tx 1',
+    !!warnSetLines && warnSetLines[1].text === 'Warning: shares input f4184fc59640:9 with "Dom Warn Set" - Tx 1, "Dom Warn Solo" — only one of them can ever be confirmed.',
+    warnSetLines ? warnSetLines[1].text : 'no lines');
+  const warnSoloCard = cardByTitle('Dom Warn Solo');
+  const warnSoloLines = warnLines(warnSoloCard);
+  check('warnings name members: the standalone names both members by set + number',
+    !!warnSoloLines && warnSoloLines.length === 1
+    && warnSoloLines[0].text === 'Warning: shares input f4184fc59640:9 with "Dom Warn Set" - Tx 1, "Dom Warn Set" - Tx 2 — only one of them can ever be confirmed.',
+    warnSoloLines ? warnSoloLines.map((l) => l.text).join(' | ') : 'no lines');
+  check('warnings name members: NO "Untitled" or "Unknown" in any warning line',
+    !!warnSetLines && !!warnSoloLines
+    && warnSetLines.concat(warnSoloLines).every((l) => l.text.indexOf('Untitled') === -1 && l.text.indexOf('Unknown') === -1),
+    warnSetLines ? warnSetLines.map((l) => l.text).join(' | ') : 'no lines');
+  // The live tick leaves the warnings alone: disarm the set
+  // behind an open modal, so the changed signature takes the
+  // values-only patch path instead of a re-render.
+  const warnCardBefore = cardByTitle('Dom Warn Set');
+  const warnElsBefore = warnLines(warnCardBefore);
+  els['btn-btc-add-pill'].click();
+  check('warnings name members: the Add modal opens (structural changes defer to the patch)',
+    els['add-modal'] && els['add-modal'].classList.contains('open'),
+    els['add-modal'] ? 'open=' + els['add-modal'].classList.contains('open') : 'no add-modal');
+  const disWarn = await fetch('/api/bitcoin/sets/' + warnSetId, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: false }) });
+  check('warnings name members: the set disarms', disWarn.status === 200, 'status=' + disWarn.status);
+  await sleep26(11000);
+  const tickWarn = liveTickFn();
+  check('warnings name members: the app registers a 1-second live timer', !!tickWarn, '');
+  if (tickWarn) await tickWarn();
+  check('warnings name members: the tick keeps the same set card element (patched, not rebuilt)',
+    !!warnCardBefore && cardByTitle('Dom Warn Set') === warnCardBefore, '');
+  const warnLinesAfter = warnLines(cardByTitle('Dom Warn Set'));
+  check('warnings name members: after the tick the warning lines are the SAME elements with the SAME text',
+    !!warnLinesAfter && warnLinesAfter.length === 2
+    && warnLinesAfter.every((l, i) => l.el === warnElsBefore[i].el && l.text === warnElsBefore[i].text),
+    warnLinesAfter ? warnLinesAfter.map((l) => l.text).join(' | ') : 'no lines');
+  check('warnings name members: after the tick still no "Untitled" or "Unknown" in the warnings',
+    !!warnLinesAfter && warnLinesAfter.every((l) => l.text.indexOf('Untitled') === -1 && l.text.indexOf('Unknown') === -1),
+    warnLinesAfter ? warnLinesAfter.map((l) => l.text).join(' | ') : 'no lines');
+  els['add-modal-x'].click();
+  check('warnings name members: the Add modal closes',
+    els['add-modal'] && !els['add-modal'].classList.contains('open'),
+    els['add-modal'] ? 'open=' + els['add-modal'].classList.contains('open') : 'no add-modal');
+  // (Round 13 sweep) A label-less standalone is named by its
+  // short txid everywhere it is shown — card title, readiness
+  // row, check-in bar — never "Untitled transaction".
+  const addWarnPlain = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ txHex: craftHex(10, 60000), trigger: { type: 'manual', params: {} } }) });
+  check('warnings sweep: label-less standalone adds', addWarnPlain.status === 201, 'status=' + addWarnPlain.status);
+  const addWarnPlainJson = addWarnPlain.status === 201 ? await addWarnPlain.json() : {};
+  const warnPlainId = (addWarnPlainJson.tx || {}).id || null;
+  const addWarnBar = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ txHex: craftHex(11, 60001), trigger: { type: 'checkin', params: { thresholdDays: 10 } } }) });
+  check('warnings sweep: label-less check-in tx adds', addWarnBar.status === 201, 'status=' + addWarnBar.status);
+  const addWarnBarJson = addWarnBar.status === 201 ? await addWarnBar.json() : {};
+  const warnBarId = (addWarnBarJson.tx || {}).id || null;
+  await rerender(appJs);
+  const stWarn = await (await fetch('/api/state')).json();
+  const plainTx = (stWarn.bitcoin.txs || []).find((t) => t.id === warnPlainId);
+  const barTx = (stWarn.bitcoin.txs || []).find((t) => t.id === warnBarId);
+  const plainShort = plainTx ? (plainTx.txid || '').slice(0, 16) + '…' : '';
+  const barShort = barTx ? (barTx.txid || '').slice(0, 16) + '…' : '';
+  check('warnings sweep: the label-less card title is its short txid',
+    !!plainShort && !!cardByTitle(plainShort), plainShort || 'no txid');
+  check('warnings sweep: the label-less tx keeps its own readiness row under its short txid',
+    !!plainShort && !!readinessBlock(plainShort) && readinessBlock(plainShort).status === 'armed',
+    plainShort ? JSON.stringify(readinessBlock(plainShort)) : 'no txid');
+  check('warnings sweep: the label-less check-in tx gets a bar under its short txid',
+    !!barShort && (checkinBars() || []).some((b) => b.label === barShort),
+    JSON.stringify(checkinBars()));
+  check('warnings sweep: no card title or bar reads "Untitled transaction"',
+    !txCards().some((c) => cardTitle(c) === 'Untitled transaction')
+    && !(checkinBars() || []).some((b) => b.label === 'Untitled transaction'),
+    txCards().map((c) => cardTitle(c)).join(', '));
+  if (warnSetId) {
+    const delWarnSet = await fetch('/api/bitcoin/sets/' + warnSetId, { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
+    check('warnings name members: the set deletes', delWarnSet.status === 200, 'status=' + delWarnSet.status);
+  }
+  for (const id of [warnM1Id, warnM2Id, warnSoloId, warnPlainId, warnBarId]) {
+    if (!id) continue;
+    const delWarn = await fetch('/api/bitcoin/txs/' + id, { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
+    check('warnings name members: fixture tx removed', delWarn.status === 200, 'status=' + delWarn.status);
+  }
+  await rerender(appJs);
+  check('warnings name members: the set card is gone after the delete', !cardByTitle('Dom Warn Set'), '');
 
   // Restore the seeded state for the width check.
   const cad60 = await fetch('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ checkCadenceSeconds: 60 }) });

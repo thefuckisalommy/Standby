@@ -2560,7 +2560,7 @@ function firedDetail(set, ruleResults, firedIndexes) {
 function noteSetMemberStale(fresh, tx, error) {
   const fset = setOfTx(fresh, tx.id);
   if (!fset) return;
-  pushHistory(fset, 'stale', (tx.label || 'Untitled transaction') + ': ' + error);
+  pushHistory(fset, 'stale', store.memberHistoryDetail(fset, tx, error));
 }
 
 // (0.8.7, round 9) Single history: the set card shows ONE
@@ -2588,7 +2588,7 @@ function forwardMemberHistory(state, tx, type, detail) {
   if (!FORWARD_HISTORY_TYPES.has(type)) return;
   const set = setOfTx(state, tx.id);
   if (!set) return;
-  pushHistory(set, type, store.memberHistoryDetail(tx, detail));
+  pushHistory(set, type, store.memberHistoryDetail(set, tx, detail));
 }
 
 function recordRelease(state, tx, record, logEntry) {

@@ -173,18 +173,33 @@ const MAX_RULES_PER_TX = 5;
 // release checks.
 const HISTORY_TYPES = new Set(['added', 'fired', 'broadcast', 'slipstream', 'confirmed', 'stale', 'failed', 'conflict', 'edited', 'armed', 'disarmed']);
 const HISTORY_MAX = 50;
-// (0.8.7, round 9) Single history: a set's trail is the ONE
-// history for the whole set — the card shows only it, and a
-// member's own history (which keeps recording, so a tx that
-// leaves the set still has its full trail) is copied in here,
-// tagged with the member's label. memberHistoryDetail is the
-// tagging the server's forwardMemberHistory uses for live
-// events; backfillSetHistory is the copy-in used at set
-// creation, on attach, and once on load for sets created
-// before this change (see the set sanitizer below).
-function memberHistoryDetail(tx, detail) {
-  const label = (tx && tx.label) || 'Untitled transaction';
-  return detail ? label + ': ' + detail : label;
+// (0.8.7, round 13) How a transaction is NAMED in the set
+// history's member tags — the same rule as the client's
+// txDisplayName (public/app.js): a set member is always named
+// by its set, '"<set label>" - Tx N', N the member's 1-based
+// index in the set's stored txIds order (the same numbering the
+// readiness lines use, so "Tx 2" means the same transaction in
+// both places). A standalone tx keeps its own label; one
+// without a label falls back to its short txid (first 16 chars
+// + '…'). No surface ever renders 'Untitled transaction' for
+// any transaction. (The last resort below is unreachable in
+// practice — every stored tx carries a txid — but a tag
+// function must return something.)
+function shortTxid16(txid) {
+  const s = String(txid || '');
+  return s ? s.slice(0, 16) + (s.length > 16 ? '…' : '') : '';
+}
+function memberTag(set, tx) {
+  if (!tx) return 'Untitled transaction';
+  if (set) {
+    const idx = (set.txIds || []).indexOf(tx.id);
+    if (idx !== -1) return '"' + (set.label || 'Untitled set') + '" - Tx ' + (idx + 1);
+  }
+  return tx.label || shortTxid16(tx.txid) || 'Untitled transaction';
+}
+function memberHistoryDetail(set, tx, detail) {
+  const tag = memberTag(set, tx);
+  return detail ? tag + ': ' + detail : tag;
 }
 function backfillSetHistory(set, txs) {
   // Events already on the trail (same type + detail — a live
@@ -200,10 +215,20 @@ function backfillSetHistory(set, txs) {
   const incoming = [];
   for (const t of (txs || [])) {
     for (const e of (Array.isArray(t.history) ? t.history : [])) {
-      const tagged = { ts: e.ts, type: e.type, detail: memberHistoryDetail(t, e.detail) };
+      const tagged = { ts: e.ts, type: e.type, detail: memberHistoryDetail(set, t, e.detail) };
       const key = tagged.type + '|' + tagged.detail;
+      // (0.8.7, round 13) The tag format changed from the bare
+      // member label to '"<set label>" - Tx N': an event already
+      // on the trail under the OLD tag still counts as the same
+      // event, so a load across the format change does not copy
+      // it in a second time under the new tag.
+      const legacy = (t.label || 'Untitled transaction');
+      const legacyDetail = e.detail ? legacy + ': ' + e.detail : legacy;
+      const legacyKey = e.type + '|' + legacyDetail;
       const n = remaining.get(key) || 0;
       if (n > 0) { remaining.set(key, n - 1); continue; }
+      const ln = remaining.get(legacyKey) || 0;
+      if (ln > 0) { remaining.set(legacyKey, ln - 1); continue; }
       incoming.push(tagged);
     }
   }

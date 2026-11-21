@@ -3223,7 +3223,7 @@ def main():
               and r.get('set', {}).get('enabled') is True
               and [e.get('type') for e in hist27a] == ['added', 'added', 'added', 'added']
               and hist27a[-1].get('detail') == 'Set created with 3 transactions'
-              and {'Set 27a m1', 'Set 27a m2', 'Set 27a m3'} == {e.get('detail', '').split(':')[0] for e in hist27a[:3]}
+              and {'"Set 27a" - Tx 1', '"Set 27a" - Tx 2', '"Set 27a" - Tx 3'} == {e.get('detail', '').split(':')[0] for e in hist27a[:3]}
               and [e.get('ts') for e in hist27a] == sorted(e.get('ts') for e in hist27a), r.get('set'))
         p0, s0, bp0, bs0 = outspend_counts()
         bc0 = broadcast_counts()
@@ -3355,7 +3355,7 @@ def main():
               x is not None and x.get('txIds') == [e1, e2], x)
         check('27 stale: the set history records the member going stale',
               [ev.get('type') for ev in (x or {}).get('history', [])].count('stale') == 1
-              and any('Set 27e m2' in (ev.get('detail') or '') for ev in (x or {}).get('history', []) if ev.get('type') == 'stale'), (x or {}).get('history'))
+              and any('"Set 27e" - Tx 2' in (ev.get('detail') or '') for ev in (x or {}).get('history', []) if ev.get('type') == 'stale'), (x or {}).get('history'))
         delete_all_txs()
         # (g) All members stale archives the set: both members
         # spend FINNEY:0 (confirmed spent). The set fires, the
@@ -3418,13 +3418,15 @@ def main():
               sets27f.get('set_hand2', {}).get('txIds') == [], sets27f.get('set_hand2'))
         # (0.8.7, round 9) The load-time backfill runs for a
         # hand-edited set too: the seeded creation event plus the
-        # member's own 'added' event, tagged with its label.
+        # member's own 'added' event, tagged by its set
+        # (0.8.7, round 13: '"Hand 1" - Tx 1', never the bare
+        # member label).
         handHist27f = sets27f.get('set_hand1', {}).get('history', [])
         check('27 migrate: missing fields defaulted (history seeded + member backfilled, enabled true)',
               sets27f.get('set_hand1', {}).get('enabled') is True
               and [e.get('type') for e in handHist27f] == ['added', 'added']
               and any(e.get('detail') == 'Set created with 1 transaction' for e in handHist27f)
-              and any('Set 27f m1' in e.get('detail', '') for e in handHist27f), sets27f.get('set_hand1'))
+              and any(e.get('detail', '').startswith('"Hand 1" - Tx 1:') for e in handHist27f), sets27f.get('set_hand1'))
         # (h) Add flow IS "add trigger set" (0.8.7 fix, round 3):
         # one Save creates ALL filled entries — each POSTed with
         # the SHARED trigger in its own record (it stays dormant
@@ -3499,7 +3501,7 @@ def main():
         check('27 single-hist: creation backfills both members, creation event last, chronological',
               [e.get('type') for e in hist27i] == ['added', 'added', 'added']
               and hist27i[-1].get('detail') == 'Set created with 2 transactions'
-              and {'Dom Single M1', 'Dom Single M2'} == {e.get('detail', '').split(':')[0] for e in hist27i[:2]}
+              and {'"Dom Single Set" - Tx 1', '"Dom Single Set" - Tx 2'} == {e.get('detail', '').split(':')[0] for e in hist27i[:2]}
               and [e.get('ts') for e in hist27i] == sorted(e.get('ts') for e in hist27i), hist27i)
         s, r = req('PUT', '/api/bitcoin/txs/' + i1, {'notes': 'edited note'})
         check('27 single-hist: member 1 notes edited (200)', s == 200, (s, r))
@@ -3508,7 +3510,7 @@ def main():
               t is not None and any(e.get('type') == 'edited' and e.get('detail') == 'Notes changed' for e in (t or {}).get('history', [])), (t or {}).get('history'))
         x = state_set(set27i)
         check('27 single-hist: the edit is forwarded to the set history, tagged, exactly once',
-              x is not None and [e.get('detail') for e in (x or {}).get('history', []) if e.get('type') == 'edited'].count('Dom Single M1: Notes changed') == 1, (x or {}).get('history'))
+              x is not None and [e.get('detail') for e in (x or {}).get('history', []) if e.get('type') == 'edited'].count('"Dom Single Set" - Tx 1: Notes changed') == 1, (x or {}).get('history'))
         s, r = req('PUT', '/api/bitcoin/sets/' + set27i, {'enabled': False})
         check('27 single-hist: set disarmed', s == 200 and r.get('set', {}).get('enabled') is False, (s, r))
         s, r = req('PUT', '/api/bitcoin/sets/' + set27i, {'enabled': True})
@@ -3529,8 +3531,8 @@ def main():
         x = state_set(set27i)
         hist27i = (x or {}).get('history', [])
         check('27 single-hist: attach backfills member 3 history before the Members changed event',
-              any('Dom Single M3' in e.get('detail', '') and e.get('type') == 'added' for e in hist27i)
-              and any(e.get('detail') == 'Dom Single M3: Notes changed' for e in hist27i)
+              any('"Dom Single Set" - Tx 3' in e.get('detail', '') and e.get('type') == 'added' for e in hist27i)
+              and any(e.get('detail') == '"Dom Single Set" - Tx 3: Notes changed' for e in hist27i)
               and hist27i[-1].get('type') == 'edited' and 'Members changed (+1)' in hist27i[-1].get('detail', ''), hist27i)
         s, r = req('PUT', '/api/bitcoin/sets/' + set27i, {'txIds': [i1, i2]})
         check('27 single-hist: edit drops member 3 (PUT txIds, 200)', s == 200 and r.get('set', {}).get('txIds') == [i1, i2], (s, r))
@@ -3539,7 +3541,24 @@ def main():
         x = state_set(set27i)
         hist27i = (x or {}).get('history', [])
         check('27 single-hist: re-attach does NOT duplicate member 3 history',
-              sum(1 for e in hist27i if e.get('detail', '').startswith('Dom Single M3')) == 2, hist27i)
+              sum(1 for e in hist27i if e.get('detail', '').startswith('"Dom Single Set" - Tx 3')) == 2, hist27i)
+        # (0.8.7, round 13) A label-less member is tagged by
+        # its set, never "Untitled transaction": attach one as
+        # Tx 3, edit its notes, and read the tag back.
+        s, r = add_tx_vout('', {'type': 'setdate', 'params': {'fireAt': '2999-01-01T00:00:00.000Z'}}, 4, 112803)
+        check('27 single-hist: label-less member adds (future setdate)', s == 201, (s, r))
+        i4 = r['tx']['id'] if s == 201 else None
+        s, r = req('PUT', '/api/bitcoin/sets/' + set27i, {'txIds': [i1, i2, i4]})
+        check('27 single-hist: label-less member attaches as Tx 3 (PUT txIds, 200)', s == 200 and r.get('set', {}).get('txIds') == [i1, i2, i4], (s, r))
+        s, r = req('PUT', '/api/bitcoin/txs/' + i4, {'notes': 'fourth note'})
+        check('27 single-hist: label-less member notes edited (200)', s == 200, (s, r))
+        x = state_set(set27i)
+        hist27i = (x or {}).get('history', [])
+        check('27 single-hist: the label-less edit is tagged "Dom Single Set" - Tx 3, never Untitled',
+              any(e.get('detail') == '"Dom Single Set" - Tx 3: Notes changed' for e in hist27i)
+              and not any('Untitled transaction' in e.get('detail', '') for e in hist27i), hist27i)
+        s, r = req('PUT', '/api/bitcoin/sets/' + set27i, {'txIds': [i1, i2]})
+        check('27 single-hist: label-less member dropped again (PUT txIds, 200)', s == 200 and r.get('set', {}).get('txIds') == [i1, i2], (s, r))
         s, r = req('PUT', '/api/bitcoin/sets/' + set27i, {'txIds': [i1, i2]})
         check('27 single-hist: member 3 dropped again before the fire (PUT txIds, 200)', s == 200 and r.get('set', {}).get('txIds') == [i1, i2], (s, r))
         s, r = req('PUT', '/api/bitcoin/sets/' + set27i,
@@ -3552,7 +3571,7 @@ def main():
         hist27i = (x or {}).get('history', [])
         check('27 single-hist: both member broadcasts are forwarded, tagged',
               [e.get('type') for e in hist27i].count('broadcast') == 2
-              and {'Dom Single M1', 'Dom Single M2'} == {e.get('detail', '').split(':')[0] for e in hist27i if e.get('type') == 'broadcast'}, hist27i)
+              and {'"Dom Single Set" - Tx 1', '"Dom Single Set" - Tx 2'} == {e.get('detail', '').split(':')[0] for e in hist27i if e.get('type') == 'broadcast'}, hist27i)
         check('27 single-hist: exactly ONE fired event (no duplicate from member forwarding)',
               [e.get('type') for e in hist27i].count('fired') == 1, hist27i)
         s, r = req('DELETE', '/api/bitcoin/sets/' + set27i)

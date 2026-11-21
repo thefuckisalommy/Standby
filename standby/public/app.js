@@ -795,6 +795,53 @@
     return { left: left, amt: amt };
   }
 
+  // How a transaction is NAMED anywhere another surface refers
+  // to it (0.8.7, round 13): a set member is always named by its
+  // set — '"<set label>" - Tx N', N the member's 1-based index
+  // in the set's stored txIds order (the same numbering the
+  // readiness lines use, so "Tx 2" means the same transaction in
+  // both places, and the number stays put if a member goes
+  // stale). A standalone tx keeps its own label; one without a
+  // label falls back to its short txid (first 16 chars + '…').
+  // No surface ever renders 'Untitled transaction' for any
+  // transaction. txDisplayName is the plain form (card titles,
+  // bar labels, confirms, result lists); txRefName is the quoted
+  // form for the shared-input warning's "with ..." list.
+  // (The 'Untitled transaction' last resort below is
+  // unreachable in practice — every stored tx carries a txid —
+  // but a name function must return something.)
+  function shortTxid16(txid) {
+    var s = String(txid || '');
+    return s ? s.slice(0, 16) + (s.length > 16 ? '\u2026' : '') : '';
+  }
+  function txDisplayName(tx) {
+    if (!tx) return 'Untitled transaction';
+    var set = setOfTxId(tx.id);
+    if (set) {
+      var idx = (set.txIds || []).indexOf(tx.id);
+      return '"' + (set.label || 'Untitled set') + '" - Tx ' + (idx + 1);
+    }
+    return tx.label || shortTxid16(tx.txid) || 'Untitled transaction';
+  }
+  function txRefName(tx) {
+    if (!tx) return 'Untitled transaction';
+    var set = setOfTxId(tx.id);
+    if (set) {
+      var idx = (set.txIds || []).indexOf(tx.id);
+      return '"' + (set.label || 'Untitled set') + '" - Tx ' + (idx + 1);
+    }
+    return '"' + (tx.label || shortTxid16(tx.txid) || 'Untitled transaction') + '"';
+  }
+  // A check-in bar's label (0.8.7, round 13): bars name a
+  // standalone tx or a set — members never get a bar of their
+  // own (the server sends the set's bar instead). A standalone
+  // tx resolves through txDisplayName, so a label-less one reads
+  // its short txid; a set bar keeps its plain label.
+  function barLabel(b) {
+    var tx = (S.bitcoin.txs || []).find(function (t) { return t.id === b.id; });
+    return tx ? txDisplayName(tx) : (b.label || '');
+  }
+
   // The release-readiness entries (0.8.7, round 10): ONE entry
   // per trigger set, not one per transaction. A set's members
   // share one trigger set, so they share one readiness row —
@@ -901,7 +948,7 @@
       block.dataset.windowDays = windowDays;
       var label = document.createElement('div');
       label.className = 'ck-tx-label';
-      label.textContent = (b.label || 'Untitled transaction') + ((barsById[b.id] || 0) > 1 && typeof b.ruleIndex === 'number' ? ' \u2014 Rule ' + (b.ruleIndex + 1) : '');
+      label.textContent = barLabel(b) + ((barsById[b.id] || 0) > 1 && typeof b.ruleIndex === 'number' ? ' \u2014 Rule ' + (b.ruleIndex + 1) : '');
       block.appendChild(label);
       var bar = document.createElement('div');
       bar.className = 'progress';
@@ -971,7 +1018,7 @@
         } else {
           key = e.tx.id;
           item.dataset.txId = e.tx.id;
-          label.textContent = e.tx.label || 'Untitled transaction';
+          label.textContent = txDisplayName(e.tx);
           var st = txStatus(e.tx);
           pill.className = 'pill ' + st.cls;
           pill.textContent = txPillText(e.tx, st);
@@ -1827,7 +1874,9 @@
         if (tx && (txStatus(tx).settled || txStatus(tx).pending)) return;
         var others = ov.txIds.filter(function (x) { return x !== tid; }).map(function (x) {
           var t = (S.bitcoin.txs || []).find(function (y) { return y.id === x; });
-          return t ? ('"' + (t.label || 'Untitled transaction') + '"') : x;
+          // (0.8.7, round 13) A member is named by its set, never
+          // by its own (absent) label — '"<set label>" - Tx N'.
+          return t ? txRefName(t) : x;
         }).join(', ');
         (overlapsByTx[tid] = overlapsByTx[tid] || []).push({ input: ov.input, others: others });
       });
@@ -2472,7 +2521,7 @@
       var head = document.createElement('div');
       head.className = 'tx-head';
       var title = document.createElement('b');
-      title.textContent = tx.label || 'Untitled transaction';
+      title.textContent = txDisplayName(tx);
       var pill = document.createElement('span');
       // A warned-about tx keeps its "Ready" label but gets an amber
       // pill (0.7.16 amendment, Ryan): the tx is still ready to
@@ -2575,7 +2624,10 @@
         // Standby's record of it, and it can still confirm on the
         // network. Branched on the same txStatus() classification
         // the card itself uses (st is in scope here).
-        var label = tx.label || 'Untitled transaction';
+        // (0.8.7, round 13) The deleted tx is named through
+        // txDisplayName: a label-less standalone reads its short
+        // txid, never 'Untitled transaction'.
+        var label = txDisplayName(tx);
         var delBody;
         if (tx.release && tx.release.status === 'submitted-slipstream') {
           delBody = 'This deletes "' + label + '" from Standby. It has already been submitted to MARA Slipstream and is waiting to be mined — deleting it here does NOT cancel or recall it, and MARA can still mine it. Its history on this card goes with it.';
@@ -2779,7 +2831,11 @@
       '<ul class="plain-list">' + fresh.map(function (m) {
         var tx = (S.bitcoin.txs || []).find(function (t) { return t.id === m.id; });
         var dest = tx && txStatus(tx).pending ? 'pending' : 'archived';
-        return '<li>' + escapeHtml(m.label || 'Untitled transaction') + ' — ' + (broadcast ? 'already broadcast' : 'inputs spent') + ' (' + dest + ')</li>';
+        // (0.8.7, round 13) The moved tx is named through
+        // txDisplayName: a member reads '"<set label>" - Tx N',
+        // a label-less standalone its short txid.
+        var name = tx ? txDisplayName(tx) : (m.label || '');
+        return '<li>' + escapeHtml(name) + ' — ' + (broadcast ? 'already broadcast' : 'inputs spent') + ' (' + dest + ')</li>';
       }).join('') + '</ul>');
   }
 
@@ -4345,7 +4401,7 @@
   async function broadcastNow(id) {
     var tx = (S.bitcoin.txs || []).find(function (t) { return t.id === id; });
     if (!tx || tx.broadcasted) return;
-    var label = tx.label || 'Untitled transaction';
+    var label = txDisplayName(tx);
     showConfirm('Broadcast this transaction?',
       'This will broadcast "' + label + '" to the network for real — the funds move and it cannot be undone. The inputs are re-checked first (a stale transaction is not sent), then it broadcasts via the primary node, falling back to the secondary if the primary does not answer.',
       async function () {
@@ -4398,7 +4454,7 @@
   async function broadcastPublic(id) {
     var tx = (S.bitcoin.txs || []).find(function (t) { return t.id === id; });
     if (!tx || !(tx.release && tx.release.status === 'submitted-slipstream')) return;
-    var label = tx.label || 'Untitled transaction';
+    var label = txDisplayName(tx);
     showConfirm('Broadcast this transaction publicly?',
       'This will broadcast "' + label + '" to the PUBLIC mempool for real — the funds move and it cannot be undone. It is currently waiting on MARA Slipstream, where it stays private until MARA mines it. Broadcasting publicly makes it visible to everyone in the public mempool — it gives up the Slipstream privacy. The inputs are re-checked first (a stale transaction is not sent), then it broadcasts via the primary node, falling back to the secondary if the primary does not answer.',
       async function () {
@@ -4472,7 +4528,10 @@
       setMsg($('btc-all-msg'), 'Nothing to broadcast — no armed transactions to broadcast.', true);
       return;
     }
-    var names = targets.map(function (t) { return t.label || 'Untitled transaction'; });
+    // (0.8.7, round 13) Targets here are standalone txs only
+    // (members are excluded above, sets get their own line) —
+    // a label-less one reads its short txid.
+    var names = targets.map(txDisplayName);
     setTargets.forEach(function (s) {
       names.push((s.label || 'Untitled set') + ' (set: ' + setMembersOf(s).length + ' transactions)');
     });
@@ -4504,7 +4563,13 @@
         showDetails(label + ' — ' + (failed ? 'finished with failures' : 'complete'),
           summary,
           '<ul class="plain-list">' + allResults.map(function (x) {
-            return '<li>' + escapeHtml(x.label || 'Untitled transaction') + ' — ' + escapeHtml(broadcastResultText(x)) + '</li>';
+            // (0.8.7, round 13) Set-member results arrive with
+            // the member's own (empty) label — resolve the tx by
+            // id so a member reads '"<set label>" - Tx N' here
+            // too, and a label-less standalone its short txid.
+            var xt = x.id ? (S.bitcoin.txs || []).find(function (t) { return t.id === x.id; }) : null;
+            var xname = xt ? txDisplayName(xt) : (x.label || '');
+            return '<li>' + escapeHtml(xname) + ' — ' + escapeHtml(broadcastResultText(x)) + '</li>';
           }).join('') + '</ul>');
       }
     } catch (e) {
@@ -4720,7 +4785,7 @@
       block.className = 'ck-tx' + (frozen ? ' frozen' : '');
       block.dataset.windowDays = windowDays;
       var label = block.children[0];
-      if (label) label.textContent = (b.label || 'Untitled transaction') + ((barsById[b.id] || 0) > 1 && typeof b.ruleIndex === 'number' ? ' — Rule ' + (b.ruleIndex + 1) : '');
+      if (label) label.textContent = barLabel(b) + ((barsById[b.id] || 0) > 1 && typeof b.ruleIndex === 'number' ? ' — Rule ' + (b.ruleIndex + 1) : '');
       var bar = block.children[1];
       var fill = bar && bar.children[0];
       if (fill) {
