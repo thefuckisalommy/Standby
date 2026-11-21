@@ -307,6 +307,16 @@ button.btn-checkin-big { width: 100%; padding: 16px 20px; font-size: 19px; }
 .readiness-tx-row b { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; font-weight: 400; }
 .readiness-tx-row .pill { flex-shrink: 0; }
 .readiness-tx-state { color: var(--muted); font-size: 13px; margin-top: 2px; overflow-wrap: anywhere; }
+/* The per-member lines under a set's readiness header (0.8.7,
+   round 12): "Tx N — <short txid>…" left, the amount pinned
+   to the right edge, indented under the header — the same row
+   shape as the header, one size smaller. No pill on member
+   lines at all: the status pill lives only on the set header
+   row. The left text truncates with an ellipsis so the amount
+   never wraps. */
+.readiness-tx-member { display: flex; align-items: baseline; gap: 6px; flex-wrap: nowrap; margin: 4px 0 0 12px; }
+.readiness-tx-member-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+.readiness-tx-member-amt { flex-shrink: 0; font-size: 14px; }
 /* The combined Node + Exchange Status block (0.8.1): one sub-card
    holding both sections, in a cool blue-slate hue (#1f2a38) so it
    reads as a different family from the neutral tx tiles (#22252d)
@@ -493,6 +503,28 @@ details.archived > summary { cursor: pointer; font-size: 18px; font-weight: 700;
   border-radius: 8px; font-size: 14.5px; line-height: 1.45;
   overflow-wrap: anywhere;
 }
+/* (0.8.7) A transaction subcard inside a set card: the same
+   shape/size as a trigger subcard, but a BLUE left border so the
+   transactions read apart from the triggers' orange. */
+.tx-trigger.tx-item { border-left-color: #60a5fa; }
+/* (0.8.7 fix, round 2) A repeatable entry in the Add modal:
+   one boxed panel per transaction, like a rule panel. */
+.btc-tx-entry { background: #14171d; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-top: 10px; }
+.btc-tx-entry:first-child { margin-top: 0; }
+/* (0.8.7 fix, round 4) The Add modal's set label sits above
+   the transaction entries — the list carries the 12px section
+   gap so the label input is not tight against the first box. */
+#btc-tx-list { margin-top: 12px; }
+/* (0.8.7) The set modal mirrors the set card: its header row
+   puts the label input in the title's spot with the green
+   arm/disarm switch pinned right in the toggle's spot, and its
+   field groups sit in subcard sections — blue-edged for
+   Transactions, orange-edged for Triggers — like the card's own
+   subcards, instead of one flat form. */
+.set-head-row { display: flex; align-items: flex-end; gap: 12px; }
+.set-head-row .set-label-wrap { flex: 1 1 auto; min-width: 0; }
+.set-head-row .set-label-wrap label { margin-top: 0; }
+.set-head-row .switch { flex-shrink: 0; margin-bottom: 6px; }
 .tx-trigger-k {
   display: block; color: var(--muted);
   font-size: 11.5px; font-weight: 700; letter-spacing: 0.6px;
@@ -501,6 +533,7 @@ details.archived > summary { cursor: pointer; font-size: 18px; font-weight: 700;
 .tx-trigger .now { color: var(--muted); }
 .tx-trigger .tx-trigger-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 .tx-trigger-head .tx-trigger-k { flex: 1 1 auto; min-width: 0; }
+.tx-trigger-head .tx-item-amt { flex-shrink: 0; font-weight: 600; }
 .tx-trigger-head .pill { flex-shrink: 0; font-size: 12px; padding: 2px 9px; }
 /* Every trigger subcard is exactly 3 rows (owner): header,
    condition, current state — each on its own line. The header
@@ -537,6 +570,10 @@ details.archived > summary { cursor: pointer; font-size: 18px; font-weight: 700;
 .rule-manual-note { color: var(--muted); font-size: 14px; margin: 8px 0 2px; }
 .rule-add { width: 100%; margin-top: 10px; }
 .rule-add:disabled { opacity: 0.5; cursor: default; }
+/* (0.8.7 fix, round 6) A member removed in an edit modal stays
+   visible, dimmed, until save — its remove button becomes Undo,
+   so the removal is reversible without closing the modal. */
+.tx-entry-removed { opacity: 0.55; }
 .tx-rules-combo { color: var(--muted); font-size: 13px; margin: 3px 0 0; }
 /* (0.8.2, combo tightening — Ryan: "just tighten it") The
    first subcard after the combination line sits closer to it

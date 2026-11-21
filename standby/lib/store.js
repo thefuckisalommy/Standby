@@ -94,7 +94,21 @@ function defaultState() {
     // (0.8.5) — the tick asks the primary every time and the
     // secondary only on fallback, so the two stamps diverge; null
     // means that endpoint has never answered.
-    bitcoin: { txs: [], connection: { ok: null, checkedAt: null, detail: '', nodeCheckedAt: { primary: null, secondary: null } } },
+    // Shared trigger sets (0.8.7): one trigger set driving several
+    // transactions — define the triggers once, attach the txs, and
+    // when the set fires every attached tx broadcasts. A set is
+    // { id, label, enabled, txIds, trigger, triggerState, history,
+    //   createdAt, checkinOffsetMs, checkinInactiveSince } — the
+    // same rule-set shape, triggerState, history, and check-in
+    // freeze a transaction carries, at set level. A tx in a set
+    // keeps its own trigger stored (it resumes when the tx leaves
+    // the set); while attached, the set's trigger is the one
+    // evaluated, once per tick for all members. Deleting a set
+    // never deletes its txs — they return to standalone.
+    // A state file from before 0.8.7 carries no sets: mergeDefaults
+    // fills [] and the load-time sanitizer below normalizes any
+    // hand-edited entry, so no version bump is needed.
+    bitcoin: { txs: [], sets: [], connection: { ok: null, checkedAt: null, detail: '', nodeCheckedAt: { primary: null, secondary: null } } },
     // The check-in clock: lastCheckinAt is the last recorded
     // check-in, totalCheckins counts them. lastOnlineAt (0.7.22)
     // is the last time the app itself was alive — written on every
@@ -122,6 +136,10 @@ function defaultState() {
 
 function newTxId() {
   return 'tx_' + crypto.randomBytes(4).toString('hex');
+}
+
+function newSetId() {
+  return 'set_' + crypto.randomBytes(4).toString('hex');
 }
 
 // ---------------------------------------------------------------------------
@@ -155,6 +173,70 @@ const MAX_RULES_PER_TX = 5;
 // release checks.
 const HISTORY_TYPES = new Set(['added', 'fired', 'broadcast', 'slipstream', 'confirmed', 'stale', 'failed', 'conflict', 'edited', 'armed', 'disarmed']);
 const HISTORY_MAX = 50;
+// (0.8.7, round 13) How a transaction is NAMED in the set
+// history's member tags — the same rule as the client's
+// txDisplayName (public/app.js): a set member is always named
+// by its set, '"<set label>" - Tx N', N the member's 1-based
+// index in the set's stored txIds order (the same numbering the
+// readiness lines use, so "Tx 2" means the same transaction in
+// both places). A standalone tx keeps its own label; one
+// without a label falls back to its short txid (first 16 chars
+// + '…'). No surface ever renders 'Untitled transaction' for
+// any transaction. (The last resort below is unreachable in
+// practice — every stored tx carries a txid — but a tag
+// function must return something.)
+function shortTxid16(txid) {
+  const s = String(txid || '');
+  return s ? s.slice(0, 16) + (s.length > 16 ? '…' : '') : '';
+}
+function memberTag(set, tx) {
+  if (!tx) return 'Untitled transaction';
+  if (set) {
+    const idx = (set.txIds || []).indexOf(tx.id);
+    if (idx !== -1) return '"' + (set.label || 'Untitled set') + '" - Tx ' + (idx + 1);
+  }
+  return tx.label || shortTxid16(tx.txid) || 'Untitled transaction';
+}
+function memberHistoryDetail(set, tx, detail) {
+  const tag = memberTag(set, tx);
+  return detail ? tag + ': ' + detail : tag;
+}
+function backfillSetHistory(set, txs) {
+  // Events already on the trail (same type + detail — a live
+  // forward, or an earlier backfill) are skipped by count, so
+  // a re-attach never shows the same line twice; genuine
+  // repeats inside one member's own trail are kept. The merged
+  // trail stays chronological, capped at the newest HISTORY_MAX.
+  const remaining = new Map();
+  for (const e of (set.history || [])) {
+    const key = e.type + '|' + e.detail;
+    remaining.set(key, (remaining.get(key) || 0) + 1);
+  }
+  const incoming = [];
+  for (const t of (txs || [])) {
+    for (const e of (Array.isArray(t.history) ? t.history : [])) {
+      const tagged = { ts: e.ts, type: e.type, detail: memberHistoryDetail(set, t, e.detail) };
+      const key = tagged.type + '|' + tagged.detail;
+      // (0.8.7, round 13) The tag format changed from the bare
+      // member label to '"<set label>" - Tx N': an event already
+      // on the trail under the OLD tag still counts as the same
+      // event, so a load across the format change does not copy
+      // it in a second time under the new tag.
+      const legacy = (t.label || 'Untitled transaction');
+      const legacyDetail = e.detail ? legacy + ': ' + e.detail : legacy;
+      const legacyKey = e.type + '|' + legacyDetail;
+      const n = remaining.get(key) || 0;
+      if (n > 0) { remaining.set(key, n - 1); continue; }
+      const ln = remaining.get(legacyKey) || 0;
+      if (ln > 0) { remaining.set(legacyKey, ln - 1); continue; }
+      incoming.push(tagged);
+    }
+  }
+  if (!incoming.length) return;
+  set.history = (set.history || []).concat(incoming)
+    .sort((a, b) => String(a.ts).localeCompare(String(b.ts)))
+    .slice(-HISTORY_MAX);
+}
 // (0.8.0) The check-in fallback: there is no global broadcast
 // threshold any more — each check-in tx carries its own
 // thresholdDays ("Days of silence"). A tx with no usable trigger
@@ -791,11 +873,71 @@ function loadState(dataDir) {
       if (clean.length !== t.history.length) { t.history = clean; historySeeded = true; }
     }
   }
-  if (pruned || migrated || triggerMigrated || historySeeded) {
+  // 0.8.7 sanitizer: trigger sets. A state file from before 0.8.7
+  // carries no sets (mergeDefaults filled []); a hand-edited one
+  // is normalized the same way the tx migration normalizes txs —
+  // dropped when it has no id or a duplicate id, its member list
+  // pruned to stored txs (dangling ids go), its trigger and
+  // triggerState normalized to the rule count, its history seeded
+  // from the facts it holds (added at createdAt) or sanitized
+  // like a tx's. A tx in two sets keeps only the first — a tx
+  // belongs to at most one set. Idempotent, runs on every load.
+  let setsNormalized = false;
+  if (!Array.isArray(state.bitcoin.sets)) { state.bitcoin.sets = []; setsNormalized = true; }
+  {
+    const txIds = new Set((state.bitcoin.txs || []).map((t) => t.id));
+    const seenSetIds = new Set();
+    const seenMemberIds = new Set();
+    const kept = [];
+    for (const s of state.bitcoin.sets) {
+      if (!s || typeof s !== 'object' || typeof s.id !== 'string' || !s.id || seenSetIds.has(s.id)) { setsNormalized = true; continue; }
+      seenSetIds.add(s.id);
+      if (!Array.isArray(s.txIds)) { s.txIds = []; setsNormalized = true; }
+      const before = s.txIds.length;
+      s.txIds = [...new Set(s.txIds.filter((id) => typeof id === 'string' && txIds.has(id) && !seenMemberIds.has(id)))];
+      for (const id of s.txIds) seenMemberIds.add(id);
+      if (s.txIds.length !== before) setsNormalized = true;
+      if (typeof s.label !== 'string') { s.label = ''; setsNormalized = true; }
+      if (typeof s.enabled !== 'boolean') { s.enabled = true; setsNormalized = true; }
+      if (typeof s.createdAt !== 'string' || !s.createdAt) { s.createdAt = state.updatedAt; setsNormalized = true; }
+      const strg = triggerOf(s);
+      if (JSON.stringify(strg) !== JSON.stringify(s.trigger)) { s.trigger = strg; setsNormalized = true; }
+      const normSetState = normalizeTriggerState(s.triggerState, strg.rules.length);
+      if (JSON.stringify(normSetState) !== JSON.stringify(s.triggerState)) { s.triggerState = normSetState; setsNormalized = true; }
+      if (typeof s.checkinOffsetMs !== 'number' || !Number.isFinite(s.checkinOffsetMs) || s.checkinOffsetMs < 0) { s.checkinOffsetMs = 0; setsNormalized = true; }
+      if (typeof s.checkinInactiveSince !== 'string' || !s.checkinInactiveSince) {
+        if (s.checkinInactiveSince !== null && s.checkinInactiveSince !== undefined) setsNormalized = true;
+        s.checkinInactiveSince = null;
+      }
+      if (!Array.isArray(s.history)) {
+        s.history = [{ ts: s.createdAt, type: 'added', detail: 'Set created with ' + s.txIds.length + (s.txIds.length === 1 ? ' transaction' : ' transactions') }];
+        setsNormalized = true;
+      } else {
+        const clean = s.history.filter((e) => e && typeof e === 'object' && HISTORY_TYPES.has(e.type)
+          && typeof e.ts === 'string' && !Number.isNaN(new Date(e.ts).getTime())
+          && typeof e.detail === 'string').slice(-HISTORY_MAX);
+        if (clean.length !== s.history.length) { s.history = clean; setsNormalized = true; }
+      }
+      // (0.8.7, round 9) A set created before the single-history
+      // change carries only its own creation event — its members'
+      // earlier histories are backfilled now, so an old set's
+      // trail starts true instead of thin. Idempotent: events
+      // already on the trail are skipped, so a later load changes
+      // nothing and this runs exactly once per set.
+      const histBefore = s.history.length;
+      backfillSetHistory(s, (state.bitcoin.txs || []).filter((t) => (s.txIds || []).includes(t.id)));
+      if (s.history.length !== histBefore) setsNormalized = true;
+      kept.push(s);
+    }
+    if (kept.length !== state.bitcoin.sets.length) setsNormalized = true;
+    state.bitcoin.sets = kept;
+  }
+  if (pruned || migrated || triggerMigrated || historySeeded || setsNormalized) {
     if (migrated) console.log('Standby 0.4.0: migrated single transaction to the transactions list');
     if (pruned) console.log('Standby: pruned legacy state (recipient/channels/reminders/release)');
     if (triggerMigrated) console.log('Standby 0.8.2: migrated transactions to rule sets (AND/OR) with per-rule triggerState');
     if (historySeeded) console.log('Standby 0.8.1: seeded per-transaction history');
+    if (setsNormalized) console.log('Standby 0.8.7: normalized trigger sets');
     // (0.8.3) Snapshot the pre-migration file before the
     // migrating save rewrites it.
     snapshotPreMigration(dataDir);
@@ -847,13 +989,14 @@ function writeJsonl(dataDir, file, entries) {
 }
 
 module.exports = {
-  loadState, saveState, defaultState, newTxId,
+  loadState, saveState, defaultState, newTxId, newSetId,
   appendCheckin, readCheckins, writeCheckins,
   appendBroadcastLog, readBroadcastLog, writeBroadcastLog,
   normalizeTrigger, normalizeRule, triggerOf, triggerRulesOf, triggerTypesOf, hasTriggerType,
   serveTrigger, serveTriggerState, normalizeTriggerState, defaultTrigger, defaultTriggerSet,
   FALLBACK_THRESHOLD_DAYS, MAX_RULES_PER_TX,
   TRIGGER_TYPES, PRICE_MIN_USD, PRICE_MAX_USD, HISTORY_TYPES, HISTORY_MAX,
+  memberHistoryDetail, backfillSetHistory,
   // (0.8.3) Persistence hardening: backup rotation, corrupt-state
   // recovery warnings, and the backup-with-keys lookup for the
   // startup key-store check.

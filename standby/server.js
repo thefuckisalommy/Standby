@@ -59,7 +59,7 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 // (last.json). Absent on a plain `node server.js` run — the key
 // feature is dormant then; every file access is guarded.
 const CHECKIN_DIR = process.env.CHECKIN_DIR || '/checkin';
-const VERSION = '0.8.6';
+const VERSION = '0.8.7';
 const MAX_BODY = 1024 * 1024; // 1 MB
 
 const MIME = {
@@ -296,6 +296,17 @@ function triggerTypesLabel(tx) {
   return store.triggerTypesOf(tx).join('+');
 }
 
+// Trigger sets (0.8.7). setOfTx finds the set a transaction
+// belongs to (at most one — the load-time sanitizer enforces it);
+// setMembers returns a set's transactions, in the set's own order.
+function setOfTx(state, txId) {
+  return ((state.bitcoin.sets || []).find((s) => (s.txIds || []).includes(txId))) || null;
+}
+function setMembers(state, set) {
+  const txs = state.bitcoin.txs || [];
+  return (set.txIds || []).map((id) => txs.find((t) => t.id === id)).filter(Boolean);
+}
+
 // The deadline a Slipstream transaction's public fallback fires at —
 // or null when there is none. Two anchors, by the transaction's
 // state (the owner's rule):
@@ -350,6 +361,23 @@ function serveTx(tx) {
 }
 function serveTxs(txs) {
   return (txs || []).map(serveTx);
+}
+
+// The set as the API serves it (0.8.7): the same dual-shape
+// serving as serveTx — a one-rule set as its single rule with a
+// flat triggerState, a multi-rule set as the set with the
+// per-rule array. The stored form is always the set.
+function serveSet(set) {
+  if (!set || typeof set !== 'object') return set;
+  const trg = store.triggerOf(set);
+  return {
+    ...set,
+    trigger: store.serveTrigger(trg),
+    triggerState: store.serveTriggerState(trg, set.triggerState),
+  };
+}
+function serveSets(sets) {
+  return (sets || []).map(serveSet);
 }
 
 // State as served to the UI: a plain deep copy, except the check-in key
@@ -770,6 +798,14 @@ function resetCheckin(state, now, method) {
     t.checkinInactiveSince = null;
   }
   for (const t of (state.bitcoin.txs || [])) syncCheckinFreeze(t, state, now);
+  // (0.8.7) A set's check-in freeze resets the same way — the
+  // set's own offset is measured against the old clock too.
+  for (const s of (state.bitcoin.sets || [])) {
+    if (!store.hasTriggerType(s, 'checkin')) continue;
+    s.checkinOffsetMs = 0;
+    s.checkinInactiveSince = null;
+  }
+  for (const s of (state.bitcoin.sets || [])) syncCheckinFreeze(s, state, now);
   store.appendCheckin(DATA_DIR, { ts: now.toISOString(), method });
 }
 
@@ -963,8 +999,15 @@ function checkinStatus(state, now) {
   // first. The DOM suite and the old frontend read these entries
   // the same way: a one-rule tx yields exactly one entry, as
   // before.
+  // (0.8.7) A set member's own check-in trigger is dormant while
+  // it is attached — the set's trigger is the one that fires — so
+  // members get no bar of their own; the set gets one per rule,
+  // like a tx, with the set's own label, arm state, and frozen
+  // offset.
+  const setMemberIds = new Set();
+  for (const s of (state.bitcoin.sets || [])) for (const id of (s.txIds || [])) setMemberIds.add(id);
   const checkinTxs = txs
-    .filter((t) => isCheckinTx(t) && !txSettledOrPending(t))
+    .filter((t) => isCheckinTx(t) && !txSettledOrPending(t) && !setMemberIds.has(t.id))
     .flatMap((t) => store.triggerOf(t).rules
       .map((r, i) => ({ rule: r, ruleIndex: i }))
       .filter((x) => x.rule.type === 'checkin')
@@ -975,6 +1018,22 @@ function checkinStatus(state, now) {
         const clock = checkinClock(state, now, th, off);
         return { id: t.id, label: t.label || '', ruleIndex, thresholdDays: th, daysSince: clock.daysSince, windowDays: clock.windowDays, nextDue: clock.nextDue, state: clock.state, enabled: !!t.enabled };
       }));
+  for (const s of (state.bitcoin.sets || [])) {
+    if (!store.hasTriggerType(s, 'checkin')) continue;
+    const members = txs.filter((t) => (s.txIds || []).includes(t.id));
+    if (!members.length || members.every(txSettledOrPending)) continue;
+    store.triggerOf(s).rules.forEach((rule, ruleIndex) => {
+      if (rule.type !== 'checkin') return;
+      const th = rule.params.thresholdDays;
+      const off = checkinLiveOffsetMs(s, now);
+      if (!last) {
+        checkinTxs.push({ id: s.id, label: s.label || '', ruleIndex, thresholdDays: th, daysSince: 0, windowDays: th, nextDue: null, state: 'not-started', enabled: !!s.enabled });
+        return;
+      }
+      const clock = checkinClock(state, now, th, off);
+      checkinTxs.push({ id: s.id, label: s.label || '', ruleIndex, thresholdDays: th, daysSince: clock.daysSince, windowDays: clock.windowDays, nextDue: clock.nextDue, state: clock.state, enabled: !!s.enabled });
+    });
+  }
   // The top level is driven by the ARMED entries only — a
   // disarmed tx cannot fire (see the comment above). When
   // nothing is armed the soonest due is null, and daysSince
@@ -2130,7 +2189,17 @@ function preBroadcastCheck(tx, logKind, opts) {
   // and put this tx in the public mempool, so the wait is over.
   if (ftx.release && ftx.release.status === 'submitted-slipstream' && !(opts && opts.forcePublic)) return { ok: false, reason: 'already submitted to Slipstream — waiting on MARA' };
   if (logKind === 'release') {
-    if (!ftx.enabled) return { ok: false, reason: 'transaction was disabled' };
+    // (0.8.7) A set member broadcasts on the SET's arm, not its
+    // own toggle: the set's enabled gates every member, and a
+    // member's own enabled is ignored while it is attached.
+    // opts.setId names the set the caller is broadcasting for.
+    if (opts && opts.setId) {
+      const fset = (fresh.bitcoin.sets || []).find((s) => s.id === opts.setId);
+      if (!fset || !(fset.txIds || []).includes(tx.id)) return { ok: false, reason: 'transaction is not in its trigger set' };
+      if (!fset.enabled) return { ok: false, reason: 'trigger set was disabled' };
+    } else if (!ftx.enabled) {
+      return { ok: false, reason: 'transaction was disabled' };
+    }
     // Vacation is check-in-only (0.8.0): it holds a check-in
     // tx's automatic release, and nothing else's — a price or
     // UTXO tx broadcasts on schedule while the owner is away.
@@ -2242,6 +2311,7 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
       const ftx = (fresh.bitcoin.txs || []).find((t) => t.id === tx.id);
       if (ftx && ftx.hex === tx.hex) {
         pushHistory(ftx, 'failed', ('input check failed: ' + e.message).slice(0, 120));
+        forwardMemberHistory(fresh, ftx, 'failed', ('input check failed: ' + e.message).slice(0, 120));
         recordRelease(fresh, ftx, record, {
           ts: now.toISOString(), kind: logKind, status: 'failed', method: 'primary', txid: tx.txid,
           hexPreview: tx.hex.slice(0, 64), note: failNote + e.message,
@@ -2271,7 +2341,11 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
       // (0.8.2) The tx is out there — log the broadcast, and the
       // confirmation too when the outspend already names the block.
       pushHistory(ftx, 'broadcast', 'txid ' + shortTxid(tx.txid));
-      if (own.blockHeight != null) pushHistory(ftx, 'confirmed', 'Block ' + own.blockHeight.toLocaleString('en-US'));
+      forwardMemberHistory(fresh, ftx, 'broadcast', 'txid ' + shortTxid(tx.txid));
+      if (own.blockHeight != null) {
+        pushHistory(ftx, 'confirmed', 'Block ' + own.blockHeight.toLocaleString('en-US'));
+        forwardMemberHistory(fresh, ftx, 'confirmed', 'Block ' + own.blockHeight.toLocaleString('en-US'));
+      }
       recordRelease(fresh, ftx, record, {
         ts: now.toISOString(), kind: logKind, status: 'broadcast', method: check.checkedVia, txid: tx.txid,
         hexPreview: tx.hex.slice(0, 64), note: 'Transaction is already out there — the node reports its own txid as the spending transaction. Recorded as broadcast; nothing was sent.',
@@ -2292,6 +2366,11 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
     const ftx = (fresh.bitcoin.txs || []).find((t) => t.id === tx.id);
     if (ftx && ftx.hex === tx.hex) {
       pushHistory(ftx, 'stale', record.error);
+      // (0.8.7, revised) The set-stale rule: a stale member does
+      // NOT archive its set — only itself is marked stale. The
+      // set keeps firing for its non-stale members; the stale
+      // verdict is noted on the set's shared history.
+      noteSetMemberStale(fresh, ftx, record.error);
       recordRelease(fresh, ftx, record, {
         ts: now.toISOString(), kind: logKind, status: 'stale', method: check.checkedVia, txid: tx.txid,
         hexPreview: tx.hex.slice(0, 64), note: 'Transaction is stale (inputs spent: ' + spentDesc + ') — broadcast not attempted.',
@@ -2354,6 +2433,7 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
       if (ftx && ftx.hex === tx.hex) {
         ftx.release = record;
         pushHistory(ftx, 'slipstream', 'txid ' + shortTxid(out.txid));
+        forwardMemberHistory(fresh, ftx, 'slipstream', 'txid ' + shortTxid(out.txid));
         store.saveState(DATA_DIR, fresh);
       }
       store.appendBroadcastLog(DATA_DIR, {
@@ -2389,6 +2469,7 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
         confirmations: null, blockHeight: null, found: true, checkedAt: null,
       };
       pushHistory(ftx, 'broadcast', 'txid ' + shortTxid(out.txid));
+      forwardMemberHistory(fresh, ftx, 'broadcast', 'txid ' + shortTxid(out.txid));
       store.saveState(DATA_DIR, fresh);
     }
     return { id: tx.id, txid: out.txid, label: tx.label || '', action: 'broadcast', method: out.method };
@@ -2410,6 +2491,7 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
       const ftx = (fresh.bitcoin.txs || []).find((t) => t.id === tx.id);
       if (ftx && ftx.hex === tx.hex) {
         pushHistory(ftx, 'failed', String(e.message || '').slice(0, 120));
+        forwardMemberHistory(fresh, ftx, 'failed', String(e.message || '').slice(0, 120));
         recordRelease(fresh, ftx, record, null); // broadcastTx already logged the failure
       }
     }
@@ -2465,6 +2547,48 @@ function firedDetail(set, ruleResults, firedIndexes) {
   return firedIndexes
     .map((i) => firedDetailForRule(ruleResults[i].rule, ruleResults[i].reason, ruleResults[i].slice || null))
     .join(' + ');
+}
+
+// (0.8.7, revised) The set-stale rule: a stale member does NOT
+// archive its set. The set keeps evaluating and firing for its
+// non-stale members; only when EVERY member is stale does the
+// set read archived (see the all-terminal branch in
+// evaluateReleaseInner and setStatus in public/app.js). A member
+// going stale is still recorded on the set's ONE shared history,
+// so the set card shows which member went stale and why. The
+// caller saves `fresh`.
+function noteSetMemberStale(fresh, tx, error) {
+  const fset = setOfTx(fresh, tx.id);
+  if (!fset) return;
+  pushHistory(fset, 'stale', store.memberHistoryDetail(fset, tx, error));
+}
+
+// (0.8.7, round 9) Single history: the set card shows ONE
+// history — the set's. A member's own history keeps recording
+// (it resumes as the tx's trail if the tx ever leaves the set),
+// but the card renders only the set's trail — so a member's
+// events are forwarded here too, tagged with the member's
+// label, on the same save as the member's own event. Callers
+// pass the fresh state they are already saving, so the
+// forwarded event can never land without its transition.
+// FORWARD — the events a reader of the set card would miss:
+//   edited, failed, broadcast, confirmed, conflict, slipstream.
+// NEVER forwarded — the set logs its own, or the backfill covers it:
+//   stale — noteSetMemberStale above already forwards it
+//     (forwarding here would log it twice);
+//   fired — the set logs its own 'fired' when ITS trigger fires;
+//     a member never fires on its own while attached;
+//   armed / disarmed — the set has its own arm, and arm-all flips
+//     every member AND its set, so forwarding would log N flips
+//     beside the set's one;
+//   added — covered by the creation / attach backfill
+//     (store.backfillSetHistory), never a live event.
+const FORWARD_HISTORY_TYPES = new Set(['edited', 'failed', 'broadcast', 'confirmed', 'conflict', 'slipstream']);
+function forwardMemberHistory(state, tx, type, detail) {
+  if (!FORWARD_HISTORY_TYPES.has(type)) return;
+  const set = setOfTx(state, tx.id);
+  if (!set) return;
+  pushHistory(set, type, store.memberHistoryDetail(set, tx, detail));
 }
 
 function recordRelease(state, tx, record, logEntry) {
@@ -2674,6 +2798,19 @@ async function evaluateReleaseInner(automatic) {
       utxoPlan.get(parts[0]).add(vout);
     }
   }
+  // (0.8.7) A set's UTXO rules ride the same batch plan as a tx's —
+  // the set is evaluated once, so its outpoints are planned once.
+  for (const set of (state.bitcoin.sets || [])) {
+    const sset = store.triggerOf(set);
+    for (const rule of (sset.rules || [])) {
+      if (rule.type !== 'utxo' || !rule.params || typeof rule.params.outpoint !== 'string') continue;
+      const parts = rule.params.outpoint.split(':');
+      const vout = parseInt(parts[1], 10);
+      if (!parts[0] || !Number.isFinite(vout) || vout < 0) continue;
+      if (!utxoPlan.has(parts[0])) utxoPlan.set(parts[0], new Set());
+      utxoPlan.get(parts[0]).add(vout);
+    }
+  }
   const utxoBatch = bitcoin.createOutspendBatch(utxoPlan, endpoints, checkCadenceSecondsOf(s) * 1000);
 
   // (0.8.0) Each tx's own trigger decides whether its conditions
@@ -2703,7 +2840,19 @@ async function evaluateReleaseInner(automatic) {
   let disarmedFired = false;
   const wasDueById = new Map();
   const evById = new Map();
+  // (0.8.7) A set member is never evaluated on its own trigger:
+  // the set's trigger is evaluated once for all its members, in
+  // the set loop below. A member's own triggerState freezes while
+  // it is attached, and resumes when it leaves the set.
+  const setByTxId = new Map();
+  for (const set of (state.bitcoin.sets || [])) {
+    for (const id of (set.txIds || [])) setByTxId.set(id, set);
+  }
+  const wasDueBySetId = new Map();
+  const evBySetId = new Map();
+  const firingSets = [];
   for (const tx of all) {
+    if (setByTxId.has(tx.id)) continue;
     // (0.8.5) Terminal first: a tx that can no longer broadcast
     // is not evaluated at all — no tip fetch, no outspend check,
     // no fee/price evaluation attributable to it. Its slice
@@ -2745,6 +2894,52 @@ async function evaluateReleaseInner(automatic) {
     }
     firing.push(tx);
   }
+  // (0.8.7) Trigger sets: each set's trigger set is evaluated
+  // ONCE per tick, shared across all its members — that is the
+  // point of a set. A firing set broadcasts every live member (the
+  // firing loop below); a disarmed set is evaluated for display
+  // only, like a disarmed tx (the 0.8.4 evaluate-all contract).
+  for (const set of (state.bitcoin.sets || [])) {
+    const members = setMembers(state, set);
+    if (!members.length) continue;
+    // (0.8.7, revised) A stale member is ordinary now, not a
+    // reason to skip the set: it is excluded from firing by the
+    // live-member filter in the firing loop below, and the set
+    // keeps evaluating and firing for its non-stale members.
+    // Every member terminal (broadcast, submitted to Slipstream,
+    // or stale) — the set is settled, nothing left to evaluate.
+    // When every member is stale the set reads archived.
+    if (members.every((m) => terminalSkipReason(m))) {
+      const allStale = members.every((m) => m.release && m.release.status === 'stale');
+      results.push({ id: set.id, kind: 'set', txid: '', label: set.label || '', action: 'skipped', reason: allStale ? 'all members are stale — the set is archived' : 'all members are broadcast or submitted', trigger: triggerTypesLabel(set) });
+      continue;
+    }
+    wasDueBySetId.set(set.id, storedCombinedDue(set));
+    let sev;
+    try { sev = await evaluateTrigger(state, set, now, utxoBatch); }
+    catch (e) {
+      // Same as a tx: a throw is 'unknown' — do not fire, say so.
+      console.error('trigger evaluation failed for set ' + (set.label || set.id) + ':', e);
+      const sset = store.triggerOf(set);
+      sset.rules.forEach((rule, i) => {
+        setRuleTriggerState(set, i, { ...freshTriggerState(now, 'unknown', 'evaluation failed — will retry'), lastError: e.message });
+      });
+      sev = { fire: false, status: 'unknown', reason: 'evaluation failed — will retry', ruleResults: [], firedIndexes: [], firedRuleTypes: [] };
+    }
+    evBySetId.set(set.id, sev);
+    if (!set.enabled) {
+      // Evaluated for display only — never broadcast, and no
+      // 'fired' history event (nothing fired in the release sense).
+      if (sev.fire) disarmedFired = true;
+      results.push({ id: set.id, kind: 'set', txid: '', label: set.label || '', action: 'skipped', reason: 'disarmed — ' + sev.reason, trigger: triggerTypesLabel(set), triggerStatus: sev.status });
+      continue;
+    }
+    if (!sev.fire) {
+      results.push({ id: set.id, kind: 'set', txid: '', label: set.label || '', action: 'skipped', reason: sev.reason, trigger: triggerTypesLabel(set), triggerStatus: sev.status });
+      continue;
+    }
+    firingSets.push({ set, ev: sev });
+  }
   const firingIds = new Set(firing.map((f) => f.id));
   // (0.8.2) Whether any firing tx was held back by the broadcast
   // backoff below — so the top-level reason says so instead of
@@ -2778,6 +2973,20 @@ async function evaluateReleaseInner(automatic) {
         && (!wasDueById.get(tx.id) || !(ftx.history || []).some((e) => e.type === 'fired'))) {
         const ev = evById.get(tx.id);
         pushHistory(ftx, 'fired', firedDetail(store.triggerOf(tx), ev.ruleResults, ev.firedIndexes));
+      }
+    }
+    // (0.8.7) The same merge for sets: each set's triggerState
+    // rides into fresh state, and the 'fired' event logs on the
+    // transition into due only — armed sets only (a disarmed set
+    // never reaches the firing set, so it never logs one here).
+    const firingSetIds = new Set(firingSets.map((fs) => fs.set.id));
+    for (const set of (state.bitcoin.sets || [])) {
+      const fset = (fresh.bitcoin.sets || []).find((s) => s.id === set.id);
+      if (fset && set.triggerState) fset.triggerState = set.triggerState;
+      if (fset && firingSetIds.has(set.id)
+        && (!wasDueBySetId.get(set.id) || !(fset.history || []).some((e) => e.type === 'fired'))) {
+        const sev = evBySetId.get(set.id);
+        pushHistory(fset, 'fired', firedDetail(store.triggerOf(set), sev.ruleResults, sev.firedIndexes));
       }
     }
     mergeNodeStamps(fresh);
@@ -2842,6 +3051,71 @@ async function evaluateReleaseInner(automatic) {
     // price rule firing during vacation broadcasts).
     const firedRuleTypes = (evById.get(tx.id) || {}).firedRuleTypes || store.triggerTypesOf(tx);
     results.push(await broadcastOne(state, tx, endpoints, now, 'release', { firedRuleTypes }));
+  }
+
+  // (0.8.7) Firing sets: every live member broadcasts, through
+  // the same per-tx broadcast path as a standalone firing tx.
+  for (const fs of firingSets) {
+    const set = fs.set;
+    const members = setMembers(state, set);
+    const live = members.filter((m) => !terminalSkipReason(m));
+    // The set-stale pre-check (0.8.7, revised): every live
+    // member's inputs are re-checked BEFORE any member
+    // broadcasts — but a stale member only excludes ITSELF. It
+    // is marked stale (release record + history on the member,
+    // a note on the set's shared history) and skipped, and the
+    // non-stale members still broadcast. Only when EVERY member
+    // is stale does nothing go out — and the set reads archived
+    // from then on, because every member is stale (see the
+    // all-terminal branch above and setStatus).
+    const staleFound = [];
+    for (const m of live) {
+      let chk = null;
+      try { chk = await bitcoin.checkInputsUnspent(bitcoin.parseTx(m.hex), endpoints, checkCadenceSecondsOf(state.settings) * 1000); }
+      catch (e) { chk = null; } // unknown: broadcastOne decides below
+      if (chk && chk.spent && chk.spent.length) {
+        staleFound.push({ member: m, desc: chk.spent.map((i) => i.prevTxid.slice(0, 12) + ':' + i.prevVout).join(', '), method: chk.checkedVia || 'primary' });
+      }
+    }
+    if (staleFound.length) {
+      try {
+        const freshS = store.loadState(DATA_DIR);
+        for (const sf of staleFound) {
+          const fm = (freshS.bitcoin.txs || []).find((t) => t.id === sf.member.id);
+          if (!fm || fm.broadcasted || (fm.release && fm.release.status === 'stale')) continue;
+          const err = 'inputs spent: ' + sf.desc;
+          fm.release = { status: 'stale', kind: 'release', trigger: releaseTriggerFor(freshS, fm), txid: fm.txid, method: sf.method, lastAttemptAt: now.toISOString(), error: err };
+          pushHistory(fm, 'stale', err);
+          noteSetMemberStale(freshS, fm, err);
+        }
+        store.saveState(DATA_DIR, freshS);
+      } catch (e) { console.error('set stale marking failed:', e); }
+      for (const sf of staleFound) {
+        results.push({ id: sf.member.id, txid: sf.member.txid, label: sf.member.label || '', action: 'stale', error: 'inputs spent: ' + sf.desc, trigger: triggerTypesLabel(sf.member) });
+      }
+    }
+    const staleIds = new Set(staleFound.map((sf) => sf.member.id));
+    for (const m of live) {
+      if (staleIds.has(m.id)) continue;
+      // The broadcast backoff (0.8.2), per member — the same guard
+      // as the standalone firing loop above.
+      if (automatic && m.release && m.release.status === 'failed'
+          && typeof m.release.lastAttemptAt === 'string') {
+        const last = Date.parse(m.release.lastAttemptAt);
+        if (Number.isFinite(last) && (now - last) < BROADCAST_BACKOFF_MS) {
+          backedOff = true;
+          results.push({ id: m.id, txid: m.txid, label: m.label || '', action: 'skipped', reason: 'broadcast backoff — last failed attempt was less than an hour ago' });
+          continue;
+        }
+      }
+      const r = await broadcastOne(state, m, endpoints, now, 'release', { firedRuleTypes: fs.ev.firedRuleTypes, setId: set.id });
+      results.push(r);
+      // A member that went stale mid-run is marked stale inside
+      // broadcastOne — but only itself. The remaining members
+      // are still broadcastable, so the loop carries on (the old
+      // any-stale-archives rule broke here; the revised rule
+      // does not).
+    }
   }
 
   const action = results.some((r) => r.action === 'broadcast') ? 'broadcast'
@@ -2917,6 +3191,7 @@ async function refreshConfirmations(state, maxAgeSec) {
         const nowConfirmed = !!u.found && (u.confirmations === null || (typeof u.confirmations === 'number' && u.confirmations >= 1));
         if (!wasConfirmed && nowConfirmed) {
           pushHistory(tx, 'confirmed', (typeof u.blockHeight === 'number') ? 'Block ' + u.blockHeight.toLocaleString('en-US') : 'Confirmed');
+          forwardMemberHistory(fresh, tx, 'confirmed', (typeof u.blockHeight === 'number') ? 'Block ' + u.blockHeight.toLocaleString('en-US') : 'Confirmed');
         }
         tx.broadcasted.confirmations = u.confirmations;
         tx.broadcasted.blockHeight = u.blockHeight;
@@ -3017,8 +3292,10 @@ async function refreshMaraWaiting(state) {
         // (0.8.2) MARA's tx is out there now — log the broadcast,
         // and the confirmation when it is already in a block.
         pushHistory(tx, 'broadcast', 'txid ' + shortTxid(u.txid));
+        forwardMemberHistory(fresh, tx, 'broadcast', 'txid ' + shortTxid(u.txid));
         if ((typeof u.confirmations === 'number' && u.confirmations >= 1) || (typeof u.blockHeight === 'number')) {
           pushHistory(tx, 'confirmed', (typeof u.blockHeight === 'number') ? 'Block ' + u.blockHeight.toLocaleString('en-US') : 'Confirmed');
+          forwardMemberHistory(fresh, tx, 'confirmed', (typeof u.blockHeight === 'number') ? 'Block ' + u.blockHeight.toLocaleString('en-US') : 'Confirmed');
         }
         store.appendBroadcastLog(DATA_DIR, {
           ts: now.toISOString(), kind: 'release', status: 'broadcast', method: 'slipstream', txid: u.txid,
@@ -3029,6 +3306,7 @@ async function refreshMaraWaiting(state) {
       } else if (u.kind === 'failed') {
         tx.release = { status: 'failed', kind: tx.release.kind || 'release', trigger: releaseTriggerFor(fresh, tx), txid: u.txid, method: 'slipstream', lastAttemptAt: now.toISOString(), error: u.error };
         pushHistory(tx, 'failed', String(u.error || '').slice(0, 120));
+        forwardMemberHistory(fresh, tx, 'failed', String(u.error || '').slice(0, 120));
         store.appendBroadcastLog(DATA_DIR, {
           ts: now.toISOString(), kind: 'release', status: 'failed', method: 'slipstream', txid: u.txid,
           hexPreview: tx.hex.slice(0, 64),
@@ -3277,7 +3555,11 @@ async function runFullTick() {
     // (0.8.4) Any tx with a non-manual rule keeps the tick
     // evaluating — armed or not — so disarmed txs' statuses stay
     // live. A manual-only setup still makes no extra API calls.
-    const hasWork = (st.bitcoin.txs || []).some((t) => store.triggerTypesOf(t).some((ty) => ty !== 'manual'));
+    // (0.8.7) A set with a non-manual rule keeps it evaluating
+    // too — a set's triggers are evaluated once per tick, like a
+    // tx's.
+    const hasWork = (st.bitcoin.txs || []).some((t) => store.triggerTypesOf(t).some((ty) => ty !== 'manual'))
+      || (st.bitcoin.sets || []).some((s) => store.triggerOf(s).rules.some((r) => r.type !== 'manual'));
     if (!hasWork) return;
     const r = await evaluateRelease({ automatic: true });
     if (r.action !== 'skipped') {
@@ -3631,6 +3913,17 @@ async function handleApi(req, res, pathname) {
       const servedSet = store.triggerOf(t);
       t.trigger = store.serveTrigger(servedSet);
       t.triggerState = store.serveTriggerState(servedSet, t.triggerState);
+    }
+    // (0.8.7) Trigger sets are served the same way as txs: the
+    // trigger in the dual shape, its current status computed from
+    // the stored evaluation (no network on a read). The members
+    // ride in served.bitcoin.txs as usual — the frontend joins
+    // them by the set's txIds.
+    for (const s of served.bitcoin.sets || []) {
+      s.triggerStatus = triggerStatusFor(state, s, now);
+      const servedSetT = store.triggerOf(s);
+      s.trigger = store.serveTrigger(servedSetT);
+      s.triggerState = store.serveTriggerState(servedSetT, s.triggerState);
     }
     return sendJson(res, 200, served);
   }
@@ -4404,6 +4697,13 @@ async function handleApi(req, res, pathname) {
       const fresh = saveMutation((f) => {
         if (!(f.bitcoin.txs || []).some((t) => t.id === tx.id)) return false;
         f.bitcoin.txs = (f.bitcoin.txs || []).filter((t) => t.id !== tx.id);
+        // (0.8.7) The tx leaves any set it was in; a set left with
+        // no members has nothing to drive and goes with it. The
+        // other members stay put.
+        for (const s of (f.bitcoin.sets || [])) {
+          s.txIds = (s.txIds || []).filter((id) => id !== tx.id);
+        }
+        f.bitcoin.sets = (f.bitcoin.sets || []).filter((s) => (s.txIds || []).length > 0);
       });
       if (!fresh) return sendError(res, 404, 'no such transaction');
       return sendJson(res, 200, { ok: true, removed: tx.id });
@@ -4526,6 +4826,11 @@ async function handleApi(req, res, pathname) {
     // to tx.history here and ride into fresh state through the
     // mutator's field list below ('history' is in it), so a
     // rejected edit (a 400 above) leaves no event behind.
+    // (0.8.7, round 9) Single history: a member's 'edited' is
+    // forwarded to its set's trail inside the save below, on
+    // fresh state — the arm/disarm flip is NOT forwarded, the
+    // set logs its own arm.
+    const forwardedEditEvents = [];
     if (typeof body.enabled === 'boolean' && orig.enabled !== tx.enabled) {
       pushHistory(tx, tx.enabled ? 'armed' : 'disarmed', '');
     }
@@ -4536,7 +4841,10 @@ async function handleApi(req, res, pathname) {
     if (orig.broadcastVia !== tx.broadcastVia) editChanges.push('Route changed to ' + (tx.broadcastVia === 'slipstream' ? 'Slipstream' : 'Public'));
     if (orig.publicFallbackDays !== tx.publicFallbackDays) editChanges.push('Public fallback changed to ' + (tx.publicFallbackDays === null ? 'Never' : tx.publicFallbackDays + (tx.publicFallbackDays === 1 ? ' day' : ' days')));
     if (orig.notes !== tx.notes) editChanges.push('Notes changed');
-    if (editChanges.length) pushHistory(tx, 'edited', editChanges.join('; '));
+    if (editChanges.length) {
+      pushHistory(tx, 'edited', editChanges.join('; '));
+      forwardedEditEvents.push({ type: 'edited', detail: editChanges.join('; ') });
+    }
     let checkinReset = false;
     // (0.8.1, audit finding 4) The edit's field changes were
     // computed on the request's snapshot while the fee and trigger
@@ -4564,6 +4872,12 @@ async function handleApi(req, res, pathname) {
       for (const k of ['hex', 'txid', 'inputs', 'outputs', 'totalOutSats', 'locktime', 'segwit', 'feeSats', 'feeRateSatVb', 'release', 'broadcasted', 'label', 'notes', 'trigger', 'triggerState', 'enabled', 'broadcastVia', 'publicFallbackDays', 'history']) {
         if (JSON.stringify(tx[k]) !== JSON.stringify(orig[k])) ftx[k] = tx[k];
       }
+      // (0.8.7, round 9) Single history: the member's edit lands
+      // on its set's trail too (forwardMemberHistory no-ops for a
+      // standalone tx). This runs only on the success path — the
+      // early returns above leave a rejected edit with no event
+      // anywhere.
+      for (const fe of forwardedEditEvents) forwardMemberHistory(f, ftx, fe.type, fe.detail);
       // The freeze (0.8.0): the danger zone is measured from the
       // EFFECTIVE last check-in — the tx's live frozen time — so a
       // frozen clock is never in the danger zone for time that never
@@ -4594,6 +4908,211 @@ async function handleApi(req, res, pathname) {
     if (checkinReset) out.checkinReset = true;
     if (triggerWarning) out.triggerWarning = triggerWarning;
     return sendJson(res, 200, out);
+  }
+
+  // Trigger sets (0.8.7). A set is one label, one arm/disarm,
+  // and one rule set driving several transactions:
+  //   POST   /api/bitcoin/sets      — create { label, txIds, trigger, enabled?, triggerConfirmed? }
+  //   PUT    /api/bitcoin/sets/:id  — update { label?, txIds?, trigger?, enabled?, triggerConfirmed? }
+  //   DELETE /api/bitcoin/sets/:id  — remove (its txs return to standalone; they are never deleted with it)
+  //   POST   /api/bitcoin/sets/:id/broadcast — MANUAL broadcast of every member, now
+  // A member keeps its own trigger stored (it resumes when the tx
+  // leaves the set); while attached, only the set's trigger is
+  // evaluated. The already-satisfied gate, the danger-zone
+  // check-in reset, and the freeze sync all mirror the tx paths.
+  function setAttachErrors(freshState, txIds, exceptSetId) {
+    const errs = [];
+    const seen = new Set();
+    for (const id of txIds) {
+      if (typeof id !== 'string' || !id) { errs.push('set members must be transaction ids'); continue; }
+      if (seen.has(id)) { errs.push('transaction attached twice: ' + id); continue; }
+      seen.add(id);
+      const t = (freshState.bitcoin.txs || []).find((x) => x.id === id);
+      if (!t) { errs.push('unknown transaction id: ' + id); continue; }
+      const other = (freshState.bitcoin.sets || []).find((s) => s.id !== exceptSetId && (s.txIds || []).includes(id));
+      if (other) { errs.push("'" + (t.label || t.id) + "' is already in '" + (other.label || other.id) + "'"); continue; }
+      if (t.broadcasted || (t.release && (t.release.status === 'broadcast' || t.release.status === 'stale' || t.release.status === 'submitted-slipstream'))) {
+        errs.push("'" + (t.label || t.id) + "' is already broadcast, stale, or waiting on MARA and cannot join a set");
+      }
+    }
+    return errs;
+  }
+  function newSetRecord(label, txIds, trigger) {
+    return {
+      id: store.newSetId(),
+      label: typeof label === 'string' ? asStr(label, 80) : '',
+      enabled: true,
+      txIds: [...new Set(txIds)],
+      trigger,
+      triggerState: null,
+      history: [{ ts: now.toISOString(), type: 'added', detail: 'Set created with ' + txIds.length + (txIds.length === 1 ? ' transaction' : ' transactions') }],
+      createdAt: now.toISOString(),
+      checkinOffsetMs: 0,
+      checkinInactiveSince: null,
+    };
+  }
+  if (req.method === 'POST' && pathname === '/api/bitcoin/sets') {
+    const body = await readBody(req);
+    if (!Array.isArray(body.txIds) || !body.txIds.length) return sendError(res, 400, 'a set needs at least one transaction');
+    const errs = setAttachErrors(state, body.txIds, null);
+    if (errs.length) return sendError(res, 400, errs[0]);
+    const trig = (body.trigger === undefined)
+      ? { trigger: store.defaultTriggerSet() }
+      : store.normalizeTrigger(body.trigger);
+    if (!trig.trigger) return sendError(res, 400, 'invalid trigger: ' + trig.error);
+    const set = newSetRecord(body.label, body.txIds, trig.trigger);
+    if (body.enabled === false) set.enabled = false;
+    let triggerWarning = null;
+    try {
+      const gate = await setGateCheck(trig.trigger, state, now, 'add');
+      if (gate.chk && gate.chk.warning) triggerWarning = gate.chk.warning;
+      if (gate.blocked && body.triggerConfirmed !== true) {
+        return sendError(res, 400, gate.message);
+      }
+    } catch (e) { /* best-effort: the create proceeds without the warning */ }
+    let checkinReset = false;
+    let saveErrs = null;
+    const fresh = saveMutation((f) => {
+      saveErrs = setAttachErrors(f, body.txIds, null);
+      if (saveErrs.length) return false;
+      if ((f.bitcoin.sets || []).some((s) => s.id === set.id)) return false;
+      // (0.8.7, round 9) Single history: the set's trail opens
+      // with each member's existing history (tagged, oldest
+      // first); the creation event closes it, so the trail never
+      // starts from scratch.
+      const memberTxs = body.txIds.map((id) => (f.bitcoin.txs || []).find((t) => t.id === id)).filter(Boolean);
+      set.history = [];
+      store.backfillSetHistory(set, memberTxs);
+      pushHistory(set, 'added', 'Set created with ' + body.txIds.length + (body.txIds.length === 1 ? ' transaction' : ' transactions'), now.toISOString());
+      (f.bitcoin.sets = f.bitcoin.sets || []).push(set);
+      // The danger zone is measured against the SMALLEST check-in
+      // threshold in the set — the most urgent check-in rule is
+      // the one that would let the release fire soonest.
+      const checkinThresholds = trig.trigger.rules.filter((r) => r.type === 'checkin').map((r) => r.params.thresholdDays);
+      if (checkinThresholds.length > 0 && inDangerZone(f, now, Math.min(...checkinThresholds))) {
+        resetCheckin(f, now, 'add-reset');
+        checkinReset = true;
+      }
+    });
+    if (!fresh) return sendError(res, 400, (saveErrs && saveErrs[0]) || 'could not save the set — try again');
+    const out = { set: serveSet((fresh.bitcoin.sets || []).find((s) => s.id === set.id) || set) };
+    if (checkinReset) out.checkinReset = true;
+    if (triggerWarning) out.triggerWarning = triggerWarning;
+    return sendJson(res, 201, out);
+  }
+  const setMatch = pathname.match(/^\/api\/bitcoin\/sets\/([^/]+)$/);
+  if (setMatch && (req.method === 'PUT' || req.method === 'DELETE')) {
+    const set = (state.bitcoin.sets || []).find((s) => s.id === setMatch[1]);
+    if (!set) return sendError(res, 404, 'no such trigger set');
+    if (req.method === 'DELETE') {
+      // Deleting a set never deletes its transactions — they
+      // return to standalone, each with its own trigger again.
+      const fresh = saveMutation((f) => {
+        if (!(f.bitcoin.sets || []).some((s) => s.id === set.id)) return false;
+        f.bitcoin.sets = (f.bitcoin.sets || []).filter((s) => s.id !== set.id);
+      });
+      if (!fresh) return sendError(res, 404, 'no such trigger set');
+      return sendJson(res, 200, { ok: true, removed: set.id });
+    }
+    const body = await readBody(req);
+    const orig = { ...set, txIds: [...(set.txIds || [])], trigger: set.trigger, history: set.history };
+    if (typeof body.label === 'string') set.label = asStr(body.label, 80);
+    if (body.txIds !== undefined) {
+      if (!Array.isArray(body.txIds)) return sendError(res, 400, 'txIds must be a list of transaction ids');
+      // Only the NEWLY attached ids are validated against the
+      // settled / other-set rules — a member already in this set
+      // stays put even if it has since broadcast.
+      const freshIds = body.txIds.filter((id) => !orig.txIds.includes(id));
+      const errs = setAttachErrors(state, freshIds, set.id);
+      if (errs.length) return sendError(res, 400, errs[0]);
+      set.txIds = [...new Set(body.txIds)];
+      // (0.8.7, round 9) Single history: a newly attached member
+      // brings its existing history into the set's trail (tagged,
+      // oldest first) — the 'Members changed' event below closes
+      // the attach, so it stays the newest entry.
+      const addedTxs = freshIds.map((id) => (state.bitcoin.txs || []).find((t) => t.id === id)).filter(Boolean);
+      if (addedTxs.length) store.backfillSetHistory(set, addedTxs);
+    }
+    let triggerWarning = null;
+    if (body.trigger !== undefined) {
+      const v = store.normalizeTrigger(body.trigger);
+      if (!v.trigger) return sendError(res, 400, 'invalid trigger: ' + v.error);
+      try {
+        const gate = await setGateCheck(v.trigger, state, now, 'save');
+        if (gate.chk && gate.chk.warning) triggerWarning = gate.chk.warning;
+        if (gate.blocked && body.triggerConfirmed !== true) {
+          return sendError(res, 400, gate.message);
+        }
+      } catch (e) { /* best-effort: the save proceeds without the warning */ }
+      if (JSON.stringify(v.trigger) !== JSON.stringify(set.trigger)) {
+        set.trigger = v.trigger;
+        set.triggerState = null;
+      }
+    }
+    if (typeof body.enabled === 'boolean') set.enabled = body.enabled;
+    if (typeof body.enabled === 'boolean' && orig.enabled !== set.enabled) {
+      pushHistory(set, set.enabled ? 'armed' : 'disarmed', '');
+    }
+    const setChanges = [];
+    if (orig.label !== set.label) setChanges.push('Label changed');
+    if (JSON.stringify(orig.trigger) !== JSON.stringify(set.trigger)) setChanges.push('Trigger changed to ' + triggerConditionText(set.trigger));
+    if (JSON.stringify(orig.txIds) !== JSON.stringify(set.txIds)) {
+      const added = (set.txIds || []).filter((id) => !orig.txIds.includes(id)).length;
+      const removed = orig.txIds.filter((id) => !(set.txIds || []).includes(id)).length;
+      setChanges.push('Members changed' + (added ? ' (+' + added + ')' : '') + (removed ? ' (-' + removed + ')' : ''));
+    }
+    if (setChanges.length) pushHistory(set, 'edited', setChanges.join('; '));
+    let checkinReset = false;
+    const fresh = saveMutation((f) => {
+      const fset = (f.bitcoin.sets || []).find((s) => s.id === set.id);
+      if (!fset) return false;
+      const freshWasEnabled = fset.enabled;
+      for (const k of ['label', 'txIds', 'trigger', 'triggerState', 'enabled', 'history']) {
+        if (JSON.stringify(set[k]) !== JSON.stringify(orig[k])) fset[k] = set[k];
+      }
+      syncCheckinFreeze(fset, f, now);
+      const fsetCheckinThresholds = store.triggerOf(fset).rules.filter((r) => r.type === 'checkin').map((r) => r.params.thresholdDays);
+      if (body.enabled === true && freshWasEnabled === false
+          && fsetCheckinThresholds.length > 0
+          && inDangerZone(f, now, Math.min(...fsetCheckinThresholds), checkinLiveOffsetMs(fset, now))) {
+        resetCheckin(f, now, 'arm-reset');
+        checkinReset = true;
+      }
+    });
+    if (!fresh) return sendError(res, 400, 'could not save the set — try again');
+    const outSet = (fresh.bitcoin.sets || []).find((s) => s.id === set.id);
+    const out = { set: serveSet(outSet) };
+    if (checkinReset) out.checkinReset = true;
+    if (triggerWarning) out.triggerWarning = triggerWarning;
+    return sendJson(res, 200, out);
+  }
+
+  // POST /api/bitcoin/sets/:id/broadcast — MANUAL broadcast of
+  // every member, now. Same path as the release (freshness gate,
+  // then the route), on the owner's explicit say-so: it ignores
+  // the set's arm state, like a manual tx broadcast ignores its
+  // own toggle. A stale member yields a 'stale' result and the
+  // loop carries on to the next member — it does not archive
+  // the set (0.8.7, revised rule).
+  const setBroadcastMatch = pathname.match(/^\/api\/bitcoin\/sets\/([^/]+)\/broadcast$/);
+  if (req.method === 'POST' && setBroadcastMatch) {
+    const set = (state.bitcoin.sets || []).find((s) => s.id === setBroadcastMatch[1]);
+    if (!set) return sendError(res, 404, 'no such trigger set');
+    const members = setMembers(state, set);
+    if (!members.length) return sendError(res, 400, 'the set has no transactions to broadcast');
+    const endpoints = bitcoin.endpointsFor(state.settings);
+    const results = [];
+    for (const tx of members) {
+      if (tx.broadcasted) {
+        results.push({ id: tx.id, txid: tx.txid, label: tx.label || '', action: 'skipped', reason: 'already broadcast' });
+        continue;
+      }
+      results.push(await broadcastOne(state, tx, endpoints, now, 'broadcast', { setId: set.id }));
+    }
+    const action = results.some((r) => r.action === 'broadcast') ? 'broadcast'
+      : results.some((r) => r.action === 'failed') ? 'failed'
+      : results.some((r) => r.action === 'stale') ? 'stale' : 'skipped';
+    return sendJson(res, 200, { ok: true, action, results });
   }
 
   // POST /api/bitcoin/txs/arm-all — Global Arm/Disarm (0.8.0):
@@ -4636,9 +5155,31 @@ async function handleApi(req, res, pathname) {
           break;
         }
       }
+      // (0.8.7) Arm/disarm every set too — a set's arm is the
+      // only arm its members have, so leaving sets out would
+      // leave half the release armed after "Disarm all".
+      const newlyArmedSets = [];
+      for (const s of (f.bitcoin.sets || [])) {
+        const wasEnabled = s.enabled;
+        s.enabled = body.enabled;
+        if (wasEnabled !== body.enabled) pushHistory(s, body.enabled ? 'armed' : 'disarmed', '');
+        syncCheckinFreeze(s, f, now);
+        if (body.enabled === true && wasEnabled === false) newlyArmedSets.push(s);
+      }
+      for (const s of newlyArmedSets) {
+        const checkinThresholds = store.triggerOf(s).rules.filter((r) => r.type === 'checkin').map((r) => r.params.thresholdDays);
+        if (checkinThresholds.length === 0) continue;
+        const members = (f.bitcoin.txs || []).filter((t) => (s.txIds || []).includes(t.id));
+        if (members.length && members.every((t) => t.broadcasted || (t.release && t.release.status === 'stale'))) continue;
+        if (inDangerZone(f, now, Math.min(...checkinThresholds), checkinLiveOffsetMs(s, now))) {
+          resetCheckin(f, now, 'arm-all-reset');
+          checkinReset = true;
+          break;
+        }
+      }
     });
     const freshTxs = fresh.bitcoin.txs || [];
-    return sendJson(res, 200, { ok: true, enabled: body.enabled, count: freshTxs.length, checkinReset, txs: serveTxs(freshTxs) });
+    return sendJson(res, 200, { ok: true, enabled: body.enabled, count: freshTxs.length, checkinReset, txs: serveTxs(freshTxs), sets: serveSets(fresh.bitcoin.sets || []) });
   }
 
   // POST /api/bitcoin/txs/:id/broadcast — MANUAL broadcast, now. Same
@@ -4761,6 +5302,7 @@ async function handleApi(req, res, pathname) {
     // the UI sees.
     const backupState = JSON.parse(JSON.stringify(state));
     backupState.bitcoin.txs = serveTxs(backupState.bitcoin.txs || []);
+    backupState.bitcoin.sets = serveSets(backupState.bitcoin.sets || []);
     return sendJson(res, 200, {
       format: 'standby-backup',
       version: 1,
@@ -5026,6 +5568,46 @@ async function handleApi(req, res, pathname) {
           : null,
       });
     }
+    // (0.8.7) Trigger sets ride along: each set's members must be
+    // among the restored txs, its trigger normalized, its history
+    // sanitized like a tx's (broadcast/confirmed/stale events are
+    // dropped with the records they describe — the network
+    // re-derives them). A set naming no restored tx is dropped
+    // whole (its members stay standalone); a duplicate id, or a
+    // tx in two sets, keeps only the first.
+    const restoredSets = [];
+    const restoredTxIds = new Set(txs.map((t) => t.id));
+    const seenSetIds = new Set();
+    const seenSetMembers = new Set();
+    if (Array.isArray(bs.bitcoin.sets)) {
+      for (const bsSet of bs.bitcoin.sets) {
+        if (!bsSet || typeof bsSet !== 'object' || typeof bsSet.id !== 'string' || !bsSet.id || seenSetIds.has(bsSet.id)) continue;
+        seenSetIds.add(bsSet.id);
+        const memberIds = Array.isArray(bsSet.txIds)
+          ? [...new Set(bsSet.txIds.filter((id) => typeof id === 'string' && restoredTxIds.has(id) && !seenSetMembers.has(id)))]
+          : [];
+        if (!memberIds.length) continue;
+        const restoredSetTrigger = store.triggerOf(bsSet);
+        restoredSets.push({
+          id: asStr(bsSet.id, 40),
+          label: asStr(bsSet.label || '', 80),
+          enabled: typeof bsSet.enabled === 'boolean' ? bsSet.enabled : true,
+          txIds: memberIds,
+          trigger: restoredSetTrigger,
+          triggerState: store.normalizeTriggerState(bsSet.triggerState, restoredSetTrigger.rules.length),
+          history: Array.isArray(bsSet.history)
+            ? bsSet.history.filter((e) => e && typeof e === 'object' && store.HISTORY_TYPES.has(e.type)
+                && typeof e.ts === 'string' && !Number.isNaN(new Date(e.ts).getTime())
+                && typeof e.detail === 'string'
+                && e.type !== 'broadcast' && e.type !== 'confirmed' && e.type !== 'stale').slice(-HISTORY_MAX)
+            : null,
+          createdAt: (typeof bsSet.createdAt === 'string' && bsSet.createdAt) ? bsSet.createdAt : now.toISOString(),
+          checkinOffsetMs: 0,
+          checkinInactiveSince: null,
+        });
+        for (const id of memberIds) seenSetMembers.add(id);
+      }
+    }
     const bsCheckin = (bs.checkin && typeof bs.checkin === 'object') ? bs.checkin : {};
     // (0.7.12, third-audit finding 4) The check-in time must be a
     // real date and not in the future (beyond the same 5-minute skew
@@ -5105,6 +5687,7 @@ async function handleApi(req, res, pathname) {
       settings,
       bitcoin: {
         txs,
+        sets: restoredSets,
         connection: (bs.bitcoin.connection && typeof bs.bitcoin.connection === 'object')
           ? bs.bitcoin.connection : { ok: null, checkedAt: null, detail: '' },
       },
@@ -5136,6 +5719,13 @@ async function handleApi(req, res, pathname) {
       t.checkinInactiveSince = null;
     }
     for (const t of txs) syncCheckinFreeze(t, restored, now);
+    // (0.8.7) A restored set's check-in freeze resets the same way.
+    for (const s of restoredSets) {
+      if (!store.hasTriggerType(s, 'checkin')) continue;
+      s.checkinOffsetMs = 0;
+      s.checkinInactiveSince = null;
+    }
+    for (const s of restoredSets) syncCheckinFreeze(s, restored, now);
     store.saveState(DATA_DIR, restored);
     // (0.8.3) The warnings describe the state that was just
     // replaced — a recovery at boot, say — so they are stale now;
@@ -5159,7 +5749,8 @@ async function handleApi(req, res, pathname) {
     // one-rule set as its single rule — see GET /api/state).
     const servedRestored = sanitizeState(restored);
     servedRestored.bitcoin.txs = serveTxs(servedRestored.bitcoin.txs || []);
-    return sendJson(res, 200, { ok: true, restoredTxs: txs.length, state: servedRestored });
+    servedRestored.bitcoin.sets = serveSets(servedRestored.bitcoin.sets || []);
+    return sendJson(res, 200, { ok: true, restoredTxs: txs.length, restoredSets: restoredSets.length, state: servedRestored });
   }
 
   // POST /api/bitcoin/connection/test — verifies both nodes without
@@ -5207,7 +5798,14 @@ async function handleApi(req, res, pathname) {
   if (req.method === 'POST' && pathname === '/api/broadcast/test') {
     const body = await readBody(req).catch(() => ({}));
     let txs = state.bitcoin.txs || [];
-    if (body && body.id) {
+    // (0.8.7) A set dry-run checks every member: { setId } names
+    // the set, like { id } names one tx.
+    let drySet = null;
+    if (body && body.setId) {
+      drySet = (state.bitcoin.sets || []).find((s) => s.id === body.setId);
+      if (!drySet) return sendError(res, 404, 'no such trigger set');
+      txs = setMembers(state, drySet);
+    } else if (body && body.id) {
       const one = txs.find((t) => t.id === body.id);
       if (!one) return sendError(res, 404, 'no such transaction');
       txs = [one];
@@ -5227,8 +5825,11 @@ async function handleApi(req, res, pathname) {
         // (it lives in the Exchange Status section and here, in
         // the dry-run notes). A price-fetch failure never breaks
         // the dry run itself; the note just says so.
-        const trg = store.triggerOf(tx);
-        if (trg && store.hasTriggerType(tx, 'price')) {
+        // (0.8.7) A set member's dry-run note reads the SET's
+        // trigger — the member's own trigger is dormant while it
+        // is attached.
+        const trg = drySet ? store.triggerOf(drySet) : store.triggerOf(tx);
+        if (trg && trg.rules.some((r) => r.type === 'price')) {
           try {
             const readings = await fetchPriceCached(priceSourcesOf(state.settings), checkCadenceSecondsOf(state.settings));
             const comb = bitcoin.combinePriceReadings(readings, priceAgreementPctOf(state.settings));
@@ -5243,9 +5844,9 @@ async function handleApi(req, res, pathname) {
             r.note = (r.note || '') + ' Price sources: could not be checked.';
           }
         }
-        results.push({ id: tx.id, label: tx.label || '', enabled: !!tx.enabled, ...r });
+        results.push({ id: tx.id, label: tx.label || '', enabled: drySet ? !!drySet.enabled : !!tx.enabled, ...r });
       } catch (e) {
-        results.push({ id: tx.id, txid: tx.txid, label: tx.label || '', enabled: !!tx.enabled, broadcastVia: validBroadcastVia(tx.broadcastVia), wouldBroadcast: false, error: e.message });
+        results.push({ id: tx.id, txid: tx.txid, label: tx.label || '', enabled: drySet ? !!drySet.enabled : !!tx.enabled, broadcastVia: validBroadcastVia(tx.broadcastVia), wouldBroadcast: false, error: e.message });
       }
     }
     // Persist what the run found (0.7.12, third-audit finding 1 —
@@ -5307,6 +5908,11 @@ async function handleApi(req, res, pathname) {
             // (0.8.2) The dry run discovered the staleness — the
             // tx's history should say so, not just its card.
             pushHistory(ftx, 'stale', a.stale.error);
+            // (0.8.7, revised) The set-stale rule: a stale member
+            // does NOT archive its set — the verdict is noted on
+            // the set's shared history, and the set keeps firing
+            // for its non-stale members.
+            noteSetMemberStale(f, ftx, a.stale.error);
             continue;
           }
           if (a.own) {
@@ -5322,7 +5928,11 @@ async function handleApi(req, res, pathname) {
               };
               // (0.8.2) The dry run discovered the tx is out there.
               pushHistory(ftx, 'broadcast', 'txid ' + shortTxid(ftx.txid));
-              if (a.own.blockHeight != null) pushHistory(ftx, 'confirmed', 'Block ' + a.own.blockHeight.toLocaleString('en-US'));
+              forwardMemberHistory(f, ftx, 'broadcast', 'txid ' + shortTxid(ftx.txid));
+              if (a.own.blockHeight != null) {
+                pushHistory(ftx, 'confirmed', 'Block ' + a.own.blockHeight.toLocaleString('en-US'));
+                forwardMemberHistory(f, ftx, 'confirmed', 'Block ' + a.own.blockHeight.toLocaleString('en-US'));
+              }
             }
             if (!ftx.release || ftx.release.status !== 'broadcast') {
               ftx.release = { status: 'broadcast', kind: 'dryrun', trigger: releaseTriggerFor(f, ftx), txid: ftx.txid, method: a.own.method, broadcastedAt: now.toISOString() };
@@ -5334,6 +5944,7 @@ async function handleApi(req, res, pathname) {
             ftx.release = { status: 'conflict', kind: 'dryrun', trigger: releaseTriggerFor(f, ftx), txid: ftx.txid, method: a.conflict.method, lastAttemptAt: now.toISOString(), error: a.conflict.error };
             // (0.8.2) The warning on the card gets its history line.
             pushHistory(ftx, 'conflict', a.conflict.error);
+            forwardMemberHistory(f, ftx, 'conflict', a.conflict.error);
             continue;
           }
           if (a.clearConflict && ftx.release && ftx.release.status === 'conflict') ftx.release = null;
