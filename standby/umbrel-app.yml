@@ -5,8 +5,10 @@ manifestVersion: 1
 id: standby
 category: automation
 name: Standby
-version: "0.8.7"
+version: "0.8.7.1"
 releaseNotes: |-
+  0.8.7.1 — A broadcast the network no longer knows is now called what it is: if the transaction's input was spent by another confirmed transaction, the card reads stale — in red — instead of "may have been dropped from the mempool" in green. The broadcast line's colour follows the verdict now (confirmed green, unconfirmed amber, not found or stale red). Also, the 390px width check in the test suite tolerates sub-pixel rounding between Chromium builds instead of failing on it.
+
   0.8.7 — Shared trigger sets: one set of triggers can now drive several transactions. Define the triggers once, attach the transactions, and when the set fires every attached transaction broadcasts. One label and one arm/disarm per set; the set's triggers are evaluated once per tick for all its members, not once per transaction. A member whose inputs are spent is skipped — it carries a 'stale' pill on its subcard — and the set keeps firing for its non-stale members; only when every member is stale does the whole set move to archive. Deleting a set returns its transactions to standalone; the transactions themselves are never deleted with it.
 
   0.8.6 — UTXO triggers share their work now: repeated checks of the same outpoint cost one request per check cadence, and when several watched outputs belong to one funding transaction they are answered with a single request instead of one per output. A confirmed-spend UTXO rule also reuses the shared per-tick block-height fetch instead of fetching the tip itself. An outpoint no node can say about is still unknown, never unspent. Fold-in: a batch lookup whose watched outputs are already cached costs no request at all, and two overlapping checks of the same outpoint — or the same funding transaction's batch — share one in-flight request instead of issuing two. A failed request never poisons the cache: the next lookup fetches fresh. The check-interval help now warns that a very fast cadence can get this IP rate-limited by a public node.

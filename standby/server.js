@@ -59,7 +59,7 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 // (last.json). Absent on a plain `node server.js` run — the key
 // feature is dormant then; every file access is guarded.
 const CHECKIN_DIR = process.env.CHECKIN_DIR || '/checkin';
-const VERSION = '0.8.7';
+const VERSION = '0.8.7.1';
 const MAX_BODY = 1024 * 1024; // 1 MB
 
 const MIME = {
@@ -3152,22 +3152,52 @@ async function refreshConfirmations(state, maxAgeSec) {
     // hourly: 2 requests each (tx status + tip height,
     // primary-first).
     if (typeof b.confirmations === 'number' && b.confirmations >= ARCHIVED_CONFIRMATIONS) {
-      out.push({ id: tx.id, txid: tx.txid, confirmations: b.confirmations, blockHeight: b.blockHeight ?? null, found: b.found !== false, checkedAt: b.checkedAt });
+      out.push({ id: tx.id, txid: tx.txid, confirmations: b.confirmations, blockHeight: b.blockHeight ?? null, found: b.found !== false, checkedAt: b.checkedAt, staleInput: b.staleInput || null, conflictInput: b.conflictInput || null });
       continue;
     }
     const ageSec = b.checkedAt ? (nowMs - new Date(b.checkedAt).getTime()) / 1000 : Infinity;
     if (ageSec < maxAgeSec && b.confirmations !== null) {
-      out.push({ id: tx.id, txid: tx.txid, confirmations: b.confirmations, blockHeight: b.blockHeight ?? null, found: b.found !== false, checkedAt: b.checkedAt });
+      out.push({ id: tx.id, txid: tx.txid, confirmations: b.confirmations, blockHeight: b.blockHeight ?? null, found: b.found !== false, checkedAt: b.checkedAt, staleInput: b.staleInput || null, conflictInput: b.conflictInput || null });
       continue;
     }
     try {
       const c = await bitcoin.getConfirmations(tx.txid, endpoints);
       const checkedAt = new Date().toISOString();
-      updates.push({ id: tx.id, txid: tx.txid, confirmations: c.confirmations, blockHeight: c.blockHeight, found: c.found, checkedAt });
-      out.push({ id: tx.id, txid: tx.txid, confirmations: c.confirmations, blockHeight: c.blockHeight ?? null, found: c.found !== false, checkedAt });
+      // (0.8.7.1) Not found on the network: ask whether the inputs
+      // are already spent — a not-found tx whose input is
+      // spent-confirmed is stale by the app's own taxonomy, not
+      // "dropped from the mempool". One outspend check per missing
+      // tx, only on this path; a tx already recorded stale never
+      // re-checks (a confirmed spend is a chain fact), and a
+      // failed check leaves the tx plain not-found for the next
+      // refresh to retry.
+      let staleInput = b.staleInput || null;
+      let conflictInput = b.conflictInput || null;
+      let staleError = null;
+      if (c.found === false && !staleInput) {
+        try {
+          const chk = await bitcoin.checkInputsUnspent(bitcoin.parseTx(tx.hex), endpoints, checkCadenceSecondsOf(state.settings) * 1000);
+          if (chk.spent.length) {
+            const first = chk.spent[0];
+            staleInput = { spentBy: first.spentBy || null, blockHeight: (typeof first.blockHeight === 'number' ? first.blockHeight : null) };
+            conflictInput = null;
+            staleError = 'inputs spent: ' + chk.spent.map((i) => String(i.prevTxid || '').slice(0, 12) + ':' + i.prevVout).join(', ');
+          } else if (chk.conflict.length) {
+            conflictInput = { spentBy: chk.conflict[0].spentBy || null };
+          } else {
+            conflictInput = null;
+          }
+        } catch (e) {
+          console.error('stale check failed for', tx.txid.slice(0, 12), e.message);
+        }
+      }
+      const update = { id: tx.id, txid: tx.txid, confirmations: c.confirmations, blockHeight: c.blockHeight, found: c.found, checkedAt, staleInput, conflictInput };
+      if (staleError) update.staleError = staleError;
+      updates.push(update);
+      out.push({ id: tx.id, txid: tx.txid, confirmations: c.confirmations, blockHeight: c.blockHeight ?? null, found: c.found !== false, checkedAt, staleInput, conflictInput });
     } catch (e) {
       console.error('confirmations check failed for', tx.txid.slice(0, 12), e.message);
-      out.push({ id: tx.id, txid: tx.txid, confirmations: b.confirmations, blockHeight: b.blockHeight ?? null, found: b.found !== false, checkedAt: b.checkedAt });
+      out.push({ id: tx.id, txid: tx.txid, confirmations: b.confirmations, blockHeight: b.blockHeight ?? null, found: b.found !== false, checkedAt: b.checkedAt, staleInput: b.staleInput || null, conflictInput: b.conflictInput || null });
     }
   }
   if (updates.length) {
@@ -3192,6 +3222,32 @@ async function refreshConfirmations(state, maxAgeSec) {
         if (!wasConfirmed && nowConfirmed) {
           pushHistory(tx, 'confirmed', (typeof u.blockHeight === 'number') ? 'Block ' + u.blockHeight.toLocaleString('en-US') : 'Confirmed');
           forwardMemberHistory(fresh, tx, 'confirmed', (typeof u.blockHeight === 'number') ? 'Block ' + u.blockHeight.toLocaleString('en-US') : 'Confirmed');
+        }
+        // (0.8.7.1) The not-found verdict: a missing tx whose
+        // input is spent-confirmed is stale — record it once, on
+        // the transition, with the history event (forwarded to
+        // the set's trail like every other member stale). A
+        // conflict (an unconfirmed spend) is recorded, not
+        // logged: it may still resolve either way, and a later
+        // clean check clears it. A tx the network knows again
+        // has its verdict cleared — a confirmed spend cannot
+        // un-happen except by reorg, and then the tx is back
+        // in play.
+        if (u.found) {
+          delete tx.broadcasted.staleInput;
+          delete tx.broadcasted.conflictInput;
+        } else if (u.staleInput) {
+          if (!tx.broadcasted.staleInput) {
+            tx.broadcasted.staleInput = u.staleInput;
+            const err = u.staleError || 'inputs spent';
+            pushHistory(tx, 'stale', err);
+            noteSetMemberStale(fresh, tx, err);
+          }
+          delete tx.broadcasted.conflictInput;
+        } else if (u.conflictInput) {
+          tx.broadcasted.conflictInput = u.conflictInput;
+        } else {
+          delete tx.broadcasted.conflictInput;
         }
         tx.broadcasted.confirmations = u.confirmations;
         tx.broadcasted.blockHeight = u.blockHeight;

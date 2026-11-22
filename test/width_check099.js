@@ -125,27 +125,61 @@ function check(name, cond, detail) {
   // previous one).
   const subcards = await page.evaluate(() => {
     return [...document.querySelectorAll('.tx-card')].map((card) => {
-      const box = card.querySelector('.tx-trigger');
+      // (0.8.7 fix, round 3) Every card is a trigger set: the
+      // FIRST .tx-trigger on a card is its blue tx subcard
+      // (.tx-item) — the trigger box is the first PLAIN
+      // .tx-trigger. Details lives inside the tx subcard, never
+      // inside a trigger box.
+      const box = card.querySelector('.tx-trigger:not(.tx-item)');
       if (!box) return null;
-      const rows = [...box.children].map((el) => {
+      const rows = [...box.children].filter((el) => !el.classList.contains('tx-details')).map((el) => {
         const r = el.getBoundingClientRect();
         return { top: Math.round(r.top * 10) / 10, bottom: Math.round(r.bottom * 10) / 10 };
       });
+      const item = card.querySelector('.tx-trigger.tx-item');
+      const hasDetails = !!item && !!item.querySelector(':scope > .tx-details');
       const br = box.getBoundingClientRect();
       return { sw: box.scrollWidth, cw: box.clientWidth, right: Math.round(br.right * 10) / 10,
-        visible: br.width > 0, rows };
+        visible: br.width > 0, rows, hasDetails };
     });
   });
   check('width subcards: every tx card has a subcard (at least the 4 seeded)',
     subcards.length >= 4 && subcards.every(Boolean),
     'subcards found: ' + subcards.filter(Boolean).length);
+  // (width-fix) One log line per subcard on failure: check()
+  // slices its detail to 200 chars, so the old single JSON line
+  // was cut off mid-number in the CI log and the culprit subcard
+  // could not be identified. Short lines survive truncation.
+  const fitsOk = subcards.length >= 4 && subcards.every((s) => s && s.visible && s.sw <= s.cw && s.right <= 390);
+  if (!fitsOk) {
+    subcards.forEach((s, i) => console.log('  width subcards fit: subcard ' + i + ': ' + JSON.stringify(s && { sw: s.sw, cw: s.cw, right: s.right, visible: s.visible })));
+  }
+  const fitsFailing = subcards.map((s, i) => (s && s.visible && s.sw <= s.cw && s.right <= 390) ? null : i).filter((i) => i !== null);
   check('width subcards: every subcard fits at 390px',
-    subcards.length >= 4 && subcards.every((s) => s && s.visible && s.sw <= s.cw && s.right <= 390),
-    JSON.stringify(subcards.map((s) => s && { sw: s.sw, cw: s.cw, right: s.right })));
+    fitsOk,
+    fitsFailing.length ? 'failing subcard(s): ' + fitsFailing.join(', ') : 'fewer than 4 subcards (' + subcards.length + ')');
+  // (width-fix) 1px epsilon on the stacking boundary: this check
+  // exists to catch rows genuinely running together (the 0.8.0
+  // bug, tens of pixels of overlap), and getBoundingClientRect
+  // rounding differs a fraction of a pixel between Chromium builds
+  // (CI 1194 vs local 1187) — 1px forgives rounding only, it
+  // cannot mask a real overlap. The row COUNT stays exact.
+  function rowsStacked(rows) {
+    return rows.length === 3
+      && rows[1].top >= rows[0].bottom - 1
+      && rows[2].top >= rows[1].bottom - 1;
+  }
+  const stackedOk = subcards.length >= 4 && subcards.every((s) => s && rowsStacked(s.rows));
+  if (!stackedOk) {
+    subcards.forEach((s, i) => console.log('  width subcards rows: subcard ' + i + ': ' + JSON.stringify(s && s.rows)));
+  }
+  const stackedFailing = subcards.map((s, i) => (s && rowsStacked(s.rows)) ? null : i).filter((i) => i !== null);
   check('width subcards: every subcard has 3 rows stacked on separate lines',
-    subcards.length >= 4 && subcards.every((s) => s && s.rows.length === 3
-      && s.rows[1].top >= s.rows[0].bottom && s.rows[2].top >= s.rows[1].bottom),
-    JSON.stringify(subcards.map((s) => s && s.rows)));
+    stackedOk,
+    stackedFailing.length ? 'failing subcard(s): ' + stackedFailing.join(', ') : 'fewer than 4 subcards (' + subcards.length + ')');
+  check('width subcards: every tx subcard holds its Details inside it (0.8.7 fix, round 3)',
+    subcards.length >= 4 && subcards.every((s) => s && s.hasDetails),
+    JSON.stringify(subcards.map((s) => s && s.hasDetails)));
   // The Staged Transactions card (0.8.0): its summary is the
   // card header and the collapse toggle — it fits at 390px.
   await checkEl('width bitcoin: Staged Transactions summary fits', '#btc-card > summary');

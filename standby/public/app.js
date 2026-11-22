@@ -1586,14 +1586,48 @@
   // which node, and how deep it is. confirmations === null means it
   // has not been checked yet (or the check failed — the checkedAt stays
   // old then, so the number reads as stale rather than wrong).
+  // (0.8.7.1) The state words follow the verdict the server records
+  // on the not-found path: a missing tx whose input is spent-confirmed
+  // reads stale — never "may have been dropped" — and one whose input
+  // has an unconfirmed spend says so. Confirmed wins over a stale
+  // verdict (a block height is a fact even if an old verdict lingers).
   function txBroadcastLine(tx) {
     var b = tx.broadcasted;
     if (!b) return '';
-    var conf = b.confirmations === null
-      ? (b.found === false ? 'not found on the network — it may have been dropped from the mempool or replaced' : 'confirmations not checked yet')
-      : b.confirmations === 0 ? '0 confirmations — in the mempool, unconfirmed'
-      : b.confirmations + (b.confirmations === 1 ? ' confirmation' : ' confirmations');
+    var conf;
+    if ((typeof b.confirmations === 'number' && b.confirmations > 0) || b.blockHeight != null) {
+      conf = (typeof b.confirmations === 'number' && b.confirmations > 0)
+        ? b.confirmations + (b.confirmations === 1 ? ' confirmation' : ' confirmations')
+        : 'confirmed in block ' + Number(b.blockHeight).toLocaleString('en-US');
+    } else if (b.staleInput) {
+      conf = 'stale — input spent by ' + shortTxid16(b.staleInput.spentBy)
+        + ((b.staleInput.blockHeight != null) ? ' (block ' + Number(b.staleInput.blockHeight).toLocaleString('en-US') + ')' : '');
+    } else if (b.conflictInput) {
+      conf = 'not found on the network — its input is spent by ' + shortTxid16(b.conflictInput.spentBy) + ', but that spend is not confirmed yet';
+    } else if (b.found === false) {
+      // (0.8.7.1) `found` is the verdict — a stale confirmation
+      // count (0, from before the tx dropped out) must not read
+      // "in the mempool" for a tx no node knows.
+      conf = 'not found on the network — it may have been dropped from the mempool or replaced';
+    } else if (b.confirmations === null) {
+      conf = 'confirmations not checked yet';
+    } else if (b.confirmations === 0) {
+      conf = '0 confirmations — in the mempool, unconfirmed';
+    } else {
+      conf = b.confirmations + (b.confirmations === 1 ? ' confirmation' : ' confirmations');
+    }
     return 'Broadcast ' + fmtDate(b.broadcastedAt) + ' via ' + methodLabel(b.method) + ' — ' + conf + '.';
+  }
+
+  // (0.8.7.1) The broadcast line's colour follows the verdict, not
+  // the mere fact of a broadcast record: confirmed green, unconfirmed
+  // amber, not-found (or stale) red. A release-only line stays muted.
+  function broadcastLineCls(tx) {
+    var b = tx.broadcasted;
+    if (!b) return 'muted';
+    if ((typeof b.confirmations === 'number' && b.confirmations > 0) || b.blockHeight != null) return 'tx-sent';
+    if (b.found === false) return 'tx-bad';
+    return 'tx-warn';
   }
 
   function txReleaseLine(tx) {
@@ -2158,7 +2192,7 @@
   var sentLine = null;
   if (tx.release || tx.broadcasted) {
     var rel = document.createElement('p');
-    rel.className = tx.broadcasted ? 'tx-sent' : 'muted';
+    rel.className = broadcastLineCls(tx);
     rel.textContent = txReleaseLine(tx);
     body.appendChild(rel);
     if (tx.broadcasted) sentLine = rel;
@@ -4638,11 +4672,18 @@
           tx.broadcasted.blockHeight = c.blockHeight;
           tx.broadcasted.found = c.found;
           tx.broadcasted.checkedAt = c.checkedAt;
+          // (0.8.7.1) The not-found verdict rides the same refresh:
+          // a null clears a verdict the server cleared (or never set).
+          if (c.staleInput) tx.broadcasted.staleInput = c.staleInput; else delete tx.broadcasted.staleInput;
+          if (c.conflictInput) tx.broadcasted.conflictInput = c.conflictInput; else delete tx.broadcasted.conflictInput;
           var after = txStatus(tx);
           if (before.settled !== after.settled || before.pending !== after.pending) bucketChanged = true;
         }
         var card = txCardEls[c.id];
-        if (card && card.sentLine && tx) card.sentLine.textContent = txBroadcastLine(tx);
+        if (card && card.sentLine && tx) {
+          card.sentLine.textContent = txBroadcastLine(tx);
+          card.sentLine.className = broadcastLineCls(tx);
+        }
         // The pill follows the network verdict too: a broadcast the
         // network no longer knows flips Broadcasted -> Failed (and
         // back if it shows up again) without waiting for a reload.
@@ -4884,7 +4925,10 @@
       if (r.condEl && rule) r.condEl.textContent = triggerCondition(rule);
       if (r.nowEl && rule) r.nowEl.textContent = triggerStateLine(rule, ts);
     });
-    if (card.sentLine) card.sentLine.textContent = txReleaseLine(tx);
+    if (card.sentLine) {
+      card.sentLine.textContent = txReleaseLine(tx);
+      card.sentLine.className = broadcastLineCls(tx);
+    }
     if (card.feeVerdictEl) {
       var fv = txFeeVerdict(tx);
       if (fv) {

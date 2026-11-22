@@ -1,5 +1,5 @@
 // Standby 0.8.2 DOM checks — block-height, set-date, and fee-market triggers.
-// Runs public/app.js from branch-0.8.7 in Node with the
+// Runs public/app.js from branch-0.8.7.1 in Node with the
 // minimal DOM shim from dom_check094.js (same El class, same
 // document/window/fetch/setInterval stubs) and verifies the 0.8.0
 // trigger UI only — the 094 suite still owns everything else.
@@ -2927,8 +2927,8 @@ function check(name, cond, detail) {
     && idx.indexOf('Installed version:') !== -1 && idx.indexOf('id="app-version"') !== -1, '');
   check('app version static: the card has no "?" button and no details (just the version line)',
     idx.indexOf('id="help-version"') === -1, '');
-  check('app version: the installed version reads 0.8.7 (from /api/health)',
-    els['app-version'] && els['app-version'].textContent === '0.8.7',
+  check('app version: the installed version reads 0.8.7.1 (from /api/health)',
+    els['app-version'] && els['app-version'].textContent === '0.8.7.1',
     els['app-version'] && els['app-version'].textContent);
   setFilter('general');
   check('app version: the card is visible under General',
@@ -4409,6 +4409,91 @@ function check(name, cond, detail) {
   }
   await rerender(appJs);
   check('warnings name members: the set card is gone after the delete', !cardByTitle('Dom Warn Set'), '');
+
+  // --- §28h (0.8.7.1): the broadcast line follows the verdict ---
+  // Four manual txs on fresh FINNEY vouts (20–23, no shared-input
+  // warnings), each seeded broadcast via the state file like §15:
+  // stale (not found, input spent-confirmed), dropped (not found,
+  // no verdict), unconfirmed (0 confirmations), confirmed (3).
+  // The line's class is green only for confirmed, amber for
+  // unconfirmed, red for not-found/stale — and the stale line
+  // names the spending transaction instead of saying the tx "may
+  // have been dropped". The pill is untouched by this change: the
+  // stale card still reads Failed.
+  function sentLineOf28h(card) {
+    if (!card) return null;
+    const stack = [card];
+    while (stack.length) {
+      const el = stack.pop();
+      const cls = (el.className || '').split(' ');
+      if ((cls.includes('tx-sent') || cls.includes('tx-warn') || cls.includes('tx-bad'))
+        && (el.textContent || '').indexOf('Broadcast ') === 0) {
+        return { el, cls: el.className, text: el.textContent || '' };
+      }
+      for (const c of (el.children || [])) stack.push(c);
+    }
+    return null;
+  }
+  const line28h = {};
+  for (const [vout, value, label] of [[20, 113000, 'Dom Line Stale'], [21, 113001, 'Dom Line Dropped'],
+      [22, 113002, 'Dom Line Unconf'], [23, 113003, 'Dom Line Conf']]) {
+    const addL = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ txHex: craftHex(vout, value), label, trigger: { type: 'manual', params: {} } }) });
+    check('broadcast line: ' + label + ' adds', addL.status === 201, 'status=' + addL.status);
+    if (addL.status === 201) line28h[label] = (await addL.json()).tx.id;
+  }
+  const lineNow28h = new Date().toISOString();
+  const lineSt28h = await (await fetch('/api/state')).json();
+  const lineTxid28h = {};
+  for (const t of (lineSt28h.bitcoin.txs || [])) lineTxid28h[t.label] = t.txid || '';
+  setDomTxFate('Dom Line Stale',
+    { status: 'broadcast', kind: 'release', trigger: 'manual', txid: lineTxid28h['Dom Line Stale'], method: 'mempool.space', broadcastedAt: lineNow28h },
+    { txid: lineTxid28h['Dom Line Stale'], broadcastedAt: lineNow28h, method: 'mempool.space', confirmations: 0, blockHeight: null, found: false, checkedAt: lineNow28h,
+      staleInput: { spentBy: 'aabbccdd', blockHeight: 899990 } });
+  setDomTxFate('Dom Line Dropped',
+    { status: 'broadcast', kind: 'release', trigger: 'manual', txid: lineTxid28h['Dom Line Dropped'], method: 'mempool.space', broadcastedAt: lineNow28h },
+    { txid: lineTxid28h['Dom Line Dropped'], broadcastedAt: lineNow28h, method: 'mempool.space', confirmations: 0, blockHeight: null, found: false, checkedAt: lineNow28h });
+  setDomTxFate('Dom Line Unconf',
+    { status: 'broadcast', kind: 'release', trigger: 'manual', txid: lineTxid28h['Dom Line Unconf'], method: 'mempool.space', broadcastedAt: lineNow28h },
+    { txid: lineTxid28h['Dom Line Unconf'], broadcastedAt: lineNow28h, method: 'mempool.space', confirmations: 0, blockHeight: null, found: true, checkedAt: lineNow28h });
+  setDomTxFate('Dom Line Conf',
+    { status: 'broadcast', kind: 'release', trigger: 'manual', txid: lineTxid28h['Dom Line Conf'], method: 'mempool.space', broadcastedAt: lineNow28h },
+    { txid: lineTxid28h['Dom Line Conf'], broadcastedAt: lineNow28h, method: 'mempool.space', confirmations: 3, blockHeight: 899997, found: true, checkedAt: lineNow28h });
+  await rerender(appJs);
+  const staleLine28h = sentLineOf28h(cardByTitle('Dom Line Stale'));
+  check('broadcast line: the stale tx renders a sent line', !!staleLine28h, staleLine28h ? staleLine28h.text : 'no line');
+  check('broadcast line: the stale line is red (tx-bad), not green',
+    !!staleLine28h && staleLine28h.cls.split(' ').includes('tx-bad'), staleLine28h ? staleLine28h.cls : 'no line');
+  check('broadcast line: the stale line names the spending transaction and its block, never "dropped"',
+    !!staleLine28h && staleLine28h.text.indexOf('stale — input spent by aabbccdd (block 899,990)') !== -1
+    && staleLine28h.text.indexOf('may have been dropped') === -1, staleLine28h ? staleLine28h.text : 'no line');
+  check('broadcast line: the stale card pill still reads Failed (pill logic untouched)',
+    !!cardByTitle('Dom Line Stale') && cardFaceText(cardByTitle('Dom Line Stale')).indexOf('Failed') !== -1,
+    cardByTitle('Dom Line Stale') ? cardFaceText(cardByTitle('Dom Line Stale')) : 'no card');
+  const droppedLine28h = sentLineOf28h(cardByTitle('Dom Line Dropped'));
+  check('broadcast line: the plain not-found tx renders a sent line', !!droppedLine28h, droppedLine28h ? droppedLine28h.text : 'no line');
+  check('broadcast line: the not-found line is red (tx-bad) and keeps the "dropped" wording',
+    !!droppedLine28h && droppedLine28h.cls.split(' ').includes('tx-bad')
+    && droppedLine28h.text.indexOf('may have been dropped from the mempool or replaced') !== -1,
+    droppedLine28h ? droppedLine28h.cls + ' | ' + droppedLine28h.text : 'no line');
+  const unconfLine28h = sentLineOf28h(cardByTitle('Dom Line Unconf'));
+  check('broadcast line: the unconfirmed tx renders a sent line', !!unconfLine28h, unconfLine28h ? unconfLine28h.text : 'no line');
+  check('broadcast line: the unconfirmed line is amber (tx-warn) with 0 confirmations',
+    !!unconfLine28h && unconfLine28h.cls.split(' ').includes('tx-warn')
+    && unconfLine28h.text.indexOf('0 confirmations — in the mempool, unconfirmed') !== -1,
+    unconfLine28h ? unconfLine28h.cls + ' | ' + unconfLine28h.text : 'no line');
+  const confLine28h = sentLineOf28h(cardByTitle('Dom Line Conf'));
+  check('broadcast line: the confirmed tx renders a sent line', !!confLine28h, confLine28h ? confLine28h.text : 'no line');
+  check('broadcast line: the confirmed line is green (tx-sent) with 3 confirmations',
+    !!confLine28h && confLine28h.cls.split(' ').includes('tx-sent')
+    && confLine28h.text.indexOf('3 confirmations') !== -1,
+    confLine28h ? confLine28h.cls + ' | ' + confLine28h.text : 'no line');
+  for (const label of ['Dom Line Stale', 'Dom Line Dropped', 'Dom Line Unconf', 'Dom Line Conf']) {
+    if (!line28h[label]) continue;
+    const delL = await fetch('/api/bitcoin/txs/' + line28h[label], { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
+    check('broadcast line: ' + label + ' removed', delL.status === 200, 'status=' + delL.status);
+  }
+  await rerender(appJs);
 
   // Restore the seeded state for the width check.
   const cad60 = await fetch('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ checkCadenceSeconds: 60 }) });
