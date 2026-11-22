@@ -7,7 +7,7 @@ Boots the branch-0.8.5 app (port 3438), the check-in receiver
 (both fixed: tip height 900000, economy fee 1 sat/vB, price 98200)
 — and checks the 0.8.1 trigger work:
 
-  1. health reports version 0.8.7.2.
+  1. health reports version 0.8.7.3.
   2. Block-height trigger: validation at add (bad heights rejected,
      good ones accepted), checkTriggerNow (a height already reached
      fires + warns, a future height watches), evaluation via the
@@ -446,7 +446,7 @@ def main():
 
         # --- 1. health + version ----------------------------------------
         s, h = req('GET', '/api/health')
-        check('1 health reports version 0.8.7.2', h.get('version') == '0.8.7.2', h)
+        check('1 health reports version 0.8.7.3', h.get('version') == '0.8.7.3', h)
 
         # --- 2. block-height trigger --------------------------------------
         # Validation at add: bad heights rejected, good ones accepted.

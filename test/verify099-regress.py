@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Standby 0.8.0 local verification: per-transaction triggers.
-Boots the branch-0.8.7.2 app (port 3448), the check-in receiver
+Boots the branch-split app (port 3448), the check-in receiver
 (3449), and two mempool stubs — primary 18245 (STUB_CONFLICT_MODE=
 unconfirmed) and secondary 18246 (confirmed) — and checks the 0.8.0
 trigger work: trigger field + validation at add/edit, legacy migration
@@ -408,7 +408,7 @@ def main():
 
         # --- 1. health + endpoints -------------------------------------
         s, h = req('GET', '/api/health')
-        check('1 health reports version 0.8.7.2', h.get('version') == '0.8.7.2', h)
+        check('1 health reports version 0.8.7.3', h.get('version') == '0.8.7.3', h)
         s, st = req('GET', '/api/state')
         check('1 fresh state: no global threshold in settings, no txs',
               'thresholdDays' not in st.get('settings', {}) and st.get('bitcoin', {}).get('txs') == [], st.get('settings'))
@@ -1296,7 +1296,19 @@ def main():
         # any more (0.8.0 user controls). The interval is
         # re-armed on startup, on a settings save, and on a
         # restore; the cache TTL is the cadence in seconds.
-        src = open(os.path.join(APP, 'server.js')).read()
+        # (0.8.7.3 server split) the server is split into lib
+        # modules, so read the module each string moved to instead
+        # of server.js alone: tick/cadence in lib/release.js,
+        # price cache in lib/prices.js. The 'onlyTypes' check keeps
+        # its original "anywhere" intent: it scans the whole server
+        # codebase (entry point + every lib module) — grep confirms
+        # the string occurs nowhere, including lib/rules.js.
+        _release = open(os.path.join(APP, 'lib', 'release.js')).read()
+        _prices = open(os.path.join(APP, 'lib', 'prices.js')).read()
+        _all = open(os.path.join(APP, 'server.js')).read()
+        for _f in sorted(os.listdir(os.path.join(APP, 'lib'))):
+            if _f.endswith('.js'):
+                _all += open(os.path.join(APP, 'lib', _f)).read()
         # (0.8.3) rearmFullTick reads the cadence from state inside a
         # try/catch: when state.json is corrupt and no backup loads,
         # loadState throws, and the tick falls back to the 60 s
@@ -1304,21 +1316,21 @@ def main():
         # the interval still tracks the saved cadence, and the
         # fallback is explicit, not a hard-coded interval.
         check('13d the full tick interval tracks the saved check cadence (rearmFullTick, not a hard-coded 60s)',
-              'function rearmFullTick()' in src
-              and 'checkCadenceSecondsOf(store.loadState(DATA_DIR).settings)' in src
-              and 'setInterval(runFullTick, seconds * 1000)' in src
-              and 'could not read check cadence' in src, '')
+              'function rearmFullTick()' in _release
+              and 'checkCadenceSecondsOf(store.loadState(DATA_DIR).settings)' in _release
+              and 'setInterval(runFullTick, seconds * 1000)' in _release
+              and 'could not read check cadence' in _release, '')
         check('13d the price cache TTL tracks the check cadence (fetchPriceCached takes the cadence, no fixed 60s constant)',
-              'async function fetchPriceCached(sources, cadenceSeconds)' in src
-              and 'PRICE_CACHE_MAX_AGE_MS' not in src, '')
+              'async function fetchPriceCached(sources, cadenceSeconds)' in _prices
+              and 'PRICE_CACHE_MAX_AGE_MS' not in _prices, '')
         check('13d the full tick evaluates every type together (no onlyTypes filter anywhere)',
-              'evaluateRelease({ automatic: true })' in src and 'onlyTypes' not in src, '')
+              'evaluateRelease({ automatic: true })' in _release and 'onlyTypes' not in _all, '')
         # The hourly tick does housekeeping only: extract its body
         # and assert it never evaluates but still refreshes node
         # status + confirmations.
-        _start = src.find('async function runHourlyTick() {')
-        _end = src.find('\n}\n', _start) if _start != -1 else -1
-        _hourly = src[_start:_end] if _start != -1 and _end != -1 else ''
+        _start = _release.find('async function runHourlyTick() {')
+        _end = _release.find('\n}\n', _start) if _start != -1 else -1
+        _hourly = _release[_start:_end] if _start != -1 and _end != -1 else ''
         check('13d the hourly tick does housekeeping only (no release evaluation)',
               _hourly != '' and 'evaluateRelease' not in _hourly
               and 'testNodes()' in _hourly and 'refreshConfirmations(' in _hourly, _hourly[:200])
