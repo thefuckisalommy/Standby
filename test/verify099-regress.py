@@ -178,6 +178,25 @@ def state_tx(tx_id, base=BASE):
     return None
 
 
+def wait_until(cond, deadline=20, interval=0.5):
+    """Poll cond() until it returns truthy, or the deadline
+    (seconds) expires — the same evidence a fixed 'wait a tick'
+    sleep bought, observed instead of assumed. Returns True if
+    cond() fired, False on deadline (callers then assert as
+    before, so a slow tick fails the same check the sleep would
+    have failed). Exceptions inside cond() are swallowed per
+    poll, so a transient read error cannot fail the wait."""
+    end = time.time() + deadline
+    while time.time() < end:
+        try:
+            if cond():
+                return True
+        except Exception:
+            pass
+        time.sleep(interval)
+    return False
+
+
 def checkin_last(base=BASE):
     s, st = req('GET', '/api/state', base=base)
     return st.get('checkin', {}).get('lastCheckinAt')
@@ -306,16 +325,60 @@ def main():
     app = None
 
     def restart():
-        """Stop + start the app, wait up, then sleep past the 5 s
-        startup release tick. Call BEFORE seeding any firing state."""
+        """Stop + start the app, wait up, then poll until the
+        startup tick has fired (Optimization O2): the startup
+        hourly tick stamps bitcoin.connection.nodeCheckedAt.primary
+        and the +2 s refresh fills bitcoin.feePeak — both are
+        observable in /api/state, so poll for them instead of
+        sleeping a fixed 7 s past the 5 s startup tick. The
+        feePeak condition also guarantees the concurrent startup
+        full tick (fired at the same ~0.5 s) has finished before
+        any post-restart read. Deadline 4 s, then proceed anyway
+        (the old behavior as fallback). Call BEFORE seeding any
+        firing state."""
         nonlocal app
+        # The pre-restart node-check stamp: the poll waits for a
+        # stamp NEWER than this, so a stale stamp can never
+        # satisfy it (mergeNodeStamps keeps the stored stamp
+        # until testNodes re-stamps it at startup).
+        prev_stamp = None
+        try:
+            _, st = req('GET', '/api/state')
+            prev_stamp = (st.get('bitcoin', {}).get('connection', {}).get('nodeCheckedAt') or {}).get('primary')
+        except Exception:
+            pass
         if app is not None:
             stop(app)
         app = start(['node', 'server.js'], env=APP_ENV, cwd=APP, log=LOG)
         ok = wait_up(BASE)
         if ok:
-            time.sleep(7)
+            end = time.time() + 4
+            while time.time() < end:
+                try:
+                    _, st = req('GET', '/api/state')
+                    conn = st.get('bitcoin', {}).get('connection', {})
+                    stamp = (conn.get('nodeCheckedAt') or {}).get('primary')
+                    fee_peak = st.get('bitcoin', {}).get('feePeak')
+                    if (isinstance(stamp, str) and stamp != prev_stamp
+                            and isinstance(fee_peak, (int, float))):
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.25)
         return ok
+
+    def clear_caches():
+        """POST /api/__test__/clear-caches — cold caches without a
+        restart (speedup): the same empty price / fee / tip /
+        fee-peak / current-fee / outspend caches a restart
+        produces, but no state re-read, no tick-timer reset, no
+        restart startup wait (~2.5 s poll). Use ONLY where a cold cache is all the
+        test needs. Keep restart() where a real restart is the
+        subject (state persistence, migration, crash recovery), or
+        where the fresh tick window is load-bearing (a background
+        tick must not fire before the manual check)."""
+        s, r = req('POST', '/api/__test__/clear-caches', {})
+        return s == 200 and r.get('ok') is True
 
     try:
         # --- pre-flight: our ports are free (nothing 09x left running) ---
@@ -331,7 +394,11 @@ def main():
         p_receiver = start(['node', 'checkin-receiver/server.js'],
                            env={'PORT': str(RECEIVER_PORT), 'CHECKIN_DIR': CHECKIN_DIR},
                            cwd=APP, log=LOG)
-        time.sleep(0.8)
+        # Poll for the stubs instead of a fixed sleep: under parallel
+        # startup load a stub can take longer than 0.8 s to listen,
+        # and the probe below used to crash on Connection refused.
+        wait_up(STUB_BASE_P, path='/api/v3/simple/price')
+        wait_up(STUB_BASE_S, path='/api/v3/simple/price')
         s, pr = req('GET', '/api/v3/simple/price', base=STUB_BASE_P)
         check('stubs up: primary price route answers 98200', s == 200 and pr.get('bitcoin', {}).get('usd') == 98200, pr)
         s, pr = req('GET', '/api/v3/simple/price', base=STUB_BASE_S)
@@ -578,7 +645,7 @@ def main():
         # (b) fail-safe — feed down -> unknown, no fire, lastError set
         s, pr = set_price(fail=True)
         check('6b stub price feed set to fail', s == 200 and pr.get('coingecko', {}).get('fail') is True and pr.get('coinbase', {}).get('fail') is True, pr)
-        check('6b restart so the eval actually hits the failing feed (empty cache)', restart())
+        check('6b caches cleared so the eval actually hits the failing feed (empty cache)', clear_caches())
         s, r, res = release_results()
         p6b_res = res.get(txp6b, {})
         check('6b feed down -> release check gives status unknown, no fire',
@@ -595,7 +662,7 @@ def main():
         for bad in ('zero', 'huge', 'empty'):
             s, pr = set_price(bad=bad)
             check('6c stub price set to bad=%s' % bad, s == 200 and pr.get('coingecko', {}).get('bad') == bad and pr.get('coinbase', {}).get('bad') == bad, pr)
-            check('6c restart before the bad=%s eval (empty cache)' % bad, restart())
+            check('6c caches cleared before the bad=%s eval (empty cache)' % bad, clear_caches())
             s, r, res = release_results()
             p6b_res = res.get(txp6b, {})
             ok = p6b_res.get('action') == 'skipped' and p6b_res.get('triggerStatus') == 'unknown'
@@ -612,7 +679,7 @@ def main():
                   not (p6b or {}).get('broadcasted'), (p6b or {}).get('broadcasted'))
             s, pr = set_price(bad=None)
             check('6c bad reading cleared after %s' % bad, s == 200 and pr.get('coingecko', {}).get('bad') is None and pr.get('coinbase', {}).get('bad') is None, pr)
-        check('6c restart after clearing the bad readings (cache back to $98,200)', restart())
+        check('6c caches cleared after clearing the bad readings (cache back to $98,200)', clear_caches())
         # (d) already-true — holding price -> status due, fire true
         s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'price', 'params': {'op': '>=', 'value': 90000}}})
         check('6d /api/triggers/check on a holding price trigger -> status due, fire true',
@@ -777,7 +844,7 @@ def main():
         # Section 6e left a $1,000,000 reading in the price cache —
         # without a restart the below-threshold add below would read
         # it as holding and the price gate would 400 it.
-        check('9 restart before the adds (empty cache)', restart())
+        check('9 caches cleared before the adds (empty cache)', clear_caches())
         s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft(1, 100901), 'label': 'R9c due checkin',
                                                 'trigger': {'type': 'checkin', 'params': {'thresholdDays': 35}}})
         txr9c = r['tx']['id']
@@ -996,7 +1063,7 @@ def main():
         s, pr = set_price(usd=106000, provider='coinbase')
         check('12c Coinbase set to $106,000 (6% above CoinGecko)',
               s == 200 and pr.get('coinbase', {}).get('usd') == 106000, pr)
-        check('12c restart before the disagree eval (empty cache)', restart())
+        check('12c caches cleared before the disagree eval (empty cache)', clear_caches())
         s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft(1, 120103), 'label': 'P12c disagree',
                                                 'trigger': {'type': 'price', 'params': {'op': '>=', 'value': 90000}}})
         txp12c = r['tx']['id'] if s == 201 else None
@@ -1043,7 +1110,7 @@ def main():
         s, pr = set_price(fail=True)
         check('12e both price sources set to fail',
               s == 200 and pr.get('coingecko', {}).get('fail') is True and pr.get('coinbase', {}).get('fail') is True, pr)
-        check('12e restart before the neither eval (empty cache)', restart())
+        check('12e caches cleared before the neither eval (empty cache)', clear_caches())
         s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft(1, 120107), 'label': 'P12e neither',
                                                 'trigger': {'type': 'price', 'params': {'op': '>=', 'value': 90000}}})
         txp12e = r['tx']['id'] if s == 201 else None
@@ -1265,6 +1332,14 @@ def main():
         # broadcast.
         delete_all_txs()
         check('13e restart before the full-tick eval (fresh tick clock)', restart())
+        # (Optimization O4) Park the cadence at 10 s for this
+        # section only: the full tick that broadcasts both txs
+        # then fires ~10 s after the restart instead of ~60 s.
+        # The 60 s interval itself is covered by §20's cadence
+        # test, so nothing is lost. Restored to 60 s at the end
+        # of this section.
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 10})
+        check('13e cadence set to 10 s for this section', s == 200, (s, r))
         set_clock(0)
         s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft(1, 130201), 'label': 'U13e full tick utxo',
                                                 'trigger': {'type': 'utxo', 'params': {'outpoint': FINNEY + ':0', 'confirmations': 1}},
@@ -1276,12 +1351,13 @@ def main():
         txc13e = r['tx']['id'] if s == 201 else None
         check('13e a check-in tx added on a fresh clock', s == 201, r)
         set_clock(36)
-        # The full tick fires ~60 s after the restart; wait until
-        # ~72 s after it, then poll for both broadcasts.
-        time.sleep(62)
+        # The full tick fires ~10 s after the cadence change
+        # above; poll for both broadcasts (the loop exits as soon
+        # as both land, so the extra iterations cost nothing in
+        # the normal case).
         txu13e_broadcast = False
         txc13e_broadcast = False
-        for _ in range(10):
+        for _ in range(15):
             if (state_tx(txu13e) or {}).get('broadcasted'):
                 txu13e_broadcast = True
             if (state_tx(txc13e) or {}).get('broadcasted'):
@@ -1296,6 +1372,10 @@ def main():
         s, r, res = release_results()
         check('13e a manual release check afterwards finds both already broadcast',
               res.get(txc13e, {}).get('action') == 'skipped' and res.get(txu13e, {}).get('action') == 'skipped', res)
+        # (Optimization O4) Restore the 60 s cadence before the
+        # next section.
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 60})
+        check('13e cadence restored to 60 s', s == 200, (s, r))
         # Clear the outspend override so the suite ends clean.
         s, pr = set_outspend(FINNEY, 0, None)
         check('13e outspend override cleared',
@@ -1306,7 +1386,7 @@ def main():
         s, pr = set_price(usd=98200)
         check('14 stub price set to $98,200 on all providers',
               s == 200 and pr.get('coingecko', {}).get('usd') == 98200 and pr.get('coinbase', {}).get('usd') == 98200, pr)
-        check('14 restart before the test-endpoint evals (empty cache)', restart())
+        check('14 caches cleared before the test-endpoint evals (empty cache)', clear_caches())
         s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft(1, 140101), 'label': 'P14 exchange',
                                                 'trigger': {'type': 'price', 'params': {'op': '>=', 'value': 150000}}})
         txp14 = r['tx']['id'] if s == 201 else None
@@ -1467,7 +1547,7 @@ def main():
         # (single-source mode).
         s, pr = set_price(fail=True, provider='coingecko')
         check('14h CoinGecko set to fail', s == 200 and pr.get('coingecko', {}).get('fail') is True, pr)
-        check('14h restart before the degraded eval (empty cache)', restart())
+        check('14h caches cleared before the degraded eval (empty cache)', clear_caches())
         s, r, res = release_results()
         s, st = req('GET', '/api/state')
         check('14h Exchange Status is degraded when one source is down',
@@ -1505,7 +1585,7 @@ def main():
         s, pr = set_price(usd=106000, provider='coinbase')
         check('14i Coinbase set to $106,000 (6% apart — they disagree)',
               s == 200 and pr.get('coinbase', {}).get('usd') == 106000, pr)
-        check('14i restart before the disagree eval (empty cache)', restart())
+        check('14i caches cleared before the disagree eval (empty cache)', clear_caches())
         s, r, res = release_results()
         s, st = req('GET', '/api/state')
         check('14i Exchange Status is error when the sources disagree',
@@ -1533,7 +1613,7 @@ def main():
         s, pr = set_price(fail=True)
         check('14j both price sources set to fail',
               s == 200 and pr.get('coingecko', {}).get('fail') is True and pr.get('coinbase', {}).get('fail') is True, pr)
-        check('14j restart before the neither eval (empty cache)', restart())
+        check('14j caches cleared before the neither eval (empty cache)', clear_caches())
         s, r, res = release_results()
         s, st = req('GET', '/api/state')
         check('14j Exchange Status is error when neither source responds',
@@ -1569,7 +1649,7 @@ def main():
         # mirroring the UTXO gate. A rule that is NOT past the
         # threshold, or a reading that is unknown (disagreeing or
         # unavailable feeds), never blocks.
-        check('15 restart before the guard evals (empty cache)', restart())
+        check('15 caches cleared before the guard evals (empty cache)', clear_caches())
         # (a) add: holding without triggerConfirmed -> 400, nothing stored.
         s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft(1, 150101), 'label': 'G15a holding add',
                                                 'trigger': {'type': 'price', 'params': {'op': '>=', 'value': 90000}}})
@@ -1615,7 +1695,7 @@ def main():
         s, pr = set_price(usd=106000, provider='coinbase')
         check('15e Coinbase set to $106,000 (6% apart — they disagree)',
               s == 200 and pr.get('coinbase', {}).get('usd') == 106000, pr)
-        check('15e restart before the disagree add (empty cache)', restart())
+        check('15e caches cleared before the disagree add (empty cache)', clear_caches())
         s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft(1, 150109), 'label': 'G15e disagree',
                                                 'trigger': {'type': 'price', 'params': {'op': '>=', 'value': 90000}}})
         check('15e disagreeing feeds do not block the add (201)',
@@ -1624,7 +1704,7 @@ def main():
         s, pr = set_price(fail=True)
         check('15f both price sources set to fail',
               s == 200 and pr.get('coingecko', {}).get('fail') is True and pr.get('coinbase', {}).get('fail') is True, pr)
-        check('15f restart before the unavailable add (empty cache)', restart())
+        check('15f caches cleared before the unavailable add (empty cache)', clear_caches())
         s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft(1, 150111), 'label': 'G15f unavailable',
                                                 'trigger': {'type': 'price', 'params': {'op': '>=', 'value': 90000}}})
         check('15f unavailable feeds do not block the add (201)',
@@ -2250,7 +2330,7 @@ def main():
         # provider. A clean slate (no txs) so no full-tick
         # broadcast can fire while the agreement is being probed.
         delete_all_txs()
-        restart()
+        clear_caches()
         set_price(98200, provider='coingecko')
         set_price(100164, provider='coinbase')
         s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'price', 'params': {'op': '>=', 'value': 90000}}})
@@ -2289,7 +2369,10 @@ def main():
         s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft_prev(SECOND, 0, 100000), 'label': 'Cadence 10s', 'trigger': {'type': 'price', 'params': {'op': '>=', 'value': 90000}}, 'triggerConfirmed': True})
         check('20 cadence 10s: seeding a firing price tx (201)', s == 201, (s, r))
         cad10 = r.get('tx', {}).get('id')
-        time.sleep(15)
+        # (Optimization O5) Poll until the full tick broadcasts
+        # it — the tick's observable effect, not a fixed 15 s
+        # wait for a 10 s cadence.
+        wait_until(lambda: (state_tx(cad10) or {}).get('broadcasted') is not None, deadline=20)
         check('20 cadence 10s: the full tick broadcast it within ~15s',
               state_tx(cad10) is not None and state_tx(cad10).get('broadcasted') is not None,
               state_tx(cad10))
@@ -2304,8 +2387,12 @@ def main():
         check('20 cadence 3600s: the tx is not broadcast yet at seed time',
               state_tx(cad3600) is not None and state_tx(cad3600).get('broadcasted') is None,
               state_tx(cad3600))
-        time.sleep(60)
-        check('20 cadence 3600s: no full-tick evaluation fired in the next ~60s (still unbroadcast)',
+        # (Optimization O5) The next tick is 3600 s away and the
+        # PUT above re-armed the interval, so no 10 s tick is in
+        # flight — a 20 s wait proves no tick fired, the same
+        # evidence the 60 s wait bought.
+        time.sleep(20)
+        check('20 cadence 3600s: no full-tick evaluation fired in the next ~20s (still unbroadcast)',
               state_tx(cad3600) is not None and state_tx(cad3600).get('broadcasted') is None,
               state_tx(cad3600))
         s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 60})
