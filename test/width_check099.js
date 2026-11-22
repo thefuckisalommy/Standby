@@ -7,7 +7,7 @@
 // min-width: 0 on .inline-unit input. This script proves the fix
 // and that no note in either form overflows or is cut off.
 //
-// Runs against the app the dom launcher boots on :3438 (seeded
+// Runs against the app the dom launcher boots on :3478 (seeded
 // with 4 armed txs). It does NOT start or stop any server — the
 // launcher runs it after dom_check099.js, while the app is up.
 // The Settings tab's BTC price sources card (two provider selects,
@@ -49,7 +49,7 @@
 'use strict';
 const { chromium, devices } = require('playwright');
 
-const BASE = 'http://127.0.0.1:3438';
+const BASE = 'http://127.0.0.1:3478';
 const failures = [];
 function check(name, cond, detail) {
   console.log((cond ? 'PASS' : 'FAIL'), '-', name, cond ? '' : '| ' + String(detail).slice(0, 200));

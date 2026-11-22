@@ -167,8 +167,9 @@ GOAL = os.path.dirname(_TESTDIR)
 STUB = os.path.join(_TESTDIR, 'stubs.js')
 
 
-def app_dir(root, candidates=('standby', 'branch-0.8.7.2', 'branch-0.8.7.1', 'branch-0.8.7', 'branch-0.8.6', 'branch-0.8.5', 'branch-0.8.4', 'branch-0.8.3', 'app')):
+def app_dir(root, candidates=('standby', 'branch-speedup', 'branch-0.8.7.2', 'branch-0.8.7.1', 'branch-0.8.7', 'branch-0.8.6', 'branch-0.8.5', 'branch-0.8.4', 'branch-0.8.3', 'app')):
     """The app dir under a root: standby/ in a repo checkout,
+    branch-speedup/ in the goal dir (test-infra working copy),
     branch-0.8.7.2/ in the goal dir (0.8.7.2 working copy),
     branch-0.8.7.1/ the 0.8.7.1 copy, branch-0.8.7/ the 0.8.7 copy, branch-0.8.6/ the 0.8.6 copy,
     branch-0.8.5/ the 0.8.5 copy, branch-0.8.4/ the 0.8.4 copy,
@@ -376,6 +377,19 @@ def start(cmd, env=None, cwd=None, log='/tmp/heirloom094-proc.log'):
     e = dict(os.environ)
     if env:
         e.update(env)
+    # Test mode (speedup): every process the harness starts runs
+    # with STANDBY_TEST_MODE=1, which is the ONLY way the app's
+    # test-only endpoints (POST /__test__/clear-caches) answer —
+    # without it they 404 like any unknown path. Production (Umbrel)
+    # never sets this variable, so the endpoints cannot run there.
+    # Stubs and the receiver inherit it too; they ignore it.
+    e.setdefault('STANDBY_TEST_MODE', '1')
+    # (Optimization O2) Shorten the app's 5 s startup-tick delay
+    # to 500 ms for every process the harness starts — the app
+    # honors it only in test mode (see STARTUP_TICK_MS in
+    # server.js), so the production startup delay is untouched.
+    # Stubs and the receiver inherit it too; they ignore it.
+    e.setdefault('STANDBY_TEST_STARTUP_TICK_MS', '500')
     p = subprocess.Popen(cmd, env=e, cwd=cwd, stdout=open(log, 'ab'), stderr=subprocess.STDOUT)
     procs.append(p)
     return p

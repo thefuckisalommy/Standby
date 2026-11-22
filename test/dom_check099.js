@@ -117,14 +117,14 @@
 //     carries a source note either; the source detail lives in
 //     the Exchange Status section and in a dry run's notes (a
 //     Dry-run on a price tx shows it in its line)
-// The app instance under test is the one on :3438 (launcher data:
+// The app instance under test is the one on :3478 (launcher data:
 // 4 armed txs, one per trigger type, seeded via the API, one
 // check-in, then one POST /api/release/check so the subcards show
 // live statuses). setInterval is stubbed (captured, not scheduled)
 // so the process can exit.
 'use strict';
 const fs = require('fs');
-const BASE = 'http://127.0.0.1:3438';
+const BASE = 'http://127.0.0.1:3478';
 const DATA_FILE = '/tmp/heirloom099-dom/state.json';
 const els = {};
 function elText(el) {
@@ -352,13 +352,47 @@ function checkinBar(label) {
   const bars = checkinBars();
   return bars && bars.find((x) => x.label === label);
 }
+// A fingerprint of the whole shim DOM (ids + each element's text,
+// class, display, value, checked state and child count, recursed
+// into children — the shim stores textContent per-element, so the
+// recursion is what sees the rendered rows). Two equal fingerprints
+// 50 ms apart mean the render has settled.
+function renderFingerprint() {
+  const out = [];
+  const walk = (el) => {
+    out.push(el.tagName, '|', el.textContent || '', '|', el.className || '', '|',
+      (el.style && el.style.display) || '', '|', el.value || '', '|', el.checked ? '1' : '0',
+      '|', (el.children || []).length, ';');
+    (el.children || []).forEach(walk);
+  };
+  Object.keys(els).sort().forEach((k) => { out.push('#', k, ':'); walk(els[k]); });
+  return out.join('');
+}
+// O7: replace the fixed 900 ms post-action wait. Return once no
+// fetch is in flight and the shim DOM has been stable for one
+// 50 ms sample — the same rendered state, waited-for instead of
+// slept-through. The 900 ms deadline is today's value as fallback:
+// on a slow render the wait costs exactly what it used to. (A click
+// handler starts its fetch synchronously, so the count is already
+// up by the time this runs; a DOM-only action renders synchronously
+// and returns after one stability sample.)
+async function waitForRender(deadlineMs = 900) {
+  const end = Date.now() + deadlineMs;
+  let prev = null;
+  while (Date.now() < end) {
+    const fp = __inFlightFetches === 0 ? renderFingerprint() : null;
+    if (fp !== null && fp === prev) return;
+    if (fp !== null) prev = fp;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
 // A fresh page load: wipe the shim DOM and eval app.js again,
 // exactly like the 094 seedClock helper (minus the state.json edit).
 async function rerender(appJs) {
   for (const k of Object.keys(els)) delete els[k];
   global.__loadError = undefined;
   eval(appJs);
-  await new Promise((r) => setTimeout(r, 900));
+  await waitForRender();
 }
 function fireChange(el) {
   (el.listeners.change || []).forEach((f) => f({ target: el }));
@@ -621,7 +655,26 @@ global.FileReader = class {
   readAsArrayBuffer(f) { const s = (f && f.__content) || ''; this.result = new TextEncoder().encode(s).buffer; if (this.onload) this.onload(); }
 };
 const realFetch = fetch;
-global.fetch = (path, opts) => realFetch(BASE + path, opts);
+// In-flight fetch count (O7): load() and the click handlers fetch
+// then render; waitForRender below waits for the count to hit 0
+// and the shim DOM to settle, instead of a fixed 900 ms. The
+// counter decrements when the response arrives (headers) — the
+// render that follows is a microtask later, covered by the
+// stability samples in waitForRender.
+let __inFlightFetches = 0;
+global.fetch = (path, opts) => {
+  __inFlightFetches++;
+  let p;
+  try {
+    p = realFetch(BASE + path, opts);
+  } catch (e) {
+    __inFlightFetches--;
+    throw e;
+  }
+  const done = () => { __inFlightFetches--; };
+  p.then(done, done);
+  return p;
+};
 // The intervals: capture the callbacks with their delays, do not
 // schedule them (a live interval would keep this process alive
 // after the checks). __pollFn keeps its old meaning (the last
@@ -641,7 +694,7 @@ function check(name, cond, detail) {
   const idx = await realFetch(BASE + '/').then((r) => r.text());
   const css = await realFetch(BASE + '/style.css').then((r) => r.text());
   eval(appJs);
-  await new Promise((r) => setTimeout(r, 900)); // load() fetches state + renders
+  await waitForRender(); // load() fetches state + renders
   const st0 = await (await fetch('/api/state')).json();
   const checkinId = ((st0.bitcoin.txs || []).find((t) => t.label === 'Dom Check-in') || {}).id;
 
@@ -1055,7 +1108,7 @@ function check(name, cond, detail) {
   // gate below would read the same cached answer and refuse the
   // add as already firing. With the override set first, every
   // FINNEY:0 read in this section sees 2 confirmations.
-  const ovr = await realFetch('http://127.0.0.1:18235/__test__/outspend', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+  const ovr = await realFetch('http://127.0.0.1:18275/__test__/outspend', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ txid: FINNEY, vout: 0, blockHeight: 899999 }) });
   check('utxo modes: the outspend override sets FINNEY:0 to 2 confirmations', ovr.status === 200, 'status=' + ovr.status);
   const add6 = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1111,7 +1164,7 @@ function check(name, cond, detail) {
   check('utxo modes: the readiness block for the waiting tx reads its condition ("Fires when UTXO f4184f…:0 is spent (3 confirmations)")',
     !!rb3 && rb3.state === 'Fires when UTXO f4184f\u2026:0 is spent (3 confirmations)', rb3 ? rb3.state : 'no block');
   // Clear the override so the suite ends clean.
-  const ovrClear = await realFetch('http://127.0.0.1:18235/__test__/outspend', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+  const ovrClear = await realFetch('http://127.0.0.1:18275/__test__/outspend', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ txid: FINNEY, vout: 0, clear: true }) });
   check('utxo modes: the outspend override is cleared', ovrClear.status === 200, 'status=' + ovrClear.status);
 
@@ -1200,7 +1253,7 @@ function check(name, cond, detail) {
     els['price-source1-status'] && els['price-source1-status'].textContent !== '—' && els['price-source2-status'] && els['price-source2-status'].textContent !== '—',
     (els['price-source1-status'] && els['price-source1-status'].textContent) + ' / ' + (els['price-source2-status'] && els['price-source2-status'].textContent));
   els['btn-save-price-sources'].click();
-  await new Promise((r) => setTimeout(r, 900));
+  await waitForRender();
   const stAfter = await (await fetch('/api/state')).json();
   check('price sources: saving Kraken + Bitstamp persists in /api/state',
     stAfter.settings && stAfter.settings.priceSources && stAfter.settings.priceSources.source1 === 'kraken' && stAfter.settings.priceSources.source2 === 'bitstamp',
@@ -1218,13 +1271,24 @@ function check(name, cond, detail) {
   els['set-price-source1'].value = 'coingecko';
   els['set-price-source2'].value = 'coinbase';
   els['btn-save-price-sources'].click();
-  await new Promise((r) => setTimeout(r, 900));
+  await waitForRender();
   const stRestored = await (await fetch('/api/state')).json();
   check('price sources: the defaults are restored (CoinGecko + Coinbase)',
     stRestored.settings && stRestored.settings.priceSources && stRestored.settings.priceSources.source1 === 'coingecko' && stRestored.settings.priceSources.source2 === 'coinbase',
     JSON.stringify(stRestored.settings && stRestored.settings.priceSources));
   // After restoring, the rows re-derive from the cache again —
-  // both sources have a cached price, so both read OK.
+  // both sources have a cached price, so both read OK. But a
+  // background tick landing in the short Kraken + Bitstamp
+  // window above re-keys the cache to those sources, and then
+  // the restore reads Not Tested until something re-fetches for
+  // the restored sources. Clear just the price cache (the fee
+  // peak survives) and run a release check so the rows read the
+  // live CoinGecko + Coinbase prices, deterministically.
+  const ccRestore = await fetch('/api/__test__/clear-caches', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ only: ['price'] }) });
+  check('price sources: the price cache is cleared so the rows re-fetch for the restored sources', ccRestore.status === 200, 'status=' + ccRestore.status);
+  const relRestore = await fetch('/api/release/check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+  check('price sources: a release check runs after the restore so the rows read live prices', relRestore.status === 200, 'status=' + relRestore.status);
+  await rerender(appJs);
   check('price sources: after restoring the defaults both status pills read OK again',
     els['price-source1-status'] && els['price-source1-status'].textContent === 'OK'
     && els['price-source2-status'] && els['price-source2-status'].textContent === 'OK',
@@ -1261,7 +1325,7 @@ function check(name, cond, detail) {
   // fresh and shows both prices inline on the rows (the stub
   // price is $98,200).
   els['btn-test-price-sources'].click();
-  await new Promise((r) => setTimeout(r, 900));
+  await waitForRender();
   check('test button: Test connection shows BOTH prices to the right of the pills ("CoinGecko [OK] $98,200" and "Coinbase [OK] $98,200")',
     els['price-source1'] && els['price-source1'].textContent.indexOf('CoinGecko') !== -1 && els['price-source1'].textContent.indexOf('$') === -1
     && els['price-source1-price'] && els['price-source1-price'].textContent === '$98,200'
@@ -1281,7 +1345,7 @@ function check(name, cond, detail) {
   els['set-price-source1'].value = 'kraken';
   fireChange(els['set-price-source1']);
   els['btn-test-price-sources'].click();
-  await new Promise((r) => setTimeout(r, 900));
+  await waitForRender();
   check('test button: Test connection follows the displayed provider — after switching Primary price source to Kraken its row reads Kraken [OK] $98,200',
     els['price-source1'] && els['price-source1'].textContent.indexOf('Kraken') !== -1
     && els['price-source1'].textContent.indexOf('CoinGecko') === -1
@@ -1303,7 +1367,7 @@ function check(name, cond, detail) {
   // source). Save Kraken + Coinbase now — both pills must
   // stay OK, not flip to Not Tested.
   els['btn-save-price-sources'].click();
-  await new Promise((r) => setTimeout(r, 900));
+  await waitForRender();
   const stSavedKraken = await (await fetch('/api/state')).json();
   check('price sources: saving Kraken + Coinbase after testing persists in /api/state',
     stSavedKraken.settings && stSavedKraken.settings.priceSources && stSavedKraken.settings.priceSources.source1 === 'kraken' && stSavedKraken.settings.priceSources.source2 === 'coinbase',
@@ -1327,7 +1391,7 @@ function check(name, cond, detail) {
   els['set-price-source1'].value = 'coingecko';
   els['set-price-source2'].value = 'coinbase';
   els['btn-save-price-sources'].click();
-  await new Promise((r) => setTimeout(r, 900));
+  await waitForRender();
   const stRestored2 = await (await fetch('/api/state')).json();
   check('price sources: the defaults are restored after the save test (CoinGecko + Coinbase)',
     stRestored2.settings && stRestored2.settings.priceSources && stRestored2.settings.priceSources.source1 === 'coingecko' && stRestored2.settings.priceSources.source2 === 'coinbase',
@@ -1359,10 +1423,10 @@ function check(name, cond, detail) {
   // into existence before filling them in.
   const customUrl = document.getElementById('set-price-source1-url');
   const customPath = document.getElementById('set-price-source1-path');
-  customUrl.value = 'http://127.0.0.1:18235/api/v3/simple/price?ids=bitcoin&vs_currencies=usd';
+  customUrl.value = 'http://127.0.0.1:18275/api/v3/simple/price?ids=bitcoin&vs_currencies=usd';
   customPath.value = 'bitcoin.usd';
   els['btn-test-price-sources'].click();
-  await new Promise((r) => setTimeout(r, 900));
+  await waitForRender();
   check('custom price source: Test shows the custom price to the right of the pill (Custom [OK] $98,200)',
     els['price-source1'] && els['price-source1'].textContent.indexOf('Custom') !== -1 && els['price-source1'].textContent.indexOf('$') === -1
     && els['price-source1-price'] && els['price-source1-price'].textContent === '$98,200',
@@ -1371,11 +1435,11 @@ function check(name, cond, detail) {
     els['price-source1-status'] && els['price-source1-status'].textContent === 'OK' && els['price-source1-status'].className === 'pill ok',
     els['price-source1-status'] && els['price-source1-status'].textContent);
   els['btn-save-price-sources'].click();
-  await new Promise((r) => setTimeout(r, 900));
+  await waitForRender();
   const stCustom = await (await fetch('/api/state')).json();
   check('custom price source: saving stores the custom object in /api/state',
     stCustom.settings && stCustom.settings.priceSources
-    && JSON.stringify(stCustom.settings.priceSources.source1) === JSON.stringify({ id: 'custom', url: 'http://127.0.0.1:18235/api/v3/simple/price?ids=bitcoin&vs_currencies=usd', path: 'bitcoin.usd' })
+    && JSON.stringify(stCustom.settings.priceSources.source1) === JSON.stringify({ id: 'custom', url: 'http://127.0.0.1:18275/api/v3/simple/price?ids=bitcoin&vs_currencies=usd', path: 'bitcoin.usd' })
     && stCustom.settings.priceSources.source2 === 'coinbase',
     JSON.stringify(stCustom.settings && stCustom.settings.priceSources));
   check('custom price source: the tested Custom row STAYS OK with its price after saving',
@@ -1387,7 +1451,7 @@ function check(name, cond, detail) {
   els['set-price-source1'].value = 'coingecko';
   els['set-price-source2'].value = 'coinbase';
   els['btn-save-price-sources'].click();
-  await new Promise((r) => setTimeout(r, 900));
+  await waitForRender();
   const stCustomRestored = await (await fetch('/api/state')).json();
   check('custom price source: the defaults are restored after the custom save test',
     stCustomRestored.settings && stCustomRestored.settings.priceSources && stCustomRestored.settings.priceSources.source1 === 'coingecko' && stCustomRestored.settings.priceSources.source2 === 'coinbase',
@@ -1397,11 +1461,11 @@ function check(name, cond, detail) {
     els['price-source1-custom'] && els['price-source1-custom'].style.display);
   // A failing provider shows the failure inline, with the
   // error — while the other source still shows its price.
-  const failCg = await realFetch('http://127.0.0.1:18235/__test__/price', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+  const failCg = await realFetch('http://127.0.0.1:18275/__test__/price', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ provider: 'coingecko', fail: true }) });
   check('test button: the stub CoinGecko feed is set to fail', failCg.status === 200, 'status=' + failCg.status);
   els['btn-test-price-sources'].click();
-  await new Promise((r) => setTimeout(r, 900));
+  await waitForRender();
   check('test button: Test connection on a failing CoinGecko drops its price from the row (name only, price span empty)',
     els['price-source1'] && els['price-source1'].textContent.indexOf('CoinGecko') !== -1
     && els['price-source1'].textContent.indexOf('$') === -1
@@ -1424,7 +1488,7 @@ function check(name, cond, detail) {
     els['price-source1-status'] && els['price-source1-status'].textContent.indexOf('—') === -1 && els['price-source1-status'].textContent.indexOf('answered') === -1
     && els['price-source2-status'] && els['price-source2-status'].textContent.indexOf('—') === -1,
     (els['price-source1-status'] && els['price-source1-status'].textContent) + ' / ' + (els['price-source2-status'] && els['price-source2-status'].textContent));
-  const unFailCg = await realFetch('http://127.0.0.1:18235/__test__/price', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+  const unFailCg = await realFetch('http://127.0.0.1:18275/__test__/price', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ provider: 'coingecko', fail: false }) });
   check('test button: the stub CoinGecko feed is restored', unFailCg.status === 200, 'status=' + unFailCg.status);
   // Exchange Status: exactly one section on the readiness card,
@@ -1459,6 +1523,17 @@ function check(name, cond, detail) {
   // Settings rows (never inside the label span). The pill stays
   // pinned to the right edge, with the Node pills. There is no
   // overall pill on the header; the rows carry the status.
+  // (Optimization O6) The price-sources section above switched
+  // the sources to Kraken + Bitstamp and back, so the price cache
+  // is still keyed to those — the rows would read "Not tested"
+  // until a refresh re-warms it for the restored sources. Clear
+  // just the price cache (the fee peak survives) and run a release
+  // check so the rows read the live CoinGecko + Coinbase prices.
+  const ccWarm = await fetch('/api/__test__/clear-caches', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ only: ['price'] }) });
+  check('exchange status: the price cache is cleared so the rows re-fetch for the restored sources', ccWarm.status === 200, 'status=' + ccWarm.status);
+  const relWarm = await fetch('/api/release/check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+  check('exchange status: a release check runs after the cache clear so the rows read live prices', relWarm.status === 200, 'status=' + relWarm.status);
+  await rerender(appJs);
   check('exchange status: the section has a row for CoinGecko (row 1), price to the left of the pill (CoinGecko checked … - $98,200 [OK])',
     els['readiness-exchange-1'] && els['readiness-exchange-1'].textContent.indexOf('CoinGecko') !== -1
     && els['readiness-exchange-1'].textContent.indexOf('$') === -1
@@ -1534,14 +1609,15 @@ function check(name, cond, detail) {
   check('dry-run source detail: a dry run of the price tx shows the source detail in its notes',
     dryLine.indexOf('Price sources: CoinGecko $98,200 · Coinbase $98,200') !== -1, dryLine || 'no dry-run line');
   // Degraded: one source down. The price cache is fresh for 1
-  // min, so wait past it (the fast tick refreshes it), then a
-  // release check + re-render shows the degraded pill.
-  const failCg2 = await realFetch('http://127.0.0.1:18235/__test__/price', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+  // min, so clear it (test-only endpoint) instead of waiting past
+  // it, then a release check + re-render shows the degraded pill.
+  const failCg2 = await realFetch('http://127.0.0.1:18275/__test__/price', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ provider: 'coingecko', fail: true }) });
   check('exchange status: the stub CoinGecko feed is set to fail (degraded)', failCg2.status === 200, 'status=' + failCg2.status);
-  await new Promise((r) => setTimeout(r, 65000));
+  const ccDeg = await fetch('/api/__test__/clear-caches', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ only: ['price'] }) });
+  check('exchange status: the price cache is cleared so the release check re-fetches (degraded)', ccDeg.status === 200, 'status=' + ccDeg.status);
   const relDeg = await fetch('/api/release/check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
-  check('exchange status: a release check runs after the cache goes stale (degraded)', relDeg.status === 200, 'status=' + relDeg.status);
+  check('exchange status: a release check runs after the caches are cleared (degraded)', relDeg.status === 200, 'status=' + relDeg.status);
   await rerender(appJs);
   // Degraded: one source down. The per-exchange rows carry the
   // failure (CoinGecko Failed, Coinbase OK) — there is still no
@@ -1576,20 +1652,21 @@ function check(name, cond, detail) {
   check('exchange status: the Dom Price readiness line stays trigger-only in single-source mode',
     !!rbDeg && rbDeg.state.indexOf('CoinGecko') === -1 && rbDeg.state.indexOf('Coinbase') === -1,
     rbDeg ? rbDeg.state : 'no block');
-  const unFailCg2 = await realFetch('http://127.0.0.1:18235/__test__/price', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+  const unFailCg2 = await realFetch('http://127.0.0.1:18275/__test__/price', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ provider: 'coingecko', fail: false }) });
   check('exchange status: the stub CoinGecko feed is restored (degraded)', unFailCg2.status === 200, 'status=' + unFailCg2.status);
-  // Error: the sources disagree by more than 5%. Same wait for
-  // the cache to go stale, then a release check + re-render.
-  const setDis1 = await realFetch('http://127.0.0.1:18235/__test__/price', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+  // Error: the sources disagree by more than 5%. Same clear for
+  // the cache, then a release check + re-render.
+  const setDis1 = await realFetch('http://127.0.0.1:18275/__test__/price', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ provider: 'coingecko', usd: 100000 }) });
   check('exchange status: the stub CoinGecko is set to $100,000 (disagree)', setDis1.status === 200, 'status=' + setDis1.status);
-  const setDis2 = await realFetch('http://127.0.0.1:18235/__test__/price', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+  const setDis2 = await realFetch('http://127.0.0.1:18275/__test__/price', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ provider: 'coinbase', usd: 106000 }) });
   check('exchange status: the stub Coinbase is set to $106,000 (6% apart)', setDis2.status === 200, 'status=' + setDis2.status);
-  await new Promise((r) => setTimeout(r, 65000));
+  const ccDis = await fetch('/api/__test__/clear-caches', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ only: ['price'] }) });
+  check('exchange status: the price cache is cleared so the release check re-fetches (disagree)', ccDis.status === 200, 'status=' + ccDis.status);
   const relDis = await fetch('/api/release/check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
-  check('exchange status: a release check runs after the cache goes stale (disagree)', relDis.status === 200, 'status=' + relDis.status);
+  check('exchange status: a release check runs after the caches are cleared (disagree)', relDis.status === 200, 'status=' + relDis.status);
   await rerender(appJs);
   // Disagree: each source is up, so each row pill stays OK and
   // shows its own price; there is still no overall pill.
@@ -1605,12 +1682,25 @@ function check(name, cond, detail) {
   check('exchange status: the Dom Price readiness line stays its condition when the sources disagree (no feed state on the line)',
     !!rbDis && rbDis.state === 'Fires when BTC price \u2265 $150,000', rbDis ? rbDis.state : 'no block');
   // Restore the stub so the suite ends on the default.
-  const setBack1 = await realFetch('http://127.0.0.1:18235/__test__/price', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+  const setBack1 = await realFetch('http://127.0.0.1:18275/__test__/price', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ provider: 'coingecko', usd: 98200 }) });
   check('exchange status: the stub CoinGecko is restored to $98,200', setBack1.status === 200, 'status=' + setBack1.status);
-  const setBack2 = await realFetch('http://127.0.0.1:18235/__test__/price', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+  const setBack2 = await realFetch('http://127.0.0.1:18275/__test__/price', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ provider: 'coinbase', usd: 98200 }) });
   check('exchange status: the stub Coinbase is restored to $98,200', setBack2.status === 200, 'status=' + setBack2.status);
+  // Heal the price state the disagree test poisoned: the served
+  // price is derived live from the price cache (ruleStatusFor),
+  // so the disagreeing readings would keep every price line
+  // 'unknown' until something re-fetches. Clear just the price
+  // cache and run a release check — the Dom Price slice heals to
+  // $98,200 here, before §14's held-clock edit triggers the
+  // offline-gap grace (during a grace the release check cannot
+  // re-fetch prices, so this is the last chance to heal it).
+  const ccOk = await fetch('/api/__test__/clear-caches', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ only: ['price'] }) });
+  check('exchange status: the price cache is cleared so the release check re-fetches the restored prices', ccOk.status === 200, 'status=' + ccOk.status);
+  const relOk = await fetch('/api/release/check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+  check('exchange status: a release check runs after the restore so the price state reads $98,200 again', relOk.status === 200, 'status=' + relOk.status);
+  await rerender(appJs);
 
   // --- 10b. node capability details, variant C: summary row + details on tap (0.8.1) ---
   // Static HTML: each node is a <details> — the summary is just
@@ -2110,7 +2200,7 @@ function check(name, cond, detail) {
   // Resume now: the button clears the grace and the card hides;
   // the pills read "armed" again.
   els['btn-resume-grace'].click();
-  await new Promise((r) => setTimeout(r, 900));
+  await waitForRender();
   check('grace card: Resume now hides the card',
     els['grace-card'] && els['grace-card'].style.display === 'none',
     els['grace-card'] && els['grace-card'].style.display);
@@ -2132,7 +2222,7 @@ function check(name, cond, detail) {
   check('grace card: an indefinite grace reads "until you resume" instead of a date',
     indText.indexOf('until you resume') !== -1 && indText.indexOf('(7 days)') === -1, indText);
   els['btn-resume-grace'].click();
-  await new Promise((r) => setTimeout(r, 900));
+  await waitForRender();
   check('grace card: Resume now hides the indefinite grace card too',
     els['grace-card'] && els['grace-card'].style.display === 'none',
     els['grace-card'] && els['grace-card'].style.display);
@@ -2148,7 +2238,7 @@ function check(name, cond, detail) {
   els['set-grace-offline'].value = '14';
   els['set-grace-duration'].value = 'indefinite';
   els['btn-save-grace'].click();
-  await new Promise((r) => setTimeout(r, 900));
+  await waitForRender();
   const gAfter = await (await fetch('/api/state')).json();
   check('grace settings: saving 14 days + indefinite persists in /api/state',
     gAfter.settings && gAfter.settings.graceOfflineDays === 14 && gAfter.settings.graceDurationDays === null,
@@ -2164,7 +2254,7 @@ function check(name, cond, detail) {
   els['set-grace-offline'].value = '7';
   els['set-grace-duration'].value = '7';
   els['btn-save-grace'].click();
-  await new Promise((r) => setTimeout(r, 900));
+  await waitForRender();
   const gRestored = await (await fetch('/api/state')).json();
   check('grace settings: restoring the defaults (7 / 7) persists',
     gRestored.settings && gRestored.settings.graceOfflineDays === 7 && gRestored.settings.graceDurationDays === 7,
@@ -2453,7 +2543,7 @@ function check(name, cond, detail) {
   els['set-fee-low'].value = '3';
   els['set-fee-medium'].value = '1.5';
   els['btn-save-fee-verdict'].click();
-  await new Promise((r) => setTimeout(r, 900));
+  await waitForRender();
   const stFeeSaved = await (await fetch('/api/state')).json();
   check('user controls fee save: saving Low 3 / Medium 1.5 from the UI persists in /api/state',
     stFeeSaved.settings && stFeeSaved.settings.feeLowMultiplier === 3 && stFeeSaved.settings.feeMediumMultiplier === 1.5,
@@ -2469,7 +2559,7 @@ function check(name, cond, detail) {
   els['set-fee-low'].value = '2';
   els['set-fee-medium'].value = '1';
   els['btn-save-fee-verdict'].click();
-  await new Promise((r) => setTimeout(r, 900));
+  await waitForRender();
   const stFeeRestored = await (await fetch('/api/state')).json();
   check('user controls fee save: restoring Low 2 / Medium 1 from the UI persists',
     stFeeRestored.settings && stFeeRestored.settings.feeLowMultiplier === 2 && stFeeRestored.settings.feeMediumMultiplier === 1,
@@ -2483,7 +2573,7 @@ function check(name, cond, detail) {
   els['set-fee-low'].value = '1';
   els['set-fee-medium'].value = '1';
   els['btn-save-fee-verdict'].click();
-  await new Promise((r) => setTimeout(r, 900));
+  await waitForRender();
   check('user controls fee save: Low 1 + Medium 1 shows an error in the msg line',
     els['fee-verdict-msg'] && els['fee-verdict-msg'].style.color === '#f87171'
     && (els['fee-verdict-msg'].textContent || '').indexOf('greater than') !== -1,
@@ -2501,7 +2591,7 @@ function check(name, cond, detail) {
   // the msg line confirms, and the price-sources note tracks it.
   els['set-price-agreement'].value = '2';
   els['btn-save-price-agreement'].click();
-  await new Promise((r) => setTimeout(r, 900));
+  await waitForRender();
   const stAgree = await (await fetch('/api/state')).json();
   check('user controls agreement save: saving 2% from the UI persists in /api/state',
     stAgree.settings && stAgree.settings.priceAgreementPct === 2,
@@ -2516,7 +2606,7 @@ function check(name, cond, detail) {
   // line shows the error and the setting does not change.
   els['set-price-agreement'].value = '0';
   els['btn-save-price-agreement'].click();
-  await new Promise((r) => setTimeout(r, 900));
+  await waitForRender();
   check('user controls agreement save: 0% shows an error in the msg line',
     els['price-agreement-msg'] && els['price-agreement-msg'].style.color === '#f87171'
     && (els['price-agreement-msg'].textContent || '').indexOf('priceAgreementPct') !== -1,
@@ -2528,7 +2618,7 @@ function check(name, cond, detail) {
   // Restore the agreement default from the UI.
   els['set-price-agreement'].value = '5';
   els['btn-save-price-agreement'].click();
-  await new Promise((r) => setTimeout(r, 900));
+  await waitForRender();
   const stAgreeRestored = await (await fetch('/api/state')).json();
   check('user controls agreement save: restoring 5% from the UI persists (and the note shows 5% again)',
     stAgreeRestored.settings && stAgreeRestored.settings.priceAgreementPct === 5
@@ -2537,7 +2627,7 @@ function check(name, cond, detail) {
   // Save the check cadence from the UI, then restore it.
   els['set-check-cadence'].value = '10';
   els['btn-save-check-cadence'].click();
-  await new Promise((r) => setTimeout(r, 900));
+  await waitForRender();
   const stCad = await (await fetch('/api/state')).json();
   check('user controls cadence save: saving 10 seconds from the UI persists in /api/state',
     stCad.settings && stCad.settings.checkCadenceSeconds === 10,
@@ -2547,7 +2637,7 @@ function check(name, cond, detail) {
     els['check-cadence-msg'] && els['check-cadence-msg'].textContent);
   els['set-check-cadence'].value = '60';
   els['btn-save-check-cadence'].click();
-  await new Promise((r) => setTimeout(r, 900));
+  await waitForRender();
   const stCadRestored = await (await fetch('/api/state')).json();
   check('user controls cadence save: restoring 60 seconds from the UI persists',
     stCadRestored.settings && stCadRestored.settings.checkCadenceSeconds === 60,
@@ -2602,7 +2692,7 @@ function check(name, cond, detail) {
   check('redesign vacation UI: checking indefinite disables the date input',
     els['set-vacation-until'] && els['set-vacation-until'].disabled === true, '');
   els['btn-save-vacation'].click();
-  await new Promise((r) => setTimeout(r, 900));
+  await waitForRender();
   const stVacInd = await (await fetch('/api/state')).json();
   check('redesign vacation UI: saving indefinite vacation persists (mode on, until null)',
     stVacInd.settings && stVacInd.settings.vacationMode === true && stVacInd.settings.vacationUntil === null,
@@ -2627,7 +2717,7 @@ function check(name, cond, detail) {
     els['set-vacation-until'] && els['set-vacation-until'].disabled === false, '');
   els['set-vacation-until'].value = '2026-12-31';
   els['btn-save-vacation'].click();
-  await new Promise((r) => setTimeout(r, 900));
+  await waitForRender();
   const stVacDated = await (await fetch('/api/state')).json();
   check('redesign vacation UI: saving a dated vacation persists the date',
     stVacDated.settings && stVacDated.settings.vacationMode === true && stVacDated.settings.vacationUntil === '2026-12-31',
@@ -2640,7 +2730,7 @@ function check(name, cond, detail) {
   // Vacation off from the UI.
   els['set-vacation'].checked = false;
   els['btn-save-vacation'].click();
-  await new Promise((r) => setTimeout(r, 900));
+  await waitForRender();
   const stVacOff = await (await fetch('/api/state')).json();
   check('redesign vacation UI: turning vacation off from the UI persists',
     stVacOff.settings && stVacOff.settings.vacationMode === false, JSON.stringify(stVacOff.settings && stVacOff.settings.vacationMode));
@@ -2652,7 +2742,7 @@ function check(name, cond, detail) {
   // tx (the seeded seven plus the 10d one), Arm all re-arms
   // them; the msg line confirms each way.
   els['btn-disarm-all'].click();
-  await new Promise((r) => setTimeout(r, 900));
+  await waitForRender();
   const stDisAll = await (await fetch('/api/state')).json();
   check('redesign arm-all UI: Disarm all disarms every staged tx',
     stDisAll.bitcoin && (stDisAll.bitcoin.txs || []).length > 0
@@ -2667,7 +2757,7 @@ function check(name, cond, detail) {
     && (checkinBars() || []).every((b) => b.cls.split(' ').includes('frozen')),
     JSON.stringify(checkinBars()));
   els['btn-arm-all'].click();
-  await new Promise((r) => setTimeout(r, 900));
+  await waitForRender();
   const stArmAll = await (await fetch('/api/state')).json();
   check('redesign arm-all UI: Arm all re-arms every staged tx',
     stArmAll.bitcoin && (stArmAll.bitcoin.txs || []).length > 0
@@ -3029,14 +3119,15 @@ function check(name, cond, detail) {
   check('rule sets 0.8.2 v2: the check-in Held tx adds via the API', addHeld.status === 201, 'status=' + addHeld.status);
   // One release check so the per-rule state lines are fresh
   // (the price/tip readings land in the slices).
-  // One release check so the per-rule state lines are fresh
-  // (the price/tip readings land in the slices). The price
-  // cache is fresh for 60s and still holds the disagreeing
-  // readings from the exchange-status section above, so wait
-  // past it first — otherwise the release check reads the stale
-  // disagreement and the price rules stay 'unknown' (correct
-  // fail-safe behavior, but not the live values this checks).
-  await new Promise((r) => setTimeout(r, 65000));
+  // (Optimization O6, deviation from the proposal) No cache clear
+  // here: the price cache is already warm with the live $98,200
+  // readings (healed by the release check after the restore in
+  // the exchange-status section above), and the served price is
+  // derived live from that cache — clearing it would drop the
+  // live values, and the release check below cannot re-fetch
+  // them because §16 left an offline-gap grace active for the
+  // width check, which skips price evaluation. The release check
+  // still runs so the blockheight / check-in rule slices land.
   const rel25 = await fetch('/api/release/check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
   check('rule sets 0.8.2: a release check runs so the rule state lines are fresh', rel25.status === 200, 'status=' + rel25.status);
   await rerender(appJs);
@@ -3302,7 +3393,7 @@ function check(name, cond, detail) {
   check('live view: the Dom Price Details open before the tick', !!det26 && det26.open === true, det26 ? 'open=' + det26.open : 'no details');
   // Open the cadence gate: the last fetch was the re-render load.
   await sleep26(11000);
-  const setP160 = await realFetch('http://127.0.0.1:18235/__test__/price', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ usd: 160000 }) });
+  const setP160 = await realFetch('http://127.0.0.1:18275/__test__/price', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ usd: 160000 }) });
   check('live view: the stub price moves to $160,000', setP160.status === 200, 'status=' + setP160.status);
   const got160 = await waitPriceSlice26('Dom Price', 160000, 100000);
   check('live view: the Dom Price slice reaches $160,000', got160, '');
@@ -3374,7 +3465,7 @@ function check(name, cond, detail) {
   check('live view: a new tx adds via the API while the popup is open', addLive.status === 201, 'status=' + addLive.status);
   const addLiveJson = addLive.status === 201 ? await addLive.json() : {};
   const liveNewId = (addLiveJson.tx || {}).id || null;
-  const setP98 = await realFetch('http://127.0.0.1:18235/__test__/price', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ usd: 98200 }) });
+  const setP98 = await realFetch('http://127.0.0.1:18275/__test__/price', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ usd: 98200 }) });
   check('live view: the stub price moves back to $98,200', setP98.status === 200, 'status=' + setP98.status);
   const got98 = await waitPriceSlice26('Dom Price', 98200, 100000);
   check('live view: the Dom Price slice returns to $98,200', got98, '');
@@ -3781,7 +3872,7 @@ function check(name, cond, detail) {
   entryField28c(entry228c, 'add-tx-notes').value = 'M2 note';
   entryField28c(entry228c, 'add-tx-hex').value = craftHex(2, 450002);
   els['btn-btc-add'].click();
-  await new Promise((r) => setTimeout(r, 900));
+  await waitForRender();
   check('add trigger set: the popup closes on save',
     els['add-modal'] && !els['add-modal'].classList.contains('open'), '');
   check('add trigger set: the confirmation names the new set and both transactions',
@@ -3936,7 +4027,7 @@ function check(name, cond, detail) {
   check('one construct: once a second transaction exists, the original\'s remove is enabled',
     els['btn-edit-remove-tx'] && els['btn-edit-remove-tx'].disabled === false, '');
   els['btn-edit-save'].click();
-  await new Promise((r) => setTimeout(r, 900));
+  await waitForRender();
   check('one construct: the popup closes on save',
     els['edit-modal'] && !els['edit-modal'].classList.contains('open'), '');
   check('one construct: the confirmation says the card is now a trigger set',
@@ -3989,7 +4080,7 @@ function check(name, cond, detail) {
     els['set-members-list'] && els['set-members-list'].children.length === 1,
     els['set-members-list'] ? 'children=' + els['set-members-list'].children.length : 'no list');
   els['btn-set-save'].click();
-  await new Promise((r) => setTimeout(r, 900));
+  await waitForRender();
   check('one construct: the set edit closes on save',
     els['set-modal'] && !els['set-modal'].classList.contains('open'), '');
   check('one construct: the confirmation names the removed transaction',

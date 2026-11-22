@@ -51,6 +51,19 @@ const store = require('./lib/store');
 const bitcoin = require('./lib/bitcoin');
 
 const PORT = parseInt(process.env.PORT || '3100', 10);
+// (Optimization O2) The startup-tick delay (the three 5 s
+// setTimeouts below: full tick, hourly tick, fee recompute).
+// Test-only: honored ONLY in test mode (STANDBY_TEST_MODE=1,
+// the same double gate as the /api/__test__/clear-caches
+// endpoint) — production (Umbrel) never sets either variable,
+// and with the var unset the delay is exactly 5000 as today.
+// STANDBY_TEST_STARTUP_TICK_MS must parse to a non-negative
+// integer; anything else falls back to 5000.
+const STARTUP_TICK_MS = (() => {
+  if (process.env.STANDBY_TEST_MODE !== '1') return 5000;
+  const ms = parseInt(process.env.STANDBY_TEST_STARTUP_TICK_MS || '', 10);
+  return (Number.isFinite(ms) && ms >= 0) ? ms : 5000;
+})();
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 // The directory shared with the check-in receiver (mounted as a
@@ -2728,7 +2741,8 @@ async function evaluateRelease(options) {
       if (expireVacation(stH, new Date())) changed = true;
       if (changed) store.saveState(DATA_DIR, stH);
     } catch (e) { console.error('offline-hold apply failed:', e); }
-    return await evaluateReleaseInner(automatic);
+    const _r = await evaluateReleaseInner(automatic);
+    return _r;
   } finally {
     releaseEvaluationInFlight = false;
   }
@@ -3907,6 +3921,39 @@ async function handleApi(req, res, pathname) {
     startupWarnings.length = 0;
     rearmFullTick();
     return sendJson(res, 200, { ok: true });
+  }
+
+  // POST /api/__test__/clear-caches (test-only, speedup): drop every
+  // in-memory cache a restart would cold — price, node fee, tip,
+  // fee peak, current fees, and the UTXO outspend caches — WITHOUT
+  // restarting (no state re-read, no tick-timer reset, no 7 s
+  // startup wait). It lives under /api/ so the dispatcher routes
+  // it to handleApi (a bare /__test__/ path would fall through to
+  // the static file server and 404). Gated on
+  // STANDBY_TEST_MODE=1, which only the test harness sets
+  // (verify094.start); without it the route 404s exactly like any
+  // unknown path, so it cannot run in production. The caches are
+  // reset to their initial shapes, so the next read fetches fresh
+  // from the (stub) sources.
+  // (Optimization O6, DOM) A body of { only: [...] } clears just
+  // the named caches — the DOM suite clears only 'price', so the
+  // fee-peak cache (re-fetched only by the startup refresh and the
+  // hourly tick) survives and the fee-verdict pill keeps working.
+  // With no `only` array the call clears everything, as before
+  // (the API and regression suites rely on the full clear).
+  if (req.method === 'POST' && pathname === '/api/__test__/clear-caches') {
+    if (process.env.STANDBY_TEST_MODE !== '1') return sendError(res, 404, 'not found');
+    const clearBody = await readBody(req).catch(() => ({}));
+    const only = (clearBody && Array.isArray(clearBody.only)) ? clearBody.only : null;
+    const want = (name) => !only || only.includes(name);
+    const cleared = [];
+    if (want('price')) { priceCache = { readings: {}, fetchedAt: null, source1: null, source2: null }; cleared.push('price'); }
+    if (want('nodeFee')) { nodeFeeCache = { readings: null, fetchedAt: null, primary: null, secondary: null }; cleared.push('nodeFee'); }
+    if (want('nodeTip')) { nodeTipCache = { readings: null, fetchedAt: null, primary: null, secondary: null }; cleared.push('nodeTip'); }
+    if (want('feePeak')) { feePeakCache = { peak: null, fetchedAt: null }; cleared.push('feePeak'); }
+    if (want('currentFees')) { currentFeesCache = { fees: null, fetchedAt: null }; cleared.push('currentFees'); }
+    if (want('outspend')) { bitcoin.clearOutspendCache(); cleared.push('outspend'); }
+    return sendJson(res, 200, { ok: true, cleared });
   }
 
   // GET /api/health
@@ -6152,10 +6199,12 @@ server.listen(PORT, '0.0.0.0', () => {
 // The startup fee recompute runs once shortly after startup too
 // — see recomputeStoredFees. The fee peak is fetched once shortly
 // after startup (the hourly tick refreshes it daily after that)
-// — see refreshFeePeakIfStale.
-setTimeout(runFullTick, 5000);
-setTimeout(runHourlyTick, 5000);
-setTimeout(recomputeStoredFees, 5000);
+// — see refreshFeePeakIfStale. The three 5 s startup delays are
+// STARTUP_TICK_MS (5000 in production; the test harness shortens
+// it to 500 ms via STANDBY_TEST_STARTUP_TICK_MS — see above).
+setTimeout(runFullTick, STARTUP_TICK_MS);
+setTimeout(runHourlyTick, STARTUP_TICK_MS);
+setTimeout(recomputeStoredFees, STARTUP_TICK_MS);
 setTimeout(refreshFeePeakIfStale, 2000);
 setTimeout(refreshCurrentFeesIfStale, 2000);
 setTimeout(refreshPriceIfStale, 2000); // 0.8.0: a price rule's "currently $X" line is live on first load

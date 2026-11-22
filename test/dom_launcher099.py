@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Launch Standby 0.8.7.2 (branch-0.8.7.2) + mempool stubs with
+"""Launch Standby 0.8.7.2 (branch-speedup) + mempool stubs with
 seeded trigger data, run dom_check099.js against it, then stop
 everything. Reuses the verify script's helpers (importing it does
 not run its main()).
 
 Ports (must not collide with 095, which uses app 3388, receiver
 3389 and stubs 18175/18176, or 096, which uses app 3398, receiver
-3399 and stubs 18185/18186): app 3438, receiver 3439, stubs
-18235 (primary) and 18236 (secondary). The stub's default BTC price
+3399 and stubs 18185/18186): app 3478, receiver 3479, stubs
+18275 (primary) and 18276 (secondary). The stub's default BTC price
 is $98,200 (STUB_PRICE_USD unset), so the seeded price rule
 (BTC >= $150,000) does not hold and its state line reads
 "currently $98,200". The stub's tip height is 900,000 and its
@@ -44,9 +44,9 @@ BRANCH = v.app_dir(GOAL)
 TESTDIR = _TESTDIR
 DATA = '/tmp/heirloom099-dom'
 CHECKIN_DIR = '/tmp/heirloom099-dom-checkin'
-BASE = 'http://127.0.0.1:3438'
-RBASE = 'http://127.0.0.1:3439'
-LOG = '/tmp/heirloom099-proc.log'
+BASE = 'http://127.0.0.1:3478'
+RBASE = 'http://127.0.0.1:3479'
+LOG = '/tmp/heirloom099-dom-proc.log'
 FINNEY_OUTPOINT = 'f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16:1'
 
 
@@ -68,15 +68,15 @@ shutil.rmtree(CHECKIN_DIR, ignore_errors=True)
 # Primary stub answers the Slipstream API, the fee-rates series
 # and the BTC price feed too (same port), so the app never touches
 # the real slipstream.mara.com, mempool.space or CoinGecko.
-p1 = v.start(['node', v.STUB, '18235'], log=LOG)
-p2 = v.start(['node', v.STUB, '18236'], log=LOG)
+p1 = v.start(['node', v.STUB, '18275'], log=LOG)
+p2 = v.start(['node', v.STUB, '18276'], log=LOG)
 recv = v.start(['node', 'checkin-receiver/server.js'],
-               env={'PORT': '3439', 'CHECKIN_DIR': CHECKIN_DIR}, cwd=BRANCH, log=LOG)
+               env={'PORT': '3479', 'CHECKIN_DIR': CHECKIN_DIR}, cwd=BRANCH, log=LOG)
 app = v.start(['node', 'server.js'],
-              env={'PORT': '3438', 'DATA_DIR': DATA, 'CHECKIN_DIR': CHECKIN_DIR,
-                   'SLIPSTREAM_API_URL': 'http://127.0.0.1:18235',
-                   'FEE_RATES_URL': 'http://127.0.0.1:18235',
-                   'PRICE_API_URL': 'http://127.0.0.1:18235'},
+              env={'PORT': '3478', 'DATA_DIR': DATA, 'CHECKIN_DIR': CHECKIN_DIR,
+                   'SLIPSTREAM_API_URL': 'http://127.0.0.1:18275',
+                   'FEE_RATES_URL': 'http://127.0.0.1:18275',
+                   'PRICE_API_URL': 'http://127.0.0.1:18275'},
               cwd=BRANCH, log=LOG)
 rc = 1
 try:
@@ -84,8 +84,8 @@ try:
     assert v.wait_up(RBASE, path='/health'), 'receiver did not come up'
     s, h = v.req('GET', '/api/health', base=BASE)
     assert h.get('version') == '0.8.7.2', h
-    s, r = v.req('PUT', '/api/settings', {'primaryApiUrl': 'http://127.0.0.1:18235',
-                                          'secondaryApiUrl': 'http://127.0.0.1:18236'}, base=BASE)
+    s, r = v.req('PUT', '/api/settings', {'primaryApiUrl': 'http://127.0.0.1:18275',
+                                          'secondaryApiUrl': 'http://127.0.0.1:18276'}, base=BASE)
     assert s == 200, r
     for hexs, label, trig in (
             (v.craft(1, 100001), 'Dom Check-in', None),
@@ -198,10 +198,10 @@ finally:
     for p in (app, recv, p1, p2):
         v.stop(p)
     # Coverage 8: no server left running on any 09x port.
-    open_ports = [port for port in (3438, 3439, 18235, 18236) if not port_closed(port)]
+    open_ports = [port for port in (3478, 3479, 18275, 18276) if not port_closed(port)]
     if open_ports:
         print('STILL LISTENING after stop:', open_ports)
         rc = 1
     else:
-        print('all 099 ports closed (3438, 3439, 18235, 18236)')
+        print('all 099 ports closed (3478, 3479, 18275, 18276)')
 sys.exit(rc)

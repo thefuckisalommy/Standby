@@ -1420,6 +1420,16 @@ async function getSlipstreamTxStatus(txid) {
 // unspent, never permission to fire.
 const outspendCache = new Map(); // key -> { fetchedAtMs, result }
 const OUTSPEND_CACHE_DEFAULT_TTL_MS = 60 * 1000;
+// Test-only (speedup): drop every outspend cache entry and every
+// in-flight dedup promise, so the next lookup fetches fresh —
+// the same cold-cache state a restart produces, without one.
+// Only reachable via the app's POST /__test__/clear-caches, which
+// itself only answers when STANDBY_TEST_MODE=1.
+function clearOutspendCache() {
+  outspendCache.clear();
+  outspendInflight.clear();
+  outspendsInflight.clear();
+}
 // (0.8.6 fold-in, audit finding 3) In-flight dedup: a request
 // already on the wire for an outpoint — or for a funding tx's
 // batch — is shared, not re-issued, so two evaluations that
@@ -2601,6 +2611,7 @@ module.exports = {
   fetchNodeFee, fetchNodeFeeReadings, combineFeeReadings, FEE_IMPLAUSIBLE_SATVB,
   fetchTipHeights, combineTipHeights,
   normalizePublicApiUrl, mempoolBase, endpointsFor, nodeCheckedAt,
+  clearOutspendCache,
   DEFAULT_PUBLIC_API_URL, DEFAULT_SECONDARY_API_URL,
   DEFAULT_SLIPSTREAM_API_URL,
 };
