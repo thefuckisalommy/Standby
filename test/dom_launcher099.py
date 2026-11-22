@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Launch Standby 0.8.7.2 (branch-speedup) + mempool stubs with
+"""Launch Standby 0.8.7.3 (branch-split) + mempool stubs with
 seeded trigger data, run dom_check099.js against it, then stop
 everything. Reuses the verify script's helpers (importing it does
 not run its main()).
@@ -37,7 +37,7 @@ spec.loader.exec_module(v)
 
 # Portability (0.8.3, tests-in-repo): resolve paths from this file.
 # _ROOT is the goal dir locally and the repo root in a checkout; the
-# app is branch-0.8.7.2/ locally and standby/ in a checkout.
+# app is branch-split/ locally and standby/ in a checkout.
 _TESTDIR = os.path.dirname(os.path.abspath(__file__))
 GOAL = os.path.dirname(_TESTDIR)
 BRANCH = v.app_dir(GOAL)
@@ -83,7 +83,7 @@ try:
     assert v.wait_up(BASE), 'app did not come up'
     assert v.wait_up(RBASE, path='/health'), 'receiver did not come up'
     s, h = v.req('GET', '/api/health', base=BASE)
-    assert h.get('version') == '0.8.7.2', h
+    assert h.get('version') == '0.8.7.3', h
     s, r = v.req('PUT', '/api/settings', {'primaryApiUrl': 'http://127.0.0.1:18275',
                                           'secondaryApiUrl': 'http://127.0.0.1:18276'}, base=BASE)
     assert s == 200, r
