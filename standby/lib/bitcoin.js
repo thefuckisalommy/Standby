@@ -1625,7 +1625,8 @@ async function checkInputsUnspentVia(parsed, apiBase, ttlMs) {
     else if (out.txid && out.txid.toLowerCase() === parsed.txid.toLowerCase()) {
       own.push({ ...inp, spentBy: out.txid, confirmed: !!(out.status && out.status.confirmed),
         blockHeight: (out.status && Number.isFinite(out.status.block_height)) ? out.status.block_height : null });
-    } else if (out.status && out.status.confirmed === true) spent.push({ ...inp, spentBy: out.txid || null });
+    } else if (out.status && out.status.confirmed === true) spent.push({ ...inp, spentBy: out.txid || null,
+      blockHeight: (out.status && Number.isFinite(out.status.block_height)) ? out.status.block_height : null });
     else conflict.push({ ...inp, spentBy: out.txid || null });
   }
   return { checked: parsed.inputs.length, unspent, spent, conflict, own, unknown };

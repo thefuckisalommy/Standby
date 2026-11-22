@@ -667,8 +667,11 @@ p.inline-btns { display: flex; gap: 8px; flex-wrap: nowrap; align-items: center;
 .tx-card .tx-actions button { padding: 6px 12px; font-size: 14px; }
 /* A sent transaction: green line (when + node + confirmations). A shared
    input: amber warning line in each affected card. These lines wrap
-   instead of overflowing the card. */
+   instead of overflowing the card. (0.8.7.1) The sent line follows the
+   verdict, not the mere fact of a broadcast: confirmed green,
+   unconfirmed amber, not-found or stale red. */
 .tx-card .tx-sent { color: var(--ok); font-size: 14px; margin: 4px 0; overflow-wrap: anywhere; }
+.tx-card .tx-bad { color: var(--bad); font-size: 14px; margin: 4px 0; overflow-wrap: anywhere; }
 .tx-card .tx-warn { color: var(--warn); font-size: 14px; margin: 4px 0; overflow-wrap: anywhere; }
 .tx-card .tx-dryrun { overflow-wrap: anywhere; }
 /* A broadcast log row is clickable — it pops out the details of that

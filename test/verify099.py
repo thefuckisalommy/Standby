@@ -7,7 +7,7 @@ Boots the branch-0.8.5 app (port 3438), the check-in receiver
 (both fixed: tip height 900000, economy fee 1 sat/vB, price 98200)
 — and checks the 0.8.1 trigger work:
 
-  1. health reports version 0.8.7.
+  1. health reports version 0.8.7.1.
   2. Block-height trigger: validation at add (bad heights rejected,
      good ones accepted), checkTriggerNow (a height already reached
      fires + warns, a future height watches), evaluation via the
@@ -147,6 +147,12 @@ Boots the branch-0.8.5 app (port 3438), the check-in receiver
       firing for its non-stale members — only when EVERY member
       is stale does the set archive; deleting a set returns its
       txs to standalone; a pre-set state file loads with sets [].
+  28. Not-found broadcast verdicts (0.8.7.1): the confirmation
+     refresh runs one outspend check per missing tx — a
+     spent-confirmed input records the tx stale (with the
+     spending txid and block height, logged once), an
+     unconfirmed spend records a conflict, and a clean check
+     clears a conflict; an already-stale tx is never re-checked.
 
 Ports: app 3438, receiver 3439, stubs 18235/18236 — no collision
 with the 095 suite (app 3388, receiver 3389, stubs 18175/18176) or
@@ -335,7 +341,7 @@ def main():
 
         # --- 1. health + version ----------------------------------------
         s, h = req('GET', '/api/health')
-        check('1 health reports version 0.8.7', h.get('version') == '0.8.7', h)
+        check('1 health reports version 0.8.7.1', h.get('version') == '0.8.7.1', h)
 
         # --- 2. block-height trigger --------------------------------------
         # Validation at add: bad heights rejected, good ones accepted.
@@ -3584,6 +3590,88 @@ def main():
               ((t1 or {}).get('history'), (t2 or {}).get('history'), (t3 or {}).get('history')))
         delete_all_txs()
         delete_all_sets()
+        # --- 28. not-found broadcast txs get a stale/conflict verdict (0.8.7.1) ---
+        # A broadcast tx the nodes no longer know is not just "not
+        # found": the confirmation refresh now asks whether its
+        # inputs are spent. FINNEY:0 is spent-confirmed by the stub
+        # (spender aabbccdd, block 899990); CONFLICT:0 ('cc'*32) is
+        # spent-unconfirmed on the primary (spender 'dd'*32), so the
+        # first completed check reads conflict. Both txs are seeded
+        # broadcast via the state file (a broadcast fact cannot be
+        # made through the API — and the pre-broadcast freshness
+        # gate would refuse these hexes outright, their inputs
+        # being spent). The background tick is parked (cadence
+        # 3600 s) so only the refreshes below move anything; the
+        # restart's 5 s startup tick runs the hourly refresh once,
+        # so the verdicts are already recorded when the endpoint
+        # below answers.
+        CONFLICT = 'cc' * 32
+        CONFLICT_SPENDER = 'dd' * 32
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 3600})
+        check('28 setup: cadence parked at 3600 s', s == 200, (s, r))
+        check('28 setup: app restarted for a cold cache', restart())
+        FROZEN28 = iso_ago(hours=2)
+        s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft_prev(FINNEY, 0, 112800), 'label': 'Stale NF', 'notes': '', 'trigger': {'type': 'manual', 'params': {}}})
+        check('28 stale: the FINNEY:0 tx adds', s == 201, (s, r))
+        stale28 = r['tx']['id'] if s == 201 else None
+        s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft_prev(CONFLICT, 0, 112801), 'label': 'Conflict NF', 'notes': '', 'trigger': {'type': 'manual', 'params': {}}})
+        check('28 conflict: the CONFLICT:0 tx adds', s == 201, (s, r))
+        conflict28 = r['tx']['id'] if s == 201 else None
+        stj = load_state_file()
+        by_id = {t.get('id'): t for t in stj.get('bitcoin', {}).get('txs', [])}
+        for tx_id in (stale28, conflict28):
+            t = by_id.get(tx_id)
+            t['broadcasted'] = {'txid': t.get('txid'), 'broadcastedAt': FROZEN28, 'method': 'mempool.space',
+                                'confirmations': 0, 'blockHeight': None, 'found': True, 'checkedAt': FROZEN28}
+            t['release'] = {'status': 'broadcast', 'kind': 'release', 'trigger': 'manual',
+                            'txid': t.get('txid'), 'method': 'mempool.space', 'broadcastedAt': FROZEN28}
+        save_state_file(stj)
+        check('28 setup: app restarted with the seeded not-found txs', restart())
+        # Let the startup hourly tick finish before the endpoint
+        # call, so its merge (which logs the stale transition)
+        # cannot race the endpoint's own merge.
+        time.sleep(3)
+        s, r = req('GET', '/api/bitcoin/confirmations')
+        check('28 refresh: the confirmations endpoint runs', s == 200, (s, r))
+        conf_by_id = {c.get('id'): c for c in r.get('confirmations', [])}
+        check('28 stale: the refresh reports the tx not found, with a stale verdict',
+              conf_by_id.get(stale28, {}).get('found') is False
+              and conf_by_id.get(stale28, {}).get('staleInput', {}).get('spentBy') == 'aabbccdd'
+              and conf_by_id.get(stale28, {}).get('staleInput', {}).get('blockHeight') == 899990,
+              conf_by_id.get(stale28))
+        check('28 conflict: the refresh reports the tx not found, with a conflict verdict',
+              conf_by_id.get(conflict28, {}).get('found') is False
+              and conf_by_id.get(conflict28, {}).get('conflictInput', {}).get('spentBy') == CONFLICT_SPENDER
+              and not conf_by_id.get(conflict28, {}).get('staleInput'),
+              conf_by_id.get(conflict28))
+        t = state_tx(stale28)
+        check('28 stale: the verdict is stored on the broadcasted fact',
+              t is not None and (t.get('broadcasted') or {}).get('staleInput', {}).get('spentBy') == 'aabbccdd'
+              and (t.get('broadcasted') or {}).get('staleInput', {}).get('blockHeight') == 899990, (t or {}).get('broadcasted'))
+        check('28 stale: the transition logs exactly one stale history event',
+              t is not None and [e.get('type') for e in t.get('history', [])].count('stale') == 1, (t or {}).get('history'))
+        t = state_tx(conflict28)
+        check('28 conflict: the verdict is stored, and no stale event is logged',
+              t is not None and (t.get('broadcasted') or {}).get('conflictInput', {}).get('spentBy') == CONFLICT_SPENDER
+              and 'stale' not in [e.get('type') for e in t.get('history', [])], (t or {}).get('broadcasted'))
+        # Force a real second refresh (backdate checkedAt past the
+        # endpoint's 60 s window): the conflict re-checks (it is
+        # transient) but the stale one is never re-checked — and
+        # never re-logged — once recorded.
+        stj = load_state_file()
+        by_id = {t.get('id'): t for t in stj.get('bitcoin', {}).get('txs', [])}
+        for tx_id in (stale28, conflict28):
+            by_id[tx_id]['broadcasted']['checkedAt'] = FROZEN28
+        save_state_file(stj)
+        s, r = req('GET', '/api/bitcoin/confirmations')
+        check('28 refresh again: the endpoint runs', s == 200, (s, r))
+        t = state_tx(stale28)
+        check('28 stale: the second refresh logs no duplicate stale event',
+              t is not None and [e.get('type') for e in t.get('history', [])].count('stale') == 1, (t or {}).get('history'))
+        t = state_tx(conflict28)
+        check('28 conflict: the second refresh still reads conflict',
+              t is not None and (t.get('broadcasted') or {}).get('conflictInput', {}).get('spentBy') == CONFLICT_SPENDER, (t or {}).get('broadcasted'))
+        delete_all_txs()
         # Cleanup: cadence back to 60.
         s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 60})
         check('27 cleanup: cadence restored to 60 s', s == 200, (s, r))

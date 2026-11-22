@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Standby 0.8.0 local verification: per-transaction triggers.
-Boots the branch-0.8.7 app (port 3448), the check-in receiver
+Boots the branch-0.8.7.1 app (port 3448), the check-in receiver
 (3449), and two mempool stubs — primary 18245 (STUB_CONFLICT_MODE=
 unconfirmed) and secondary 18246 (confirmed) — and checks the 0.8.0
 trigger work: trigger field + validation at add/edit, legacy migration
@@ -341,7 +341,7 @@ def main():
 
         # --- 1. health + endpoints -------------------------------------
         s, h = req('GET', '/api/health')
-        check('1 health reports version 0.8.7', h.get('version') == '0.8.7', h)
+        check('1 health reports version 0.8.7.1', h.get('version') == '0.8.7.1', h)
         s, st = req('GET', '/api/state')
         check('1 fresh state: no global threshold in settings, no txs',
               'thresholdDays' not in st.get('settings', {}) and st.get('bitcoin', {}).get('txs') == [], st.get('settings'))
