@@ -1,5 +1,5 @@
 // Standby 0.8.2 DOM checks — block-height, set-date, and fee-market triggers.
-// Runs public/app.js from branch-0.8.7.1 in Node with the
+// Runs public/app.js from branch-0.8.7.2 in Node with the
 // minimal DOM shim from dom_check094.js (same El class, same
 // document/window/fetch/setInterval stubs) and verifies the 0.8.0
 // trigger UI only — the 094 suite still owns everything else.
@@ -2927,8 +2927,8 @@ function check(name, cond, detail) {
     && idx.indexOf('Installed version:') !== -1 && idx.indexOf('id="app-version"') !== -1, '');
   check('app version static: the card has no "?" button and no details (just the version line)',
     idx.indexOf('id="help-version"') === -1, '');
-  check('app version: the installed version reads 0.8.7.1 (from /api/health)',
-    els['app-version'] && els['app-version'].textContent === '0.8.7.1',
+  check('app version: the installed version reads 0.8.7.2 (from /api/health)',
+    els['app-version'] && els['app-version'].textContent === '0.8.7.2',
     els['app-version'] && els['app-version'].textContent);
   setFilter('general');
   check('app version: the card is visible under General',
@@ -4492,6 +4492,49 @@ function check(name, cond, detail) {
     if (!line28h[label]) continue;
     const delL = await fetch('/api/bitcoin/txs/' + line28h[label], { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
     check('broadcast line: ' + label + ' removed', delL.status === 200, 'status=' + delL.status);
+  }
+  await rerender(appJs);
+
+  // --- §28i (0.8.7.2): an archived broadcast line shows the derived count ---
+  // A broadcast tx past 6 confirmations is never re-queried per-tx,
+  // but its line no longer freezes at the stored snapshot: the
+  // confirmations poll derives it from the settled block height +
+  // the current stub tip (900,000 - 899,993 + 1 = 8), while the
+  // stored snapshot stays 7. The line first renders the stored 7
+  // from state, then the load's confirmations poll corrects it —
+  // so wait for the derived count instead of reading once.
+  const addD28i = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ txHex: craftHex(24, 113004), label: 'Dom Line Derived', trigger: { type: 'manual', params: {} } }) });
+  check('broadcast line: Dom Line Derived adds', addD28i.status === 201, 'status=' + addD28i.status);
+  const derivedId28i = addD28i.status === 201 ? (await addD28i.json()).tx.id : null;
+  const derivedNow28i = new Date().toISOString();
+  const derivedSt28i = await (await fetch('/api/state')).json();
+  const derivedTxid28i = (derivedSt28i.bitcoin.txs || []).find((t) => t.label === 'Dom Line Derived');
+  setDomTxFate('Dom Line Derived',
+    { status: 'broadcast', kind: 'release', trigger: 'manual', txid: derivedTxid28i ? derivedTxid28i.txid : '', method: 'mempool.space', broadcastedAt: derivedNow28i },
+    { txid: derivedTxid28i ? derivedTxid28i.txid : '', broadcastedAt: derivedNow28i, method: 'mempool.space', confirmations: 7, blockHeight: 899993, found: true, checkedAt: derivedNow28i });
+  await rerender(appJs);
+  let derivedLine28i = null;
+  for (let i = 0; i < 20; i++) {
+    derivedLine28i = sentLineOf28h(cardByTitle('Dom Line Derived'));
+    if (derivedLine28i && derivedLine28i.text.indexOf('8 confirmations') !== -1) break;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  check('broadcast line: the archived tx renders a sent line', !!derivedLine28i, derivedLine28i ? derivedLine28i.text : 'no line');
+  check('broadcast line: the archived line shows the derived count (8), not the stored 7',
+    !!derivedLine28i && derivedLine28i.text.indexOf('8 confirmations') !== -1
+    && derivedLine28i.text.indexOf('7 confirmations') === -1,
+    derivedLine28i ? derivedLine28i.text : 'no line');
+  check('broadcast line: the derived line is still green (tx-sent)',
+    !!derivedLine28i && derivedLine28i.cls.split(' ').includes('tx-sent'), derivedLine28i ? derivedLine28i.cls : 'no line');
+  const derivedStored28i = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')).bitcoin.txs.find((t) => t.label === 'Dom Line Derived');
+  check('broadcast line: the stored snapshot is untouched (still 7, checkedAt still the seeded value)',
+    !!derivedStored28i && (derivedStored28i.broadcasted || {}).confirmations === 7
+    && (derivedStored28i.broadcasted || {}).checkedAt === derivedNow28i,
+    derivedStored28i ? JSON.stringify(derivedStored28i.broadcasted) : 'no tx');
+  if (derivedId28i) {
+    const delD = await fetch('/api/bitcoin/txs/' + derivedId28i, { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
+    check('broadcast line: Dom Line Derived removed', delD.status === 200, 'status=' + delD.status);
   }
   await rerender(appJs);
 

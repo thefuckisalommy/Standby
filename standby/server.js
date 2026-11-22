@@ -59,7 +59,7 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 // (last.json). Absent on a plain `node server.js` run — the key
 // feature is dormant then; every file access is guarded.
 const CHECKIN_DIR = process.env.CHECKIN_DIR || '/checkin';
-const VERSION = '0.8.7.1';
+const VERSION = '0.8.7.2';
 const MAX_BODY = 1024 * 1024; // 1 MB
 
 const MIME = {
@@ -3144,6 +3144,24 @@ async function refreshConfirmations(state, maxAgeSec) {
   const nowMs = Date.now();
   const out = [];
   const updates = [];
+  // (0.8.7.2) The current tip for deriving archived counts, resolved
+  // lazily on the first archived tx that needs it — one shared
+  // lookup for the whole refresh, and none at all when no archived
+  // tx carries a block height. A cache hit costs no request; a miss
+  // costs one primary-first tip fetch through the same shared
+  // per-tick cache the block-height rule uses (and warms it for the
+  // tick). Null when the tip cannot be read — the stored snapshot
+  // is returned instead, exactly as before.
+  let derivedTip = undefined; // undefined = not yet resolved, null = unavailable
+  async function tipForDerived() {
+    if (derivedTip !== undefined) return derivedTip;
+    derivedTip = null;
+    try {
+      const comb = bitcoin.combineTipHeights(await fetchTipHeightsCached(endpoints, checkCadenceSecondsOf(state.settings)));
+      if (comb.valid && typeof comb.tip === 'number') derivedTip = comb.tip;
+    } catch (e) { /* tip unavailable — fall back to the stored count */ }
+    return derivedTip;
+  }
   for (const tx of (state.bitcoin.txs || []).filter((t) => t.broadcasted)) {
     const b = tx.broadcasted;
     // (0.8.5) A broadcast tx at ARCHIVED_CONFIRMATIONS is done —
@@ -3151,8 +3169,22 @@ async function refreshConfirmations(state, maxAgeSec) {
     // (pending, unconfirmed, not-found) it still refreshes
     // hourly: 2 requests each (tx status + tip height,
     // primary-first).
+    // (0.8.7.2) But "never re-queried" froze the DISPLAYED count
+    // at the last stored snapshot (a Nov 13 tx still read 1043
+    // when the true count was 1288). The stored snapshot is still
+    // the >= 6 gate and is never overwritten — but what the
+    // endpoint returns, and the card shows, is derived from the
+    // settled confirming block height + the current tip. The
+    // height is only trusted once 6-deep (a single sighting would
+    // bake in reorg risk), and the count never goes backwards:
+    // the stored snapshot is the floor.
     if (typeof b.confirmations === 'number' && b.confirmations >= ARCHIVED_CONFIRMATIONS) {
-      out.push({ id: tx.id, txid: tx.txid, confirmations: b.confirmations, blockHeight: b.blockHeight ?? null, found: b.found !== false, checkedAt: b.checkedAt, staleInput: b.staleInput || null, conflictInput: b.conflictInput || null });
+      let shown = b.confirmations;
+      if (typeof b.blockHeight === 'number') {
+        const tip = await tipForDerived();
+        if (typeof tip === 'number') shown = Math.max(b.confirmations, tip - b.blockHeight + 1);
+      }
+      out.push({ id: tx.id, txid: tx.txid, confirmations: shown, blockHeight: b.blockHeight ?? null, found: b.found !== false, checkedAt: b.checkedAt, staleInput: b.staleInput || null, conflictInput: b.conflictInput || null });
       continue;
     }
     const ageSec = b.checkedAt ? (nowMs - new Date(b.checkedAt).getTime()) / 1000 : Infinity;

@@ -7,7 +7,7 @@ Boots the branch-0.8.5 app (port 3438), the check-in receiver
 (both fixed: tip height 900000, economy fee 1 sat/vB, price 98200)
 — and checks the 0.8.1 trigger work:
 
-  1. health reports version 0.8.7.1.
+  1. health reports version 0.8.7.2.
   2. Block-height trigger: validation at add (bad heights rejected,
      good ones accepted), checkTriggerNow (a height already reached
      fires + warns, a future height watches), evaluation via the
@@ -153,6 +153,12 @@ Boots the branch-0.8.5 app (port 3438), the check-in receiver
      spending txid and block height, logged once), an
      unconfirmed spend records a conflict, and a clean check
      clears a conflict; an already-stale tx is never re-checked.
+  29. Archived broadcast counts are derived (0.8.7.2): past 6
+     confirmations the endpoint returns tip - blockHeight + 1
+     from the shared per-tick tip cache instead of the frozen
+     stored snapshot — the count follows the tip, the stored
+     snapshot is never overwritten, and with no tip available
+     the stored count is returned.
 
 Ports: app 3438, receiver 3439, stubs 18235/18236 — no collision
 with the 095 suite (app 3388, receiver 3389, stubs 18175/18176) or
@@ -341,7 +347,7 @@ def main():
 
         # --- 1. health + version ----------------------------------------
         s, h = req('GET', '/api/health')
-        check('1 health reports version 0.8.7.1', h.get('version') == '0.8.7.1', h)
+        check('1 health reports version 0.8.7.2', h.get('version') == '0.8.7.2', h)
 
         # --- 2. block-height trigger --------------------------------------
         # Validation at add: bad heights rejected, good ones accepted.
@@ -3675,6 +3681,85 @@ def main():
         # Cleanup: cadence back to 60.
         s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 60})
         check('27 cleanup: cadence restored to 60 s', s == 200, (s, r))
+        delete_all_txs()
+
+        # --- 29. archived broadcast txs show a derived confirmation count (0.8.7.2) ---
+        # A broadcast tx past 6 confirmations is never re-queried
+        # per-tx — but its displayed count no longer freezes at the
+        # last stored snapshot (the live "Mara" tx still read 1043
+        # when the true count was 1288). The confirmations endpoint
+        # now derives the count from the settled confirming block
+        # height + the current tip, from the shared per-tick tip
+        # cache — one tip fetch for all archived txs on a cold
+        # cache, zero on a hit. The gate is unchanged: below 6 the
+        # tx is still re-queried per-tx, and the stored snapshot is
+        # never overwritten with the derived number.
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 3600})
+        check('29 setup: cadence parked at 3600 s', s == 200, (s, r))
+        s, r = req('POST', '/__test__/tip', {'height': STUB_TIP}, base=STUB_BASE_P)
+        s, r = req('POST', '/__test__/tip', {'height': STUB_TIP}, base=STUB_BASE_S)
+        s, r = req('POST', '/__test__/tip-fail', {'fail': False}, base=STUB_BASE_P)
+        s, r = req('POST', '/__test__/tip-fail', {'fail': False}, base=STUB_BASE_S)
+        check('29 setup: app restarted for a cold tip cache', restart())
+        FROZEN29 = iso_ago(hours=2)
+        s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft_prev(FINNEY, 3, 112900), 'label': 'Derived Arch', 'notes': '', 'trigger': {'type': 'manual', 'params': {}}})
+        check('29 derived: the FINNEY:3 tx adds', s == 201, (s, r))
+        arch29 = r['tx']['id'] if s == 201 else None
+        stj = load_state_file()
+        by_id = {t.get('id'): t for t in stj.get('bitcoin', {}).get('txs', [])}
+        arch_tx = by_id.get(arch29)
+        arch_tx['broadcasted'] = {'txid': arch_tx.get('txid'), 'broadcastedAt': FROZEN29, 'method': 'mempool.space',
+                                  'confirmations': 7, 'blockHeight': 899993, 'found': True, 'checkedAt': FROZEN29}
+        arch_tx['release'] = {'status': 'broadcast', 'kind': 'release', 'trigger': 'manual',
+                              'txid': arch_tx.get('txid'), 'method': 'mempool.space', 'broadcastedAt': FROZEN29}
+        save_state_file(stj)
+        check('29 setup: app restarted with the seeded archived tx', restart())
+        time.sleep(3)
+        s, r = req('GET', '/api/bitcoin/confirmations')
+        check('29 refresh: the confirmations endpoint runs', s == 200, (s, r))
+        conf_by_id = {c.get('id'): c for c in r.get('confirmations', [])}
+        check('29 derived: the endpoint returns tip - block + 1 (900000 - 899993 + 1 = 8), not the stored 7',
+              conf_by_id.get(arch29, {}).get('confirmations') == 8
+              and conf_by_id.get(arch29, {}).get('blockHeight') == 899993
+              and conf_by_id.get(arch29, {}).get('found') is True, conf_by_id.get(arch29))
+        t = state_tx(arch29)
+        check('29 stored: the stored snapshot is untouched (still 7, checkedAt still frozen)',
+              t is not None and (t.get('broadcasted') or {}).get('confirmations') == 7
+              and (t.get('broadcasted') or {}).get('checkedAt') == FROZEN29, (t or {}).get('broadcasted'))
+        # Move the stub tip forward; restart (cold tip cache — the
+        # TTL is the parked 3600 s cadence); the derived count must
+        # follow the tip while the stored snapshot stays put.
+        s, r = req('POST', '/__test__/tip', {'height': 900010}, base=STUB_BASE_P)
+        s, r = req('POST', '/__test__/tip', {'height': 900010}, base=STUB_BASE_S)
+        check('29 setup: app restarted for a cold tip cache after the tip move', restart())
+        time.sleep(3)
+        s, r = req('GET', '/api/bitcoin/confirmations')
+        check('29 refresh after tip move: the endpoint runs', s == 200, (s, r))
+        conf_by_id = {c.get('id'): c for c in r.get('confirmations', [])}
+        check('29 derived: the count follows the tip (900010 - 899993 + 1 = 18)',
+              conf_by_id.get(arch29, {}).get('confirmations') == 18, conf_by_id.get(arch29))
+        t = state_tx(arch29)
+        check('29 stored: the stored snapshot is still 7 after the tip move',
+              t is not None and (t.get('broadcasted') or {}).get('confirmations') == 7, (t or {}).get('broadcasted'))
+        # Fallback: with no tip available at all (both stubs fail
+        # the tip read), the endpoint returns the stored count.
+        s, r = req('POST', '/__test__/tip-fail', {'fail': True}, base=STUB_BASE_P)
+        s, r = req('POST', '/__test__/tip-fail', {'fail': True}, base=STUB_BASE_S)
+        check('29 setup: app restarted with both stubs failing the tip read', restart())
+        time.sleep(3)
+        s, r = req('GET', '/api/bitcoin/confirmations')
+        check('29 refresh with no tip: the endpoint runs', s == 200, (s, r))
+        conf_by_id = {c.get('id'): c for c in r.get('confirmations', [])}
+        check('29 fallback: with no tip available the endpoint returns the stored 7',
+              conf_by_id.get(arch29, {}).get('confirmations') == 7, conf_by_id.get(arch29))
+        # Cleanup: stubs back to the fixed tip, tip reads working,
+        # cadence back to 60.
+        s, r = req('POST', '/__test__/tip-fail', {'fail': False}, base=STUB_BASE_P)
+        s, r = req('POST', '/__test__/tip-fail', {'fail': False}, base=STUB_BASE_S)
+        s, r = req('POST', '/__test__/tip', {'height': STUB_TIP}, base=STUB_BASE_P)
+        s, r = req('POST', '/__test__/tip', {'height': STUB_TIP}, base=STUB_BASE_S)
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 60})
+        check('29 cleanup: settings and cadence restored', s == 200, (s, r))
         delete_all_txs()
     finally:
         for p in list(v.procs):
