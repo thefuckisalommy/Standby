@@ -169,9 +169,9 @@ STUB = os.path.join(_TESTDIR, 'stubs.js')
 
 def app_dir(root, candidates=('standby', 'branch-split', 'branch-speedup', 'branch-0.8.7.2', 'branch-0.8.7.1', 'branch-0.8.7', 'branch-0.8.6', 'branch-0.8.5', 'branch-0.8.4', 'branch-0.8.3', 'app')):
     """The app dir under a root: standby/ in a repo checkout,
+    branch-split/ in the goal dir (0.8.7.4 working copy),
     branch-speedup/ in the goal dir (test-infra working copy),
-    branch-0.8.7.2/ in the goal dir (0.8.7.2 working copy),
-    branch-0.8.7.1/ the 0.8.7.1 copy, branch-0.8.7/ the 0.8.7 copy, branch-0.8.6/ the 0.8.6 copy,
+    branch-0.8.7.2/ the 0.8.7.2 copy, branch-0.8.7.1/ the 0.8.7.1 copy, branch-0.8.7/ the 0.8.7 copy, branch-0.8.6/ the 0.8.6 copy,
     branch-0.8.5/ the 0.8.5 copy, branch-0.8.4/ the 0.8.4 copy,
     branch-0.8.3/ the 0.8.3 copy, app/ for the 0.7.22-era layout this file's own suite boots."""
     for cand in candidates:

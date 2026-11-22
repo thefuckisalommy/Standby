@@ -5,8 +5,10 @@ manifestVersion: 1
 id: standby
 category: automation
 name: Standby
-version: "0.8.7.3"
+version: "0.8.7.4"
 releaseNotes: |-
+  0.8.7.4 — A staged transaction whose inputs were spent elsewhere now reads stale on its own: the hourly check re-tests every armed staged transaction's inputs, so one that can no longer broadcast is marked stale — in red — instead of sitting at Ready until a dry run or a firing trigger finds out. An unconfirmed spend still only warns; it never marks a transaction stale.
+
   0.8.7.3 — The server is now split into modules: the single large server file is divided into focused files — one each for configuration, trigger rules, release evaluation, the API, check-ins, and the rest — with a small entry point that starts them. Nothing about how the app works changes: same routes, same settings, same state file. It is a code-organisation change so each piece is easier to work on separately.
 
   0.8.7.2 — The confirmation count on an old broadcast no longer freezes: once a transaction is 6 confirmations deep, the card derives the count from its confirming block height plus the current tip instead of repeating the last stored snapshot — so a transaction broadcast days ago keeps counting up with no extra requests to the node. Below 6 confirmations nothing changes: the node is still asked every hour until the transaction is 6 deep, because a single sighting is not trusted.

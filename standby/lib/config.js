@@ -24,7 +24,7 @@ const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 // (last.json). Absent on a plain `node server.js` run — the key
 // feature is dormant then; every file access is guarded.
 const CHECKIN_DIR = process.env.CHECKIN_DIR || '/checkin';
-const VERSION = '0.8.7.3';
+const VERSION = '0.8.7.4';
 const MAX_BODY = 1024 * 1024; // 1 MB
 
 module.exports = { PORT, STARTUP_TICK_MS, DATA_DIR, PUBLIC_DIR, CHECKIN_DIR, VERSION, MAX_BODY };
