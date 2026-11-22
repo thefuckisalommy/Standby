@@ -79,7 +79,6 @@ jobs:
   dom:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: api
     env:
       TZ: America/New_York
     steps:
