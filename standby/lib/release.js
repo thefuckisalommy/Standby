@@ -667,6 +667,72 @@ async function refreshConfirmations(state, maxAgeSec) {
   return out;
 }
 
+// Staged-transaction freshness (0.8.7.4). A staged tx whose inputs
+// were spent elsewhere used to go unnoticed until a dry run or the
+// broadcast-time gate: refreshConfirmations only looks at
+// broadcasted txs, and the tick only evaluates trigger rules —
+// a UTXO rule watches the outpoint the owner named, not the tx's
+// own inputs. So the hourly tick re-checks every live staged tx's
+// inputs through the same shared per-outpoint cache as the other
+// paths. A confirmed spend by another tx marks it stale — the same
+// record + history + set note as the release-time set-stale path
+// (kind 'release'; an already-stale tx is never re-checked, a
+// confirmed spend is a chain fact). An unconfirmed spend changes
+// nothing: it is a warning only, and the broadcast-time gate is
+// the arbiter — same as the release path. A tx whose own txid is
+// the spender is likewise left alone here (the dry run /
+// broadcast-time recognition owns that case). No live staged txs
+// → zero network requests. Returns [{ id, txid, action: 'stale',
+// error }] for the txs it marked.
+async function refreshStagedFreshness(state) {
+  const endpoints = bitcoin.endpointsFor(state.settings);
+  const now = new Date();
+  // Live staged txs only: never broadcast, not terminal (a stale
+  // record is terminal — see terminalSkipReason), and armed — a
+  // standalone tx's own enabled, or its set's enabled for a
+  // member (the set's arm gates every member). Disarmed txs are
+  // not checked: they cannot broadcast, and the next hourly tick
+  // after re-arming picks them up.
+  const setByTxId = new Map();
+  for (const set of (state.bitcoin.sets || [])) {
+    for (const id of (set.txIds || [])) setByTxId.set(id, set);
+  }
+  const live = (state.bitcoin.txs || []).filter((tx) => {
+    if (tx.broadcasted) return false;
+    if (terminalSkipReason(tx)) return false;
+    const set = setByTxId.get(tx.id);
+    if (set) return !!set.enabled;
+    return !!tx.enabled;
+  });
+  if (!live.length) return [];
+  const staleFound = [];
+  for (const tx of live) {
+    let chk = null;
+    try { chk = await bitcoin.checkInputsUnspent(bitcoin.parseTx(tx.hex), endpoints, checkCadenceSecondsOf(state.settings) * 1000); }
+    catch (e) { console.error('staged freshness check failed for', (tx.label || tx.id) + ':', e.message); continue; }
+    if (chk && chk.spent && chk.spent.length) {
+      staleFound.push({ tx, desc: chk.spent.map((i) => i.prevTxid.slice(0, 12) + ':' + i.prevVout).join(', '), method: chk.checkedVia || 'primary' });
+    }
+    // conflict / own / unknown: no state change (see header).
+  }
+  if (!staleFound.length) return [];
+  // Merge into FRESH state (see refreshConfirmations): an edit
+  // landing while the lookups were on the network would otherwise
+  // be clobbered by the save of this stale copy. Guards
+  // re-evaluated here, exactly as the set-stale path does.
+  const fresh = store.loadState(DATA_DIR);
+  for (const sf of staleFound) {
+    const fm = (fresh.bitcoin.txs || []).find((t) => t.id === sf.tx.id);
+    if (!fm || fm.broadcasted || (fm.release && fm.release.status === 'stale')) continue;
+    const err = 'inputs spent: ' + sf.desc;
+    fm.release = { status: 'stale', kind: 'release', trigger: releaseTriggerFor(fresh, fm), txid: fm.txid, method: sf.method, lastAttemptAt: now.toISOString(), error: err };
+    pushHistory(fm, 'stale', err);
+    noteSetMemberStale(fresh, fm, err);
+  }
+  store.saveState(DATA_DIR, fresh);
+  return staleFound.map((sf) => ({ id: sf.tx.id, txid: sf.tx.txid, action: 'stale', error: 'inputs spent: ' + sf.desc }));
+}
+
 // Refresh the MARA-waiting transactions (0.7.16). For every tx
 // whose release status is 'submitted-slipstream' — submitted to MARA
 // Slipstream, not yet visible in the public mempool — check BOTH:
@@ -1045,6 +1111,13 @@ async function runHourlyTick() {
     const st = store.loadState(DATA_DIR);
     await refreshConfirmations(st, 0);
   } catch (e) { console.error('confirmations refresh failed:', e); }
+  // Staged freshness (0.8.7.4): a staged tx whose inputs were
+  // spent elsewhere reads stale on its own now, instead of
+  // waiting for a dry run or a firing trigger to notice.
+  try {
+    const st = store.loadState(DATA_DIR);
+    await refreshStagedFreshness(st);
+  } catch (e) { console.error('staged freshness refresh failed:', e); }
   // MARA-waiting transactions (0.7.16): a Slipstream submission
   // that is not yet visible publicly needs its status kept current
   // even while the clock is on-track — the refresh runs regardless
@@ -1195,4 +1268,4 @@ function rearmFullTick() {
   fullTickTimer = setInterval(runFullTick, seconds * 1000);
 }
 
-module.exports = { releaseEvaluationInFlight, BROADCAST_BACKOFF_MS, ARCHIVED_CONFIRMATIONS, terminalSkipReason, evaluateRelease, storedRuleOutcomes, storedCombinedDue, evaluateReleaseInner, refreshConfirmations, refreshMaraWaiting, refreshPublicFallbacks, FEE_PEAK_REFRESH_MS, FEE_PEAK_MAX_AGE_MS, refreshFeePeakIfStale, FEE_CURRENT_REFRESH_MS, FEE_CURRENT_MAX_AGE_MS, refreshCurrentFeesIfStale, currentFeesForState, feePeakForState, runFullTick, runHourlyTick, mergeNodeStamps, testNodes, recomputeStoredFees, fullTickTimer, rearmFullTick };
+module.exports = { releaseEvaluationInFlight, BROADCAST_BACKOFF_MS, ARCHIVED_CONFIRMATIONS, terminalSkipReason, evaluateRelease, storedRuleOutcomes, storedCombinedDue, evaluateReleaseInner, refreshConfirmations, refreshStagedFreshness, refreshMaraWaiting, refreshPublicFallbacks, FEE_PEAK_REFRESH_MS, FEE_PEAK_MAX_AGE_MS, refreshFeePeakIfStale, FEE_CURRENT_REFRESH_MS, FEE_CURRENT_MAX_AGE_MS, refreshCurrentFeesIfStale, currentFeesForState, feePeakForState, runFullTick, runHourlyTick, mergeNodeStamps, testNodes, recomputeStoredFees, fullTickTimer, rearmFullTick };

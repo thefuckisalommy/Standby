@@ -7,7 +7,7 @@ Boots the branch-0.8.5 app (port 3438), the check-in receiver
 (both fixed: tip height 900000, economy fee 1 sat/vB, price 98200)
 — and checks the 0.8.1 trigger work:
 
-  1. health reports version 0.8.7.3.
+  1. health reports version 0.8.7.4.
   2. Block-height trigger: validation at add (bad heights rejected,
      good ones accepted), checkTriggerNow (a height already reached
      fires + warns, a future height watches), evaluation via the
@@ -159,6 +159,15 @@ Boots the branch-0.8.5 app (port 3438), the check-in receiver
      stored snapshot — the count follows the tip, the stored
      snapshot is never overwritten, and with no tip available
      the stored count is returned.
+  30. Staged freshness on the hourly tick (0.8.7.4): the hourly
+     refresh re-checks every live staged tx's inputs — a
+     confirmed spend marks it stale (release record kind
+     'release', one 'stale' history event, a note on the set's
+     shared history for a member, and the set stays live for
+     its non-stale members), an unconfirmed spend changes
+     nothing, and an already-stale tx is never re-checked
+     (the stub outspend counters prove zero requests on a
+     second hourly tick with no live staged txs left).
 
 Ports: app 3438, receiver 3439, stubs 18235/18236 — no collision
 with the 095 suite (app 3388, receiver 3389, stubs 18175/18176) or
@@ -446,7 +455,7 @@ def main():
 
         # --- 1. health + version ----------------------------------------
         s, h = req('GET', '/api/health')
-        check('1 health reports version 0.8.7.3', h.get('version') == '0.8.7.3', h)
+        check('1 health reports version 0.8.7.4', h.get('version') == '0.8.7.4', h)
 
         # --- 2. block-height trigger --------------------------------------
         # Validation at add: bad heights rejected, good ones accepted.
@@ -2502,6 +2511,18 @@ def main():
         check('21 crash: stub price lowered again after the restart (primary)', s == 200, (s, r))
         s, r = req('POST', '/__test__/price', {'usd': 80000}, base=STUB_BASE_S)
         check('21 crash: stub price lowered again after the restart (secondary)', s == 200, (s, r))
+        # (0.8.7.4) The startup tick's freshness refresh (§30)
+        # checked the crash tx's input against the PRE-restart
+        # stub answers — OWN_SPEND is unspent by default — and
+        # cached it; the stub restart above just changed what the
+        # node says underneath the running app. Clear the outspend
+        # cache so the dry run sees the stub's new own-anchor
+        # answer. In production the node never rewrites an
+        # outpoint's answer, and a cached answer inside the
+        # cadence TTL is the accepted design — this clear is for
+        # the stub's answer flip, not a product gap.
+        s, r = req('POST', '/api/__test__/clear-caches', {'only': ['outspend']})
+        check('21 crash: outspend cache cleared so the dry run sees the stub restart', s == 200, (s, r))
         s, r = req('POST', '/api/broadcast/test', {})
         check('21 crash: dry run runs (200)', s == 200, (s, r))
         drv = [x for x in (r.get('results') or []) if x.get('id') == crash_id]
@@ -3371,10 +3392,14 @@ def main():
         # members, each with its own past setdate trigger that
         # WOULD fire standalone, attached to a set whose one
         # shared rule is a UTXO watch on FINNEY:1 (unspent). The
-        # startup tick evaluates the set once — one singular
-        # outspend request, primary only — and the members' own
-        # triggers are never evaluated (their triggerState stays
-        # null, nothing broadcasts).
+        # startup tick evaluates the set once — and (0.8.7.4) the
+        # hourly freshness refresh checks the three member inputs
+        # first, so the rule reads FINNEY:1 from the shared cache:
+        # three singular requests total, primary only, no batch —
+        # and the members' own triggers are never evaluated (their
+        # triggerState stays null, nothing broadcasts). The rule's
+        # own one-request cost is re-proved on a cold cache just
+        # below, via a release check.
         s, r = add_tx_vout('Set 27a m1', {'type': 'setdate', 'params': {'fireAt': '2020-01-01T00:00:00.000Z'}}, 1, 112700, trigger_confirmed=True)
         check('27 single: member 1 adds (own past setdate trigger)', s == 201, (s, r))
         m1 = r['tx']['id'] if s == 201 else None
@@ -3404,8 +3429,16 @@ def main():
         bc0 = broadcast_counts()
         check('27 single: app restarted (startup tick is the measured evaluation)', restart())
         p1, s1, bp1, bs1 = outspend_counts()
-        check('27 single: one shared UTXO rule costs ONE singular request, primary only, no batch',
-              (p1, s1, bp1, bs1) == (p0 + 1, s0, bp0, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        # (0.8.7.4) The startup tick now does two things: the
+        # hourly freshness refresh (§30) checks each live staged
+        # member input — FINNEY:1, FINNEY:2, SECOND:0 — three
+        # singular requests, primary only, no batch — and the
+        # set's UTXO rule on FINNEY:1 then reads the shared cache
+        # the refresh populated, costing zero extra requests. One
+        # request per outpoint still holds, through the cache
+        # rather than a second lookup; the tick total is three.
+        check('27 single: startup tick costs THREE singular requests (freshness refresh of the 3 member inputs), primary only, no batch',
+              (p1, s1, bp1, bs1) == (p0 + 3, s0, bp0, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
         bc1 = broadcast_counts()
         check('27 single: the startup tick broadcast nothing', bc1 == bc0, (bc0, bc1))
         x = state_set(set27a)
@@ -3415,6 +3448,19 @@ def main():
             t = state_tx(mid)
             check('27 single: member own trigger never evaluated (triggerState stays null)',
                   t is not None and t.get('triggerState') is None, (t or {}).get('triggerState'))
+        # (0.8.7.4) The rule itself still costs exactly one
+        # request when the cache is cold: clear the outspend cache
+        # and run a release check — no freshness refresh runs on a
+        # release check, so the set rule's FINNEY:1 lookup is the
+        # only outspend request the check makes.
+        s, r = req('POST', '/api/__test__/clear-caches', {'only': ['outspend']})
+        check('27 single: outspend cache cleared for the cold rule check', s == 200, (s, r))
+        p0, s0, bp0, bs0 = outspend_counts()
+        s, r, res = release_results()
+        check('27 single: release check runs (cold cache)', s == 200, (s, r))
+        p1, s1, bp1, bs1 = outspend_counts()
+        check('27 single: the set rule alone costs ONE singular request on a cold cache, primary only, no batch',
+              (p1, s1, bp1, bs1) == (p0 + 1, s0, bp0, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
         # (b) Fire broadcasts ALL members: retarget the set to a
         # past setdate, then a manual release check sends all
         # three through the per-tx broadcast path.
@@ -3932,6 +3978,97 @@ def main():
         s, r = req('POST', '/__test__/tip', {'height': STUB_TIP}, base=STUB_BASE_S)
         s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 60})
         check('29 cleanup: settings and cadence restored', s == 200, (s, r))
+        delete_all_txs()
+
+        # --- 30. staged txs go stale on the hourly refresh (0.8.7.4) ---
+        # A staged tx whose inputs were spent elsewhere used to sit
+        # at Ready until a dry run or a firing trigger noticed:
+        # refreshConfirmations only looks at broadcasted txs, and
+        # the tick only evaluates trigger rules. The hourly tick
+        # now re-checks every live staged tx's inputs — a
+        # confirmed spend marks it stale (release record kind
+        # 'release', one 'stale' history event, a note on the
+        # set's shared history for a member), an unconfirmed
+        # spend changes nothing, and an already-stale tx is never
+        # re-checked (the outspend counters prove it). The
+        # restart's 5 s startup tick runs the hourly refresh once,
+        # so the verdicts are already recorded when the state
+        # below is read.
+        CONFLICT = 'cc' * 32
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 3600})
+        check('30 setup: cadence parked at 3600 s', s == 200, (s, r))
+        check('30 setup: caches cleared for a cold cache', clear_caches())
+        s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft_prev(FINNEY, 0, 113000), 'label': 'Stale staged', 'notes': '', 'trigger': {'type': 'manual', 'params': {}}})
+        check('30 stale: the FINNEY:0 staged tx adds', s == 201, (s, r))
+        stale30 = r['tx']['id'] if s == 201 else None
+        s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft_prev(FINNEY, 1, 113001), 'label': 'Live staged', 'notes': '', 'trigger': {'type': 'manual', 'params': {}}})
+        check('30 live: the FINNEY:1 staged tx adds', s == 201, (s, r))
+        live30 = r['tx']['id'] if s == 201 else None
+        s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft_prev(CONFLICT, 0, 113002), 'label': 'Conflict staged', 'notes': '', 'trigger': {'type': 'manual', 'params': {}}})
+        check('30 conflict: the CONFLICT:0 staged tx adds', s == 201, (s, r))
+        conflict30 = r['tx']['id'] if s == 201 else None
+        # A set with one stale member and one live member: the
+        # member goes stale on its own history AND the set's
+        # shared history, and the set stays live for the rest.
+        s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft_prev(FINNEY, 0, 113003), 'label': 'Set stale m', 'notes': '', 'trigger': {'type': 'manual', 'params': {}}})
+        check('30 set: the stale member adds', s == 201, (s, r))
+        sm30 = r['tx']['id'] if s == 201 else None
+        s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft_prev(FINNEY, 1, 113004), 'label': 'Set live m', 'notes': '', 'trigger': {'type': 'manual', 'params': {}}})
+        check('30 set: the live member adds', s == 201, (s, r))
+        lm30 = r['tx']['id'] if s == 201 else None
+        s, r = req('POST', '/api/bitcoin/sets', {'label': 'Set 30', 'txIds': [sm30, lm30],
+                  'trigger': {'type': 'manual', 'params': {}}, 'enabled': True})
+        check('30 set: set created with 2 members (201)', s == 201, (s, r))
+        set30 = r.get('set', {}).get('id') if s == 201 else None
+        check('30 setup: app restarted (startup hourly tick is the refresh)', restart())
+        # (Optimization O8) Poll until the refresh's merge has
+        # marked the tx stale — the merge's observable effect,
+        # not a fixed wait.
+        wait_until(lambda: ((state_tx(stale30) or {}).get('release') or {}).get('status') == 'stale', deadline=5)
+        t = state_tx(stale30)
+        check('30 stale: the staged tx is marked stale by the hourly refresh',
+              t is not None and (t.get('release') or {}).get('status') == 'stale'
+              and (t.get('release') or {}).get('kind') == 'release'
+              and (t.get('release') or {}).get('method') == 'primary'
+              and (t.get('release') or {}).get('error', '').startswith('inputs spent: '), (t or {}).get('release'))
+        check('30 stale: exactly one stale history event',
+              t is not None and [e.get('type') for e in t.get('history', [])].count('stale') == 1, (t or {}).get('history'))
+        t = state_tx(live30)
+        check('30 live: the unspent staged tx is untouched (no release record, no stale event)',
+              t is not None and not t.get('release')
+              and 'stale' not in [e.get('type') for e in t.get('history', [])], t)
+        t = state_tx(conflict30)
+        check('30 conflict: the unconfirmed spend changes nothing (no release record, no stale event)',
+              t is not None and not t.get('release')
+              and 'stale' not in [e.get('type') for e in t.get('history', [])], t)
+        t = state_tx(sm30)
+        check('30 set: the stale member is marked stale on its own history',
+              t is not None and (t.get('release') or {}).get('status') == 'stale'
+              and [e.get('type') for e in t.get('history', [])].count('stale') == 1, (t or {}).get('history'))
+        s, st = req('GET', '/api/state')
+        setj = [x for x in st.get('bitcoin', {}).get('sets', []) if x.get('id') == set30]
+        check('30 set: the set notes the stale member on its shared history, once',
+              len(setj) == 1 and [e.get('type') for e in setj[0].get('history', [])].count('stale') == 1, setj[0].get('history') if setj else None)
+        t = state_tx(lm30)
+        check('30 set: the live member is untouched, so the set stays live',
+              t is not None and not t.get('release'), t)
+        # No re-check: delete everything but the stale tx, restart
+        # again — the second startup hourly tick must cost ZERO
+        # singular outspend requests (no live staged txs left to
+        # check, and the stale one is terminal so it is skipped).
+        for tid in (live30, conflict30, sm30, lm30):
+            s, r = req('DELETE', '/api/bitcoin/txs/' + tid)
+        p0, s0, bp0, bs0 = outspend_counts()
+        check('30 no-recheck: app restarted with only the stale tx left', restart())
+        p1, s1, bp1, bs1 = outspend_counts()
+        check('30 no-recheck: the second hourly tick costs ZERO outspend requests for the already-stale tx',
+              (p1, s1, bp1, bs1) == (p0, s0, bp0, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        t = state_tx(stale30)
+        check('30 no-recheck: still exactly one stale history event after the second tick',
+              t is not None and [e.get('type') for e in t.get('history', [])].count('stale') == 1, (t or {}).get('history'))
+        # Cleanup: cadence back to 60.
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 60})
+        check('30 cleanup: settings and cadence restored', s == 200, (s, r))
         delete_all_txs()
     finally:
         for p in list(v.procs):
