@@ -356,9 +356,9 @@
         <button class="help-btn" id="help-fee" data-help="fee" aria-label="About this setting" title="About this setting">?</button>
       </div>
       <label for="set-fee-low">Low Risk at or above</label>
-      <div class="inline-unit" id="set-fee-low-row"><input id="set-fee-low" type="number" min="1" max="10" step="0.5" value="2"><span>× 90-day peak tx fee</span></div>
+      <div class="inline-unit" id="set-fee-low-row"><input id="set-fee-low" type="number" min="1" max="10" step="0.5" value="2"><span>× peak tx fee</span></div>
       <label for="set-fee-medium">High Risk at or below</label>
-      <div class="inline-unit" id="set-fee-medium-row"><input id="set-fee-medium" type="number" min="0.5" max="5" step="0.5" value="1"><span>× 90-day peak tx fee</span></div>
+      <div class="inline-unit" id="set-fee-medium-row"><input id="set-fee-medium" type="number" min="0.5" max="5" step="0.5" value="1"><span>× peak tx fee</span></div>
       <!-- Fee verdict zone bar (0.8.0): always visible under the
            numbers, showing the three zones as a bar that moves
            live as you type. No ticks or axis label below —
@@ -374,6 +374,9 @@
         <button id="btn-save-fee-verdict" class="primary">Save broadcast fee risk</button>
       </p>
       <p id="fee-verdict-msg" class="muted"></p>
+      <!-- Fee history note (0.8.9): what the peak actually covers,
+           or that it is still building — set by renderSettings. -->
+      <p id="fee-history-note" class="muted"></p>
     </div>
 
     <div class="card" id="card-keys">

@@ -102,15 +102,30 @@ const PRICE_PROVIDERS = ['coingecko', 'coinbase', 'binance', 'kraken', 'bitstamp
 const priceState = {};
 // The economy fee this stub serves (0.8.1): settable via POST
 // /__test__/fees { economyFee }, default 1 sat/vB.
+// Test hook (0.8.9, accumulated peak): the fee mode this stub
+// serves — 'mempool' (default) answers /api/v1/fees/recommended,
+// 'esplora' 404s it, so the app falls back to /api/fee-estimates
+// exactly like a plain Esplora node. Settable per stub via POST
+// /__test__/fee-mode { mode }. Per stub process; restarting the
+// stub clears it.
+let feeMode = 'mempool';
 // Test hook (0.8.5, fee fetch): feeRequests counts every
 // /api/v1/fees/recommended request this stub has answered —
 // the node fee fetch and the verdict's hourly current-fees
-// fetch both hit this route (FEE_RATES_URL points at the
-// primary stub), so a suite reads the count as a delta across
-// a controlled window. Runtime-readable via GET
-// /__test__/fee-count below.
+// fetch both hit this route from the configured node, so a suite
+// reads the count as a delta across a controlled window.
+// Runtime-readable via GET /__test__/fee-count below.
 let feeRequests = 0;
 const feeState = { economyFee: 1 };
+// Test hooks (0.8.9 audit fixes): feeDelayMs delays every fee
+// answer (recommended + estimates) by that many ms — mutable via
+// POST /__test__/fee-delay, so a suite can hold a fee fetch in
+// flight while an edit lands. feeEstimatesMap, when set, replaces
+// the default /fee-estimates map — mutable via POST
+// /__test__/fee-estimates-map {map|null}, so a suite can serve a
+// sparse map and prove a missing 144 yields no reading.
+let feeDelayMs = 0;
+let feeEstimatesMap = null;
 // Test hook (0.8.6, UTXO cache/batch): outspendRequests counts
 // every singular /api/tx/:txid/outspend/:vout request this stub
 // has answered, outspendsRequests every batch
@@ -257,44 +272,41 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     return res.end(String(tipHeight));
   }
-  // Fee history (0.7.20): GET /api/v1/mining/blocks/fee-rates/3m
-  // returns a fixed 10-point series whose avgFee_50 medians are
-  // [1,1,1,1,1,1,1,1,2,2] — the 90th percentile is 2.0 sat/vB (the
-  // measured live 3m peak), so an app pointed at a stub via
-  // FEE_RATES_URL always sees feePeak 2.0. Older suites never call
-  // this route, so the stub stays forward-compatible.
-  if (req.method === 'GET' && p === '/api/v1/mining/blocks/fee-rates/3m') {
-    const medians = [1, 1, 1, 1, 1, 1, 1, 1, 2, 2];
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify(medians.map((m, i) => ({
-      avgHeight: TIP - (9 - i), timestamp: 1762800000 + i * 600,
-      avgFee_0: 0, avgFee_10: 1, avgFee_25: 1, avgFee_50: m,
-      avgFee_75: m, avgFee_90: m, avgFee_100: m,
-    }))));
-  }
   // Current recommended fees (0.7.21): GET /api/v1/fees/recommended
   // returns a fixed object whose economyFee is 1 sat/vB — the
-  // measured live floor — so an app pointed at a stub via
-  // FEE_RATES_URL always sees economyFee 1 and a fee below 1
-  // sat/vB reads Critical Risk. Older suites never call this
-  // route, so the stub stays forward-compatible. The economy fee
-  // is settable per stub via POST /__test__/fees { economyFee }
-  // (0.8.1, two-node fee logic) — a suite can drive the two
-  // nodes' fees apart, or make one implausible.
+  // measured live floor — so an app pointed at a stub always sees
+  // economyFee 1 and a fee below 1 sat/vB reads Critical Risk. The
+  // economy fee is settable per stub via POST /__test__/fees
+  // { economyFee } (0.8.1, two-node fee logic) — a suite can drive
+  // the two nodes' fees apart, or make one implausible. In
+  // 'esplora' fee mode (POST /__test__/fee-mode) this route 404s,
+  // so the app falls back to /api/fee-estimates below.
   if (req.method === 'GET' && p === '/api/v1/fees/recommended') {
     feeRequests++;
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ fastestFee: feeState.economyFee, halfHourFee: feeState.economyFee, hourFee: feeState.economyFee, economyFee: feeState.economyFee, minimumFee: 1 }));
+    const answer = () => {
+      if (feeMode === 'esplora') {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'not found (stub esplora mode)' }));
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ fastestFee: feeState.economyFee, halfHourFee: feeState.economyFee, hourFee: feeState.economyFee, economyFee: feeState.economyFee, minimumFee: 1 }));
+    };
+    if (feeDelayMs > 0) return setTimeout(answer, feeDelayMs);
+    return answer();
   }
   // Esplora-style fee estimates (0.8.1): GET /api/fee-estimates
   // returns a map of confirmation target to fee rate — the shape
   // a plain Esplora serves instead of /api/v1/fees/recommended.
   // The node capability test falls back to it when the mempool
-  // fee endpoint 404s. The 6-block rate tracks the settable
+  // fee endpoint 404s. The 144-block rate tracks the settable
   // economy fee, so the same hook drives it.
   if (req.method === 'GET' && p === '/api/fee-estimates') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ '1': feeState.economyFee + 1, '2': feeState.economyFee + 1, '3': feeState.economyFee, '6': feeState.economyFee, '144': feeState.economyFee, '1008': 1 }));
+    const answer = () => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(feeEstimatesMap || { '1': feeState.economyFee + 1, '2': feeState.economyFee + 1, '3': feeState.economyFee, '6': feeState.economyFee, '144': feeState.economyFee, '1008': 1 }));
+    };
+    if (feeDelayMs > 0) return setTimeout(answer, feeDelayMs);
+    return answer();
   }
   // Test control for the fee (0.8.1): POST /__test__/fees
   // { economyFee } sets this stub's economy fee (and its
@@ -308,6 +320,53 @@ const server = http.createServer((req, res) => {
       if (typeof b.economyFee === 'number' && Number.isFinite(b.economyFee) && b.economyFee >= 0) feeState.economyFee = b.economyFee;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ ok: true, economyFee: feeState.economyFee }));
+    });
+    return;
+  }
+  // Test control (0.8.9, accumulated peak):
+  // POST /__test__/fee-mode { mode: 'mempool'|'esplora' } — see
+  // the feeMode declaration above. Answers the current mode.
+  if (req.method === 'POST' && p === '/__test__/fee-mode') {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      let b = {};
+      try { b = JSON.parse(body); } catch { b = {}; }
+      if (b.mode === 'mempool' || b.mode === 'esplora') feeMode = b.mode;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ ok: true, mode: feeMode }));
+    });
+    return;
+  }
+  // Test control (0.8.9 audit fixes): POST /__test__/fee-delay
+  // {ms} delays every fee answer by that many ms — {ms: 0}
+  // clears it — so a suite can hold a fee fetch in flight while
+  // an edit lands. POST /__test__/fee-estimates-map {map}
+  // replaces the /fee-estimates map the stub serves (a sparse map
+  // proves a missing 144 yields no reading); {map: null}
+  // restores the default map.
+  if (req.method === 'POST' && p === '/__test__/fee-delay') {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      let b = {};
+      try { b = JSON.parse(body); } catch { b = {}; }
+      if (typeof b.ms === 'number' && Number.isFinite(b.ms) && b.ms >= 0) feeDelayMs = b.ms;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ ok: true, delayMs: feeDelayMs }));
+    });
+    return;
+  }
+  if (req.method === 'POST' && p === '/__test__/fee-estimates-map') {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      let b = {};
+      try { b = JSON.parse(body); } catch { b = {}; }
+      if (b.map === null) feeEstimatesMap = null;
+      else if (b.map && typeof b.map === 'object') feeEstimatesMap = b.map;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ ok: true, map: feeEstimatesMap }));
     });
     return;
   }

@@ -368,8 +368,8 @@ function check(name, cond, detail) {
   await checkEl('width settings: Save check cadence button fits', '#btn-save-check-cadence');
   await checkInput('width settings: fee Low input fits', '#set-fee-low');
   await checkInput('width settings: fee Medium input fits', '#set-fee-medium');
-  await checkEl('width settings: fee Low row (input + x 90-day peak tx fee unit) fits', '#set-fee-low-row');
-  await checkEl('width settings: fee Medium row (input + x 90-day peak tx fee unit) fits', '#set-fee-medium-row');
+  await checkEl('width settings: fee Low row (input + x peak tx fee unit) fits', '#set-fee-low-row');
+  await checkEl('width settings: fee Medium row (input + x peak tx fee unit) fits', '#set-fee-medium-row');
   await checkEl('width settings: fee zone bar fits', '#zone-bar');
   await checkEl('width settings: Save fee verdict button fits', '#btn-save-fee-verdict');
   // The msg lines are empty until a Save is run, so give them

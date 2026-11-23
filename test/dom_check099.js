@@ -2857,10 +2857,10 @@ function check(name, cond, detail) {
     && idx.indexOf('id="set-fee-medium"') !== -1 && idx.indexOf('id="btn-save-fee-verdict"') !== -1
     && idx.indexOf('id="fee-verdict-msg"') !== -1
     && appJs.indexOf('Where the Low / Medium / High fee pill flips') !== -1, '');
-  check('user controls static: the Broadcast Fee Risk inputs are number inputs with bounds 1-10 and 0.5-5 and a x 90-day peak tx fee unit',
+  check('user controls static: the Broadcast Fee Risk inputs are number inputs with bounds 1-10 and 0.5-5 and a x peak tx fee unit',
     idx.indexOf('id="set-fee-low" type="number" min="1" max="10"') !== -1
     && idx.indexOf('id="set-fee-medium" type="number" min="0.5" max="5"') !== -1
-    && idx.indexOf('<span>× 90-day peak tx fee</span>') !== -1, '');
+    && idx.indexOf('<span>× peak tx fee</span>') !== -1, '');
   check('user controls static: the three cards sit after the Grace period card, in order (agreement, cadence, fee)',
     idx.indexOf('id="btn-save-grace"') !== -1 && idx.indexOf('id="btn-save-price-agreement"') !== -1
     && idx.indexOf('id="btn-save-check-cadence"') !== -1 && idx.indexOf('id="btn-save-fee-verdict"') !== -1
@@ -2892,9 +2892,9 @@ function check(name, cond, detail) {
   // names the 90-day peak tx fee. The bar reflects whatever is
   // in the inputs, so it is there whether or not you are editing
   // — no show/hide, no open class.
-  check('fee zone bar static: the second input reads "High Risk at or below" and both units read "× 90-day peak tx fee"',
+  check('fee zone bar static: the second input reads "High Risk at or below" and both units read "× peak tx fee"',
     idx.indexOf('<label for="set-fee-medium">High Risk at or below</label>') !== -1
-    && idx.indexOf('<span>× 90-day peak tx fee</span>') !== -1, '');
+    && idx.indexOf('<span>× peak tx fee</span>') !== -1, '');
   check('fee zone bar static: the zone bar exists with three segments and their ranges',
     idx.indexOf('id="zone-bar"') !== -1 && idx.indexOf('id="seg-high"') !== -1
     && idx.indexOf('id="seg-med"') !== -1 && idx.indexOf('id="seg-low"') !== -1
@@ -2937,7 +2937,10 @@ function check(name, cond, detail) {
   // The fee pill at the defaults: add a tx whose fee rate is
   // exactly 4.0 sat/vB (Finney vout 1 is 150,000 sats, the
   // output is 149,660, so the fee is 340 sats over 85 bytes).
-  // The peak is 2.0, so 4.0 is Low Risk at the defaults.
+  // The peak is 2.0 — the launcher seeds 25 hourly observations
+  // at 2.0 spanning a full day, and the startup tick adds nothing
+  // (the latest seed is minutes old) — so 4.0 is Low Risk at the
+  // defaults.
   const feeTx = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ txHex: craftHex(1, 149660), label: 'Dom Fee 4', trigger: { type: 'manual', params: {} } }) });
   check('user controls fee pill: adding the 4.0 sat/vB tx (201)', feeTx.status === 201, 'status=' + feeTx.status);
   const stFee = await (await fetch('/api/state')).json();
@@ -3429,8 +3432,8 @@ function check(name, cond, detail) {
     && idx.indexOf('Installed version:') !== -1 && idx.indexOf('id="app-version"') !== -1, '');
   check('app version static: the card has no "?" button and no details (just the version line)',
     idx.indexOf('id="help-version"') === -1, '');
-  check('app version: the installed version reads 0.8.8 (from /api/health)',
-    els['app-version'] && els['app-version'].textContent === '0.8.8',
+  check('app version: the installed version reads 0.8.9 (from /api/health)',
+    els['app-version'] && els['app-version'].textContent === '0.8.9',
     els['app-version'] && els['app-version'].textContent);
   setFilter('general');
   check('app version: the card is visible under General',

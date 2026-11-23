@@ -161,10 +161,13 @@
     return String(r);
   }
 
-  // The fee verdict (0.7.20, extended 0.7.21 with Critical Risk):
-  // is this tx's FIXED fee good enough for a long-term hold?
-  // The ladder, against the 90-day peak (the 90th percentile
-  // of block medians over 3 months, served as S.bitcoin.feePeak):
+  // The fee verdict (0.7.20, extended 0.7.21 with Critical Risk,
+  // peak accumulated 0.8.9): is this tx's FIXED fee good enough
+  // for a long-term hold? The ladder, against the peak (the 90th
+  // percentile of the hourly economy-fee observations Standby
+  // records from its own nodes, S.bitcoin.feePeak; the window they
+  // span in days is S.bitcoin.feePeakWindowDays, the count
+  // S.bitcoin.feePeakObservations):
   // Low Risk at `lowMult`x the peak, Medium Risk at `medMult`x–
   // `lowMult`x, High Risk below the peak (Settings: Fee verdict;
   // defaults 2 and 1). 0.7.21 adds the CURRENT check first: a fee
@@ -226,12 +229,21 @@
 
   // The fee-risk pop-out (0.7.21): the Fee line is clickable and
   // opens the shared showDetails pop-out with HOW the verdict was
-  // calculated — the 90-day peak, your fee, the current economy
+  // calculated — the peak, your fee, the current economy
   // fee, and the reason for the level — so the verdict is
   // explainable, not a black box. The numbers use the app's own
   // one-decimal rate formatting, so they match the Fee line.
   function showFeePopout(tx, verdict) {
     var peak = S.bitcoin.feePeak;
+    var win = S.bitcoin.feePeakWindowDays;
+    // The window the peak covers (0.8.9, accumulated): the
+    // observations reach back at most 90 days; a young history
+    // reaches back only as far as it has been recording. The label
+    // names the real window — "90-day peak" at 90 days, "peak over
+    // the last N days of observations" when shorter.
+    var peakLabel = (typeof win === 'number' && win < 90)
+      ? 'peak over the last ' + win + (win === 1 ? ' day' : ' days') + ' of observations'
+      : '90-day peak';
     var econ = S.bitcoin.currentFees && S.bitcoin.currentFees.economyFee;
     var rate = tx.feeRateSatVb;
     // The ladder's thresholds (Settings: Fee verdict) — the
@@ -243,14 +255,14 @@
     if (verdict === 'Critical Risk') {
       body = 'Your fee is ' + fmtRate(rate) + ' sat/vB, but the current economy fee is ' + fmtRate(econ) + ' sat/vB — it would not confirm within a day right now. Because it is below the current market fee, it is ranked Critical Risk.';
     } else if (verdict === 'Low Risk') {
-      body = 'The 90-day peak is ' + fmtRate(peak) + ' sat/vB. Your fee is ' + fmtRate(rate) + ' sat/vB. Because it is at least ' + low + '× the peak (' + fmtRate(low * peak) + ' sat/vB), it is ranked Low Risk.';
+      body = 'The ' + peakLabel + ' is ' + fmtRate(peak) + ' sat/vB. Your fee is ' + fmtRate(rate) + ' sat/vB. Because it is at least ' + low + '× the peak (' + fmtRate(low * peak) + ' sat/vB), it is ranked Low Risk.';
     } else if (verdict === 'Medium Risk') {
-      body = 'The 90-day peak is ' + fmtRate(peak) + ' sat/vB. Your fee is ' + fmtRate(rate) + ' sat/vB. Low Risk needs ' + fmtRate(low * peak) + ' sat/vB (' + low + '× the peak). Your fee is at least ' + fmtRate(med * peak) + ' sat/vB (' + med + '× the peak) but below ' + low + '× the peak, so it is ranked Medium Risk.';
+      body = 'The ' + peakLabel + ' is ' + fmtRate(peak) + ' sat/vB. Your fee is ' + fmtRate(rate) + ' sat/vB. Low Risk needs ' + fmtRate(low * peak) + ' sat/vB (' + low + '× the peak). Your fee is at least ' + fmtRate(med * peak) + ' sat/vB (' + med + '× the peak) but below ' + low + '× the peak, so it is ranked Medium Risk.';
     } else { // High Risk
-      body = 'The 90-day peak is ' + fmtRate(peak) + ' sat/vB. Your fee is ' + fmtRate(rate) + ' sat/vB. Because it is below ' + fmtRate(med * peak) + ' sat/vB (' + med + '× the peak), it is ranked High Risk.';
+      body = 'The ' + peakLabel + ' is ' + fmtRate(peak) + ' sat/vB. Your fee is ' + fmtRate(rate) + ' sat/vB. Because it is below ' + fmtRate(med * peak) + ' sat/vB (' + med + '× the peak), it is ranked High Risk.';
     }
     var html = '<dl class="kv">'
-      + '<dt>90-day peak</dt><dd>' + escapeHtml(fmtRate(peak) + ' sat/vB') + '</dd>'
+      + '<dt>' + peakLabel + '</dt><dd>' + escapeHtml(fmtRate(peak) + ' sat/vB') + '</dd>'
       + '<dt>Your fee</dt><dd>' + escapeHtml(fmtRate(rate) + ' sat/vB') + '</dd>'
       + ((typeof econ === 'number')
         ? '<dt>Current economy fee</dt><dd>' + escapeHtml(fmtRate(econ) + ' sat/vB') + '</dd>' : '')
@@ -1021,7 +1033,7 @@
     // (0.7.20) Each row also carries the fee verdict as a second
     // pill next to the status pill ("armed" + "Med Fee Risk"),
     // colour-coded like the status pill. No verdict when the fee
-    // rate is unknown or the 90-day peak has not been fetched — the
+    // rate is unknown or the peak has no history yet — the
     // row then shows only the status pill.
     // (0.8.7, round 10) One row per trigger set, not per
     // transaction: a set renders once, headed by the SET's label
@@ -2242,7 +2254,7 @@
   // " — High Risk" — for an ACTIVE tx only (a broadcast or
   // archived tx's fee is moot, and a pending one is already
   // submitted). No verdict when the fee rate is unknown or the
-  // 90-day peak has not been fetched: the line stays exactly
+  // peak has no history yet: the line stays exactly
   // as it was, rather than showing a wrong one.
   if (tx.feeSats !== null && tx.feeSats !== undefined) {
     var feeRow = kvRow('tx-fee', 'Fee', fmtSats(tx.feeSats) + ' · ' + fmtRate(tx.feeRateSatVb) + ' sat/vB');
@@ -5447,6 +5459,18 @@
     var fm = (S.settings && typeof S.settings.feeMediumMultiplier === 'number') ? S.settings.feeMediumMultiplier : 1;
     $('set-fee-medium').value = String(fm);
     updateFeeZoneBar();
+    // (0.8.9) The fee-history note under the Broadcast Fee Risk
+    // card: what the peak actually covers, or that it is still
+    // building — the peak appears only after a day of readings
+    // (24 hourly observations).
+    var fhn = $('fee-history-note');
+    if (fhn) {
+      var fobs = (S.bitcoin && typeof S.bitcoin.feePeakObservations === 'number') ? S.bitcoin.feePeakObservations : 0;
+      var fwin = (S.bitcoin && typeof S.bitcoin.feePeakWindowDays === 'number') ? S.bitcoin.feePeakWindowDays : 0;
+      fhn.textContent = (S.bitcoin && typeof S.bitcoin.feePeak === 'number')
+        ? 'Peak from ' + fwin + (fwin === 1 ? ' day' : ' days') + ' of hourly observations (' + fobs + ' readings).'
+        : 'Fee history is still building: ' + fobs + ' of 24 hourly observations. The peak appears after a day.';
+    }
     renderApiKeys();
   }
 
@@ -5791,7 +5815,7 @@
     },
     fee: {
       title: 'Broadcast Fee Risk',
-      body: 'Where the Low / Medium / High fee pill flips. Each transaction\u2019s fee rate is compared to the 90-day peak (the 90th percentile of block medians).\n\nLow Risk is at or above the Low multiplier, Medium Risk at or above the Medium multiplier, High Risk below it. A fee below the current economy fee is Critical Risk.\n\nThe pill is informational \u2014 it never blocks a broadcast \u2014 and shows on every staged transaction. The Low multiplier must stay above the Medium one.',
+      body: 'Where the Low / Medium / High fee pill flips. Each transaction\u2019s fee rate is compared to the peak fee \u2014 the 90th percentile of the hourly economy-fee readings Standby records from your nodes, up to 90 days back.\n\nLow Risk is at or above the Low multiplier, Medium Risk at or above the Medium multiplier, High Risk below it. A fee below the current economy fee is Critical Risk.\n\nThe peak needs a day of readings (24 hourly observations) before it appears; until then the pill is hidden and only the current-fee check applies. The pill is informational \u2014 it never blocks a broadcast \u2014 and shows on every staged transaction. The Low multiplier must stay above the Medium one.',
       triggers: ['general'],
     },
     keys: {

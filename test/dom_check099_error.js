@@ -496,7 +496,6 @@ function startApp() {
     DATA_DIR: DATA,
     CHECKIN_DIR,
     SLIPSTREAM_API_URL: 'http://127.0.0.1:' + STUB_P,
-    FEE_RATES_URL: 'http://127.0.0.1:' + STUB_P,
     PRICE_API_URL: 'http://127.0.0.1:' + STUB_P,
   });
   appChild = spawn('node', ['server.js'], { cwd: APP_DIR, env, stdio: 'ignore' });

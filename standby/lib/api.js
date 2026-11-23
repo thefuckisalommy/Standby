@@ -134,6 +134,12 @@ async function handleApi(req, res, pathname) {
       if (changed) store.saveState(DATA_DIR, state);
     } catch (e) { console.error('grace apply failed:', e); }
     const served = sanitizeState(state);
+    // (0.8.9) The fee history is state-internal — the raw hourly
+    // observations (~2,160 entries) are never served; the peak,
+    // window, count, and basis below describe them. Serving the
+    // series would bloat every state read for data the UI never
+    // renders.
+    delete served.feeHistory;
     // (0.8.3) Persistence / startup warnings for the UI (a later
     // increment renders them): a state recovery that happened in
     // this process, a receiver key list rewritten at startup, keys
@@ -142,14 +148,22 @@ async function handleApi(req, res, pathname) {
     served.warnings = startupWarnings.concat(store.getStateWarnings());
     served.grace = graceStatus(state, now); // the grace (0.8.0, extended 0.8.8): null when none is active, else { active, indefinite, graceUntil, triggeredAt, offlineGapDays }
     served.bitcoin.overlaps = bitcoin.findSharedInputs(state.bitcoin.txs || []);
-    // The fee verdict's 90-day peak (0.7.20): the cached number (or
-    // null when there is no usable fee data), with the fetched-at
-    // timestamp so the value is clearly labelled. Derived on every
-    // read, like the overlaps — never stored, so no migration and no
-    // restore change. The frontend compares each active tx's own fee
-    // rate to this peak; a null peak means no verdict anywhere.
-    const fp = feePeakForState();
+    // The fee verdict's peak (0.7.20; 0.8.9 accumulated): computed
+    // from the recorded fee history in this state — the 90th
+    // percentile of the hourly economy-fee observations, with the
+    // window they span in days, how many there are, and the basis
+    // (always fee estimates: one consistent day-scale measurement
+    // across mempool, Esplora, and RPC modes). Derived on every
+    // read, like the overlaps — the peak itself is never stored,
+    // only the observations are. A null peak means the history is
+    // still building (fewer than 24 observations) and there is no
+    // verdict anywhere; the frontend compares each active tx's own
+    // fee rate to this peak.
+    const fp = feePeakForState(state);
     served.bitcoin.feePeak = fp.peak;
+    served.bitcoin.feePeakWindowDays = fp.windowDays;
+    served.bitcoin.feePeakObservations = fp.observations;
+    served.bitcoin.feePeakBasis = fp.basis;
     served.bitcoin.feePeakAt = fp.fetchedAt;
     // The current recommended fees (0.7.21): the cached object (or
     // null when there is no usable current-fee data), with the
@@ -2017,6 +2031,13 @@ async function handleApi(req, res, pathname) {
         lastOnlineAt: now.toISOString(),
       },
       checkinKeys: restoredKeys,
+      // (0.8.9) The fee history rides along: the peak is computed
+      // from these observations, so restoring without them would
+      // reset the verdict to "still building" for a day. A backup
+      // from before 0.8.9 carries none, which restores as empty.
+      // Sanitized like a load — a hand-edited backup cannot
+      // smuggle a bad entry into the peak.
+      feeHistory: store.sanitizeFeeHistory(bs.feeHistory),
     };
     // (0.8.0) The restore counts as a check-in (see the clock
     // comment above): the offsets are measured against the OLD
@@ -2060,6 +2081,9 @@ async function handleApi(req, res, pathname) {
     // The restored state is served the same way as a read (a
     // one-rule set as its single rule — see GET /api/state).
     const servedRestored = sanitizeState(restored);
+    // (0.8.9) The fee history is state-internal — see GET
+    // /api/state — never served, even in a restore response.
+    delete servedRestored.feeHistory;
     servedRestored.bitcoin.txs = serveTxs(servedRestored.bitcoin.txs || []);
     servedRestored.bitcoin.sets = serveSets(servedRestored.bitcoin.sets || []);
     return sendJson(res, 200, { ok: true, restoredTxs: txs.length, restoredSets: restoredSets.length, state: servedRestored });

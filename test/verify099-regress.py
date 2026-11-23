@@ -151,7 +151,7 @@ STUB_S = 18246
 STUB_BASE_P = 'http://127.0.0.1:%d' % STUB_P
 STUB_BASE_S = 'http://127.0.0.1:%d' % STUB_S
 APP_ENV = {'PORT': str(PORT), 'DATA_DIR': DATA, 'CHECKIN_DIR': CHECKIN_DIR,
-           'SLIPSTREAM_API_URL': STUB_BASE_P, 'FEE_RATES_URL': STUB_BASE_P,
+           'SLIPSTREAM_API_URL': STUB_BASE_P,
            'PRICE_API_URL': STUB_BASE_P}
 LOG = '/tmp/heirloom099-regress-proc.log'
 
@@ -341,14 +341,17 @@ def main():
         """Stop + start the app, wait up, then poll until the
         startup tick has fired (Optimization O2): the startup
         hourly tick stamps bitcoin.connection.nodeCheckedAt.primary
-        and the +2 s refresh fills bitcoin.feePeak — both are
+        and the +2 s refresh fills bitcoin.currentFees — both are
         observable in /api/state, so poll for them instead of
         sleeping a fixed 7 s past the 5 s startup tick. The
-        feePeak condition also guarantees the concurrent startup
+        currentFees condition also guarantees the concurrent startup
         full tick (fired at the same ~0.5 s) has finished before
         any post-restart read. Deadline 4 s, then proceed anyway
-        (the old behavior as fallback). Call BEFORE seeding any
-        firing state."""
+        (the old behavior as fallback). On the very first boot the
+        node URLs are not pointed at the stubs yet, so the +2 s
+        refresh cannot fill currentFees and the poll runs its 4 s
+        course — the 4 s itself still guarantees the 500 ms startup
+        ticks finished. Call BEFORE seeding any firing state."""
         nonlocal app
         # The pre-restart node-check stamp: the poll waits for a
         # stamp NEWER than this, so a stale stamp can never
@@ -371,9 +374,9 @@ def main():
                     _, st = req('GET', '/api/state')
                     conn = st.get('bitcoin', {}).get('connection', {})
                     stamp = (conn.get('nodeCheckedAt') or {}).get('primary')
-                    fee_peak = st.get('bitcoin', {}).get('feePeak')
+                    cur_fees = st.get('bitcoin', {}).get('currentFees') or {}
                     if (isinstance(stamp, str) and stamp != prev_stamp
-                            and isinstance(fee_peak, (int, float))):
+                            and isinstance(cur_fees.get('economyFee'), (int, float))):
                         break
                 except Exception:
                     pass
@@ -383,13 +386,16 @@ def main():
     def clear_caches():
         """POST /api/__test__/clear-caches — cold caches without a
         restart (speedup): the same empty price / fee / tip /
-        fee-peak / current-fee / outspend caches a restart
-        produces, but no state re-read, no tick-timer reset, no
-        restart startup wait (~2.5 s poll). Use ONLY where a cold cache is all the
-        test needs. Keep restart() where a real restart is the
-        subject (state persistence, migration, crash recovery), or
-        where the fresh tick window is load-bearing (a background
-        tick must not fire before the manual check)."""
+        current-fee / outspend caches a restart produces, but no
+        state re-read, no tick-timer reset, no restart startup wait
+        (~2.5 s poll). (There is no fee-peak cache any more — the
+        peak is derived from the recorded history in state.json,
+        so a restart is the only way to re-read it.) Use ONLY where
+        a cold cache is all the test needs. Keep restart() where a
+        real restart is the subject (state persistence, migration,
+        crash recovery), or where the fresh tick window is
+        load-bearing (a background tick must not fire before the
+        manual check)."""
         s, r = req('POST', '/api/__test__/clear-caches', {})
         return s == 200 and r.get('ok') is True
 
@@ -421,7 +427,7 @@ def main():
 
         # --- 1. health + endpoints -------------------------------------
         s, h = req('GET', '/api/health')
-        check('1 health reports version 0.8.8', h.get('version') == '0.8.8', h)
+        check('1 health reports version 0.8.9', h.get('version') == '0.8.9', h)
         s, st = req('GET', '/api/state')
         check('1 fresh state: no global threshold in settings, no txs',
               'thresholdDays' not in st.get('settings', {}) and st.get('bitcoin', {}).get('txs') == [], st.get('settings'))
@@ -2521,7 +2527,9 @@ def main():
         delete_all_txs()
         # (f) Broadcast fee risk multipliers, called directly on
         # lib/bitcoin.js (the same pattern as the 094 suite):
-        # peak 2.0 sat/vB (the stub fee-rates route). A 4.0
+        # peak 2.0 sat/vB (a plain input to the pure verdict
+        # function — the peak itself now comes from the recorded
+        # fee history, proved in the API suite's §31). A 4.0
         # sat/vB fee is Low at the defaults (2x/1x) and Medium
         # at 3x/1.5x; 2.5 sat/vB is Medium at the defaults and
         # High at 3x/1.5x. The Critical check (below the economy

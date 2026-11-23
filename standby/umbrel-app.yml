@@ -5,7 +5,7 @@ manifestVersion: 1
 id: standby
 category: automation
 name: Standby
-version: "0.8.8"
+version: "0.8.9"
 releaseNotes: |-
   0.8.8 — The secondary node can now be turned off in Settings — off means the primary node only, with no fallback anywhere. The offline grace period now also pauses block-height, set-date, and fee-market triggers — not just price and UTXO — and it now has its own on/off toggle in Settings: off means triggers fire immediately, with no pause after an offline gap. The check-in hold is now unified into the same grace: a check-in rule pauses like any other during the grace, its due date is not pushed out, and the grace card shows whenever a grace is active, with a countdown bar, the number of transactions held, and how many of them would fire the moment it lifts. A short check-in threshold can also start the grace sooner (offline more than a quarter of the threshold, with the clock more than half spent).
 

@@ -46,7 +46,7 @@
 const http = require('http');
 const { PORT, VERSION, DATA_DIR, STARTUP_TICK_MS } = require('./lib/config');
 const { verifyCheckinKeyStore } = require('./lib/checkin');
-const { runFullTick, runHourlyTick, refreshFeePeakIfStale, refreshCurrentFeesIfStale, recomputeStoredFees, rearmFullTick } = require('./lib/release');
+const { runFullTick, runHourlyTick, refreshCurrentFeesIfStale, recomputeStoredFees, rearmFullTick } = require('./lib/release');
 const { refreshPriceIfStale } = require('./lib/prices');
 const { handleApi } = require('./lib/api');
 const { serveStatic, sendError } = require('./lib/http');
@@ -76,15 +76,14 @@ server.listen(PORT, '0.0.0.0', () => {
 // shortly after startup and then every checkCadenceSeconds; the
 // hourly tick runs once shortly after startup and then hourly.
 // The startup fee recompute runs once shortly after startup too
-// — see recomputeStoredFees. The fee peak is fetched once shortly
-// after startup (the hourly tick refreshes it daily after that)
-// — see refreshFeePeakIfStale. The three 5 s startup delays are
+// — see recomputeStoredFees. The hourly tick records one
+// economy-fee observation (the fee history the peak is computed
+// from) — see recordFeeHistoryObservation. The three 5 s startup delays are
 // STARTUP_TICK_MS (5000 in production; the test harness shortens
 // it to 500 ms via STANDBY_TEST_STARTUP_TICK_MS — see above).
 setTimeout(runFullTick, STARTUP_TICK_MS);
 setTimeout(runHourlyTick, STARTUP_TICK_MS);
 setTimeout(recomputeStoredFees, STARTUP_TICK_MS);
-setTimeout(refreshFeePeakIfStale, 2000);
 setTimeout(refreshCurrentFeesIfStale, 2000);
 setTimeout(refreshPriceIfStale, 2000); // 0.8.0: a price rule's "currently $X" line is live on first load
 setInterval(runHourlyTick, 60 * 60 * 1000);

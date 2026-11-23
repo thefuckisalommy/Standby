@@ -135,6 +135,12 @@ function defaultState() {
     // indefinite grace, active until resumed. See server.js
     // graceStatus / applyGrace.
     grace: { graceUntil: null, triggeredAt: null, offlineGapDays: null },
+    // Fee history (0.8.9): the hourly economy-fee observations
+    // the peak is computed from — [{ t, fee }] — see
+    // sanitizeFeeHistory above. Empty until the hourly tick
+    // records the first observation; the peak is served only
+    // once 24 observations (a day) have accumulated.
+    feeHistory: [],
     // Check-in API keys: one per service that may check in for the
     // owner (a bot, a shortcut, an AI assistant). A key is a bearer
     // token that authorizes exactly one thing — recording a check-in,
@@ -184,6 +190,52 @@ const MAX_RULES_PER_TX = 5;
 // release checks.
 const HISTORY_TYPES = new Set(['added', 'fired', 'broadcast', 'slipstream', 'confirmed', 'stale', 'failed', 'conflict', 'edited', 'armed', 'disarmed']);
 const HISTORY_MAX = 50;
+
+// Fee history (0.8.9, accumulated peak): the fee verdict's peak is
+// no longer fetched from a fee-rates endpoint — it is computed from
+// Standby's own record of the economy fee, one observation per
+// hourly tick (see lib/release.js recordFeeHistoryObservation).
+// An observation is { t, fee } — t an ISO timestamp, fee the
+// economy fee in sat/vB from whichever node answered that hour
+// (mempool /fees/recommended.economyFee, Esplora /fee-estimates at
+// the 144-block target, RPC estimatesmartfee at 144 — one
+// consistent day-scale measurement, so the series stays comparable
+// no matter which node answered each hour). The history lives in
+// state.json, so it survives restarts, rides the backup rotation,
+// and restores with the backup — it is never memory-only.
+// FEE_HISTORY_WINDOW_DAYS bounds the series (observations older
+// than that are pruned); FEE_HISTORY_MAX_ENTRIES is the same bound
+// in entries (hourly x 90 days); FEE_HISTORY_MIN_OBSERVATIONS is
+// the floor before a peak is served at all (24 hourly readings
+// spanning a full day — before that the peak is null and the
+// historical check is skipped).
+const FEE_HISTORY_WINDOW_DAYS = 90;
+const FEE_HISTORY_MIN_OBSERVATIONS = 24;
+const FEE_HISTORY_MAX_ENTRIES = FEE_HISTORY_WINDOW_DAYS * 24;
+
+// Sanitize a stored fee history into the canonical shape: an
+// array of { t, fee } with a parseable ISO timestamp and a finite
+// non-negative fee, in ascending time order, pruned to the window
+// and capped to the max entries (oldest dropped first). Anything
+// else — a non-array, a bad entry, a future timestamp — is
+// dropped, never trusted. Pure — safe on load, restore, and
+// hand-edited state.
+function sanitizeFeeHistory(raw, nowMs) {
+  if (!Array.isArray(raw)) return [];
+  const now = (typeof nowMs === 'number' && Number.isFinite(nowMs)) ? nowMs : Date.now();
+  const cutoff = now - FEE_HISTORY_WINDOW_DAYS * 86400000;
+  const out = [];
+  for (const e of raw) {
+    if (!e || typeof e !== 'object') continue;
+    const t = (typeof e.t === 'string' && e.t) ? new Date(e.t).getTime() : NaN;
+    const fee = e.fee;
+    if (!Number.isFinite(t) || t <= cutoff || t > now + 60000) continue;
+    if (typeof fee !== 'number' || !Number.isFinite(fee) || fee < 0) continue;
+    out.push({ t: new Date(t).toISOString(), fee });
+  }
+  out.sort((a, b) => new Date(a.t).getTime() - new Date(b.t).getTime());
+  return out.slice(-FEE_HISTORY_MAX_ENTRIES);
+}
 // (0.8.7, round 13) How a transaction is NAMED in the set
 // history's member tags — the same rule as the client's
 // txDisplayName (public/app.js): a set member is always named
@@ -744,6 +796,12 @@ function loadState(dataDir) {
     }
   }
   const state = mergeDefaults(defaultState(), saved);
+  // (0.8.9) The fee history is sanitized on load — a hand-edited
+  // or older state file cannot smuggle a bad entry, a future
+  // timestamp, or a series older than the window into the peak.
+  // mergeDefaults already keeps a stored array; this pass drops
+  // anything malformed and prunes past the 90-day window.
+  state.feeHistory = sanitizeFeeHistory(state.feeHistory);
   // (0.8.0) The `paused` setting is gone — Global Arm/Disarm
   // replaces it. Prune it from older state files so a stale
   // `paused: true` can never resurface through /api/state.
@@ -1047,6 +1105,7 @@ module.exports = {
   serveTrigger, serveTriggerState, normalizeTriggerState, defaultTrigger, defaultTriggerSet,
   FALLBACK_THRESHOLD_DAYS, MAX_RULES_PER_TX,
   TRIGGER_TYPES, PRICE_MIN_USD, PRICE_MAX_USD, HISTORY_TYPES, HISTORY_MAX,
+  sanitizeFeeHistory, FEE_HISTORY_WINDOW_DAYS, FEE_HISTORY_MIN_OBSERVATIONS, FEE_HISTORY_MAX_ENTRIES,
   memberHistoryDetail, backfillSetHistory,
   // (0.8.3) Persistence hardening: backup rotation, corrupt-state
   // recovery warnings, and the backup-with-keys lookup for the

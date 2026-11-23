@@ -9,7 +9,6 @@ const caches = {
   price: { readings: {}, fetchedAt: null, source1: null, source2: null },
   nodeFee: { readings: null, fetchedAt: null, primary: null, secondary: null },
   nodeTip: { readings: null, fetchedAt: null, primary: null, secondary: null },
-  feePeak: { peak: null, fetchedAt: null },
   currentFees: { fees: null, fetchedAt: null },
 };
 
@@ -21,7 +20,6 @@ function clearCaches(only) {
   if (want('price')) { caches.price = { readings: {}, fetchedAt: null, source1: null, source2: null }; cleared.push('price'); }
   if (want('nodeFee')) { caches.nodeFee = { readings: null, fetchedAt: null, primary: null, secondary: null }; cleared.push('nodeFee'); }
   if (want('nodeTip')) { caches.nodeTip = { readings: null, fetchedAt: null, primary: null, secondary: null }; cleared.push('nodeTip'); }
-  if (want('feePeak')) { caches.feePeak = { peak: null, fetchedAt: null }; cleared.push('feePeak'); }
   if (want('currentFees')) { caches.currentFees = { fees: null, fetchedAt: null }; cleared.push('currentFees'); }
   if (want('outspend')) { bitcoin.clearOutspendCache(); cleared.push('outspend'); }
   return cleared;

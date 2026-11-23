@@ -167,8 +167,9 @@ GOAL = os.path.dirname(_TESTDIR)
 STUB = os.path.join(_TESTDIR, 'stubs.js')
 
 
-def app_dir(root, candidates=('branch-0.8.8-nonrpc', 'branch-0.8.8', 'standby', 'branch-split', 'branch-speedup', 'branch-0.8.7.2', 'branch-0.8.7.1', 'branch-0.8.7', 'branch-0.8.6', 'branch-0.8.5', 'branch-0.8.4', 'branch-0.8.3', 'app')):
-    """The app dir under a root: branch-0.8.8-nonrpc/ in the goal dir (0.8.8
+def app_dir(root, candidates=('branch-local-peak', 'branch-0.8.8-nonrpc', 'branch-0.8.8', 'standby', 'branch-split', 'branch-speedup', 'branch-0.8.7.2', 'branch-0.8.7.1', 'branch-0.8.7', 'branch-0.8.6', 'branch-0.8.5', 'branch-0.8.4', 'branch-0.8.3', 'app')):
+    """The app dir under a root: branch-local-peak/ in the goal dir (0.8.9
+    working copy), branch-0.8.8-nonrpc/ in the goal dir (0.8.8
     working copy), standby/ in a repo checkout,
     branch-split/ in the goal dir (0.8.7.4 working copy),
     branch-speedup/ in the goal dir (test-infra working copy),
