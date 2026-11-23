@@ -603,8 +603,10 @@
   // shown whenever a grace is active — even with nothing held.
   // The copy follows the approved mockup exactly:
   // "Grace period has been activated because the device was offline
-  // for 3 days." / "2 transactions are ready to fire but held up
-  // by grace." — the held count is the same line for 0 or more.
+  // for 3 days." / "2 transactions are held by grace, 1 of them
+  // would fire now." — the held line carries both numbers (held,
+  // then would-fire as a subset of held) and is the same line for
+  // 0 or more.
   // The countdown bar fills as the grace elapses (same convention
   // as the check-in bar): "Day N of M" left, "N days left · until
   // Nov 30" right; under a day left it reads "less than a day
@@ -622,6 +624,7 @@
     var gapDays = (typeof g.offlineGapDays === 'number') ? g.offlineGapDays : 0;
     var gapText = gapDays === 1 ? '1 day' : gapDays + ' days';
     var held = graceHeldTxCount();
+    var fire = graceWouldFireTxCount();
     // Built from spans and <b> elements (not innerHTML) so
     // the dynamic values are text, never markup.
     var ts = function (t) { var s = document.createElement('span'); s.textContent = t; return s; };
@@ -635,7 +638,11 @@
     var b2 = document.createElement('b');
     b2.textContent = held === 1 ? '1 transaction' : held + ' transactions';
     gh.appendChild(b2);
-    gh.appendChild(ts(held === 1 ? ' is ready to fire but held up by grace.' : ' are ready to fire but held up by grace.'));
+    gh.appendChild(ts(held === 1 ? ' is held by grace, ' : ' are held by grace, '));
+    var b3 = document.createElement('b');
+    b3.textContent = fire === 1 ? '1 of them' : fire + ' of them';
+    gh.appendChild(b3);
+    gh.appendChild(ts(' would fire now.'));
     // Countdown bar (finite grace only): Day N of M, N days left.
     // N is whole days elapsed since the grace was set (the bar
     // fills as the grace elapses, like the check-in bar); the
@@ -1798,13 +1805,36 @@
   // held-count line: every armed active tx with a held rule
   // type, plus every member of a held set — each tx counted
   // once. This is the held count, NOT a fresh evaluation:
-  // held rules are not evaluated during a grace, so "ready to
-  // fire" means held, not freshly proven due.
+  // held rules are not evaluated during a grace, so a held tx
+  // is one whose triggers are paused, whether or not its
+  // condition is met (see graceWouldFireTxCount for the ones
+  // whose condition is met).
   function graceHeldTxCount() {
     var ids = {};
     (S.bitcoin.txs || []).forEach(function (t) { if (graceHoldsTx(t)) ids[t.id] = true; });
     (S.bitcoin.sets || []).forEach(function (s) {
       if (!graceHoldsSet(s)) return;
+      (s.txIds || []).forEach(function (id) { ids[id] = true; });
+    });
+    return Object.keys(ids).length;
+  }
+  // How many of the held transactions would fire right now if
+  // the grace lifted (0.8.8, both-numbers card): the same held
+  // population as graceHeldTxCount, restricted to txs/sets whose
+  // served triggerStatus reads wouldFire — the backend's raw
+  // condition, judged on the best data available without any new
+  // network calls (live clock for check-in/set-date, live caches
+  // for price/block-height/fee-market, the last stored evaluation
+  // for UTXO — see wouldFireFor in lib/rules.js). The second
+  // number is a subset of the first, so it never exceeds the held
+  // count.
+  function graceWouldFireTxCount() {
+    var ids = {};
+    (S.bitcoin.txs || []).forEach(function (t) {
+      if (graceHoldsTx(t) && t.triggerStatus && t.triggerStatus.wouldFire) ids[t.id] = true;
+    });
+    (S.bitcoin.sets || []).forEach(function (s) {
+      if (!graceHoldsSet(s) || !s.triggerStatus || !s.triggerStatus.wouldFire) return;
       (s.txIds || []).forEach(function (id) { ids[id] = true; });
     });
     return Object.keys(ids).length;

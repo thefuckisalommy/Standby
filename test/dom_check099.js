@@ -55,8 +55,8 @@
 //     "Grace period active" card at the top of the Dashboard
 //     whenever a grace is active — even with nothing held — with
 //     the approved copy ("Grace period has been activated because
-//     the device was offline for X days." / "N transactions are
-//     ready to fire but held up by grace."), a countdown bar
+//     the device was offline for X days." / "N transaction(s)
+//     is/are held by grace, M of them would fire now."), a countdown bar
 //     ("Day N of M" / "N days left · until <date>", "less than a
 //     day left" under a day, "until you resume" when indefinite),
 //     a Resume now button with its note to the right; armed held
@@ -2088,20 +2088,37 @@ function check(name, cond, detail) {
   check('held bars: the status pill reads "Grace period"',
     els['status-pill'] && els['status-pill'].textContent === 'Grace period',
     els['status-pill'] && els['status-pill'].textContent);
-  // The held count is 9, not 7: the 7 trigger txs plus two of
-  // the three extra UTXO txs from §8 (the unconfirmed-mode
-  // conflict tx and one FINNEY:0 tx — the other FINNEY:0 tx
-  // has already fired once the stub override cleared, so it
-  // is settled/pending by now). The line must agree with the
+  // The held count is 9, not 7: the 7 trigger txs plus the two
+  // FINNEY:0 txs from §8. (The third extra UTXO tx, the
+  // unconfirmed-mode conflict tx, is NOT held: its rule fired
+  // on the unconfirmed spend and it broadcast already, so it
+  // is pending by now — the §14 comment used to say the
+  // opposite, corrected by the §14 state dump in the
+  // both-numbers build.) The line must agree with the
   // per-card pills, the independent view of the same held set.
   const heldN14 = gracePillCount();
   check('held bars: the grace card shows the 40-day gap and the held txs',
     els['grace-card'] && els['grace-card'].style.display !== 'none'
     && els['grace-text'] && elText(els['grace-text']) === 'Grace period has been activated because the device was offline for 40 days.'
-    && els['grace-held'] && elText(els['grace-held']) === heldN14 + ' transactions are ready to fire but held up by grace.',
+    && els['grace-held'] && elText(els['grace-held']) === '9 transactions are held by grace, 2 of them would fire now.',
     elText(els['grace-text']) + ' / ' + elText(els['grace-held']));
-  check('held bars: the held count is 9 (7 trigger txs + 2 of the 3 extra UTXO txs from §8)',
+  check('held bars: the held count is 9 (7 trigger txs + the 2 FINNEY:0 txs from §8)',
     heldN14 === 9, 'grace pills: ' + heldN14);
+  // Both-numbers grace card (0.8.8): 2 of the 9 held would fire
+  // now — the two past-due check-ins, judged on the live clock
+  // (40 days past both the 35d and the 10d thresholds). The
+  // rest read 'watching' on their stored slices (price $98,200
+  // < $150,000, tip 900,000 < 950,000, fee 1 > 0.5, set-date in
+  // 2029, FINNEY:1 unspent, both FINNEY:0 txs last read at 2
+  // confirmations, below their N). The conflict tx reads
+  // wouldFire TRUE on its stale 'due' slice but it already
+  // broadcast, so it is not held and does not count toward
+  // the second number.
+  const st14 = await (await fetch('/api/state')).json();
+  const heldLabels14 = txCards().filter((c) => { const p = cardStatus(c); return !!p && p.textContent === 'Grace'; }).map(cardTitle);
+  const wf14 = (st14.bitcoin.txs || []).filter((t) => heldLabels14.includes(t.label) && (t.triggerStatus || {}).wouldFire).map((t) => t.label);
+  check('held bars: 2 of the 9 held would fire now (the two past-due check-ins)',
+    wf14.length === 2 && wf14.includes('Dom Check-in') && wf14.includes('Dom Check-in 10d'), wf14.join(', '));
   check('held bars: the grace countdown starts at "Day 0 of 7" with "7 days left"',
     els['grace-bar-day'] && els['grace-bar-day'].textContent === 'Day 0 of 7'
     && els['grace-bar-left'] && (els['grace-bar-left'].textContent || '').indexOf('7 days left · until ') === 0
@@ -2223,7 +2240,8 @@ function check(name, cond, detail) {
   // the top whenever a grace is active — even with nothing
   // held — with the approved copy ("Grace period has been
   // activated because the device was offline for X days." /
-  // "N transactions are ready to fire but held up by grace."),
+  // "N transaction(s) is/are held by grace, M of them would
+  // fire now."),
   // a countdown bar ("Day N of M" / "N days left · until
   // <date>", "less than a day left" under a day, "until you
   // resume" for an indefinite grace), and a Resume now button
@@ -2332,12 +2350,24 @@ function check(name, cond, detail) {
       return bolds.length === 1 && bolds[0] === '8 days';
     })(), JSON.stringify((els['grace-text'].children || []).map((c) => c.tagName + ':' + c.textContent)));
   // The held count is 9 here too (same inventory as §14:
-  // 7 trigger txs + 2 of the 3 extra UTXO txs from §8).
+  // 7 trigger txs + the 2 FINNEY:0 txs from §8).
   const heldN18 = gracePillCount();
-  check('grace card: reads "N transactions are ready to fire but held up by grace." (N = the Grace pills)',
-    graceHeldText === heldN18 + ' transactions are ready to fire but held up by grace.', graceHeldText);
+  check('grace card: reads "N transactions are held by grace, M of them would fire now." (N = the Grace pills)',
+    graceHeldText === '9 transactions are held by grace, 0 of them would fire now.', graceHeldText);
   check('grace card: the held count is 9 (same inventory as §14)',
     heldN18 === 9, 'grace pills: ' + heldN18);
+  // Both-numbers grace card (0.8.8): 0 of the 9 held would fire
+  // now. The check-in clock is fresh (§14's Check in button
+  // reset it), so both check-ins read false on the live clock;
+  // everything else still reads 'watching' on its stored slice;
+  // the conflict tx still reads wouldFire TRUE on its stale
+  // 'due' slice but it already broadcast, so it is not held
+  // and does not count.
+  const st18 = await (await fetch('/api/state')).json();
+  const heldLabels18 = txCards().filter((c) => { const p = cardStatus(c); return !!p && p.textContent === 'Grace'; }).map(cardTitle);
+  const wf18 = (st18.bitcoin.txs || []).filter((t) => heldLabels18.includes(t.label) && (t.triggerStatus || {}).wouldFire).map((t) => t.label);
+  check('grace card: 0 of the 9 held would fire now (clock fresh, everything watching)',
+    wf18.length === 0, wf18.join(', '));
   check('grace card: the countdown reads "Day 5 of 7" with "2 days left · until <date>"',
     els['grace-bar-day'] && els['grace-bar-day'].textContent === 'Day 5 of 7'
     && els['grace-bar-left'] && els['grace-bar-left'].textContent === '2 days left · until ' + new Date(graceUntil).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
@@ -2413,7 +2443,7 @@ function check(name, cond, detail) {
   await rerender(appJs);
   check('grace card: still visible with nothing held (0 held)',
     els['grace-card'] && els['grace-card'].style.display !== 'none'
-    && elText(els['grace-held']) === '0 transactions are ready to fire but held up by grace.',
+    && elText(els['grace-held']) === '0 transactions are held by grace, 0 of them would fire now.',
     elText(els['grace-held']));
   for (const id of allIds) {
     await fetch('/api/bitcoin/txs/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: true }) });

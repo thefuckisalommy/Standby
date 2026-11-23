@@ -57,6 +57,15 @@ armed entry is past due and held. The settings validation (only
 the grace served on /api/state are covered there too (/api/status
 stays grace-free — it is the check-in endpoint, and a held
 check-in bar reads 'grace' there, not a Grace-period field).
+The served triggerStatus also carries a wouldFire boolean (0.8.8
+both-numbers card): among the held txs, how many would fire the
+moment the grace lifts — check-in and set-date on the live clock,
+price / fee-market / block-height on the warm caches (else the
+stored last evaluation), UTXO on the stored slice only (it goes
+stale during a grace), manual never, unknown never. Leg 1 reads
+1 of 3 would fire (price only); leg 2 reads 2 of 3 (price +
+check-in, not the UTXO whose spend landed after its last
+evaluation).
 Section 19 covers the Getting
 Started empty-state card (0.8.0): the served markup and CSS only
 (the show/hide behaviour and the button navigation are in the DOM
@@ -2098,6 +2107,21 @@ def main():
               (state_tx(txg_price) or {}).get('broadcasted') is None
               and (state_tx(txg_utxo) or {}).get('broadcasted') is None,
               ((state_tx(txg_price) or {}).get('broadcasted'), (state_tx(txg_utxo) or {}).get('broadcasted')))
+        # Both-numbers grace card (0.8.8): of the three held txs,
+        # only the price tx would fire now — its condition reads
+        # met on the warm price cache. The UTXO tx would NOT: its
+        # spend landed after its last evaluation, and the UTXO rule
+        # reads its stored slice only (stale during a grace). The
+        # check-in tx would NOT either: its clock is fresh. So the
+        # card reads 1 of 3 would fire.
+        s, st = req('GET', '/api/state')
+        wf1 = {t.get('id'): (t.get('triggerStatus') or {}).get('wouldFire') for t in st.get('bitcoin', {}).get('txs', [])}
+        check('18 wouldFire: the holding price tx would fire (warm price cache, 98200 >= 90000)',
+              wf1.get(txg_price) is True, wf1.get(txg_price))
+        check('18 wouldFire: the spent UTXO tx would NOT fire (no stored slice — the spend landed after its last evaluation)',
+              wf1.get(txg_utxo) is False, wf1.get(txg_utxo))
+        check('18 wouldFire: the on-track check-in tx would NOT fire (clock fresh)',
+              wf1.get(txg_ck) is False, wf1.get(txg_ck))
         # Saving new grace settings does NOT change an active
         # grace (it keeps the duration it was created with).
         gu_before = (req('GET', '/api/state')[1].get('grace') or {}).get('graceUntil')
@@ -2215,6 +2239,19 @@ def main():
               res.get(txg_utxo2))
         check('18 the due check-in tx did NOT broadcast during the grace',
               (state_tx(txg_ck2) or {}).get('broadcasted') is None, (state_tx(txg_ck2) or {}).get('broadcasted'))
+        # Both-numbers grace card (0.8.8): 2 of 3 would fire —
+        # the holding price tx (warm cache) and the past-due
+        # check-in tx (live clock, 36d past the 35d threshold).
+        # The UTXO tx would NOT: its spend landed after its last
+        # evaluation and its stored slice was never written.
+        s, st = req('GET', '/api/state')
+        wf2 = {t.get('id'): (t.get('triggerStatus') or {}).get('wouldFire') for t in st.get('bitcoin', {}).get('txs', [])}
+        check('18 wouldFire: the second holding price tx would fire (warm price cache)',
+              wf2.get(txg_price2) is True, wf2.get(txg_price2))
+        check('18 wouldFire: the second spent UTXO tx would NOT fire (no stored slice)',
+              wf2.get(txg_utxo2) is False, wf2.get(txg_utxo2))
+        check('18 wouldFire: the past-due check-in tx would fire (live clock, 36d past 35d)',
+              wf2.get(txg_ck2) is True, wf2.get(txg_ck2))
         # Resume: the due check-in tx broadcasts, like the price
         # and UTXO txs. The outspend cache still holds the
         # add-time "unspent" verdict (TTL = the cadence), so

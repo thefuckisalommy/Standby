@@ -755,6 +755,68 @@ function ruleStatusFor(state, tx, rule, slice, now) {
   return { ...base, status: 'not-evaluated', reason: 'Not evaluated yet' };
 }
 
+// The cached tip height, or null when no usable reading is
+// cached (same endpoint-base match as the price/fee branches
+// in ruleStatusFor; no age check — the last known tip is
+// trusted until a fresh reading arrives, exactly like the
+// price and fee caches). Synchronous, no network: reading the
+// cache must never trigger a fetch, or the grace card would
+// defeat the grace it reports on.
+function tipFromCache(state) {
+  const eps = bitcoin.endpointsFor(state.settings);
+  const primary = eps[0] ? eps[0].base : null;
+  const secondary = eps[1] ? eps[1].base : null;
+  if (!caches.nodeTip.readings || !Object.keys(caches.nodeTip.readings).length) return null;
+  if (caches.nodeTip.primary !== primary || caches.nodeTip.secondary !== secondary) return null;
+  const comb = bitcoin.combineTipHeights(caches.nodeTip.readings);
+  return comb.valid ? comb.tip : null;
+}
+
+// Whether this tx/set WOULD fire right now if the grace lifted
+// (0.8.8, both-numbers grace card): the raw condition of each
+// rule, judged on the best data available WITHOUT any new
+// network calls — the grace suspends rule evaluation, and this
+// must not defeat that. Per rule:
+//   check-in — the live clock: past due (clock.state
+//     'release-due') means would fire. The served slice reads
+//     'grace' when past due + grace active, so the clock, not
+//     the slice status, is the authority here (the clock also
+//     honours the vacation freeze, via the live offset).
+//   set-date — the live clock: the date has passed (served
+//     status 'due').
+//   price / fee-market — the served status 'due': ruleStatusFor
+//     already judges these on the live caches when warm, else
+//     the stored last evaluation.
+//   block-height — the tip cache when warm (tipFromCache
+//     above), else the stored slice's 'due'.
+//   UTXO — the stored slice's 'due' ONLY: its checks ARE the
+//     rule evaluation, so they go stale during a grace — a
+//     spend that lands while the app is away is not seen until
+//     the rules run again. That staleness is by design; the
+//     number is the last known answer, not a live one.
+//   manual — never. unknown / not-evaluated — never (fail-safe:
+//     a condition that cannot be read cannot be claimed met).
+// Combined by the set's op, exactly like the evaluator:
+// OR fires if any rule is met, AND only if every rule is met.
+function wouldFireFor(state, tx, set, statuses, now) {
+  const met = set.rules.map((rule, i) => {
+    const s = statuses[i];
+    if (rule.type === 'manual') return false;
+    if (rule.type === 'checkin') {
+      const clock = checkinClock(state, now, rule.params.thresholdDays, checkinLiveOffsetMs(tx, now));
+      return clock.state === 'release-due';
+    }
+    if (rule.type === 'blockheight') {
+      const tip = tipFromCache(state);
+      if (typeof tip === 'number') return tip >= rule.params.targetHeight;
+      return s.status === 'due';
+    }
+    return s.status === 'due';
+  });
+  if (set.op === 'OR') return met.some(Boolean);
+  return met.length === set.rules.length && met.every(Boolean);
+}
+
 // The tx-level trigger status for the UI (0.8.2): a one-rule set
 // reads exactly as its single rule did (the object above); a
 // multi-rule set reads the same combine as the evaluator — 'due'
@@ -767,7 +829,8 @@ function ruleStatusFor(state, tx, rule, slice, now) {
 function triggerStatusFor(state, tx, now) {
   const set = store.triggerOf(tx);
   const statuses = set.rules.map((rule, i) => ruleStatusFor(state, tx, rule, ruleTriggerState(tx, i), now));
-  if (set.rules.length === 1) return statuses[0];
+  const wouldFire = wouldFireFor(state, tx, set, statuses, now);
+  if (set.rules.length === 1) return { ...statuses[0], wouldFire };
   const outcomes = statuses.map((s, i) => {
     const held = s.status === 'grace' ? 'grace' : s.status === 'vacation' ? 'vacation' : s.status === 'held' ? 'held' : null;
     const cls = (s.status === 'due' || s.status === 'release-due') ? 'satisfied'
@@ -781,7 +844,7 @@ function triggerStatusFor(state, tx, now) {
     label: set.op === 'AND' ? 'AND rules' : 'OR rules',
     condition: triggerConditionText(set),
     status: combined.status, reason: combined.reason,
-    rules: statuses,
+    rules: statuses, wouldFire,
   };
 }
 

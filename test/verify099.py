@@ -1096,6 +1096,188 @@ def main():
         save_state_file(stj)
         check('6c unify: check-in clock restored (restart)', restart())
 
+        # --- 6d. both-numbers grace card: wouldFire (0.8.8) ---
+        # The grace card's second number — how many of the held
+        # transactions would fire the moment the grace lifts — is
+        # served per tx/set as triggerStatus.wouldFire: the raw
+        # condition of each rule, judged on the best data
+        # available WITHOUT any new network calls (the grace
+        # suspends rule evaluation, and the card must not defeat
+        # that). Per rule: check-in and set-date read the live
+        # clock (exact); price and fee-market read the live caches
+        # when warm, else the stored last evaluation; block-height
+        # reads the tip cache when warm, else the stored slice;
+        # UTXO reads the stored slice ONLY (its checks ARE the
+        # rule evaluation, so they go stale during a grace);
+        # manual never fires; unknown / not-evaluated never fire.
+        # Combined by the set's op (OR: any met; AND: all met).
+        # The stub price is pinned to 98200 and the fee to 1
+        # sat/vB (earlier sections leave other values behind).
+        delete_all_txs()
+        check('6d wouldFire: caches cleared cold for a deterministic start', clear_caches())
+        s, r = req('POST', '/__test__/price', {'usd': 98200}, base=STUB_BASE_P)
+        check('6d wouldFire: stub price pinned to 98200', s == 200, (s, r))
+        s, r = req('POST', '/__test__/fees', {'economyFee': 1}, base=STUB_BASE_P)
+        check('6d wouldFire: stub fee pinned to 1 sat/vB', s == 200, (s, r))
+        s, r = req('POST', '/__test__/outspend', {'txid': SECOND, 'vout': 0, 'blockHeight': 899999}, base=STUB_BASE_P)
+        check('6d wouldFire: SECOND:0 driven to spent (2 confs)', s == 200, (s, r))
+        # The spent UTXO tx first, alone and disarmed: a real
+        # evaluation writes its slice 'due' without broadcasting
+        # (disarmed txs are evaluated for display but never enter
+        # the firing set). It stays disarmed — a real 'due' UTXO
+        # tx would broadcast before any grace could hold it, which
+        # is exactly why the number reads the last evaluation.
+        s, r = add_tx('WF UTXO spent', {'type': 'utxo', 'params': {'outpoint': SECOND + ':0'}}, 111000, trigger_confirmed=True)
+        check('6d wouldFire: the spent UTXO tx adds (triggerConfirmed)', s == 201, (s, r))
+        wf_utxo_spent = r['tx']['id'] if s == 201 else None
+        s, r = req('PUT', '/api/bitcoin/txs/' + wf_utxo_spent, {'enabled': False})
+        check('6d wouldFire: the spent UTXO tx is disarmed', s == 200, (s, r))
+        s, r, res = release_results()
+        check('6d wouldFire: the disarmed spent UTXO tx is skipped, not broadcast',
+              res.get(wf_utxo_spent, {}).get('action') == 'skipped', res.get(wf_utxo_spent))
+        check('6d wouldFire: the evaluation wrote its slice due',
+              rule_slice(state_tx(wf_utxo_spent)).get('status') == 'due', rule_slice(state_tx(wf_utxo_spent)))
+        # The rest, added with a fresh clock and no grace yet.
+        s, r = add_tx('WF check-in due', {'type': 'checkin', 'params': {'thresholdDays': 35}}, 111001)
+        check('6d wouldFire: the check-in tx adds', s == 201, (s, r))
+        wf_ck = r['tx']['id'] if s == 201 else None
+        s, r = add_tx('WF price holding', {'type': 'price', 'params': {'asset': 'BTC', 'op': '>=', 'value': 90000}}, 111002, trigger_confirmed=True)
+        check('6d wouldFire: the holding price tx adds (triggerConfirmed)', s == 201, (s, r))
+        wf_price = r['tx']['id'] if s == 201 else None
+        s, r = add_tx('WF price not holding', {'type': 'price', 'params': {'asset': 'BTC', 'op': '>=', 'value': 200000}}, 111003)
+        check('6d wouldFire: the not-holding price tx adds', s == 201, (s, r))
+        wf_price_no = r['tx']['id'] if s == 201 else None
+        s, r = add_tx('WF setdate past', {'type': 'setdate', 'params': {'fireAt': iso_ago(hours=1)}}, 111004, trigger_confirmed=True)
+        check('6d wouldFire: the past set-date tx adds (triggerConfirmed)', s == 201, (s, r))
+        wf_sd = r['tx']['id'] if s == 201 else None
+        s, r = add_tx('WF setdate future', {'type': 'setdate', 'params': {'fireAt': iso_in(days=1)}}, 111005)
+        check('6d wouldFire: the future set-date tx adds', s == 201, (s, r))
+        wf_sd_no = r['tx']['id'] if s == 201 else None
+        s, r = add_tx('WF blockheight reached', {'type': 'blockheight', 'params': {'targetHeight': 899000}}, 111006, trigger_confirmed=True)
+        check('6d wouldFire: the reached block-height tx adds (triggerConfirmed)', s == 201, (s, r))
+        wf_bh = r['tx']['id'] if s == 201 else None
+        s, r = add_tx('WF blockheight not reached', {'type': 'blockheight', 'params': {'targetHeight': 950000}}, 111007)
+        check('6d wouldFire: the unreached block-height tx adds', s == 201, (s, r))
+        wf_bh_no = r['tx']['id'] if s == 201 else None
+        s, r = add_tx('WF UTXO unspent', {'type': 'utxo', 'params': {'outpoint': FINNEY + ':1'}}, 111008)
+        check('6d wouldFire: the unspent UTXO tx adds', s == 201, (s, r))
+        wf_utxo_no = r['tx']['id'] if s == 201 else None
+        s, r = add_tx('WF feemarket met', {'type': 'feemarket', 'params': {'maxFeeRate': 5, 'direction': 'below'}}, 111009, trigger_confirmed=True)
+        check('6d wouldFire: the met fee-market tx adds (triggerConfirmed)', s == 201, (s, r))
+        wf_fm = r['tx']['id'] if s == 201 else None
+        s, r = add_tx('WF feemarket unmet', {'type': 'feemarket', 'params': {'maxFeeRate': 5, 'direction': 'above'}}, 111010)
+        check('6d wouldFire: the unmet fee-market tx adds', s == 201, (s, r))
+        wf_fm_no = r['tx']['id'] if s == 201 else None
+        s, r = add_tx('WF OR', {'op': 'OR', 'rules': [
+            {'type': 'price', 'params': {'asset': 'BTC', 'op': '>=', 'value': 200000}},
+            {'type': 'setdate', 'params': {'fireAt': iso_ago(hours=1)}}]}, 111011, trigger_confirmed=True)
+        check('6d wouldFire: the OR set adds (triggerConfirmed)', s == 201, (s, r))
+        wf_or = r['tx']['id'] if s == 201 else None
+        s, r = add_tx('WF AND unmet', {'op': 'AND', 'rules': [
+            {'type': 'price', 'params': {'asset': 'BTC', 'op': '>=', 'value': 90000}},
+            {'type': 'setdate', 'params': {'fireAt': iso_in(days=1)}}]}, 111012)
+        check('6d wouldFire: the unmet AND set adds', s == 201, (s, r))
+        wf_and_no = r['tx']['id'] if s == 201 else None
+        s, r = add_tx('WF AND met', {'op': 'AND', 'rules': [
+            {'type': 'price', 'params': {'asset': 'BTC', 'op': '>=', 'value': 90000}},
+            {'type': 'setdate', 'params': {'fireAt': iso_ago(hours=1)}}]}, 111013, trigger_confirmed=True)
+        check('6d wouldFire: the met AND set adds (triggerConfirmed)', s == 201, (s, r))
+        wf_and = r['tx']['id'] if s == 201 else None
+        s, r = add_tx('WF manual', {'type': 'manual', 'params': {}}, 111014)
+        check('6d wouldFire: the manual tx adds', s == 201, (s, r))
+        wf_manual = r['tx']['id'] if s == 201 else None
+        # Backdate the clock 40 days (past the 35-day check-in
+        # threshold) and the online stamp 10 days (past the
+        # 7-day grace threshold), then restart: the grace sets
+        # on the startup tick before any held rule evaluates.
+        stj = load_state_file()
+        stj['checkin']['lastOnlineAt'] = iso_ago(days=10)
+        stj['checkin']['lastCheckinAt'] = iso_ago(days=40)
+        save_state_file(stj)
+        check('6d wouldFire: app restarted with a 10-day gap and a 40-day-old clock', restart())
+        s, st = req('GET', '/api/state')
+        check('6d wouldFire: the grace is active', st.get('grace', {}).get('active') is True, st.get('grace'))
+        def wf(tx_id):
+            t = state_tx(tx_id)
+            return (t or {}).get('triggerStatus', {}).get('wouldFire')
+        # Cache-independent reads first: clock rules and stored
+        # slices are exact whether or not a cache is warm.
+        check('6d wouldFire: the past-due check-in tx would fire (live clock)', wf(wf_ck) is True, wf(wf_ck))
+        check('6d wouldFire: the unspent UTXO tx would not fire (never evaluated)', wf(wf_utxo_no) is False, wf(wf_utxo_no))
+        check('6d wouldFire: the spent UTXO tx would fire (stored slice due)', wf(wf_utxo_spent) is True, wf(wf_utxo_spent))
+        check('6d wouldFire: the past set-date tx would fire (live clock)', wf(wf_sd) is True, wf(wf_sd))
+        check('6d wouldFire: the future set-date tx would not fire', wf(wf_sd_no) is False, wf(wf_sd_no))
+        check('6d wouldFire: the not-holding price tx would not fire', wf(wf_price_no) is False, wf(wf_price_no))
+        check('6d wouldFire: the unmet fee-market tx would not fire', wf(wf_fm_no) is False, wf(wf_fm_no))
+        check('6d wouldFire: the unreached block-height tx would not fire', wf(wf_bh_no) is False, wf(wf_bh_no))
+        check('6d wouldFire: the manual tx would never fire', wf(wf_manual) is False, wf(wf_manual))
+        check('6d wouldFire: the unmet AND set would not fire (one rule unmet)', wf(wf_and_no) is False, wf(wf_and_no))
+        # Cold caches, one snapshot: the holding price, the met
+        # fee-market, and the reached block-height txs read false
+        # until their caches warm — the card must not claim a
+        # condition it has no data for. The OR set already reads
+        # true (its set-date rule is clock-exact); the met AND set
+        # reads false (its price rule is unreadable cold).
+        check('6d wouldFire: caches cleared cold', clear_caches())
+        s, st = req('GET', '/api/state')
+        cold = {t.get('id'): (t.get('triggerStatus') or {}).get('wouldFire') for t in st.get('bitcoin', {}).get('txs', [])}
+        check('6d wouldFire: the holding price tx reads false with a cold price cache', cold.get(wf_price) is False, cold.get(wf_price))
+        check('6d wouldFire: the met fee-market tx reads false with a cold fee cache', cold.get(wf_fm) is False, cold.get(wf_fm))
+        check('6d wouldFire: the reached block-height tx reads false with a cold tip cache', cold.get(wf_bh) is False, cold.get(wf_bh))
+        check('6d wouldFire: the OR set reads true cold (its set-date rule is clock-exact)', cold.get(wf_or) is True, cold.get(wf_or))
+        check('6d wouldFire: the met AND set reads false cold (its price rule is unreadable)', cold.get(wf_and) is False, cold.get(wf_and))
+        # Warm each cache explicitly via the stateless trigger
+        # gate (no state change, no evaluation) and re-read.
+        s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'price', 'params': {'asset': 'BTC', 'op': '>=', 'value': 90000}}})
+        check('6d wouldFire: the price gate warms the price cache', s == 200 and r.get('fire') is True, (s, r))
+        check('6d wouldFire: the holding price tx reads true once the price cache is warm', wf(wf_price) is True, wf(wf_price))
+        check('6d wouldFire: the met AND set reads true once its price rule is met', wf(wf_and) is True, wf(wf_and))
+        s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'feemarket', 'params': {'maxFeeRate': 5, 'direction': 'below'}}})
+        check('6d wouldFire: the fee gate warms the fee cache', s == 200 and r.get('fire') is True, (s, r))
+        check('6d wouldFire: the met fee-market tx reads true once the fee cache is warm', wf(wf_fm) is True, wf(wf_fm))
+        s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'blockheight', 'params': {'targetHeight': 899000}}})
+        check('6d wouldFire: the block-height gate warms the tip cache', s == 200 and r.get('fire') is True, (s, r))
+        check('6d wouldFire: the reached block-height tx reads true once the tip cache is warm', wf(wf_bh) is True, wf(wf_bh))
+        # Checking in clears the check-in rule's wouldFire (the
+        # clock is fresh again) but not the grace itself.
+        s, r = req('POST', '/api/checkin', {'method': 'app'})
+        check('6d wouldFire: a check-in lands', s == 200 and r.get('ok') is True, (s, r))
+        check('6d wouldFire: the check-in tx reads false once the clock is fresh', wf(wf_ck) is False, wf(wf_ck))
+        s, st = req('GET', '/api/state')
+        check('6d wouldFire: the grace is still active after the check-in', st.get('grace', {}).get('active') is True, st.get('grace'))
+        # A stale 'due' block-height slice still counts when the
+        # tip cache is cold (the fallback): seed one on the
+        # unreached tx via before_start — on disk before boot,
+        # race-free — and restart. The grace holds the rules, so
+        # the seeded slice survives the startup tick.
+        def seed_bh_due():
+            stj2 = load_state_file()
+            for t in stj2.get('bitcoin', {}).get('txs', []):
+                if t.get('id') == wf_bh_no:
+                    t['triggerState'] = {'lastEvalAt': iso_ago(), 'status': 'due', 'reason': 'block 900,000 reached — firing',
+                                         'lastPrice': None, 'lastPriceAt': None, 'lastOutspend': None, 'lastError': None,
+                                         'lastTipHeight': 900000}
+                    break
+            save_state_file(stj2)
+        check('6d wouldFire: app restarted with a seeded due block-height slice', restart(before_start=seed_bh_due))
+        s, st = req('GET', '/api/state')
+        check('6d wouldFire: the grace is still active after the restart', st.get('grace', {}).get('active') is True, st.get('grace'))
+        check('6d wouldFire: the seeded due slice survives the startup tick',
+              rule_slice(state_tx(wf_bh_no)).get('status') == 'due', rule_slice(state_tx(wf_bh_no)))
+        check('6d wouldFire: the stale due slice counts with a cold tip cache (fallback)', wf(wf_bh_no) is True, wf(wf_bh_no))
+        # Cleanup: resume the grace, drop the txs, clear the stub
+        # override, restore a fresh clock for the next sections.
+        s, r = req('POST', '/api/grace/resume', {})
+        check('6d wouldFire: resumed', s == 200, (s, r))
+        delete_all_txs()
+        s, r = req('POST', '/__test__/outspend', {'txid': SECOND, 'vout': 0, 'clear': True}, base=STUB_BASE_P)
+        check('6d wouldFire: SECOND:0 override cleared', s == 200, (s, r))
+        stj = load_state_file()
+        stj['checkin']['lastOnlineAt'] = iso_ago()
+        stj['checkin']['lastCheckinAt'] = iso_ago()
+        save_state_file(stj)
+        check('6d wouldFire: check-in clock restored (restart)', restart())
+
         # --- 7. vacation does NOT freeze the new types --------------------
         # Vacation is check-in-only: a set-date tx must still fire
         # while vacation mode is on.
