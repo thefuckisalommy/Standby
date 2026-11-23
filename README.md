@@ -2,23 +2,22 @@
 
 Community app store for [Standby](https://github.com/thefuckisalommy/Standby) — presigned Bitcoin transactions, ready when they're needed.
 
-Standby is a transaction broadcasting tool: you sign Bitcoin transactions in your own wallet, store them in trigger sets, and Standby broadcasts them when the set's trigger fires — whether you're planning for the unexpected, watching a price, or keeping a transaction ready for a UTXO to move. It never holds your keys.
+Standby is a transaction broadcasting tool: you sign Bitcoin transactions in your own wallet, store them Standby, set the conditions in which they should broadcast, and Standby broadcasts them when the set's trigger fires.
 
 > **Runs on Umbrel or on any Linux box with Docker.** The prebuilt image is built for arm64 and amd64 — see [Run on any Linux box (Docker)](#run-on-any-linux-box-docker).
 
 ## Features
 
 - **Prepare in advance** — store presigned transactions: paste the raw signed hex, or import a hex file or a fully-signed PSBT (.psbt). The app never sees your keys.
-- **Broadcast manually** — send a prepared transaction whenever you decide.
-- **Shared trigger sets** — one trigger drives every transaction in the set. A trigger already satisfied when you add or edit is blocked unless you confirm it, so nothing fires the moment you save it.
-  - **Check-in** — fire after N days of silence (35 by default; each set has its own threshold and countdown). Check in from the app or an API key; it resets every check-in countdown, never a price or UTXO rule.
+- **Broadcast Triggers** — a trigger is the broadcast condition for every transaction it is bundled with
+  - **Check-in** — fire after N days of silence (35 by default; each set has its own threshold and countdown). Check in from the app or an API key; it resets every check-in countdown.
   - **BTC price** — fire when the price crosses a value you set. Two sources you pick (CoinGecko and Coinbase by default, or Custom with a URL and JSON path). A reading counts only when they agree within 5% (default); if they disagree, the rule waits. If one feed fails, the other decides alone.
-  - **UTXO moved** — fire when a named outpoint is spent, on any spend (0 confirmations) or at N confirmations. A spend by your own transaction reads as already broadcast, not a trigger.
+  - **UTXO moved** — fire when a named outpoint is spent, on any spend (0 confirmations) or at N confirmations.
   - **Block height** — fire when the chain reaches a height you set. Judged fresh every tick, so a reorg that moves the tip back below the height stops it being due.
   - **Set date** — fire at a date and time you set. A pure deadline: checking in does not snooze it.
   - **Fee market** — fire when the economy fee crosses a rate you set, up or down. The market rate alone, not the transaction's own fee. Read from the primary node first (secondary only if the primary fails), once per 5 minutes, shared across all fee transactions.
   - **Manual only** — never fires on its own.
-- **Releases** — when a set's trigger fires, every armed transaction in it broadcasts. Rules are evaluated together on every check-cadence tick (about once a minute by default, adjustable in Settings), each on its own — one failing or stale transaction never stops the others. Once a release starts, it finishes, even if you check in halfway through. A release re-checks every armed transaction's inputs first, and a broadcast has a 15-second deadline.
+- **Releases** — when a trigger condition is met, every armed transaction in its set is broadcast. Rules are evaluated together on every check-cadence tick (about once a minute by default, adjustable in Settings), each on its own — one failing or stale transaction never stops the others. Once a release starts, it finishes, even if you check in halfway through. A release re-checks every armed transaction's inputs first, and a broadcast has a 15-second deadline.
 - **Grace after being offline** — if the app was offline longer than 7 days (by default), price and UTXO triggers pause for a 7-day grace period (or until you resume). Check-in triggers have their own offline-gap hold.
 - **Vacation and disarm** — vacation freezes the check-in countdown (price and UTXO triggers keep firing); disarming a set stops its transactions firing on their own (manual broadcast still works). Disarmed sets are still evaluated every tick, so their statuses stay live.
 - **Broadcast Fee Risk** — each transaction's fee rate vs the 90-day peak (the 90th percentile of block medians): Low, Medium, High, or Critical (below the current economy fee). Informational only — it never blocks a broadcast. The Low and Medium multipliers are adjustable in Settings.
