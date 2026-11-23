@@ -10,7 +10,15 @@
 //   getrawtransaction   -> the parent tx (FINNEY / SECOND / CONFLICT /
 //                          OWN_SPEND) or a tx registered via
 //                          /__test__/rpc-known or recorded by a
-//                          broadcast; anything else is Core error -5
+//                          broadcast; anything else is Core error -5.
+//                          Verbose form models REAL Core: it returns
+//                          confirmations, blockhash (a real non-zero
+//                          hash for confirmed txs), blocktime, time —
+//                          and NO blockheight (Core never returns
+//                          one; the height comes from getblockheader)
+//   getblockheader      -> {height, ...} for a block hash the stub
+//                          issued (unknown hash is Core error -5)
+//   estimatesmartfee    -> {feerate, blocks: 6} (default 0.00005
 //   estimatesmartfee    -> {feerate, blocks: 6} (default 0.00005
 //                          BTC/kB = 5 sat/vB), or "insufficient data"
 //   sendrawtransaction  -> the txid; the sentinel txid answers Core
@@ -35,7 +43,7 @@
 //     sets the confirmations / block height a broadcasted txid
 //     reports (default 6 at block 899995)
 //   GET  /__test__/rpc-count — answers the per-method call counts
-//     {getblockcount, gettxout, getrawtransaction,
+//     {getblockcount, gettxout, getrawtransaction, getblockheader,
 //      estimatesmartfee, sendrawtransaction, getblockchaininfo}
 const http = require('http');
 const crypto = require('crypto');
@@ -43,6 +51,16 @@ const FINNEY = 'f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16
 const SECOND = 'aa'.repeat(32);
 const CONFLICT = 'cc'.repeat(32);
 const OWN_SPEND = 'ee'.repeat(32);
+// A block hash for a height: deterministic and non-zero, so a
+// getblockheader(hash) round-trips to the height it was issued
+// for — the way real Core behaves (a zero hash would break any
+// implementation that looks the height up by hash).
+const hashToHeight = {};
+function blockHashForHeight(h) {
+  const hash = crypto.createHash('sha256').update('standby-block-' + h).digest('hex');
+  hashToHeight[hash] = h;
+  return hash;
+}
 const SENTINEL_TXID = (process.env.SENTINEL_TXID || '').toLowerCase();
 const CONFIRMED_HEIGHT = 899995;
 let tipHeight = parseInt(process.env.STUB_RPC_TIP || '900000', 10) || 900000;
@@ -69,7 +87,7 @@ known[OWN_SPEND] = parentEntry(OWN_SPEND, 50, 899950, [1.0]);
 // Broadcasted txids keep their own confirmation override:
 // txid -> {confirmations, blockheight}; default 6 at 899995.
 const broadcasted = {};
-const counts = { getblockcount: 0, gettxout: 0, getrawtransaction: 0, estimatesmartfee: 0, sendrawtransaction: 0, getblockchaininfo: 0 };
+const counts = { getblockcount: 0, gettxout: 0, getrawtransaction: 0, getblockheader: 0, estimatesmartfee: 0, sendrawtransaction: 0, getblockchaininfo: 0 };
 
 function txidOfHex(hex) {
   try {
@@ -117,9 +135,21 @@ function handleMethod(method, params) {
         vin: [], vout: entry.vout.map((o, i) => ({ value: o.value, n: i, scriptPubKey: { asm: '', hex: '', type: 'pubkeyhash' } })) };
       if (typeof entry.confirmations === 'number') {
         out.confirmations = entry.confirmations;
-        if (entry.confirmations > 0) { out.blockhash = '00'.repeat(32); out.blockheight = entry.blockheight; out.blocktime = 0; out.time = 0; }
+        // Real Core: a confirmed tx carries blockhash/blocktime/
+        // time — and NO blockheight. The height is recovered via
+        // getblockheader(blockhash); a zero blockhash here would
+        // break that lookup, so the hash is a real one for the
+        // confirming height.
+        if (entry.confirmations > 0) { out.blockhash = blockHashForHeight(entry.blockheight); out.blocktime = 0; out.time = 0; }
       }
       return out;
+    }
+    case 'getblockheader': {
+      counts.getblockheader++;
+      const hash = String(p[0] || '').toLowerCase();
+      const height = hashToHeight[hash];
+      if (typeof height !== 'number') throw { code: -5, message: 'Block not found' };
+      return { hash, confirmations: tipHeight - height + 1, height, version: 1, versionHex: '00000001', merkleroot: '00'.repeat(32), time: 0, mediantime: 0, nonce: 0, bits: '1d00ffff', difficulty: 1, chainwork: '00'.repeat(32), nTx: 1, previousblockhash: '00'.repeat(32), nextblockhash: null };
     }
     case 'estimatesmartfee': {
       counts.estimatesmartfee++;

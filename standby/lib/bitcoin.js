@@ -33,16 +33,22 @@
 // Core JSON-RPC endpoint (settings.*RpcEnabled / *RpcUrl / *RpcUser /
 // *RpcPass). An RPC node answers the same questions through Core
 // directly — getblockcount, gettxout, getrawtransaction,
-// estimatesmartfee, sendrawtransaction — with no mempool service in
-// between. RPC mode has one hard limit the mempool path does not:
-// plain RPC cannot tell a CONFIRMED spend from an UNCONFIRMED one
-// (there is no outspend lookup and the spender's txid is not
-// returned), so a spend seen over RPC reads as a confirmed spend in
-// the freshness / dry-run path (an unconfirmed spend reads as
-// stale), while the UTXO trigger refuses to fire on it at all
-// unless it asked for confirmations 0 — see checkUtxoRule in
-// lib/rules.js. With RPC disabled (the default) nothing changes:
-// every call below takes the mempool path exactly as before.
+// getblockheader, estimatesmartfee, sendrawtransaction — with no
+// mempool service in between. RPC mode has one hard limit the
+// mempool path does not: plain RPC cannot tell a CONFIRMED spend
+// from an UNCONFIRMED one (there is no outspend lookup and the
+// spender's txid is not returned), so a spend seen over RPC is
+// UNKNOWN as to confirmation — the freshness / dry-run path keeps
+// the transaction active with a warning and re-asks the next
+// endpoint (see checkInputsUnspentVia), while the UTXO trigger
+// refuses to fire on it at all unless it asked for confirmations
+// 0 — see checkUtxoRule in lib/rules.js. With RPC disabled (the
+// default) nothing changes: every call below takes the mempool path
+// exactly as before. RPC mode also needs the node to run with
+// txindex=1: without it Core cannot look up historical transactions
+// (getrawtransaction answers -5), so parent lookups read unknown —
+// fail-safe, but the app cannot verify spends the node has not
+// indexed; see the nodes help text and the README.
 //
 // HARD RULES:
 //   - Never accept, store, or log private keys, seeds, or passwords.
@@ -852,6 +858,34 @@ async function rpcCall(endpoint, method, params) {
   return data.result;
 }
 
+// The height of one block, by its hash, over RPC (0.8.8 fix for
+// bug 1). Core's verbose getrawtransaction NEVER returns a
+// blockheight — it returns confirmations, blockhash, blocktime —
+// so a confirming height is recovered with getblockheader(hash).
+// The answer is immutable (a block hash never moves to another
+// height), so it is cached forever, keyed by endpoint + hash —
+// the same cold-cache state a restart produces is restored by
+// clearOutspendCache below. A failure (unknown hash, pruned node)
+// returns null, never throws: the caller falls through to the
+// next endpoint or reports the height unknown, instead of losing
+// the transaction data the getrawtransaction call already gave.
+const rpcBlockHeightCache = new Map(); // key -> height
+async function rpcBlockHeight(ep, blockhash) {
+  if (!blockhash || typeof blockhash !== 'string' || !/^[0-9a-fA-F]{64}$/.test(blockhash)) return null;
+  const key = ep.base + '|' + blockhash.toLowerCase();
+  if (rpcBlockHeightCache.has(key)) return rpcBlockHeightCache.get(key);
+  let header;
+  try {
+    header = await rpcCall(ep, 'getblockheader', [blockhash]);
+  } catch {
+    return null;
+  }
+  const h = (header && typeof header === 'object') ? header.height : null;
+  if (typeof h !== 'number' || !Number.isFinite(h) || h < 0) return null;
+  rpcBlockHeightCache.set(key, h);
+  return h;
+}
+
 // ---------------------------------------------------------------------------
 // Fee verdict (0.7.20): is a stored transaction's FIXED fee good
 // enough for a long-term hold? The fee was set when the tx was
@@ -1568,6 +1602,7 @@ function clearOutspendCache() {
   outspendCache.clear();
   outspendInflight.clear();
   outspendsInflight.clear();
+  rpcBlockHeightCache.clear();
 }
 // (0.8.6 fold-in, audit finding 3) In-flight dedup: a request
 // already on the wire for an outpoint — or for a funding tx's
@@ -1668,9 +1703,10 @@ async function mempoolOutspends(prevTxid, apiBase, ttlMs) {
 //   whether the spending tx is confirmed (there is no outspend
 //   lookup and the spender's txid is not returned). Callers that
 //   need a confirmation count must read that flag, never the
-//   status: the freshness path treats an RPC spend as a confirmed
-//   spend (it reads as stale — see checkInputsUnspentVia), while
-//   the UTXO trigger refuses to fire on it unless it asked for
+//   status: the freshness path treats an RPC spend as UNKNOWN as
+//   to confirmation — it keeps the transaction active and re-asks
+//   the next endpoint (see checkInputsUnspentVia) — while the
+//   UTXO trigger refuses to fire on it unless it asked for
 //   confirmations 0 (see checkUtxoRule). Same cache rules as the
 //   mempool path, keyed by the RPC URL: a spent/unspent answer is
 //   cached for the TTL, an unknown one never is, and a failed
@@ -1834,6 +1870,10 @@ function outspendEntryToResult(outpoint, entry, checkedVia, checkedBase) {
 //              may still be evicted or replaced, so the transaction
 //              stays active with a warning, and a broadcast is still
 //              attempted — the network is the arbiter.
+//   (0.8.8 fix, bug 2) Over RPC a spend is a FOURTH thing: spent
+//   but confirmation-unknown. It lands in `unknown` (flagged
+//   spendSeenConfirmationsUnknown), never in `spent` — an RPC
+//   spend must never permanently mark a transaction stale.
 async function checkInputsUnspentVia(parsed, ep, ttlMs) {
   // (0.8.8) RPC own check: plain RPC cannot name the spender of
   // an input, so before the per-input gettxout checks, ask whether
@@ -1856,7 +1896,10 @@ async function checkInputsUnspentVia(parsed, ep, ttlMs) {
     if (ownTx !== null && typeof ownTx === 'object') {
       const confs = ownTx.confirmations;
       const confirmed = typeof confs === 'number' && confs > 0;
-      const blockHeight = (confirmed && Number.isFinite(ownTx.blockheight)) ? ownTx.blockheight : null;
+      // (0.8.8 fix, bug 1) Core's verbose getrawtransaction has
+      // no blockheight — the confirming height comes from
+      // getblockheader(ownTx.blockhash) (see rpcBlockHeight).
+      const blockHeight = confirmed ? await rpcBlockHeight(ep, ownTx.blockhash) : null;
       return {
         checked: parsed.inputs.length,
         unspent: [], spent: [], conflict: [], unknown: [],
@@ -1878,18 +1921,22 @@ async function checkInputsUnspentVia(parsed, ep, ttlMs) {
     else if (out.txid && out.txid.toLowerCase() === parsed.txid.toLowerCase()) {
       own.push({ ...inp, spentBy: out.txid, confirmed: !!(out.status && out.status.confirmed),
         blockHeight: (out.status && Number.isFinite(out.status.block_height)) ? out.status.block_height : null });
-    // (0.8.8) An RPC spend has no spender txid and no confirmation
-    // information — plain RPC cannot tell a confirmed spend from
-    // an unconfirmed one — so it reads here as a CONFIRMED spend
-    // by an unknown transaction: the input is stale. That is the
-    // documented RPC limitation (an unconfirmed spend reads as
-    // stale in RPC mode); the UTXO trigger, which must count
-    // confirmations, instead refuses to fire on it — see
-    // checkUtxoRule. An RPC spend reaches `own` only through the
-    // own-tx check at the top of this function (the tx itself is
-    // known to the node); a spend by another tx can never land
+    // (0.8.8 fix, bug 2) An RPC spend has no spender txid and no
+    // confirmation information — plain RPC cannot tell a confirmed
+    // spend from an unconfirmed one — so it reads here as UNKNOWN,
+    // never as a confirmed spend: the input goes on the unknown
+    // list (flagged spendSeenConfirmationsUnknown, so the dry-run
+    // note can say a spend was seen), and checkInputsUnspent
+    // re-asks the next endpoint for it. In mixed mode the mempool
+    // secondary then gives the real answer (confirmed → stale,
+    // unconfirmed → conflict); with no usable secondary the input
+    // stays unknown — warn, keep the transaction active, retry
+    // next tick — and NO path may permanently mark it stale on
+    // RPC evidence alone. An RPC spend reaches `own` only through
+    // the own-tx check at the top of this function (the tx itself
+    // is known to the node); a spend by another tx can never land
     // there, because the spender is unnamed.
-    } else if (ep.mode === 'rpc') spent.push({ ...inp, spentBy: null, blockHeight: null });
+    } else if (ep.mode === 'rpc') unknown.push({ ...inp, spendSeenConfirmationsUnknown: true });
     else if (out.status && out.status.confirmed === true) spent.push({ ...inp, spentBy: out.txid || null,
       blockHeight: (out.status && Number.isFinite(out.status.block_height)) ? out.status.block_height : null });
     else conflict.push({ ...inp, spentBy: out.txid || null });
@@ -1984,11 +2031,23 @@ async function checkOutspend(outpoint, endpoints, opts) {
   if (batch && batch.hasBatch(prevTxid) && Number.isFinite(prevVout) && prevVout >= 0) {
     const b = await batch.fetch(prevTxid);
     if (b.unknown) {
-      return { outpoint, spent: false, confirmed: false, txid: null, blockHeight: null, unknown: true,
-        checkedVia: b.checkedVia, checkedBase: b.checkedBase, error: b.error || undefined };
+      // (0.8.8 fix, bug 7b) The batch is a mempool-API shape — an
+      // RPC endpoint is skipped by checkOutspends, so with no
+      // mempool endpoint the batch answers unknown even though
+      // the singular RPC path (gettxout) could answer. Fall
+      // through to the singular loop below when any endpoint is
+      // RPC, instead of returning unknown: a confs=0 UTXO rule
+      // that could fire via the singular path must not stay
+      // unknown forever. With no RPC endpoint the batch already
+      // asked every mempool endpoint, so unknown stands.
+      if (!endpoints.some((e) => e && e.mode === 'rpc')) {
+        return { outpoint, spent: false, confirmed: false, txid: null, blockHeight: null, unknown: true,
+          checkedVia: b.checkedVia, checkedBase: b.checkedBase, error: b.error || undefined };
+      }
+    } else {
+      const entry = Array.isArray(b.results) ? b.results[prevVout] : null;
+      return outspendEntryToResult(outpoint, entry, b.checkedVia, b.checkedBase);
     }
-    const entry = Array.isArray(b.results) ? b.results[prevVout] : null;
-    return outspendEntryToResult(outpoint, entry, b.checkedVia, b.checkedBase);
   }
   const errors = [];
   let first404 = null;
@@ -2087,6 +2146,12 @@ async function dryRun(dataDir, { tx, endpoints, ttlMs }) {
     : check.conflict.length ? 'conflict'
     : check.unknown.length ? 'unknown' : 'ready';
   const wouldBroadcast = check.spent.length === 0 && check.own.length === 0;
+  // (0.8.8 fix, bug 2) Inputs the RPC node saw spent but cannot
+  // count: a spend was seen, its confirmation is unknown — the
+  // verdict is 'unknown' (never 'blocked'), the transaction stays
+  // active, and the note says so in plain words instead of the
+  // generic could-not-verify line.
+  const spendSeen = (check.unknown || []).filter((i) => i && i.spendSeenConfirmationsUnknown === true);
   // The route this transaction would take (0.7.16): the dry-run note
   // names it, so a Slipstream transaction says "would submit to
   // Slipstream" instead of "would broadcast". The freshness gate is
@@ -2105,6 +2170,8 @@ async function dryRun(dataDir, { tx, endpoints, ttlMs }) {
           ? 'This transaction is timelocked until ' + (typeof timelock.until === 'number' ? 'block ' + timelock.until : timelock.until.toISOString()) + ' — ' + rejecter + ' would reject it as non-final until then, so ' + attempt + ' would be attempted and rejected; it will be retried on the next hourly check. ' + viaNote
           : verdict === 'conflict'
           ? check.conflict.length + ' input(s) are spent by another transaction that is not confirmed yet — the spend may still be evicted, so this transaction stays active with a warning and ' + attempt + ' will still be attempted. ' + viaNote
+          : spendSeen.length
+          ? spendSeen.length + ' input(s) are spent — the RPC node saw the spend but cannot say whether it is confirmed (spend seen, confirmation unknown) — so this transaction stays active with a warning and ' + attempt + ' will still be attempted. ' + viaNote
           : check.unknown.length + ' input(s) could not be verified — ' + attempt + ' would be attempted, but the network is the arbiter. ' + viaNote;
   // The fee (0.7.18): the input values come from the parent txs,
   // fetched best-effort from the node. Always computed fresh — the
@@ -2211,10 +2278,15 @@ function btcToSats(value) {
 // endpoint is down, so the caller falls through to the next one.
 //   mempool: GET /api/tx/:txid (404 = unknown).
 //   RPC: getrawtransaction(txid, true) — code -5 = unknown;
-//   confirmations > 0 means confirmed, with blockheight; in the
-//   mempool confirmations is 0 and there is no blockheight. The
-//   vout values are converted BTC → satoshis here, so callers
-//   read one unit (satoshis) from either transport.
+//   confirmations > 0 means confirmed, and the confirming height
+//   comes from getblockheader(raw.blockhash) — Core's verbose
+//   getrawtransaction NEVER returns a blockheight (0.8.8 fix,
+//   bug 1). When the height cannot be recovered, block_height is
+//   left undefined and the CALLER must fall through to the next
+//   endpoint (see getConfirmations) instead of reporting a
+//   definitive null count. The vout values are converted BTC →
+//   satoshis here, so callers read one unit (satoshis) from
+//   either transport.
 async function txStatusFor(ep, txid, timeoutMs) {
   if (ep.mode === 'rpc') {
     let raw;
@@ -2232,10 +2304,15 @@ async function txStatusFor(ep, txid, timeoutMs) {
       const sats = btcToSats(o.value);
       return { ...o, value: sats };
     }) : [];
+    // (0.8.8 fix, bug 1) No raw.blockheight exists — recover the
+    // height from the block hash. A null here means "this endpoint
+    // could not say", not "unconfirmed": getConfirmations falls
+    // through to the next endpoint on it.
+    const height = confirmed ? await rpcBlockHeight(ep, raw.blockhash) : null;
     return {
       status: {
         confirmed,
-        block_height: (confirmed && Number.isFinite(raw.blockheight)) ? raw.blockheight : undefined,
+        block_height: (height !== null) ? height : undefined,
         block_time: raw.blocktime,
       },
       vout,
@@ -2596,6 +2673,13 @@ async function getTipHeight(endpoints) {
 // the call throws and the caller keeps the last known value.
 async function getConfirmations(txid, endpoints) {
   const errors = [];
+  // (0.8.8 fix, bug 1) An endpoint that confirms the tx but
+  // cannot name its height (the RPC getblockheader lookup failed)
+  // has NOT answered the question — the next endpoint is still
+  // asked. Only when no endpoint can count it does this partial
+  // answer stand (found, confirmed, count unknown), exactly as
+  // before for a single-RPC setup.
+  let partial = null;
   for (const ep of endpoints) {
     try {
       const st = await txStatusFor(ep, txid);
@@ -2607,13 +2691,15 @@ async function getConfirmations(txid, endpoints) {
       }
       const height = status.block_height;
       if (!Number.isFinite(height)) {
-        return { found: true, confirmed: true, blockHeight: null, confirmations: null, checkedVia: ep.label, checkedBase: ep.base };
+        partial = { found: true, confirmed: true, blockHeight: null, confirmations: null, checkedVia: ep.label, checkedBase: ep.base };
+        continue;
       }
       return { found: true, confirmed: true, blockHeight: height, confirmations: Math.max(0, tip - height + 1), checkedVia: ep.label, checkedBase: ep.base };
     } catch (e) {
       errors.push(ep.label + ' (' + mempoolHostLabel(ep.base) + '): ' + e.message);
     }
   }
+  if (partial) return partial;
   // Every endpoint either 404'd the tx or failed to answer. Distinguish
   // "answered and does not know it" from "could not reach it": a 404 on
   // every endpoint that DID answer means not found; anything else is a

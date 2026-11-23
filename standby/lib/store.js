@@ -22,8 +22,8 @@ function defaultState() {
       // Per-node Bitcoin Core JSON-RPC mode (0.8.8): when a node's
       // *RpcEnabled is true, that node is talked to over its own
       // Core RPC (getblockcount / gettxout / getrawtransaction /
-      // estimatesmartfee / sendrawtransaction) instead of the
-      // mempool API endpoint above. The URL is the Core RPC
+      // getblockheader / estimatesmartfee / sendrawtransaction)
+      // instead of the mempool API endpoint above. The URL is the Core RPC
       // address (http(s)://host:8332, no path, no userinfo — the
       // user and password go in the fields below). The RPC
       // password is stored in state.json unencrypted, like every
