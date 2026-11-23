@@ -206,9 +206,9 @@ const HISTORY_MAX = 50;
 // FEE_HISTORY_WINDOW_DAYS bounds the series (observations older
 // than that are pruned); FEE_HISTORY_MAX_ENTRIES is the same bound
 // in entries (hourly x 90 days); FEE_HISTORY_MIN_OBSERVATIONS is
-// the floor before a peak is served at all (24 hourly readings =
-// one day — before that the peak is null and the historical check
-// is skipped).
+// the floor before a peak is served at all (24 hourly readings
+// spanning a full day — before that the peak is null and the
+// historical check is skipped).
 const FEE_HISTORY_WINDOW_DAYS = 90;
 const FEE_HISTORY_MIN_OBSERVATIONS = 24;
 const FEE_HISTORY_MAX_ENTRIES = FEE_HISTORY_WINDOW_DAYS * 24;

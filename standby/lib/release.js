@@ -962,8 +962,8 @@ async function refreshPublicFallbacks(state) {
 // (feePeakForState below), never cached and never stored
 // separately. An hour when both nodes fail records nothing and
 // leaves the peak unchanged. The peak is served only once 24
-// observations (a day) have accumulated — before that the
-// historical check is skipped. A failed recording never breaks
+// observations spanning a full day have accumulated — before that
+// the historical check is skipped. A failed recording never breaks
 // the tick.
 async function recordFeeHistoryObservation(state) {
   const endpoints = bitcoin.endpointsFor(state.settings);
@@ -973,8 +973,14 @@ async function recordFeeHistoryObservation(state) {
     console.error('fee-history observation skipped (no usable economy fee):', combined.reason || 'no reading');
     return false;
   }
-  state.feeHistory = bitcoin.appendFeeHistoryObservation(state.feeHistory, combined.fee, Date.now());
-  store.saveState(DATA_DIR, state);
+  // Merge into FRESH state (see testNodes, refreshConfirmations):
+  // an edit landing while the node fetch was on the network — a
+  // disarm, a trigger change — would otherwise be clobbered by
+  // saving the pre-fetch copy this function was handed. The
+  // passed-in state is used only for the endpoints/settings read.
+  const fresh = store.loadState(DATA_DIR);
+  fresh.feeHistory = bitcoin.appendFeeHistoryObservation(fresh.feeHistory, combined.fee, Date.now());
+  store.saveState(DATA_DIR, fresh);
   return true;
 }
 

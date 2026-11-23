@@ -4760,12 +4760,17 @@ def main():
         # the recorded history in state.json. No public endpoint is
         # involved at any point: the current fees come from the
         # configured nodes too (mempool /fees/recommended, or
-        # Esplora /fee-estimates mapped to the same tiers). A
-        # second app on port 3440 proves the live behaviour — the
-        # main app's own history is already long (one observation
-        # per restart), so only a seeded second app gives
-        # controlled counts. The unit checks prove the pure
-        # helpers without a server.
+        # Esplora /fee-estimates mapped to the same tiers). At
+        # most one observation per hour — a restart within the
+        # hour adds nothing — and the peak needs 24 observations
+        # spanning a full day, so the 25th hourly reading is the
+        # first that can serve one. Esplora is exact-target-or-
+        # nothing, like mempool: a map without 144 yields no
+        # reading. A second app on port 3440 proves the live
+        # behaviour — the main app's own history is already long
+        # (one observation per restart), so only a seeded second
+        # app gives controlled counts. The unit checks prove the
+        # pure helpers without a server.
         lp_dir = '/tmp/heirloom099-accumpeak'
         lp_checkin = lp_dir + '-checkin'
         lp_port = 3440
@@ -4843,21 +4848,26 @@ def main():
             # (a) Unit checks for the pure helpers (same pattern as
             # the 0.7.20 ladder check): percentile, minimum, window,
             # pruning, append cap, sanitizer, and the Esplora
-            # mapping — without a server.
+            # mapping — without a server. The full-history fixture
+            # is spaced 59 minutes apart (latest 61 minutes old)
+            # so the per-hour dedupe does not block the append
+            # whose cap is being proved.
             node_js = (
                 "const b = require('./lib/bitcoin.js');"
                 "const s = require('./lib/store.js');"
                 "const now = Date.now();"
                 "const h = (n) => new Date(now - n * 3600000).toISOString();"
                 "const h24 = Array.from({length: 24}, (_, i) => ({ t: h(23 - i), fee: 2 }));"
+                "const h25 = Array.from({length: 25}, (_, i) => ({ t: h(24 - i), fee: 2 }));"
                 "const h23 = h24.slice(0, 23);"
-                "const pct = Array.from({length: 24}, (_, i) => ({ t: h(23 - i), fee: i < 21 ? 1 : (i < 23 ? 2 : 10) }));"
+                "const pct = Array.from({length: 25}, (_, i) => ({ t: h(24 - i), fee: i < 22 ? 1 : (i < 24 ? 2 : 10) }));"
                 "const win3 = Array.from({length: 24}, (_, i) => ({ t: new Date(now - (3 * 86400000 - i * 3 * 3600000)).toISOString(), fee: 2 }));"
                 "const old = [{ t: new Date(now - 91 * 86400000).toISOString(), fee: 100 }].concat(h23);"
-                "const full = Array.from({length: 2160}, (_, i) => ({ t: h(2159 - i), fee: 2 }));"
+                "const full = Array.from({length: 2160}, (_, i) => ({ t: new Date(now - (61 + i * 59) * 60000).toISOString(), fee: 2 }));"
                 "const dirty = [{ t: h(1), fee: 2 }, { fee: 2 }, { t: h(1), fee: -1 }, { t: 'not-a-date', fee: 2 }, { t: new Date(now + 3600000).toISOString(), fee: 2 }, { t: new Date(now - 91 * 86400000).toISOString(), fee: 2 }];"
                 "console.log(JSON.stringify({"
                 " p24: b.feePeakFromObservations(h24, now),"
+                " p25: b.feePeakFromObservations(h25, now),"
                 " p23: b.feePeakFromObservations(h23, now),"
                 " pPct: b.feePeakFromObservations(pct, now),"
                 " pWin3: b.feePeakFromObservations(win3, now),"
@@ -4866,9 +4876,11 @@ def main():
                 " a4: b.appendFeeHistoryObservation([{t: h(3), fee: 1}, {t: h(2), fee: 1}, {t: h(1), fee: 1}], 2, now).length,"
                 " aCap: b.appendFeeHistoryObservation(full, 3, now).length,"
                 " aBad: b.appendFeeHistoryObservation([{t: h(1), fee: 1}], -1, now).length,"
+                " aDedupe: b.appendFeeHistoryObservation([{t: h(2), fee: 1}, {t: new Date(now - 30 * 60000).toISOString(), fee: 1}], 2, now).length,"
                 " sClean: s.sanitizeFeeHistory(dirty, now).length,"
                 " mFull: b.feeEstimatesToRecommended({'1': 9, '2': 8, '3': 7, '6': 6, '144': 5, '1008': 1}),"
                 " mSparse: b.feeEstimatesToRecommended({'6': 7}),"
+                " mNear: b.feeEstimatesToRecommended({'120': 5, '168': 4}),"
                 " mNull: b.feeEstimatesToRecommended({}),"
                 " tExact: b.feeEstimateAtTarget({'6': 7, '144': 5, '1008': 1}, 144),"
                 " tNear: b.feeEstimateAtTarget({'6': 7, '1008': 1}, 144),"
@@ -4880,13 +4892,15 @@ def main():
                 nv = json.loads(nr.stdout.strip())
             except Exception:
                 nv = {}
-            check('31 unit: 24 hourly observations at 2.0 peak at 2.0 over a 1-day window',
-                  (nv.get('p24') or {}).get('peak') == 2.0 and (nv.get('p24') or {}).get('windowDays') == 1
-                  and (nv.get('p24') or {}).get('observations') == 24, nv.get('p24'))
+            check('31 unit: 24 hourly observations spanning 23 hours serve no peak (a full day of coverage is required)',
+                  (nv.get('p24') or {}).get('peak') is None and (nv.get('p24') or {}).get('observations') == 24, nv.get('p24'))
+            check('31 unit: 25 hourly observations spanning a full day peak at 2.0 over a 1-day window',
+                  (nv.get('p25') or {}).get('peak') == 2.0 and (nv.get('p25') or {}).get('windowDays') == 1
+                  and (nv.get('p25') or {}).get('observations') == 25, nv.get('p25'))
             check('31 unit: 23 observations serve no peak (24-observation minimum)',
                   (nv.get('p23') or {}).get('peak') is None and (nv.get('p23') or {}).get('observations') == 23, nv.get('p23'))
-            check('31 unit: the peak is a percentile, not the max ([1x21, 2, 2, 10] peaks at ~1.7, not 10)',
-                  abs(((nv.get('pPct') or {}).get('peak') or 0) - 1.7) < 1e-9, nv.get('pPct'))
+            check('31 unit: the peak is a percentile, not the max ([1x22, 2, 2, 10] peaks at 1.6, not 10)',
+                  abs(((nv.get('pPct') or {}).get('peak') or 0) - 1.6) < 1e-9, nv.get('pPct'))
             check('31 unit: a 3-day span windows at 3 days',
                   (nv.get('pWin3') or {}).get('windowDays') == 3, nv.get('pWin3'))
             check('31 unit: a 91-day-old observation is ignored by the peak (23 kept, no peak yet)',
@@ -4900,16 +4914,20 @@ def main():
                   nv.get('aCap') == 2160, nv)
             check('31 unit: appending an invalid fee appends nothing',
                   nv.get('aBad') == 1, nv)
+            check('31 unit: appending within an hour of the latest observation adds nothing (one observation per hour)',
+                  nv.get('aDedupe') == 2, nv)
             check('31 unit: the sanitizer keeps only the one clean entry of six dirty ones',
                   nv.get('sClean') == 1, nv)
             check('31 unit: Esplora fee-estimates map exactly to the mempool tiers (144, not 6, is the economy tier)',
                   nv.get('mFull') == {'fastestFee': 9, 'halfHourFee': 7, 'hourFee': 6, 'economyFee': 5, 'minimumFee': 1}, nv.get('mFull'))
-            check('31 unit: a sparse Esplora map falls back to the nearest target for every tier',
-                  nv.get('mSparse') == {'fastestFee': 7, 'halfHourFee': 7, 'hourFee': 7, 'economyFee': 7, 'minimumFee': 7}, nv.get('mSparse'))
+            check('31 unit: a sparse Esplora map with only a 6-block rate maps to null (no substitute tier)',
+                  nv.get('mSparse') is None, nv.get('mSparse'))
+            check('31 unit: a map with 120/168 but no 144 maps to null (nearest is not good enough)',
+                  nv.get('mNear') is None, nv.get('mNear'))
             check('31 unit: an empty Esplora map maps to null (no economy rate, no data)',
                   nv.get('mNull') is None, nv)
-            check('31 unit: the 144 target is exact when present, nearest when absent, higher on a tie',
-                  nv.get('tExact') == 5 and nv.get('tNear') == 7 and nv.get('tTie') == 6, nv)
+            check('31 unit: the 144 target is exact when present, null when absent (no nearest-target fallback, no tie rule)',
+                  nv.get('tExact') == 5 and nv.get('tNear') is None and nv.get('tTie') is None, nv)
             # (b) Fresh app: the startup hourly tick records one
             # observation from the primary stub (economyFee 1) and
             # the peak stays null — the history is still building.
@@ -4935,38 +4953,52 @@ def main():
                   len(fh) == 1 and fh[0].get('t') == st.get('feePeakAt'), (fh, st.get('feePeakAt')))
             check('31 fresh: the served state never carries the raw history',
                   'feeHistory' not in lp_state(), 'feeHistory' in lp_state())
-            # (c) The 24th observation serves the peak: seed 23
-            # hourly readings at 2.0 and the startup tick records
-            # the 24th (fee 1, from the stub) — the 90th
-            # percentile of [1, 2x23] is 2.0.
+            # (c) A full day of coverage serves the peak: seed 25
+            # hourly readings at 2.0 spanning exactly 24 hours —
+            # the startup tick adds nothing (one observation per
+            # hour: the latest seed is minutes old), so the peak
+            # is 2.0 over a 1-day window at boot. (Seeding 24 and
+            # letting the tick record the 25th would push the span
+            # a second past 24 hours, and the ceil'd window would
+            # read 2 days — the span is the observations' own
+            # timestamps, so the seed must carry the full day.)
+            # All 25 timestamps derive from ONE base time: a
+            # fresh now() per entry would skew the span a
+            # millisecond past 24 hours and ceil it to 2 days.
             stop(app_lp)
-            lp_seed_state([obs_hours_ago(23 - i, 2.0) for i in range(23)])
+            seed_base = datetime.now(timezone.utc)
+            lp_seed_state([{'t': (seed_base - timedelta(hours=24 - i)).isoformat().replace('+00:00', 'Z'), 'fee': 2.0} for i in range(25)])
             app_lp = lp_start()
-            check('31 24th: second app up again', wait_up(lp_base))
-            st = lp_wait_obs(24)
-            check('31 24th: 24 observations after the startup tick',
-                  st.get('feePeakObservations') == 24, st.get('feePeakObservations'))
-            check('31 24th: the peak appears at 2.0 sat/vB',
+            check('31 25th: second app up again', wait_up(lp_base))
+            time.sleep(4)  # past the 500 ms startup hourly tick
+            st = lp_bitcoin()
+            check('31 25th: 25 observations at boot',
+                  st.get('feePeakObservations') == 25, st.get('feePeakObservations'))
+            check('31 25th: the peak appears at 2.0 sat/vB',
                   st.get('feePeak') == 2.0, st.get('feePeak'))
-            check('31 24th: the served window is 1 day',
+            check('31 25th: the served window is 1 day',
                   st.get('feePeakWindowDays') == 1, st.get('feePeakWindowDays'))
             fh = (lp_state_file().get('feeHistory') or [])
-            check('31 24th: the recorded 24th observation is the stub economy fee (1)',
-                  len(fh) == 24 and fh[-1].get('fee') == 1, fh[-1] if fh else fh)
+            check('31 25th: the startup tick adds nothing (latest seed minutes old)',
+                  len(fh) == 25 and fh[-1].get('fee') == 2.0, fh[-1] if fh else fh)
             # (h) Restart survival: the history is in state.json,
-            # so a restart keeps it — the next startup tick appends
-            # a 25th observation and the peak stays 2.0.
+            # so a restart keeps it — but the next startup tick
+            # adds NOTHING (one observation per hour: the latest
+            # reading is minutes old), so the count stays 25 and
+            # the peak stays 2.0. Restarts cannot manufacture
+            # observations.
             stop(app_lp)
             app_lp = lp_start()
             check('31 restart: second app up after restart', wait_up(lp_base))
-            st = lp_wait_obs(25)
-            check('31 restart: 25 observations after the restart startup tick',
+            time.sleep(4)  # past the 500 ms startup hourly tick
+            st = lp_bitcoin()
+            check('31 restart: still 25 observations after the restart startup tick (dedupe: within the hour)',
                   st.get('feePeakObservations') == 25, st.get('feePeakObservations'))
             check('31 restart: the peak stays 2.0 across the restart',
                   st.get('feePeak') == 2.0, st.get('feePeak'))
             fh = (lp_state_file().get('feeHistory') or [])
-            check('31 restart: the seeded entries survive (first fee still 2.0, 25th is 1)',
-                  len(fh) == 25 and fh[0].get('fee') == 2.0 and fh[-1].get('fee') == 1, (len(fh), fh[0] if fh else None, fh[-1] if fh else None))
+            check('31 restart: the seeded entries survive (first fee still 2.0, 25th is 2.0 — no new observation)',
+                  len(fh) == 25 and fh[0].get('fee') == 2.0 and fh[-1].get('fee') == 2.0, (len(fh), fh[0] if fh else None, fh[-1] if fh else None))
             # (i) Restore round-trip: the backup carries the
             # history, so restoring it keeps the peak — the verdict
             # does not reset to "still building" for a day.
@@ -4985,18 +5017,18 @@ def main():
             s, r = req('POST', '/__test__/fees', {'economyFee': 5}, base=STUB_BASE_S)
             check('31 fallback: secondary stub fee set to 5', s == 200 and r.get('economyFee') == 5, (s, r))
             stop(app_lp)
-            lp_seed_state([obs_hours_ago(23 - i, 2.0) for i in range(23)],
+            lp_seed_state([obs_hours_ago(24 - i, 2.0) for i in range(24)],
                           primary='http://127.0.0.1:9', secondary=STUB_BASE_S)
             app_lp = lp_start()
             check('31 fallback: second app (dead primary) up', wait_up(lp_base))
-            st = lp_wait_obs(24)
+            st = lp_wait_obs(25)
             check('31 fallback: the observation still records with the primary dead',
-                  st.get('feePeakObservations') == 24, st.get('feePeakObservations'))
+                  st.get('feePeakObservations') == 25, st.get('feePeakObservations'))
             check('31 fallback: the peak still appears at 2.0',
                   st.get('feePeak') == 2.0, st.get('feePeak'))
             fh = (lp_state_file().get('feeHistory') or [])
             check('31 fallback: the recorded observation is the secondary fee (5), not the primary',
-                  len(fh) == 24 and fh[-1].get('fee') == 5, fh[-1] if fh else fh)
+                  len(fh) == 25 and fh[-1].get('fee') == 5, fh[-1] if fh else fh)
             check('31 fallback: the current fees come from the secondary too (economy 5)',
                   lp_wait_current_fee(5), lp_bitcoin().get('currentFees'))
             s, r = req('POST', '/__test__/fees', {'economyFee': 1}, base=STUB_BASE_S)
@@ -5005,22 +5037,22 @@ def main():
             # peak stays null — a dead hour leaves the history
             # (and the peak) unchanged, never a wrong value.
             stop(app_lp)
-            lp_seed_state([obs_hours_ago(23 - i, 2.0) for i in range(23)],
+            lp_seed_state([obs_hours_ago(24 - i, 2.0) for i in range(24)],
                           primary='http://127.0.0.1:9', secondary='http://127.0.0.1:19998')
             open(lp_log, 'w').close()
             app_lp = lp_start()
             check('31 both-fail: second app (both nodes dead) up', wait_up(lp_base))
             time.sleep(4)  # past the 500 ms startup hourly tick
             st = lp_bitcoin()
-            check('31 both-fail: still 23 observations after the startup tick (nothing recorded)',
-                  st.get('feePeakObservations') == 23, st.get('feePeakObservations'))
+            check('31 both-fail: still 24 observations after the startup tick (nothing recorded)',
+                  st.get('feePeakObservations') == 24, st.get('feePeakObservations'))
             check('31 both-fail: the peak stays null with both nodes dead',
                   st.get('feePeak') is None, st.get('feePeak'))
             check('31 both-fail: the current fees stay null too (no data, not a guess)',
                   st.get('currentFees') is None, st.get('currentFees'))
             fh = (lp_state_file().get('feeHistory') or [])
-            check('31 both-fail: the stored history is untouched (23 entries)',
-                  len(fh) == 23, len(fh))
+            check('31 both-fail: the stored history is untouched (24 entries)',
+                  len(fh) == 24, len(fh))
             lp_log_text = open(lp_log, errors='ignore').read() if os.path.exists(lp_log) else ''
             check('31 both-fail: the skipped hour is logged',
                   'fee-history observation skipped' in lp_log_text, lp_log_text[-500:])
@@ -5033,15 +5065,15 @@ def main():
             s, r = req('POST', '/__test__/fees', {'economyFee': 3}, base=STUB_BASE_P)
             check('31 esplora: primary stub economy fee set to 3', s == 200 and r.get('economyFee') == 3, (s, r))
             stop(app_lp)
-            lp_seed_state([obs_hours_ago(23 - i, 2.0) for i in range(23)])
+            lp_seed_state([obs_hours_ago(24 - i, 2.0) for i in range(24)])
             app_lp = lp_start()
             check('31 esplora: second app (esplora primary) up', wait_up(lp_base))
-            st = lp_wait_obs(24)
+            st = lp_wait_obs(25)
             check('31 esplora: the observation records from the Esplora primary',
-                  st.get('feePeakObservations') == 24, st.get('feePeakObservations'))
+                  st.get('feePeakObservations') == 25, st.get('feePeakObservations'))
             fh = (lp_state_file().get('feeHistory') or [])
             check('31 esplora: the recorded observation is the Esplora economy fee (3)',
-                  len(fh) == 24 and fh[-1].get('fee') == 3, fh[-1] if fh else fh)
+                  len(fh) == 25 and fh[-1].get('fee') == 3, fh[-1] if fh else fh)
             check('31 esplora: the peak is 2.0 (the 24th reading does not move it)',
                   st.get('feePeak') == 2.0, st.get('feePeak'))
             check('31 esplora: the current fees map from fee-estimates to the mempool tiers',
@@ -5057,17 +5089,102 @@ def main():
             # tick is 23 kept readings + 1 new one.
             stop(app_lp)
             old_obs = {'t': iso_ago(days=91), 'fee': 100}
-            lp_seed_state([old_obs] + [obs_hours_ago(23 - i, 2.0) for i in range(23)])
+            lp_seed_state([old_obs] + [obs_hours_ago(24 - i, 2.0) for i in range(24)])
             app_lp = lp_start()
             check('31 prune: second app (stale history) up', wait_up(lp_base))
-            st = lp_wait_obs(24)
-            check('31 prune: 24 observations after load-prune + the new one',
-                  st.get('feePeakObservations') == 24, st.get('feePeakObservations'))
+            st = lp_wait_obs(25)
+            check('31 prune: 25 observations after load-prune + the new one',
+                  st.get('feePeakObservations') == 25, st.get('feePeakObservations'))
             check('31 prune: the peak is 2.0, not polluted by the 100 sat/vB outlier',
                   st.get('feePeak') == 2.0, st.get('feePeak'))
             fh = (lp_state_file().get('feeHistory') or [])
             check('31 prune: the 91-day-old entry is gone from the stored history',
-                  len(fh) == 24 and all(e.get('fee') != 100 for e in fh), [e.get('fee') for e in fh])
+                  len(fh) == 25 and all(e.get('fee') != 100 for e in fh), [e.get('fee') for e in fh])
+            # (j) Stale-state race (0.8.9 audit fix 1): the
+            # recording fetches from the node before saving, so
+            # hold that fetch in flight (primary stub fee-delay
+            # 4 s) and disarm a tx while it is on the network —
+            # the disarm must survive the recording save, and the
+            # observation must still land. The tx is created on
+            # the second app after boot (a manual trigger, so it
+            # can never fire) — the seeded state carries no txs
+            # by this point in the suite, so the test must not
+            # depend on them.
+            stop(app_lp)
+            s, r = req('POST', '/__test__/fee-delay', {'ms': 4000}, base=STUB_BASE_P)
+            check('31 race: primary stub fee delay set to 4000 ms', s == 200 and r.get('delayMs') == 4000, (s, r))
+            lp_seed_state([obs_hours_ago(24 - i, 2.0) for i in range(24)])
+            _, rc0 = req('GET', '/__test__/fee-count', base=STUB_BASE_P)
+            race_base_count = (rc0 or {}).get('count') or 0
+            app_lp = lp_start()
+            check('31 race: second app up', wait_up(lp_base))
+            # Wait until a fee request is in flight (the stub
+            # counts it on receipt, before the delay answers) —
+            # the count is cumulative, so wait for it to rise
+            # past its pre-boot value. The observation fetch runs
+            # ~4 s, so the edits below land well before its save.
+            fee_in_flight = False
+            for _ in range(20):
+                try:
+                    s2, r2 = req('GET', '/__test__/fee-count', base=STUB_BASE_P)
+                    if s2 == 200 and (r2.get('count') or 0) > race_base_count:
+                        fee_in_flight = True
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.25)
+            check('31 race: a fee fetch is in flight', fee_in_flight, fee_in_flight)
+            s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft(1, 111900), 'label': 'Race disarm', 'notes': '', 'trigger': {'type': 'manual', 'params': {}}}, base=lp_base)
+            check('31 race: the tx is created mid-fetch (201)', s == 201, (s, r))
+            race_tx_id = (r or {}).get('tx', {}).get('id')
+            check('31 race: the created tx has an id', isinstance(race_tx_id, str) and bool(race_tx_id), race_tx_id)
+            s, r = req('PUT', '/api/bitcoin/txs/' + race_tx_id, {'enabled': False}, base=lp_base)
+            check('31 race: the tx disarms mid-fetch (200, enabled False)',
+                  s == 200 and r.get('tx', {}).get('enabled') is False, (s, r))
+            mid = lp_bitcoin()
+            check('31 race: the observation has not landed yet at edit time (fetch still in flight)',
+                  (mid.get('feePeakObservations') or 0) < 25, mid.get('feePeakObservations'))
+            st = lp_wait_obs(25)
+            check('31 race: the observation still lands after the slow fetch',
+                  st.get('feePeakObservations') == 25, st.get('feePeakObservations'))
+            fh = (lp_state_file().get('feeHistory') or [])
+            check('31 race: the recorded observation is the stub economy fee (1)',
+                  len(fh) == 25 and fh[-1].get('fee') == 1, fh[-1] if fh else fh)
+            st = lp_state()
+            race_tx_now = [t for t in (st.get('bitcoin', {}) or {}).get('txs', []) if t.get('id') == race_tx_id]
+            check('31 race: the mid-fetch disarm survives the recording save',
+                  len(race_tx_now) == 1 and race_tx_now[0].get('enabled') is False, race_tx_now)
+            s, r = req('POST', '/__test__/fee-delay', {'ms': 0}, base=STUB_BASE_P)
+            check('31 race: primary stub fee delay cleared', s == 200 and r.get('delayMs') == 0, (s, r))
+            # (k) Sparse Esplora map (0.8.9 audit fix 3): the
+            # primary serves /fee-estimates with only a 6-block
+            # rate and no 144 — exact-target-or-nothing means no
+            # economy fee, so the startup tick records nothing
+            # (the secondary is dead, so it cannot mask the gap).
+            s, r = req('POST', '/__test__/fee-mode', {'mode': 'esplora'}, base=STUB_BASE_P)
+            check('31 sparse: primary stub in esplora mode', s == 200 and r.get('mode') == 'esplora', (s, r))
+            s, r = req('POST', '/__test__/fee-estimates-map', {'map': {'6': 7}}, base=STUB_BASE_P)
+            check('31 sparse: primary stub serves a 6-only fee-estimates map', s == 200 and r.get('map') == {'6': 7}, (s, r))
+            stop(app_lp)
+            lp_seed_state([obs_hours_ago(24 - i, 2.0) for i in range(24)],
+                          primary=STUB_BASE_P, secondary='http://127.0.0.1:19998')
+            app_lp = lp_start()
+            check('31 sparse: second app up', wait_up(lp_base))
+            time.sleep(4)  # past the 500 ms startup hourly tick
+            st = lp_bitcoin()
+            check('31 sparse: still 24 observations after the startup tick (nothing recorded)',
+                  st.get('feePeakObservations') == 24, st.get('feePeakObservations'))
+            check('31 sparse: the peak stays null with no usable 144',
+                  st.get('feePeak') is None, st.get('feePeak'))
+            check('31 sparse: the current fees stay null too (no data, not a guess)',
+                  st.get('currentFees') is None, st.get('currentFees'))
+            fh = (lp_state_file().get('feeHistory') or [])
+            check('31 sparse: the stored history is untouched (24 entries)',
+                  len(fh) == 24, len(fh))
+            s, r = req('POST', '/__test__/fee-estimates-map', {'map': None}, base=STUB_BASE_P)
+            check('31 sparse: primary stub fee-estimates map restored', s == 200 and r.get('map') is None, (s, r))
+            s, r = req('POST', '/__test__/fee-mode', {'mode': 'mempool'}, base=STUB_BASE_P)
+            check('31 sparse: primary stub back in mempool mode', s == 200 and r.get('mode') == 'mempool', (s, r))
         finally:
             if app_lp is not None:
                 stop(app_lp)
@@ -5077,6 +5194,8 @@ def main():
                 req('POST', '/__test__/fee-mode', {'mode': 'mempool'}, base=STUB_BASE_P)
                 req('POST', '/__test__/fees', {'economyFee': 1}, base=STUB_BASE_P)
                 req('POST', '/__test__/fees', {'economyFee': 1}, base=STUB_BASE_S)
+                req('POST', '/__test__/fee-delay', {'ms': 0}, base=STUB_BASE_P)
+                req('POST', '/__test__/fee-estimates-map', {'map': None}, base=STUB_BASE_P)
             except Exception:
                 pass
 

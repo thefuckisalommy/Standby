@@ -786,8 +786,11 @@ function percentile90(sorted) {
 // ignored (defense in depth; the recorder and the load sanitizer
 // already prune them). Returns { peak, windowDays, observations,
 // fetchedAt }: peak is null until FEE_HISTORY_MIN_OBSERVATIONS
-// (24) have accumulated — before that the historical check is
-// skipped and the UI notes the history is still building.
+// (24) have accumulated AND they span a full day — the raw span
+// (lastTs - firstTs), not the ceil'd windowDays, which rounds
+// minutes up to a day — so 24 readings collected in minutes serve
+// no peak. Before that the historical check is skipped and the UI
+// notes the history is still building.
 // windowDays is the span the history actually covers, in whole
 // days (0..90; 0 when the history has fewer than two distinct
 // timestamps); fetchedAt is the latest
@@ -814,7 +817,12 @@ function feePeakFromObservations(observations, nowMs) {
   const windowDays = (firstTs === null || lastTs === null) ? 0
     : Math.min(FEE_HISTORY_WINDOW_DAYS, Math.ceil((lastTs - firstTs) / 86400000));
   const fetchedAt = (lastTs === null) ? null : new Date(lastTs).toISOString();
-  if (count < FEE_HISTORY_MIN_OBSERVATIONS) return { peak: null, windowDays, observations: count, fetchedAt };
+  // A full day of coverage, on the raw span: 24 hourly readings
+  // span 23 hours, so the peak first appears with the 25th — the
+  // reading one full day after the first. A count alone would let
+  // restarts manufacture a peak in minutes.
+  const spanMs = (firstTs === null || lastTs === null) ? 0 : (lastTs - firstTs);
+  if (count < FEE_HISTORY_MIN_OBSERVATIONS || spanMs < 86400000) return { peak: null, windowDays, observations: count, fetchedAt };
   fees.sort((a, b) => a - b);
   return { peak: percentile90(fees), windowDays, observations: count, fetchedAt };
 }
@@ -825,12 +833,22 @@ function feePeakFromObservations(observations, nowMs) {
 // and the series is capped at the max entries (oldest dropped
 // first), so the history can never grow past ~2,160 entries. A
 // fee that is not a finite non-negative number appends nothing
-// (the recorder checks validity first; this is the backstop). The
-// caller (recordFeeHistoryObservation) saves the result.
+// (the recorder checks validity first; this is the backstop).
+// One observation per hour: the dedupe lives HERE, the single
+// choke point every recording goes through — if the latest entry
+// (newest after sanitizing, which sorts ascending) is under an
+// hour old, this call adds nothing, so restarts and repeat ticks
+// cannot manufacture observations. The caller saves the result
+// either way (pruning may still have changed it).
 function appendFeeHistoryObservation(observations, fee, nowMs) {
   const now = (typeof nowMs === 'number' && Number.isFinite(nowMs)) ? nowMs : Date.now();
   const next = sanitizeFeeHistory(Array.isArray(observations) ? observations : [], now);
   if (typeof fee !== 'number' || !Number.isFinite(fee) || fee < 0) return next;
+  const last = next[next.length - 1];
+  if (last) {
+    const lastT = new Date(last.t).getTime();
+    if (Number.isFinite(lastT) && now - lastT < 3600000) return next;
+  }
   next.push({ t: new Date(now).toISOString(), fee });
   return next.slice(-FEE_HISTORY_MAX_ENTRIES);
 }
@@ -853,34 +871,25 @@ function appendFeeHistoryObservation(observations, fee, nowMs) {
 const ESPLORA_FEE_TARGETS = { fastest: 1, halfHour: 3, hour: 6, economy: 144, minimum: 1008 };
 
 // The rate at one confirmation target from a /fee-estimates map:
-// the exact target when present, else the nearest available
-// target (ties go to the higher target — the cheaper, more
-// patient reading). Returns null when the map carries no usable
-// rate at all.
+// the EXACT target when present, else null — the same rule as
+// mempool's /fees/recommended, which serves the named tier or no
+// data, never a substitute tier. A nearest-target fallback would
+// mix different confirmation horizons into one historical dataset
+// (a 6-block rate recorded as the day-scale economy fee), so a
+// sparse map yields no reading for its missing tiers instead.
 function feeEstimateAtTarget(estimates, target) {
   if (!estimates || typeof estimates !== 'object') return null;
-  const keys = Object.keys(estimates)
-    .map((k) => parseInt(k, 10))
-    .filter((n) => Number.isFinite(n) && n > 0
-      && typeof estimates[String(n)] === 'number'
-      && Number.isFinite(estimates[String(n)]) && estimates[String(n)] >= 0);
-  if (!keys.length) return null;
-  if (keys.includes(target)) return estimates[String(target)];
-  let best = keys[0];
-  for (const k of keys) {
-    const dBest = Math.abs(best - target), dK = Math.abs(k - target);
-    if (dK < dBest || (dK === dBest && k > best)) best = k;
-  }
-  return estimates[String(best)];
+  const v = estimates[String(target)];
+  return (typeof v === 'number' && Number.isFinite(v) && v >= 0) ? v : null;
 }
 
 // Map an Esplora /fee-estimates response to the mempool
 // recommended-fees shape. Returns null when the economy tier has
 // no usable rate — without an economy rate the object is useless
 // for the Critical check and the observation, so the caller
-// treats it as no data (the other tiers fall back the same way,
-// so a sparse map still yields a usable object as long as ANY
-// rate exists).
+// treats it as no data (the other tiers are null when their
+// target is missing, so a sparse map yields no usable object
+// unless its economy tier is present).
 function feeEstimatesToRecommended(estimates) {
   if (!estimates || typeof estimates !== 'object') return null;
   const out = {};
@@ -2512,8 +2521,8 @@ async function testNodeHeight(apiBase) {
 // The economy fee from ONE node (0.8.1): the mempool endpoint
 // first, then Esplora's. Returns { fee, source } — source is
 // 'mempool' (the /api/v1/fees/recommended economyFee) or
-// 'esplora' (the 144-block rate from /api/fee-estimates, nearest
-// target when 144 is missing). Throws with an informative
+// 'esplora' (the 144-block rate from /api/fee-estimates, exact
+// target or no reading). Throws with an informative
 // message when the node has no usable fee endpoint, so callers
 // can tell "no fee data" from "bad data". The fee-market
 // trigger, the hourly observation, and the node capability test
@@ -2547,8 +2556,8 @@ async function fetchNodeFee(apiBase) {
   // day-scale estimate everywhere, so Esplora's is the 144-block
   // target — the same target the observation records and the
   // current-fees mapping uses — not the 6-block rate this branch
-  // used to take. A map without a usable 144 (or nearest-target)
-  // rate has no economy fee at all.
+  // used to take. A map without a usable 144 rate has no economy
+  // fee at all.
   const fee = feeEstimateAtTarget(data, ESPLORA_FEE_TARGETS.economy);
   if (typeof fee !== 'number') throw new Error('fee-estimates has no usable rates');
   return { fee, source: 'esplora' };

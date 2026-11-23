@@ -2937,9 +2937,10 @@ function check(name, cond, detail) {
   // The fee pill at the defaults: add a tx whose fee rate is
   // exactly 4.0 sat/vB (Finney vout 1 is 150,000 sats, the
   // output is 149,660, so the fee is 340 sats over 85 bytes).
-  // The peak is 2.0 — the launcher seeds 24 hourly observations
-  // at 2.0, and the startup tick's extra reading (fee 1) leaves
-  // the 90th percentile at 2.0 — so 4.0 is Low Risk at the defaults.
+  // The peak is 2.0 — the launcher seeds 25 hourly observations
+  // at 2.0 spanning a full day, and the startup tick adds nothing
+  // (the latest seed is minutes old) — so 4.0 is Low Risk at the
+  // defaults.
   const feeTx = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ txHex: craftHex(1, 149660), label: 'Dom Fee 4', trigger: { type: 'manual', params: {} } }) });
   check('user controls fee pill: adding the 4.0 sat/vB tx (201)', feeTx.status === 201, 'status=' + feeTx.status);
   const stFee = await (await fetch('/api/state')).json();

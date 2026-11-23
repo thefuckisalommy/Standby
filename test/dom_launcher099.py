@@ -69,16 +69,17 @@ shutil.rmtree(DATA, ignore_errors=True)
 shutil.rmtree(CHECKIN_DIR, ignore_errors=True)
 # Fee-history seed (0.8.9, accumulated peak): the fee-pill checks
 # need a served peak of 2.0 sat/vB, and a fresh app has no history
-# (the peak appears only after 24 hourly observations). Seed the
-# state file with 24 hourly observations at 2.0 sat/vB over the
-# last 23 hours — the 90th percentile is 2.0 over a 1-day window —
-# before the app boots. loadState merges the seed over the defaults,
-# so only version, bitcoin.txs, and feeHistory need to be present.
-# The startup hourly tick appends one more observation (fee 1, from the
-# primary stub), which leaves the peak at 2.0.
+# (the peak appears only after 24 hourly observations spanning a
+# full day). Seed the state file with 25 hourly observations at
+# 2.0 sat/vB over the last 24 hours — the 90th percentile is 2.0
+# over a 1-day window — before the app boots. loadState merges
+# the seed over the defaults, so only version, bitcoin.txs, and
+# feeHistory need to be present. The startup hourly tick adds
+# nothing (one observation per hour: the latest seed is minutes
+# old), so the peak stays 2.0.
 os.makedirs(DATA, exist_ok=True)
 _now = datetime.now(timezone.utc)
-_seed_history = [{'t': (_now - timedelta(hours=23 - i)).isoformat().replace('+00:00', 'Z'), 'fee': 2.0} for i in range(24)]
+_seed_history = [{'t': (_now - timedelta(hours=24 - i)).isoformat().replace('+00:00', 'Z'), 'fee': 2.0} for i in range(25)]
 # The seed must be a plausible state document (version + bitcoin.txs)
 # or loadState rejects it as corrupt; mergeDefaults fills the rest.
 json.dump({'version': 7, 'bitcoin': {'txs': []}, 'feeHistory': _seed_history}, open(os.path.join(DATA, 'state.json'), 'w'), indent=2)
