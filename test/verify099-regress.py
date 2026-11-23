@@ -40,18 +40,33 @@ condition / current state, one line each) and the dry-run note of
 a price tx carries the source detail (both readings, single-source
 fallback, or the disagreement) — that is where the source detail
 lives, alongside the Exchange Status section. Section 18 covers the
-grace period for price/UTXO triggers (0.8.0): when the app comes back
-after being offline longer than settings.graceOfflineDays (default 7),
-price and UTXO triggers are paused for settings.graceDurationDays
-(default 7, null = indefinite until resumed) — a blanket hold, so no
-price/UTXO trigger fires during it, even one whose condition first
-becomes true during the grace; after expiry (or POST /api/grace/resume)
-they evaluate normally and fire if the condition still holds. Check-in
-triggers are NOT held by it, and checking in does NOT clear it. The
-settings validation (only 1/3/7/14/30, null duration valid) and the
-grace served on /api/state are covered there too (/api/status stays
-grace-free — it is the check-in endpoint, and the check-in hold must
-not read as a Grace period there). Section 19 covers the Getting
+grace period for ALL triggers (0.8.0, extended 0.8.8, unified
+0.8.8): when the app comes back after being offline longer than
+settings.graceOfflineDays (default 7), price, UTXO, block-height,
+set-date, fee-market, AND check-in triggers are paused for
+settings.graceDurationDays (default 7, null = indefinite until
+resumed) while the grace toggle is on — a blanket hold, so no held
+trigger fires during it, even one whose condition first becomes
+true during the grace; after expiry (or POST /api/grace/resume)
+they evaluate normally and fire if the condition still holds.
+Checking in does NOT clear it. A past-due check-in bar reads
+'grace' while the grace holds it, never 'release-due', and the
+top-level check-in state is 'grace' ("Grace period") while any
+armed entry is past due and held. The settings validation (only
+0/1/3/7/14/30, null duration valid, graceEnabled a boolean) and
+the grace served on /api/state are covered there too (/api/status
+stays grace-free — it is the check-in endpoint, and a held
+check-in bar reads 'grace' there, not a Grace-period field).
+The served triggerStatus also carries a wouldFire boolean (0.8.8
+both-numbers card): among the held txs, how many would fire the
+moment the grace lifts — check-in and set-date on the live clock,
+price / fee-market / block-height on the warm caches (else the
+stored last evaluation), UTXO on the stored slice only (it goes
+stale during a grace), manual never, unknown never. Leg 1 reads
+1 of 3 would fire (price only); leg 2 reads 2 of 3 (price +
+check-in, not the UTXO whose spend landed after its last
+evaluation).
+Section 19 covers the Getting
 Started empty-state card (0.8.0): the served markup and CSS only
 (the show/hide behaviour and the button navigation are in the DOM
 suite, §19) — the card at the top of the Dashboard with Ryan's
@@ -158,15 +173,14 @@ def save_state_file(stj):
 
 
 def set_clock(days_back, online_days=0):
-    """Backdate the check-in clock; keep lastOnlineAt fresh so the
-    0.7.22 offline-gap hold never triggers in these tests. The
+    """Backdate the check-in clock; keep lastOnlineAt fresh so no
+    grace sets in these tests. The
     30 s margin keeps floored day counts exact when a tx carries
     a banked freeze offset of a few hundred ms (a disarm->re-arm
     inside the test banks real elapsed time — section 21)."""
     stj = load_state_file()
     stj['checkin']['lastCheckinAt'] = (datetime.now(timezone.utc) - timedelta(days=days_back, seconds=30)).isoformat().replace('+00:00', 'Z')
     stj['checkin']['lastOnlineAt'] = iso_ago(days=online_days)
-    stj['checkin']['heldUntil'] = None
     save_state_file(stj)
 
 
@@ -273,7 +287,6 @@ def set_clock_margin(days_back, online_days=0, margin_s=30):
     stj = load_state_file()
     stj['checkin']['lastCheckinAt'] = (datetime.now(timezone.utc) - timedelta(days=days_back, seconds=margin_s)).isoformat().replace('+00:00', 'Z')
     stj['checkin']['lastOnlineAt'] = iso_ago(days=online_days)
-    stj['checkin']['heldUntil'] = None
     save_state_file(stj)
 
 
@@ -408,7 +421,7 @@ def main():
 
         # --- 1. health + endpoints -------------------------------------
         s, h = req('GET', '/api/health')
-        check('1 health reports version 0.8.7.4', h.get('version') == '0.8.7.4', h)
+        check('1 health reports version 0.8.8', h.get('version') == '0.8.8', h)
         s, st = req('GET', '/api/state')
         check('1 fresh state: no global threshold in settings, no txs',
               'thresholdDays' not in st.get('settings', {}) and st.get('bitcoin', {}).get('txs') == [], st.get('settings'))
@@ -1789,39 +1802,57 @@ def main():
               (st.get('nextDue'), st.get('windowDays')))
         s, r = req('PUT', '/api/bitcoin/txs/' + txb16b, {'enabled': True})
         check('16 re-arming the 10d tx', s == 200 and r.get('tx', {}).get('enabled') is True, r)
-        # Held: the bars use the EFFECTIVE window — last check-in
-        # 40 days back, heldUntil 12 days out, so both bars read
-        # 40 of 52 (the hold is shared; each tx's own due is
-        # earlier than the hold). No special grace display: the
-        # top-level state stays on-track and no 'Grace period'
-        # text appears anywhere in the status.
+        # Held by the grace (0.8.8 unification): the bars use their
+        # OWN windows — last check-in 40 days back, so both bars
+        # read 40 of their own threshold (35 / 10) — and a bar
+        # past due while the grace is active reads state 'grace',
+        # never 'release-due': the due date is NOT pushed out by
+        # the grace. The top-level state is 'grace' ("Grace
+        # period") while any armed entry is past due and held.
+        # The grace sets on the read: lastOnlineAt is 40 days
+        # back, past the 7-day threshold.
         stj = load_state_file()
         stj['checkin']['lastCheckinAt'] = iso_ago(days=40, seconds=30)
         stj['checkin']['lastOnlineAt'] = iso_ago(days=40)
-        stj['checkin']['heldUntil'] = (datetime.now(timezone.utc) + timedelta(days=12)).isoformat().replace('+00:00', 'Z')
         save_state_file(stj)
         s, st = req('GET', '/api/status')
         bars = {c.get('id'): c for c in st.get('checkinTxs', [])}
-        check('16 held: the 35d bar reads 40 of 52 (the longer held window, not 35)',
-              bars.get(txb16a, {}).get('daysSince') == 40 and bars.get(txb16a, {}).get('windowDays') == 52, bars.get(txb16a))
-        check('16 held: the 10d bar reads 40 of 52 too (the hold outruns its own due)',
-              bars.get(txb16b, {}).get('daysSince') == 40 and bars.get(txb16b, {}).get('windowDays') == 52, bars.get(txb16b))
-        check('16 held: the top-level state is on-track, not a grace state',
-              st.get('state') == 'on-track' and st.get('label') == 'On track', (st.get('state'), st.get('label')))
-        check('16 held: no Grace period text anywhere in the status',
-              'Grace period' not in json.dumps(st) and 'grace' not in json.dumps(st).lower(), json.dumps(st)[:400])
-        # A check-in clears the hold and resets both bars to 0.
+        check('16 grace: the 35d bar reads 40 of 35, state grace (past due, held by the grace)',
+              bars.get(txb16a, {}).get('daysSince') == 40 and bars.get(txb16a, {}).get('windowDays') == 35
+              and bars.get(txb16a, {}).get('state') == 'grace', bars.get(txb16a))
+        check('16 grace: the 10d bar reads 40 of 10, state grace too',
+              bars.get(txb16b, {}).get('daysSince') == 40 and bars.get(txb16b, {}).get('windowDays') == 10
+              and bars.get(txb16b, {}).get('state') == 'grace', bars.get(txb16b))
+        check('16 grace: the top-level state is grace ("Grace period"), not release-due',
+              st.get('state') == 'grace' and st.get('label') == 'Grace period', (st.get('state'), st.get('label')))
+        check('16 grace: no heldUntil anywhere in the status',
+              'heldUntil' not in json.dumps(st), json.dumps(st)[:400])
+        # A check-in clears the clock but NOT the grace: both bars
+        # reset to 0 (on-track again — the clock is fresh, so no
+        # entry is past due any more), while the grace stays
+        # active until it expires or is resumed.
         s, r = req('POST', '/api/checkin', {'method': 'app'})
-        check('16 check-in lands after the hold', s == 200 and r.get('ok') is True, r)
+        check('16 check-in lands during the grace', s == 200 and r.get('ok') is True, r)
         s, st = req('GET', '/api/status')
         bars = {c.get('id'): c for c in st.get('checkinTxs', [])}
-        check('16 checking in resets both bars to 0 days elapsed (35d + 10d windows back)',
+        check('16 checking in resets both bars to 0 days elapsed (35d + 10d windows back, on-track)',
               bars.get(txb16a, {}).get('daysSince') == 0 and bars.get(txb16a, {}).get('windowDays') == 35
-              and bars.get(txb16b, {}).get('daysSince') == 0 and bars.get(txb16b, {}).get('windowDays') == 10,
+              and bars.get(txb16a, {}).get('state') == 'on-track'
+              and bars.get(txb16b, {}).get('daysSince') == 0 and bars.get(txb16b, {}).get('windowDays') == 10
+              and bars.get(txb16b, {}).get('state') == 'on-track',
               st.get('checkinTxs'))
+        check('16 the top-level state is on-track after the check-in (clock fresh, nothing past due)',
+              st.get('state') == 'on-track' and st.get('label') == 'On track', (st.get('state'), st.get('label')))
+        s, st2 = req('GET', '/api/state')
+        check('16 the grace is still active after the check-in',
+              (st2.get('grace') or {}).get('active') is True, st2.get('grace'))
         stj = load_state_file()
-        check('16 the check-in cleared the hold in state',
-              stj.get('checkin', {}).get('heldUntil') is None, stj.get('checkin'))
+        check('16 no heldUntil in the stored check-in state',
+              'heldUntil' not in stj.get('checkin', {}), stj.get('checkin'))
+        # Resume clears the grace for the sections below (resume
+        # also refreshes lastOnlineAt, so no grace re-sets).
+        s, r = req('POST', '/api/grace/resume', {})
+        check('16 resume clears the grace', s == 200 and r.get('ok') is True and r.get('grace') is None, (s, r))
         # PUT /api/settings with thresholdDays is a 400 for any
         # value — and the clock is untouched by the rejection.
         before = checkin_last()
@@ -1941,18 +1972,17 @@ def main():
         check('16b clearing the fates restores both bars',
               set(bars) == {txb16a, txb16b}, st.get('checkinTxs'))
 
-        # --- 18. grace period for price/UTXO triggers (0.8.0) ---
+        # --- 18. grace period for ALL triggers (0.8.0, unified 0.8.8) ---
         # When the app comes back after being offline longer than
-        # settings.graceOfflineDays (default 7), price and UTXO
+        # settings.graceOfflineDays (default 7), price, UTXO,
+        # block-height, set-date, fee-market, AND check-in
         # triggers are paused for settings.graceDurationDays
         # (default 7, null = indefinite until resumed). The grace
-        # is a blanket hold: NO price/UTXO trigger fires while it
-        # is active, even one whose condition first becomes true
-        # during the grace. After it expires (or the owner
-        # resumes) the triggers evaluate normally and fire if the
-        # condition still holds. Check-in triggers are NOT held by
-        # it (their own heldUntil hold is separate), and checking
-        # in does NOT clear it.
+        # is a blanket hold: NO trigger fires while it is active,
+        # even one whose condition first becomes true during the
+        # grace. After it expires (or the owner resumes) the
+        # triggers evaluate normally and fire if the condition
+        # still holds. Checking in does NOT clear it.
         s, st = req('GET', '/api/state')
         check('18 grace settings default to graceOfflineDays 7 and graceDurationDays 7',
               st.get('settings', {}).get('graceOfflineDays') == 7
@@ -1969,7 +1999,7 @@ def main():
             s, r = req('PUT', '/api/settings', {'graceOfflineDays': bad_off})
             check('18 graceOfflineDays %r is a 400' % (bad_off,),
                   s == 400 and 'graceOfflineDays' in (r.get('error') or ''), (s, r))
-        for bad_dur in (5, 0, 31, '7'):
+        for bad_dur in (5, 31, '7'):
             s, r = req('PUT', '/api/settings', {'graceDurationDays': bad_dur})
             check('18 graceDurationDays %r is a 400' % (bad_dur,),
                   s == 400 and 'graceDurationDays' in (r.get('error') or ''), (s, r))
@@ -1988,6 +2018,25 @@ def main():
               st['settings'].get('graceDurationDays') is None, st['settings'])
         s, r = req('PUT', '/api/settings', {'graceDurationDays': 7})
         check('18 graceDurationDays restored to 7', s == 200, (s, r))
+        s, r = req('PUT', '/api/settings', {'graceDurationDays': 0})
+        check('18 graceDurationDays 0 (off, back-compat) is valid (0.8.8)', s == 200, (s, r))
+        s, st = req('GET', '/api/state')
+        check('18 graceDurationDays reads back as 0',
+              st['settings'].get('graceDurationDays') == 0, st['settings'])
+        s, r = req('PUT', '/api/settings', {'graceDurationDays': 7})
+        check('18 graceDurationDays restored to 7 after the 0 check', s == 200, (s, r))
+        # The toggle (0.8.8): a non-boolean is a 400; false reads
+        # back as false. Restored to true right away — the rest of
+        # this section needs the grace on.
+        s, r = req('PUT', '/api/settings', {'graceEnabled': 'yes'})
+        check('18 graceEnabled non-boolean is rejected (400)', s == 400, (s, r))
+        s, r = req('PUT', '/api/settings', {'graceEnabled': False})
+        check('18 graceEnabled false is valid', s == 200, (s, r))
+        s, st = req('GET', '/api/state')
+        check('18 graceEnabled reads back as false',
+              st['settings'].get('graceEnabled') is False, st['settings'])
+        s, r = req('PUT', '/api/settings', {'graceEnabled': True})
+        check('18 graceEnabled restored to true', s == 200, (s, r))
 
         # A price rule that HOLDS at the stub price ($98,200 >=
         # $90,000), a UTXO rule on an unspent outpoint, and a
@@ -2018,8 +2067,8 @@ def main():
               'grace' not in stat, [k for k in stat.keys() if 'grace' in k.lower()])
         # 8 days offline is past the threshold: the grace sets on
         # the next read. lastCheckinAt stays fresh, so the
-        # check-in hold does NOT set — an 8-day gap is under
-        # threshold/4 for a 35-day rule (8.75 days).
+        # check-in rule is on-track, not due — but it is still
+        # held by the grace while the grace is active.
         set_clock(0, 8)
         s, st = req('GET', '/api/state')
         g = st.get('grace') or {}
@@ -2030,8 +2079,8 @@ def main():
               bool(gu) and abs((datetime.fromisoformat(gu.replace('Z', '+00:00'))
                                 - datetime.now(timezone.utc)).total_seconds() - 7 * 86400) < 180,
               gu)
-        check('18 the check-in hold did NOT set on an 8-day gap (heldUntil stays null)',
-              st.get('checkin', {}).get('heldUntil') is None, st.get('checkin'))
+        check('18 no heldUntil anywhere in the served check-in state',
+              'heldUntil' not in st.get('checkin', {}), st.get('checkin'))
         s, stat = req('GET', '/api/status')
         check('18 /api/status stays grace-free even while a grace is active',
               'grace' not in stat, [k for k in stat.keys() if 'grace' in k.lower()])
@@ -2050,12 +2099,29 @@ def main():
               res.get(txg_utxo, {}).get('action') == 'skipped'
               and res.get(txg_utxo, {}).get('triggerStatus') == 'grace',
               res.get(txg_utxo))
-        check('18 the check-in tx is NOT held by the grace (its status is on-track, not grace)',
-              res.get(txg_ck, {}).get('triggerStatus') == 'on-track', res.get(txg_ck))
+        check('18 the check-in tx IS held by the grace too (skipped, status grace)',
+              res.get(txg_ck, {}).get('action') == 'skipped'
+              and res.get(txg_ck, {}).get('triggerStatus') == 'grace',
+              res.get(txg_ck))
         check('18 neither tx broadcasted during the grace',
               (state_tx(txg_price) or {}).get('broadcasted') is None
               and (state_tx(txg_utxo) or {}).get('broadcasted') is None,
               ((state_tx(txg_price) or {}).get('broadcasted'), (state_tx(txg_utxo) or {}).get('broadcasted')))
+        # Both-numbers grace card (0.8.8): of the three held txs,
+        # only the price tx would fire now — its condition reads
+        # met on the warm price cache. The UTXO tx would NOT: its
+        # spend landed after its last evaluation, and the UTXO rule
+        # reads its stored slice only (stale during a grace). The
+        # check-in tx would NOT either: its clock is fresh. So the
+        # card reads 1 of 3 would fire.
+        s, st = req('GET', '/api/state')
+        wf1 = {t.get('id'): (t.get('triggerStatus') or {}).get('wouldFire') for t in st.get('bitcoin', {}).get('txs', [])}
+        check('18 wouldFire: the holding price tx would fire (warm price cache, 98200 >= 90000)',
+              wf1.get(txg_price) is True, wf1.get(txg_price))
+        check('18 wouldFire: the spent UTXO tx would NOT fire (no stored slice — the spend landed after its last evaluation)',
+              wf1.get(txg_utxo) is False, wf1.get(txg_utxo))
+        check('18 wouldFire: the on-track check-in tx would NOT fire (clock fresh)',
+              wf1.get(txg_ck) is False, wf1.get(txg_ck))
         # Saving new grace settings does NOT change an active
         # grace (it keeps the duration it was created with).
         gu_before = (req('GET', '/api/state')[1].get('grace') or {}).get('graceUntil')
@@ -2066,8 +2132,7 @@ def main():
               (st.get('grace') or {}).get('graceUntil') == gu_before, st.get('grace'))
         s, r = req('PUT', '/api/settings', {'graceDurationDays': 7})
         check('18 grace duration restored to 7', s == 200, (s, r))
-        # Checking in does NOT clear the price/UTXO grace (it
-        # clears only the check-in hold).
+        # Checking in does NOT clear the grace.
         s, r = req('POST', '/api/checkin', {})
         check('18 a check-in lands (200)', s == 200 and r.get('ok') is True, (s, r))
         s, st = req('GET', '/api/state')
@@ -2109,7 +2174,6 @@ def main():
         stj['grace'] = {'graceUntil': iso_ago(hours=1), 'triggeredAt': iso_ago(days=8), 'offlineGapDays': 8}
         stj['checkin']['lastOnlineAt'] = iso_now()
         stj['checkin']['lastCheckinAt'] = iso_now()
-        stj['checkin']['heldUntil'] = None
         save_state_file(stj)
         s, st = req('GET', '/api/state')
         check('18 an expired grace reads as no grace (grace null)',
@@ -2134,10 +2198,11 @@ def main():
         # fresh UTXO tx on the same outpoint, and it must be
         # unspent at add time.
         set_outspend(SECOND, 0, None)
-        # A check-in trigger is NOT held by the grace: with the
-        # clock 36 days back and an 8-day offline gap, the grace
-        # sets — and the due check-in tx still broadcasts while
-        # the price and UTXO txs stay held.
+        # A check-in trigger IS held by the grace (0.8.8
+        # unification): with the clock 36 days back and an 8-day
+        # offline gap, the grace sets — and the due check-in tx
+        # is held like the price and UTXO txs. Once the grace is
+        # resumed it broadcasts.
         restart()
         delete_all_txs()
         set_price(98200)
@@ -2160,8 +2225,10 @@ def main():
         check('18 the grace sets again on the 8-day gap',
               (st.get('grace') or {}).get('active') is True, st.get('grace'))
         s, rc, res = release_results()
-        check('18 the due check-in tx still broadcasts during the grace (not held by it)',
-              res.get(txg_ck2, {}).get('action') == 'broadcast', res.get(txg_ck2))
+        check('18 the due check-in tx is held by the grace too (skipped, status grace)',
+              res.get(txg_ck2, {}).get('action') == 'skipped'
+              and res.get(txg_ck2, {}).get('triggerStatus') == 'grace',
+              res.get(txg_ck2))
         check('18 the second price tx is held by the grace (skipped, status grace)',
               res.get(txg_price2, {}).get('action') == 'skipped'
               and res.get(txg_price2, {}).get('triggerStatus') == 'grace',
@@ -2170,13 +2237,55 @@ def main():
               res.get(txg_utxo2, {}).get('action') == 'skipped'
               and res.get(txg_utxo2, {}).get('triggerStatus') == 'grace',
               res.get(txg_utxo2))
+        check('18 the due check-in tx did NOT broadcast during the grace',
+              (state_tx(txg_ck2) or {}).get('broadcasted') is None, (state_tx(txg_ck2) or {}).get('broadcasted'))
+        # Both-numbers grace card (0.8.8): 2 of 3 would fire —
+        # the holding price tx (warm cache) and the past-due
+        # check-in tx (live clock, 36d past the 35d threshold).
+        # The UTXO tx would NOT: its spend landed after its last
+        # evaluation and its stored slice was never written.
+        s, st = req('GET', '/api/state')
+        wf2 = {t.get('id'): (t.get('triggerStatus') or {}).get('wouldFire') for t in st.get('bitcoin', {}).get('txs', [])}
+        check('18 wouldFire: the second holding price tx would fire (warm price cache)',
+              wf2.get(txg_price2) is True, wf2.get(txg_price2))
+        check('18 wouldFire: the second spent UTXO tx would NOT fire (no stored slice)',
+              wf2.get(txg_utxo2) is False, wf2.get(txg_utxo2))
+        check('18 wouldFire: the past-due check-in tx would fire (live clock, 36d past 35d)',
+              wf2.get(txg_ck2) is True, wf2.get(txg_ck2))
+        # Resume: the due check-in tx broadcasts, like the price
+        # and UTXO txs. The outspend cache still holds the
+        # add-time "unspent" verdict (TTL = the cadence), so
+        # clear just the outspend cache first — otherwise the
+        # resumed check reads the stale verdict.
+        s, r = req('POST', '/api/grace/resume', {})
+        check('18 resumed after the held check-in leg', s == 200, (s, r))
+        s, r = req('POST', '/api/__test__/clear-caches', {'only': ['outspend']})
+        check('18 outspend cache cleared after the resume', s == 200 and r.get('ok') is True, (s, r))
+        s, rc, res = release_results()
+        check('18 the due check-in tx broadcasts once the grace is resumed',
+              s == 200 and res.get(txg_ck2, {}).get('action') == 'broadcast', res.get(txg_ck2))
+        check('18 the second price tx broadcasts once the grace is resumed',
+              s == 200 and res.get(txg_price2, {}).get('action') == 'broadcast', res.get(txg_price2))
+        check('18 the second UTXO tx broadcasts once the grace is resumed',
+              s == 200 and res.get(txg_utxo2, {}).get('action') == 'broadcast', res.get(txg_utxo2))
+        # Re-seed an active grace for the restore section below:
+        # it expects the backup to carry an ACTIVE grace (and
+        # the restore to drop it). lastOnlineAt is fresh after
+        # the resume, so the seeded grace reads as-is.
+        stj = load_state_file()
+        stj['grace'] = {'graceUntil': (datetime.now(timezone.utc) + timedelta(days=6)).isoformat().replace('+00:00', 'Z'),
+                        'triggeredAt': iso_ago(days=1), 'offlineGapDays': 8}
+        save_state_file(stj)
+        s, st = req('GET', '/api/state')
+        check('18 an active grace is seeded again for the restore leg',
+              (st.get('grace') or {}).get('active') is True, st.get('grace'))
         # Restore carries the grace settings + price sources
         # (0.8.0): the backup holds them (it dumps the whole
         # state), and the restore applies them — a backup from
         # before 0.8.0 carries none, which restores as the
         # defaults. The ACTIVE grace does NOT ride along: a
         # restore counts as a check-in (the owner is present),
-        # so the grace is cleared, like the check-in hold.
+        # so the grace is cleared.
         s, r = req('PUT', '/api/settings', {'graceOfflineDays': 14, 'graceDurationDays': 30,
                                             'priceSources': {'source1': 'kraken', 'source2': 'bitstamp'}})
         check('18 restore: non-default grace + price-source settings save', s == 200, (s, r))

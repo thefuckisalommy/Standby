@@ -1,5 +1,5 @@
 // Standby 0.8.2 DOM checks — block-height, set-date, and fee-market triggers.
-// Runs public/app.js from branch-split in Node with the
+// Runs public/app.js from branch-0.8.8-nonrpc in Node with the
 // minimal DOM shim from dom_check094.js (same El class, same
 // document/window/fetch/setInterval stubs) and verifies the 0.8.0
 // trigger UI only — the 094 suite still owns everything else.
@@ -51,23 +51,28 @@
 //     (green), "Label + armed" for a genuine problem state, and
 //     "unarmed" when disarmed; a shared-input overlap keeps the text
 //     but turns the pill amber
-//   - the grace period (0.8.0): a "Grace period active" card at the
-//     top of the Dashboard (only while a grace is active for an
-//     armed price or UTXO tx) with the offline days and the end date
-//     bolded, a Resume now button, and the muted note; armed
-//     price/UTXO cards read "Grace" on an amber pill instead of
-//     "armed" (check-in/manual untouched, disarmed still "unarmed");
-//     the Settings grace card has the two dropdowns (offline days to
-//     trigger, how long it lasts, incl. indefinite) with Save; an
-//     indefinite grace reads "until you resume" instead of a date
+//   - the grace period (0.8.0, extended 0.8.8, unified 0.8.8): a
+//     "Grace period active" card at the top of the Dashboard
+//     whenever a grace is active — even with nothing held — with
+//     the approved copy ("Grace period has been activated because
+//     the device was offline for X days." / "N transaction(s)
+//     is/are held by grace, M of them would fire now."), a countdown bar
+//     ("Day N of M" / "N days left · until <date>", "less than a
+//     day left" under a day, "until you resume" when indefinite),
+//     a Resume now button with its note to the right; armed held
+//     cards read "Grace" on an amber pill instead of "armed"
+//     (check-in cards included; manual untouched, disarmed still
+//     "unarmed"); the Settings grace card has the toggle + the two
+//     dropdowns (offline days to trigger, how long it lasts, incl.
+//     indefinite) with Save
 //   - the Getting Started card (0.8.0): an empty-state card at the
 //     very top of the Dashboard, shown only when no transactions
 //     are STAGED (active) — archived and pending do not count —
 //     the first thing a fresh install sees — with Ryan's exact
 //     copy and a full-width orange button that opens the Add
 //     transaction popup (it never switches tabs or scrolls); it is
-//     independent of the grace card (which needs armed price/UTXO
-//     txs to show)
+//     independent of the grace card (which shows whenever a grace
+//     is active, even with nothing held)
 //   - the Add form is a popup (0.8.0): the inline "Add a
 //     transaction" card at the bottom of the Transactions tab is
 //     gone — three buttons open the same popup (Getting Started,
@@ -345,12 +350,19 @@ function checkinBars() {
       const bar = b.children[1] || { children: [] };
       const fill = bar.children[0] || { style: {} };
       const cap = (b.children[2] || {}).textContent || '';
-      return { label, width: parseFloat((fill.style || {}).width) || 0, caption: cap, cls: b.className || '' };
+      return { label, width: parseFloat((fill.style || {}).width) || 0, fillBg: (fill.style || {}).background || '', caption: cap, cls: b.className || '' };
     });
 }
 function checkinBar(label) {
   const bars = checkinBars();
   return bars && bars.find((x) => x.label === label);
+}
+// How many tx cards read "Grace" on their pill right now — the
+// per-card view of the held set, against which the grace card's
+// held-count line must agree (both derive from the same hold,
+// through different code paths: txStatus vs graceHeldTxCount).
+function gracePillCount() {
+  return txCards().filter((c) => { const p = cardStatus(c); return !!p && p.textContent === 'Grace'; }).length;
 }
 // A fingerprint of the whole shim DOM (ids + each element's text,
 // class, display, value, checked state and child count, recursed
@@ -1178,7 +1190,7 @@ function check(name, cond, detail) {
   check('price sources: the note explains the 5% agreement rule (static HTML)',
     idx.indexOf('agree within <span id="price-sources-agreement">5%</span>') !== -1, '');
   check('price sources: the "?" pop-out names the primary-decides rule',
-    appJs.indexOf('is the one that decides') !== -1, '');
+    appJs.indexOf('price decides') !== -1, '');
   check('price sources: the "?" pop-out names the single-source fallback',
     appJs.indexOf('the other is used alone') !== -1, '');
   check('price sources: the card has a per-source display with a status pill and a price value span (static HTML)',
@@ -1694,7 +1706,7 @@ function check(name, cond, detail) {
   // 'unknown' until something re-fetches. Clear just the price
   // cache and run a release check — the Dom Price slice heals to
   // $98,200 here, before §14's held-clock edit triggers the
-  // offline-gap grace (during a grace the release check cannot
+  // grace (during a grace the release check cannot
   // re-fetch prices, so this is the last chance to heal it).
   const ccOk = await fetch('/api/__test__/clear-caches', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ only: ['price'] }) });
   check('exchange status: the price cache is cleared so the release check re-fetches the restored prices', ccOk.status === 200, 'status=' + ccOk.status);
@@ -1770,6 +1782,112 @@ function check(name, cond, detail) {
     els['btc-primary-status'] && els['btc-primary-status'].textContent === 'OK',
     els['btc-primary-status'] && els['btc-primary-status'].textContent);
   toggleDetails(detP, false);
+
+  // --- 10d. Secondary-node toggle (0.8.8) ---
+  // The toggle sits inline with the Secondary node heading,
+  // right-aligned — the same switch as the arm/disarm toggle on
+  // a transaction card — and never hides with the settings it
+  // controls. Off hides the secondary URL box without clearing
+  // its saved value, and the secondary pill reads Disabled —
+  // never Offline, Failed, or a stale timestamp. The Dashboard
+  // readiness row names the slot ("Secondary Node"), not the
+  // provider host — but ONLY while the secondary is disabled,
+  // when there is no real node to name. While enabled the
+  // readiness row shows the node name (the configured host),
+  // as before; Settings still shows the host. Save
+  // round-trips it.
+  check('secondary toggle static: the toggle exists in the HTML',
+    idx.indexOf('id="btc-secondary-enabled"') !== -1, '');
+  check('secondary toggle static: the toggle is the same switch as the arm/disarm toggle (class "switch green")',
+    idx.indexOf('class="switch green" id="btc-secondary-enabled-wrap"') !== -1, '');
+  check('secondary toggle static: the toggle sits inline with the Secondary node heading (label, then switch, in the heading row)',
+    idx.indexOf('class="node-subhead"') !== -1
+    && idx.indexOf('class="node-subhead"') < idx.indexOf('<label for="btc-secondary-url">Secondary node</label>')
+    && idx.indexOf('<label for="btc-secondary-url">Secondary node</label>') < idx.indexOf('id="btc-secondary-enabled"'), '');
+  check('secondary toggle static: the heading row spreads label and switch apart (space-between, so the switch sits right-aligned)',
+    /\.node-subhead\s*\{[^}]*justify-content:\s*space-between/.test(css), '');
+  check('secondary toggle static: the toggle sits before the secondary URL box',
+    idx.indexOf('id="btc-secondary-enabled"') !== -1 && idx.indexOf('id="btc-secondary-enabled"') < idx.indexOf('id="btc-secondary-url"'), '');
+  check('secondary toggle static: the toggle sits outside the secondary fields wrapper (it never hides with them)',
+    idx.indexOf('id="btc-secondary-enabled"') !== -1 && idx.indexOf('id="btc-secondary-enabled"') < idx.indexOf('id="btc-secondary-fields"'), '');
+  check('secondary toggle static: the secondary fields wrapper exists in the HTML',
+    idx.indexOf('id="btc-secondary-fields"') !== -1, '');
+  await rerender(appJs);
+  check('secondary toggle: the toggle starts checked (secondary on by default)',
+    els['btc-secondary-enabled'] && els['btc-secondary-enabled'].checked === true, '');
+  check('secondary toggle: the secondary fields show while enabled',
+    els['btc-secondary-fields'] && els['btc-secondary-fields'].style.display !== 'none', '');
+  check('secondary toggle: the Dashboard readiness row shows the node name (host) while enabled',
+    els['readiness-secondary'] && els['readiness-secondary'].textContent === '127.0.0.1:18276',
+    els['readiness-secondary'] && els['readiness-secondary'].textContent);
+  check('secondary toggle: the readiness row shows the same host as the Settings row while enabled',
+    els['readiness-secondary'] && els['btc-secondary']
+    && els['readiness-secondary'].textContent === els['btc-secondary'].textContent,
+    els['readiness-secondary'] && els['readiness-secondary'].textContent);
+  check('secondary toggle: the Settings row still shows the configured host',
+    els['btc-secondary'] && els['btc-secondary'].textContent === '127.0.0.1:18276',
+    els['btc-secondary'] && els['btc-secondary'].textContent);
+  // Uncheck: the fields hide immediately (values untouched).
+  els['btc-secondary-enabled'].checked = false;
+  fireChange(els['btc-secondary-enabled']);
+  check('secondary toggle: unchecking hides the secondary fields',
+    els['btc-secondary-fields'] && els['btc-secondary-fields'].style.display === 'none', '');
+  check('secondary toggle: the toggle itself stays visible while disabled (it lives in the heading row, not the fields)',
+    els['btc-secondary-enabled-wrap'] && els['btc-secondary-enabled-wrap'].style.display !== 'none', '');
+  check('secondary toggle: the switch title names the off state while disabled',
+    els['btc-secondary-enabled-wrap'] && els['btc-secondary-enabled-wrap'].title === 'Secondary node off — primary only',
+    els['btc-secondary-enabled-wrap'] && els['btc-secondary-enabled-wrap'].title);
+  check('secondary toggle: hiding keeps the saved URL in the box',
+    els['btc-secondary-url'] && els['btc-secondary-url'].value === 'http://127.0.0.1:18276',
+    els['btc-secondary-url'] && els['btc-secondary-url'].value);
+  els['btn-btc-save-nodes'].click();
+  await new Promise((r) => setTimeout(r, 1500));
+  await waitForRender();
+  const stSecOff = await (await fetch('/api/state')).json();
+  check('secondary toggle: the toggle saves off (state secondaryEnabled false)',
+    stSecOff.settings.secondaryEnabled === false, JSON.stringify(stSecOff.settings));
+  check('secondary toggle: the secondary setting survives the disable (URL kept)',
+    stSecOff.settings.secondaryApiUrl === 'http://127.0.0.1:18276', JSON.stringify(stSecOff.settings));
+  check('secondary toggle: the Settings secondary pill reads Disabled',
+    els['btc-secondary-status'] && els['btc-secondary-status'].textContent === 'Disabled',
+    els['btc-secondary-status'] && els['btc-secondary-status'].textContent);
+  check('secondary toggle: the Dashboard readiness secondary pill reads Disabled',
+    els['readiness-secondary-status'] && els['readiness-secondary-status'].textContent === 'Disabled',
+    els['readiness-secondary-status'] && els['readiness-secondary-status'].textContent);
+  check('secondary toggle: the disabled readiness row falls back to "Secondary Node" (no real name)',
+    els['readiness-secondary'] && els['readiness-secondary'].textContent === 'Secondary Node',
+    els['readiness-secondary'] && els['readiness-secondary'].textContent);
+  check('secondary toggle: the disabled readiness row shows no provider hostname',
+    els['readiness-secondary'] && els['readiness-secondary'].textContent.indexOf('127.0.0.1') === -1,
+    els['readiness-secondary'] && els['readiness-secondary'].textContent);
+  // Re-enable: the fields return with their saved values intact.
+  els['btc-secondary-enabled'].checked = true;
+  fireChange(els['btc-secondary-enabled']);
+  check('secondary toggle: re-checking shows the secondary fields again',
+    els['btc-secondary-fields'] && els['btc-secondary-fields'].style.display !== 'none',
+    els['btc-secondary-fields'] && els['btc-secondary-fields'].style.display);
+  check('secondary toggle: the switch title names the on state again after re-enabling',
+    els['btc-secondary-enabled-wrap'] && els['btc-secondary-enabled-wrap'].title === 'Secondary node on — used if the primary fails',
+    els['btc-secondary-enabled-wrap'] && els['btc-secondary-enabled-wrap'].title);
+  check('secondary toggle: the URL box still holds the saved secondary URL after re-enabling',
+    els['btc-secondary-url'] && els['btc-secondary-url'].value === 'http://127.0.0.1:18276',
+    els['btc-secondary-url'] && els['btc-secondary-url'].value);
+  els['btn-btc-save-nodes'].click();
+  await new Promise((r) => setTimeout(r, 1500));
+  await waitForRender();
+  const stSecOn = await (await fetch('/api/state')).json();
+  check('secondary toggle: the toggle saves back on',
+    stSecOn.settings.secondaryEnabled === true, JSON.stringify(stSecOn.settings));
+  // Re-test so the pills read OK again for the later sections.
+  els['btn-btc-test-conn'].click();
+  await new Promise((r) => setTimeout(r, 1500));
+  await waitForRender();
+  check('secondary toggle: both pills read OK again after re-enabling + re-test',
+    els['btc-primary-status'] && els['btc-primary-status'].textContent === 'OK'
+    && els['btc-secondary-status'] && els['btc-secondary-status'].textContent === 'OK', '');
+  check('secondary toggle: the readiness row shows the host name again after re-enabling',
+    els['readiness-secondary'] && els['readiness-secondary'].textContent === '127.0.0.1:18276',
+    els['readiness-secondary'] && els['readiness-secondary'].textContent);
 
   // --- 11. Staged Transactions card (0.8.0) ---
   // Static HTML: the transactions card is renamed "Staged
@@ -1933,12 +2051,17 @@ function check(name, cond, detail) {
   check('readiness rows: the long-label row status pill reads "armed"',
     !!longRb && longRb.status === 'armed', longRb ? longRb.status : 'no block');
 
-  // --- 14. held window + shared check-in reset (0.8.0) ---
-  // Backdate the clock 40 days with a hold 12 days out (a direct
-  // state.json edit, like the API suite's seed): both bars read
-  // 40 of 52 — the EFFECTIVE window, not their own thresholds —
-  // with no "Grace period" text and the pill still "On track".
-  // The shared Check in button then resets both bars to 0.
+  // --- 14. held window + shared check-in reset (0.8.0, unified 0.8.8) ---
+  // Backdate the clock 40 days with lastOnlineAt 40 days back
+  // (a direct state.json edit, like the API suite's seed): a
+  // grace sets on the rerender's read (gap 40d > 7d
+  // threshold), and both bars read past due in their OWN
+  // windows — 40 of 35 / 40 of 10 — state 'grace', never
+  // 'release-due': the due date is NOT pushed out by the
+  // grace. The status pill reads "Grace period" and the grace
+  // card shows with its countdown bar. The shared Check in
+  // button then resets both bars to 0 (checking in does NOT
+  // clear the grace — the card stays up).
   const heldSt = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
   const heldNow = Date.now();
   // The 30 s margin keeps the floored day count exact: the
@@ -1950,24 +2073,57 @@ function check(name, cond, detail) {
   // seconds=30) does the same thing).
   heldSt.checkin.lastCheckinAt = new Date(heldNow - 40 * 86400000 - 30000).toISOString();
   heldSt.checkin.lastOnlineAt = new Date(heldNow - 40 * 86400000).toISOString();
-  heldSt.checkin.heldUntil = new Date(heldNow + 12 * 86400000).toISOString();
   fs.writeFileSync(DATA_FILE, JSON.stringify(heldSt, null, 2) + '\n');
   await rerender(appJs);
   const heldBar35 = checkinBar('Dom Check-in');
   const heldBar10 = checkinBar('Dom Check-in 10d');
-  check('held bars: the 35d bar reads "40 of 52 days elapsed" (the longer held window)',
-    !!heldBar35 && heldBar35.caption === '40 of 52 days elapsed', heldBar35 ? heldBar35.caption : 'no bar');
-  check('held bars: the 10d bar reads "40 of 52 days elapsed" too (the hold outruns its own due)',
-    !!heldBar10 && heldBar10.caption === '40 of 52 days elapsed', heldBar10 ? heldBar10.caption : 'no bar');
-  check('held bars: the 35d bar fill is ~77% wide (40/52)',
-    !!heldBar35 && Math.abs(heldBar35.width - 40 / 52 * 100) < 0.5, heldBar35 ? heldBar35.width : 'no bar');
-  check('held bars: the status pill still reads "On track" — no grace state',
-    els['status-pill'] && els['status-pill'].textContent === 'On track',
+  check('held bars: the 35d bar reads "40 of 35 days elapsed — held by grace" (its own window, not pushed out)',
+    !!heldBar35 && heldBar35.caption === '40 of 35 days elapsed — held by grace', heldBar35 ? heldBar35.caption : 'no bar');
+  check('held bars: the 10d bar reads "40 of 10 days elapsed — held by grace" too',
+    !!heldBar10 && heldBar10.caption === '40 of 10 days elapsed — held by grace', heldBar10 ? heldBar10.caption : 'no bar');
+  check('held bars: both bars are full (40 of 35 / 40 of 10) with an amber fill',
+    !!heldBar35 && heldBar35.width === 100 && heldBar35.fillBg === 'var(--warn)'
+    && !!heldBar10 && heldBar10.width === 100 && heldBar10.fillBg === 'var(--warn)',
+    (heldBar35 ? heldBar35.width + '/' + heldBar35.fillBg : '—') + ' / ' + (heldBar10 ? heldBar10.width + '/' + heldBar10.fillBg : '—'));
+  check('held bars: the status pill reads "Grace period"',
+    els['status-pill'] && els['status-pill'].textContent === 'Grace period',
     els['status-pill'] && els['status-pill'].textContent);
-  check('held bars: no "Grace period" text on the status pill or the bar captions',
-    els['status-pill'] && els['status-pill'].textContent.indexOf('Grace') === -1
-    && !!heldBar35 && heldBar35.caption.indexOf('Grace') === -1
-    && !!heldBar10 && heldBar10.caption.indexOf('Grace') === -1, '');
+  // The held count is 9, not 7: the 7 trigger txs plus the two
+  // FINNEY:0 txs from §8. (The third extra UTXO tx, the
+  // unconfirmed-mode conflict tx, is NOT held: its rule fired
+  // on the unconfirmed spend and it broadcast already, so it
+  // is pending by now — the §14 comment used to say the
+  // opposite, corrected by the §14 state dump in the
+  // both-numbers build.) The line must agree with the
+  // per-card pills, the independent view of the same held set.
+  const heldN14 = gracePillCount();
+  check('held bars: the grace card shows the 40-day gap and the held txs',
+    els['grace-card'] && els['grace-card'].style.display !== 'none'
+    && els['grace-text'] && elText(els['grace-text']) === 'Grace period has been activated because the device was offline for 40 days.'
+    && els['grace-held'] && elText(els['grace-held']) === '9 transactions are held by grace, 2 of them would fire now.',
+    elText(els['grace-text']) + ' / ' + elText(els['grace-held']));
+  check('held bars: the held count is 9 (7 trigger txs + the 2 FINNEY:0 txs from §8)',
+    heldN14 === 9, 'grace pills: ' + heldN14);
+  // Both-numbers grace card (0.8.8): 2 of the 9 held would fire
+  // now — the two past-due check-ins, judged on the live clock
+  // (40 days past both the 35d and the 10d thresholds). The
+  // rest read 'watching' on their stored slices (price $98,200
+  // < $150,000, tip 900,000 < 950,000, fee 1 > 0.5, set-date in
+  // 2029, FINNEY:1 unspent, both FINNEY:0 txs last read at 2
+  // confirmations, below their N). The conflict tx reads
+  // wouldFire TRUE on its stale 'due' slice but it already
+  // broadcast, so it is not held and does not count toward
+  // the second number.
+  const st14 = await (await fetch('/api/state')).json();
+  const heldLabels14 = txCards().filter((c) => { const p = cardStatus(c); return !!p && p.textContent === 'Grace'; }).map(cardTitle);
+  const wf14 = (st14.bitcoin.txs || []).filter((t) => heldLabels14.includes(t.label) && (t.triggerStatus || {}).wouldFire).map((t) => t.label);
+  check('held bars: 2 of the 9 held would fire now (the two past-due check-ins)',
+    wf14.length === 2 && wf14.includes('Dom Check-in') && wf14.includes('Dom Check-in 10d'), wf14.join(', '));
+  check('held bars: the grace countdown starts at "Day 0 of 7" with "7 days left"',
+    els['grace-bar-day'] && els['grace-bar-day'].textContent === 'Day 0 of 7'
+    && els['grace-bar-left'] && (els['grace-bar-left'].textContent || '').indexOf('7 days left · until ') === 0
+    && els['grace-bar-fill'] && els['grace-bar-fill'].style.width === '0%',
+    (els['grace-bar-day'] && els['grace-bar-day'].textContent) + ' / ' + (els['grace-bar-left'] && els['grace-bar-left'].textContent) + ' / ' + (els['grace-bar-fill'] && els['grace-bar-fill'].style.width));
   // The shared Check in button resets every bar to 0.
   els['btn-checkin'].click();
   await new Promise((r) => setTimeout(r, 1500));
@@ -1981,6 +2137,12 @@ function check(name, cond, detail) {
   check('check-in resets: both bar fills are 0% wide after checking in',
     !!resetBar35 && resetBar35.width === 0 && !!resetBar10 && resetBar10.width === 0,
     (resetBar35 ? resetBar35.width : '—') + ' / ' + (resetBar10 ? resetBar10.width : '—'));
+  check('check-in resets: the status pill reads "On track" again (clock fresh, nothing past due)',
+    els['status-pill'] && els['status-pill'].textContent === 'On track',
+    els['status-pill'] && els['status-pill'].textContent);
+  check('check-in resets: the grace card is still visible — checking in does not clear the grace',
+    els['grace-card'] && els['grace-card'].style.display !== 'none',
+    els['grace-card'] && els['grace-card'].style.display);
 
   // --- 15. settled / pending check-in txs get no bar ---
   // (Same rule as the API suite's §16b, proven in the DOM):
@@ -2062,67 +2224,94 @@ function check(name, cond, detail) {
     (checkinBars() || []).length === 2 && els['checkin-card'] && els['checkin-card'].style.display !== 'none',
     JSON.stringify(checkinBars()) + ' display=' + (els['checkin-card'] && els['checkin-card'].style.display));
 
-  // --- 18. grace period for price/UTXO triggers (0.8.0) ---
+  // --- 18. grace period for ALL triggers (0.8.0, extended 0.8.8, unified 0.8.8) ---
   // When the app comes back after being offline longer than
-  // settings.graceOfflineDays (default 7), price and UTXO
-  // triggers are paused for settings.graceDurationDays (default
-  // 7, null = indefinite until resumed). The dashboard shows a
-  // "Grace period active" card at the top (only while a grace
-  // is active for an armed price or UTXO tx) with the offline
-  // days and the end date bolded, a Resume now button, and the
-  // muted note; armed price/UTXO tx cards read "Grace" on an
-  // amber pill instead of "armed"; the Settings grace card has
-  // the two dropdowns (offline days to trigger, how long it
-  // lasts) with Save. (Direct state.json edits for the grace,
-  // like §14's held-clock edit and §16b's fate edits. The
-  // launcher's lastOnlineAt is fresh — the app booted minutes
-  // ago — so seeding a grace directly never re-triggers one on
-  // the read.)
+  // settings.graceOfflineDays (default 7), price, UTXO,
+  // block-height, set-date, fee-market, AND check-in triggers
+  // are paused for settings.graceDurationDays (default 7, null
+  // = indefinite until resumed). The grace has an on/off
+  // toggle as the first option on the Settings grace card (in
+  // the heading, like the secondary-node toggle): off hides
+  // the two dropdowns without clearing them, and no grace is
+  // ever set — nor does an already-active grace show or hold
+  // — while it is off. The duration dropdown offers 1/3/7/14/30
+  // days + indefinite only (no 0: the toggle is the off switch
+  // now). The dashboard shows a "Grace period active" card at
+  // the top whenever a grace is active — even with nothing
+  // held — with the approved copy ("Grace period has been
+  // activated because the device was offline for X days." /
+  // "N transaction(s) is/are held by grace, M of them would
+  // fire now."),
+  // a countdown bar ("Day N of M" / "N days left · until
+  // <date>", "less than a day left" under a day, "until you
+  // resume" for an indefinite grace), and a Resume now button
+  // with "Resuming will end the grace period immediately." to
+  // its right; armed held tx cards read "Grace" on an amber
+  // pill instead of "armed" (check-in cards included now);
+  // the Settings grace card has the toggle + the two dropdowns
+  // (offline days to trigger, how long it lasts) with Save.
+  // (Direct state.json edits for the grace, like §14's
+  // held-clock edit and §16b's fate edits. The launcher's
+  // lastOnlineAt is fresh — the app booted minutes ago — so
+  // seeding a grace directly never re-triggers one on the
+  // read.)
   function setDomGrace(grace) {
     const st = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
     st.grace = grace;
     fs.writeFileSync(DATA_FILE, JSON.stringify(st, null, 2) + '\n');
   }
-  function fmtDateShortDom(d) {
-    const x = new Date(d);
-    return x.toLocaleDateString() + ', ' + x.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
-  }
   const graceNow = Date.now();
-  const graceUntil = new Date(graceNow + 7 * 86400000).toISOString();
-  const graceTriggeredAt = new Date(graceNow).toISOString();
+  // A grace 5 days in, of a 7-day duration (the approved
+  // render): "Day 5 of 7", "2 days left · until <date>", bar
+  // ~71% wide. triggeredAt 5 days ago, graceUntil 2 days out.
+  const graceUntil = new Date(graceNow + 2 * 86400000).toISOString();
+  const graceTriggeredAt = new Date(graceNow - 5 * 86400000).toISOString();
   // Static HTML: the dashboard grace card (before the check-in
   // card) and the Settings grace card (after the price sources
   // card), with the exact copy from the approved mockup.
-  check('grace card static: the dashboard grace card exists (title, text, Resume button, note)',
+  check('grace card static: the dashboard grace card exists (title, text, held count, countdown bar, Resume button, note)',
     idx.indexOf('id="grace-card"') !== -1 && idx.indexOf('Grace period active') !== -1
-    && idx.indexOf('id="grace-text"') !== -1 && idx.indexOf('id="btn-resume-grace"') !== -1
-    && idx.indexOf('Ends the grace period immediately') !== -1, '');
+    && idx.indexOf('id="grace-text"') !== -1 && idx.indexOf('id="grace-held"') !== -1
+    && idx.indexOf('id="grace-bar-day"') !== -1 && idx.indexOf('id="grace-bar-left"') !== -1
+    && idx.indexOf('id="grace-bar-fill"') !== -1 && idx.indexOf('id="btn-resume-grace"') !== -1
+    && idx.indexOf('Resuming will end the grace period immediately.') !== -1, '');
   check('grace card static: the grace card sits at the top of the dashboard (before the check-in card)',
     idx.indexOf('id="grace-card"') !== -1 && idx.indexOf('id="checkin-card"') !== -1
     && idx.indexOf('id="grace-card"') < idx.indexOf('id="checkin-card"'), '');
   check('grace card static: the Resume button reads "Resume now" and is orange (primary)',
     idx.indexOf('id="btn-resume-grace" class="primary"') !== -1, '');
-  check('grace settings static: the Settings grace card exists (title, two dropdowns, Save; the explainer lives in the "?" pop-out)',
-    idx.indexOf('Grace period</h2>') !== -1 && idx.indexOf('id="set-grace-offline"') !== -1
+  check('grace settings static: the Settings grace card exists (title, toggle, two dropdowns, Save; the explainer lives in the "?" pop-out)',
+    idx.indexOf('Grace period</h2>') !== -1 && idx.indexOf('id="grace-enabled"') !== -1
+    && idx.indexOf('id="set-grace-offline"') !== -1
     && idx.indexOf('id="set-grace-duration"') !== -1 && idx.indexOf('id="btn-save-grace"') !== -1
-    && appJs.indexOf('A pause for price and UTXO triggers after the app has been offline') !== -1, '');
+    && appJs.indexOf('A pause for ALL triggers') !== -1, '');
+  check('grace settings static: the toggle is the first option on the grace card (in the heading, before the offline dropdown)',
+    idx.indexOf('id="grace-enabled"') !== -1 && idx.indexOf('id="set-grace-offline"') !== -1
+    && idx.indexOf('id="grace-enabled"') < idx.indexOf('id="set-grace-offline"'), '');
+  check('grace settings static: the toggle is the same switch as the arm/disarm toggle (class "switch green")',
+    idx.indexOf('class="switch green" id="grace-enabled-wrap"') !== -1, '');
+  check('grace settings static: the toggle sits inline with the Grace period heading (heading, then switch, then the "?" button)',
+    idx.indexOf('Grace period</h2>') !== -1 && idx.indexOf('id="grace-enabled"') !== -1 && idx.indexOf('id="help-grace"') !== -1
+    && idx.indexOf('Grace period</h2>') < idx.indexOf('id="grace-enabled"')
+    && idx.indexOf('id="grace-enabled"') < idx.indexOf('id="help-grace"'), '');
+  check('grace settings static: the grace fields wrapper exists in the HTML',
+    idx.indexOf('id="grace-fields"') !== -1, '');
   check('grace settings static: the grace card sits after the Bitcoin price source card',
     idx.indexOf('id="btn-save-grace"') !== -1 && idx.indexOf('id="btn-save-price-sources"') !== -1
     && idx.indexOf('id="btn-save-grace"') > idx.indexOf('id="btn-save-price-sources"'), '');
   check('grace settings static: the offline dropdown offers 1/3/7/14/30 days',
     JSON.stringify(selectValues(idx, 'set-grace-offline')) === JSON.stringify(['1', '3', '7', '14', '30']),
     JSON.stringify(selectValues(idx, 'set-grace-offline')));
-  check('grace settings static: the duration dropdown offers 1/3/7/14/30 days + indefinite',
+  check('grace settings static: the duration dropdown offers 1/3/7/14/30 days + indefinite (no 0 — the toggle is the off switch)',
     JSON.stringify(selectValues(idx, 'set-grace-duration')) === JSON.stringify(['1', '3', '7', '14', '30', 'indefinite']),
     JSON.stringify(selectValues(idx, 'set-grace-duration')));
   check('grace settings static: the Save button reads "Save grace period" and is orange (primary)',
     idx.indexOf('id="btn-save-grace" class="primary"') !== -1, '');
   // Section 14 left lastOnlineAt stale (the held-clock seed), so
   // a grace is active from the read paths by now — the app was
-  // offline 40 days, which is past the 7-day grace threshold as
-  // well as the check-in hold. Restore a fresh stamp and clear
-  // the grace for a clean starting point (the check-in clock and
-  // hold are untouched).
+  // offline 40 days, which is past the 7-day grace threshold.
+  // Restore a fresh stamp and clear the grace for a clean
+  // starting point (the check-in clock is untouched).
   const stClean = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
   stClean.checkin.lastOnlineAt = new Date().toISOString();
   stClean.grace = { graceUntil: null, triggeredAt: null, offlineGapDays: null };
@@ -2137,28 +2326,59 @@ function check(name, cond, detail) {
   // still accurate — only the pill says Grace).
   const priceLineBefore = (readinessBlock('Dom Price') || {}).state || '';
   const utxoLineBefore = (readinessBlock('Dom UTXO') || {}).state || '';
-  // Seed a finite grace (offline 8 days, 7-day duration) and
-  // re-render: the card shows with the offline days and the end
-  // date (both bolded) and the duration.
+  const bhLineBefore = (readinessBlock('Dom Blockheight') || {}).state || '';
+  const sdLineBefore = (readinessBlock('Dom Setdate') || {}).state || '';
+  const fmLineBefore = (readinessBlock('Dom Feemarket') || {}).state || '';
+  const ckLineBefore = (readinessBlock('Dom Check-in') || {}).state || '';
+  // Seed a finite grace (offline 8 days, 5 days into a 7-day
+  // duration) and re-render: the card shows the approved copy
+  // with the offline days bolded, the held count, and the
+  // countdown bar at "Day 5 of 7" / "2 days left · until <date>".
   setDomGrace({ graceUntil, triggeredAt: graceTriggeredAt, offlineGapDays: 8 });
   await rerender(appJs);
   const graceText = elText(els['grace-text']);
+  const graceHeldText = elText(els['grace-held']);
   check('grace card: appears when a grace is active',
     els['grace-card'] && els['grace-card'].style.display !== 'none',
     els['grace-card'] && els['grace-card'].style.display);
-  check('grace card: names the offline days ("8 days")',
-    graceText.indexOf('8 days') !== -1, graceText);
-  check('grace card: names the end date (' + fmtDateShortDom(graceUntil) + ') and the duration ("7 days")',
-    graceText.indexOf(fmtDateShortDom(graceUntil)) !== -1 && graceText.indexOf('(7 days)') !== -1, graceText);
-  check('grace card: the offline days and the end date are bolded',
+  check('grace card: reads "Grace period has been activated because the device was offline for 8 days."',
+    graceText === 'Grace period has been activated because the device was offline for 8 days.', graceText);
+  check('grace card: the offline days are bolded (only that value is bold)',
     (function () {
       const gt = els['grace-text'];
       const bolds = (gt.children || []).filter((c) => c.tagName === 'B').map((c) => c.textContent);
-      return bolds.length === 2 && bolds[0] === '8 days' && bolds[1].indexOf(fmtDateShortDom(graceUntil)) !== -1;
+      return bolds.length === 1 && bolds[0] === '8 days';
     })(), JSON.stringify((els['grace-text'].children || []).map((c) => c.tagName + ':' + c.textContent)));
-  // The Grace pill: armed price/UTXO cards read "Grace" on
-  // amber; check-in and manual cards are untouched.
-  for (const label of ['Dom Price', 'Dom UTXO']) {
+  // The held count is 9 here too (same inventory as §14:
+  // 7 trigger txs + the 2 FINNEY:0 txs from §8).
+  const heldN18 = gracePillCount();
+  check('grace card: reads "N transactions are held by grace, M of them would fire now." (N = the Grace pills)',
+    graceHeldText === '9 transactions are held by grace, 0 of them would fire now.', graceHeldText);
+  check('grace card: the held count is 9 (same inventory as §14)',
+    heldN18 === 9, 'grace pills: ' + heldN18);
+  // Both-numbers grace card (0.8.8): 0 of the 9 held would fire
+  // now. The check-in clock is fresh (§14's Check in button
+  // reset it), so both check-ins read false on the live clock;
+  // everything else still reads 'watching' on its stored slice;
+  // the conflict tx still reads wouldFire TRUE on its stale
+  // 'due' slice but it already broadcast, so it is not held
+  // and does not count.
+  const st18 = await (await fetch('/api/state')).json();
+  const heldLabels18 = txCards().filter((c) => { const p = cardStatus(c); return !!p && p.textContent === 'Grace'; }).map(cardTitle);
+  const wf18 = (st18.bitcoin.txs || []).filter((t) => heldLabels18.includes(t.label) && (t.triggerStatus || {}).wouldFire).map((t) => t.label);
+  check('grace card: 0 of the 9 held would fire now (clock fresh, everything watching)',
+    wf18.length === 0, wf18.join(', '));
+  check('grace card: the countdown reads "Day 5 of 7" with "2 days left · until <date>"',
+    els['grace-bar-day'] && els['grace-bar-day'].textContent === 'Day 5 of 7'
+    && els['grace-bar-left'] && els['grace-bar-left'].textContent === '2 days left · until ' + new Date(graceUntil).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
+    (els['grace-bar-day'] && els['grace-bar-day'].textContent) + ' / ' + (els['grace-bar-left'] && els['grace-bar-left'].textContent));
+  check('grace card: the countdown bar is ~71% wide (5 of 7 days elapsed)',
+    els['grace-bar-fill'] && Math.abs(parseFloat(els['grace-bar-fill'].style.width) - 5 / 7 * 100) < 0.5,
+    els['grace-bar-fill'] && els['grace-bar-fill'].style.width);
+  // The Grace pill: armed held cards read "Grace" on
+  // amber; check-in cards are held now too (0.8.8 unification),
+  // manual cards are untouched.
+  for (const label of ['Dom Price', 'Dom UTXO', 'Dom Blockheight', 'Dom Setdate', 'Dom Feemarket', 'Dom Check-in']) {
     const pill = cardByTitle(label) && cardStatus(cardByTitle(label));
     check('grace pill: "' + label + '" card pill reads "Grace" on amber during the grace',
       !!pill && pill.textContent === 'Grace' && pill.className === 'pill warn',
@@ -2168,15 +2388,23 @@ function check(name, cond, detail) {
       !!rb && rb.status === 'Grace' && rb.statusCls === 'pill warn',
       rb ? rb.status + ' / ' + rb.statusCls : 'no block');
   }
+  check('grace pill: the Dom Check-in readiness line is unchanged (condition + current value)',
+    (readinessBlock('Dom Check-in') || {}).state === ckLineBefore,
+    (readinessBlock('Dom Check-in') || {}).state + ' (was: ' + ckLineBefore + ')');
   check('grace pill: the Dom Price readiness line is unchanged (condition + current value)',
     (readinessBlock('Dom Price') || {}).state === priceLineBefore,
     (readinessBlock('Dom Price') || {}).state + ' (was: ' + priceLineBefore + ')');
   check('grace pill: the Dom UTXO readiness line is unchanged',
     (readinessBlock('Dom UTXO') || {}).state === utxoLineBefore,
     (readinessBlock('Dom UTXO') || {}).state + ' (was: ' + utxoLineBefore + ')');
-  for (const label of ['Dom Check-in', 'Dom Manual', 'Dom Pill healthy']) {
+  for (const [label, before] of [['Dom Blockheight', bhLineBefore], ['Dom Setdate', sdLineBefore], ['Dom Feemarket', fmLineBefore]]) {
+    check('grace pill: the ' + label + ' readiness line is unchanged',
+      (readinessBlock(label) || {}).state === before,
+      (readinessBlock(label) || {}).state + ' (was: ' + before + ')');
+  }
+  for (const label of ['Dom Manual', 'Dom Pill healthy']) {
     const pill = cardByTitle(label) && cardStatus(cardByTitle(label));
-    check('grace pill: "' + label + '" keeps its normal pill during the grace (check-in/manual not held)',
+    check('grace pill: "' + label + '" keeps its normal pill during the grace (manual, not held)',
       !!pill && pill.textContent === 'armed',
       pill ? pill.textContent + ' / ' + pill.className : 'no pill');
   }
@@ -2197,6 +2425,41 @@ function check(name, cond, detail) {
   check('grace pill: the re-armed price tx reads "Grace" again',
     !!rearmPill && rearmPill.textContent === 'Grace' && rearmPill.className === 'pill warn',
     rearmPill ? rearmPill.textContent + ' / ' + rearmPill.className : 'no pill');
+  // The card shows even with NOTHING held (0.8.8): disarm every
+  // tx whose pill reads "Grace" (the held set, whatever its
+  // inventory — the 9 Grace pills) and the card stays up with
+  // a 0 count, then re-arm them all and the count comes back.
+  const heldBefore = elText(els['grace-held']);
+  const graceLabels = txCards().map((c) => ({ label: cardTitle(c), pill: cardStatus(c) }))
+    .filter((x) => x.label && x.pill && x.pill.textContent === 'Grace').map((x) => x.label);
+  check('grace card: the held set is the 9 Grace pills',
+    graceLabels.length === 9, graceLabels.join(', '));
+  const allIds = ((await (await fetch('/api/state')).json()).bitcoin.txs || [])
+    .filter((t) => graceLabels.includes(t.label))
+    .map((t) => t.id);
+  for (const id of allIds) {
+    await fetch('/api/bitcoin/txs/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: false }) });
+  }
+  await rerender(appJs);
+  check('grace card: still visible with nothing held (0 held)',
+    els['grace-card'] && els['grace-card'].style.display !== 'none'
+    && elText(els['grace-held']) === '0 transactions are held by grace, 0 of them would fire now.',
+    elText(els['grace-held']));
+  for (const id of allIds) {
+    await fetch('/api/bitcoin/txs/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: true }) });
+  }
+  await rerender(appJs);
+  check('grace card: the held count reads "' + heldBefore + '" again after re-arming',
+    elText(els['grace-held']) === heldBefore,
+    elText(els['grace-held']));
+  // Under a day left: a grace ending ~12h out reads
+  // "less than a day left" instead of "0 days left".
+  setDomGrace({ graceUntil: new Date(Date.now() + 12 * 3600000).toISOString(), triggeredAt: new Date(Date.now() - 6 * 86400000).toISOString(), offlineGapDays: 8 });
+  await rerender(appJs);
+  check('grace card: under a day left reads "less than a day left" (Day 6 of 7)',
+    els['grace-bar-day'] && els['grace-bar-day'].textContent === 'Day 6 of 7'
+    && els['grace-bar-left'] && (els['grace-bar-left'].textContent || '').indexOf('less than a day left · until ') === 0,
+    (els['grace-bar-day'] && els['grace-bar-day'].textContent) + ' / ' + (els['grace-bar-left'] && els['grace-bar-left'].textContent));
   // Resume now: the button clears the grace and the card hides;
   // the pills read "armed" again.
   els['btn-resume-grace'].click();
@@ -2207,23 +2470,91 @@ function check(name, cond, detail) {
   const afterResume = await (await fetch('/api/state')).json();
   check('grace card: the grace is gone from /api/state after Resume',
     afterResume.grace === null, JSON.stringify(afterResume.grace));
-  for (const label of ['Dom Price', 'Dom UTXO']) {
+  for (const label of ['Dom Price', 'Dom UTXO', 'Dom Blockheight', 'Dom Setdate', 'Dom Feemarket']) {
     const pill = cardByTitle(label) && cardStatus(cardByTitle(label));
     check('grace pill: "' + label + '" reads "armed" again after Resume',
       !!pill && pill.textContent === 'armed',
       pill ? pill.textContent + ' / ' + pill.className : 'no pill');
   }
-  // An indefinite grace reads "until you resume" (no date).
+  // An indefinite grace has no bar — the labels row reads
+  // "until you resume" instead of a date.
   setDomGrace({ graceUntil: null, triggeredAt: graceTriggeredAt, offlineGapDays: 12 });
   await rerender(appJs);
   const indText = elText(els['grace-text']);
   check('grace card: an indefinite grace shows (offline 12 days)',
     els['grace-card'] && els['grace-card'].style.display !== 'none' && indText.indexOf('12 days') !== -1, indText);
-  check('grace card: an indefinite grace reads "until you resume" instead of a date',
-    indText.indexOf('until you resume') !== -1 && indText.indexOf('(7 days)') === -1, indText);
+  check('grace card: an indefinite grace reads "until you resume" in the labels row, with no bar',
+    els['grace-bar-left'] && els['grace-bar-left'].textContent === 'until you resume'
+    && els['grace-bar'] && els['grace-bar'].style.display === 'none',
+    (els['grace-bar-left'] && els['grace-bar-left'].textContent) + ' / bar display=' + (els['grace-bar'] && els['grace-bar'].style.display));
   els['btn-resume-grace'].click();
   await waitForRender();
   check('grace card: Resume now hides the indefinite grace card too',
+    els['grace-card'] && els['grace-card'].style.display === 'none',
+    els['grace-card'] && els['grace-card'].style.display);
+  // The toggle: off hides the dashboard card even with a grace
+  // seeded active, and held pills read "armed" again — off means
+  // triggers fire immediately. On brings the card back (the
+  // seeded grace record itself survives the toggle).
+  setDomGrace({ graceUntil, triggeredAt: graceTriggeredAt, offlineGapDays: 8 });
+  await rerender(appJs);
+  check('grace toggle: the card shows again with a seeded grace (toggle on)',
+    els['grace-card'] && els['grace-card'].style.display !== 'none',
+    els['grace-card'] && els['grace-card'].style.display);
+  check('grace toggle: the toggle starts checked (grace on by default)',
+    els['grace-enabled'] && els['grace-enabled'].checked === true, '');
+  check('grace toggle: the grace fields show while enabled',
+    els['grace-fields'] && els['grace-fields'].style.display !== 'none', '');
+  els['grace-enabled'].checked = false;
+  fireChange(els['grace-enabled']);
+  check('grace toggle: unchecking hides the grace fields',
+    els['grace-fields'] && els['grace-fields'].style.display === 'none', '');
+  check('grace toggle: the toggle itself stays visible while disabled (it lives in the heading, not the fields)',
+    els['grace-enabled-wrap'] && els['grace-enabled-wrap'].style.display !== 'none', '');
+  check('grace toggle: the switch title names the off state while disabled',
+    els['grace-enabled-wrap'] && els['grace-enabled-wrap'].title === 'Grace period off — triggers fire immediately',
+    els['grace-enabled-wrap'] && els['grace-enabled-wrap'].title);
+  check('grace toggle: hiding keeps the dropdown values (7 / 7)',
+    els['set-grace-offline'] && els['set-grace-offline'].value === '7'
+    && els['set-grace-duration'] && els['set-grace-duration'].value === '7',
+    'offline=' + (els['set-grace-offline'] && els['set-grace-offline'].value)
+    + ' duration=' + (els['set-grace-duration'] && els['set-grace-duration'].value));
+  els['btn-save-grace'].click();
+  await waitForRender();
+  const gOff = await (await fetch('/api/state')).json();
+  check('grace toggle: saving off persists graceEnabled false (dropdowns kept at 7 / 7)',
+    gOff.settings && gOff.settings.graceEnabled === false
+    && gOff.settings.graceOfflineDays === 7 && gOff.settings.graceDurationDays === 7,
+    JSON.stringify(gOff.settings && { graceEnabled: gOff.settings.graceEnabled, graceOfflineDays: gOff.settings.graceOfflineDays, graceDurationDays: gOff.settings.graceDurationDays }));
+  check('grace toggle: the dashboard card hides while the grace is off, even with a seeded active grace',
+    els['grace-card'] && els['grace-card'].style.display === 'none',
+    els['grace-card'] && els['grace-card'].style.display);
+  check('grace toggle: held pills read "armed" again while the grace is off',
+    (function () {
+      const pill = cardByTitle('Dom Price') && cardStatus(cardByTitle('Dom Price'));
+      return !!pill && pill.textContent === 'armed';
+    })(), '');
+  els['grace-enabled'].checked = true;
+  fireChange(els['grace-enabled']);
+  check('grace toggle: re-checking shows the grace fields again',
+    els['grace-fields'] && els['grace-fields'].style.display !== 'none',
+    els['grace-fields'] && els['grace-fields'].style.display);
+  check('grace toggle: the switch title names the on state again after re-enabling',
+    els['grace-enabled-wrap'] && els['grace-enabled-wrap'].title === 'Grace period on — triggers pause after an offline gap',
+    els['grace-enabled-wrap'] && els['grace-enabled-wrap'].title);
+  els['btn-save-grace'].click();
+  await waitForRender();
+  const gOn = await (await fetch('/api/state')).json();
+  check('grace toggle: saving on persists graceEnabled true',
+    gOn.settings && gOn.settings.graceEnabled === true,
+    JSON.stringify(gOn.settings && { graceEnabled: gOn.settings.graceEnabled }));
+  check('grace toggle: the dashboard card shows again with the toggle back on (the seeded grace survived)',
+    els['grace-card'] && els['grace-card'].style.display !== 'none',
+    els['grace-card'] && els['grace-card'].style.display);
+  // Clear the seeded grace so the settings tests below start clean.
+  els['btn-resume-grace'].click();
+  await waitForRender();
+  check('grace toggle: Resume now hides the card after re-enabling',
     els['grace-card'] && els['grace-card'].style.display === 'none',
     els['grace-card'] && els['grace-card'].style.display);
   // Settings grace card: the dropdowns reflect the saved
@@ -2251,14 +2582,19 @@ function check(name, cond, detail) {
   check('grace settings: the Save confirmation shows',
     els['grace-settings-msg'] && els['grace-settings-msg'].textContent === 'Grace period saved.',
     els['grace-settings-msg'] && els['grace-settings-msg'].textContent);
+  // The toggle is the off switch now: saving with it off keeps the
+  // dropdown values, and the duration dropdown has no 0 to save.
+  check('grace settings: the toggle is on while saving the defaults',
+    els['grace-enabled'] && els['grace-enabled'].checked === true, '');
   els['set-grace-offline'].value = '7';
   els['set-grace-duration'].value = '7';
   els['btn-save-grace'].click();
   await waitForRender();
   const gRestored = await (await fetch('/api/state')).json();
-  check('grace settings: restoring the defaults (7 / 7) persists',
-    gRestored.settings && gRestored.settings.graceOfflineDays === 7 && gRestored.settings.graceDurationDays === 7,
-    JSON.stringify(gRestored.settings && { graceOfflineDays: gRestored.settings.graceOfflineDays, graceDurationDays: gRestored.settings.graceDurationDays }));
+  check('grace settings: restoring the defaults (7 / 7, toggle on) persists',
+    gRestored.settings && gRestored.settings.graceEnabled === true
+    && gRestored.settings.graceOfflineDays === 7 && gRestored.settings.graceDurationDays === 7,
+    JSON.stringify(gRestored.settings && { graceEnabled: gRestored.settings.graceEnabled, graceOfflineDays: gRestored.settings.graceOfflineDays, graceDurationDays: gRestored.settings.graceDurationDays }));
   // Leave a finite grace active at the end, so the width check
   // can measure the grace card at 390px.
   setDomGrace({ graceUntil, triggeredAt: graceTriggeredAt, offlineGapDays: 8 });
@@ -2266,6 +2602,82 @@ function check(name, cond, detail) {
   check('grace card: a finite grace is left active for the width check',
     els['grace-card'] && els['grace-card'].style.display !== 'none',
     els['grace-card'] && els['grace-card'].style.display);
+  // (0.8.8, audit finding 3) Grace counts must ignore a set
+  // member's parked trigger: a member whose own trigger is
+  // check-in, inside a set whose trigger is manual, is NOT
+  // held by the grace — the set's trigger is the one that
+  // fires. The reverse (manual member, check-in set) IS held,
+  // counted through the set. (A live member's subcard carries
+  // no pill at all — only a stale member gets one — so there
+  // is no member "Grace" pill to fix; the count is the bug,
+  // plus the set card's own pill, which must read the set's
+  // trigger, not any member's parked one.)
+  const addF3M1 = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ txHex: craftHex(1, 210001), label: 'Dom F3 member ck', trigger: { type: 'checkin', params: { thresholdDays: 35 } } }) });
+  check('grace counts: the check-in member tx adds', addF3M1.status === 201, 'status=' + addF3M1.status);
+  const addF3M1Json = addF3M1.status === 201 ? await addF3M1.json() : {};
+  const f3m1Id = (addF3M1Json.tx || {}).id || null;
+  // Standalone first: the check-in member counts on its own
+  // (held 9 -> 10), so the set step below proves the drop.
+  await rerender(appJs);
+  check('grace counts: the standalone check-in member counts as held (10 held)',
+    elText(els['grace-held']) === '10 transactions are held by grace, 0 of them would fire now.',
+    elText(els['grace-held']));
+  const addF3S1 = await fetch('/api/bitcoin/sets', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ label: 'Dom F3 manual set', txIds: [f3m1Id], trigger: { type: 'manual', params: {} } }) });
+  check('grace counts: the manual set creates with the check-in member', addF3S1.status === 201, 'status=' + addF3S1.status);
+  const addF3S1Json = addF3S1.status === 201 ? await addF3S1.json() : {};
+  const f3s1Id = (addF3S1Json.set || {}).id || null;
+  await rerender(appJs);
+  check('grace counts: attaching the member to a manual set drops the held count back to 9 (parked trigger ignored)',
+    elText(els['grace-held']) === '9 transactions are held by grace, 0 of them would fire now.',
+    elText(els['grace-held']));
+  const f3s1Card = cardByTitle('Dom F3 manual set');
+  const f3s1Pill = f3s1Card && cardStatus(f3s1Card);
+  check('grace counts: the manual set card pill reads "armed", not "Grace"',
+    !!f3s1Pill && f3s1Pill.textContent === 'armed',
+    f3s1Pill ? f3s1Pill.textContent + ' / ' + f3s1Pill.className : 'no pill');
+  check('grace counts: no "Grace" anywhere on the manual set card (member subcard reads the set, not its parked trigger)',
+    !!f3s1Card && cardFaceText(f3s1Card).indexOf('Grace') === -1,
+    f3s1Card ? cardFaceText(f3s1Card) : 'no card');
+  check('grace counts: the member has no standalone card while attached',
+    !cardByTitle('Dom F3 member ck'), '');
+  // Reverse: a manual member in a check-in set IS held, counted
+  // through the set (held 9 -> 10), and the set pill reads Grace.
+  const addF3M2 = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ txHex: craftHex(2, 210002), label: 'Dom F3 member manual', trigger: { type: 'manual', params: {} } }) });
+  check('grace counts: the manual member tx adds', addF3M2.status === 201, 'status=' + addF3M2.status);
+  const addF3M2Json = addF3M2.status === 201 ? await addF3M2.json() : {};
+  const f3m2Id = (addF3M2Json.tx || {}).id || null;
+  const addF3S2 = await fetch('/api/bitcoin/sets', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ label: 'Dom F3 checkin set', txIds: [f3m2Id], trigger: { type: 'checkin', params: { thresholdDays: 35 } } }) });
+  check('grace counts: the check-in set creates with the manual member', addF3S2.status === 201, 'status=' + addF3S2.status);
+  const addF3S2Json = addF3S2.status === 201 ? await addF3S2.json() : {};
+  const f3s2Id = (addF3S2Json.set || {}).id || null;
+  await rerender(appJs);
+  check('grace counts: the manual member in a check-in set counts through the set (10 held)',
+    elText(els['grace-held']) === '10 transactions are held by grace, 0 of them would fire now.',
+    elText(els['grace-held']));
+  const f3s2Card = cardByTitle('Dom F3 checkin set');
+  const f3s2Pill = f3s2Card && cardStatus(f3s2Card);
+  check('grace counts: the check-in set card pill reads "Grace"',
+    !!f3s2Pill && f3s2Pill.textContent === 'Grace' && f3s2Pill.className === 'pill warn',
+    f3s2Pill ? f3s2Pill.textContent + ' / ' + f3s2Pill.className : 'no pill');
+  // Clean up: delete both sets (members return to standalone),
+  // then the member txs, so the fixture is back to 9 held for
+  // the sections below. The seeded grace stays active.
+  const delF3S1 = await fetch('/api/bitcoin/sets/' + f3s1Id, { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
+  check('grace counts: the manual set deletes', delF3S1.status === 200, 'status=' + delF3S1.status);
+  const delF3S2 = await fetch('/api/bitcoin/sets/' + f3s2Id, { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
+  check('grace counts: the check-in set deletes', delF3S2.status === 200, 'status=' + delF3S2.status);
+  const delF3M1 = await fetch('/api/bitcoin/txs/' + f3m1Id, { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
+  check('grace counts: the check-in member tx deletes', delF3M1.status === 200, 'status=' + delF3M1.status);
+  const delF3M2 = await fetch('/api/bitcoin/txs/' + f3m2Id, { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
+  check('grace counts: the manual member tx deletes', delF3M2.status === 200, 'status=' + delF3M2.status);
+  await rerender(appJs);
+  check('grace counts: the held count is back to 9 after cleanup',
+    elText(els['grace-held']) === '9 transactions are held by grace, 0 of them would fire now.',
+    elText(els['grace-held']));
 
   // --- 19. Getting Started empty-state card (0.8.0) ---
   // When no transactions are STAGED (active), a "Getting
@@ -2669,7 +3081,7 @@ function check(name, cond, detail) {
   // holds \u2019 escapes, not the decoded apostrophe.
   check('redesign static: the vacation "?" pop-out says the countdown freezes and the five fast triggers keep firing (check-in-only)',
     appJs.indexOf('Freezes the check-in countdown') !== -1
-    && appJs.indexOf('Price, UTXO, block-height, set-date, and fee-market triggers keep firing while you') !== -1,
+    && appJs.indexOf('price, UTXO, block-height, set-date, and fee-market triggers keep firing') !== -1,
     '');
   check('redesign static: the vacation card has the indefinite option ("Until I say I\'m back")',
     idx.indexOf('id="set-vacation-indefinite"') !== -1 && idx.indexOf("Until I say I'm back") !== -1, '');
@@ -2782,7 +3194,7 @@ function check(name, cond, detail) {
     { key: 'arm', title: 'Global Arm/Disarm', bodyPhrase: 'Arms or disarms every staged transaction', appliesPhrase: 'General' },
     { key: 'nodes', title: 'Bitcoin nodes', bodyPhrase: 'The Bitcoin nodes Standby talks to', appliesPhrase: 'General' },
     { key: 'price-sources', title: 'Bitcoin price source', bodyPhrase: 'The two price sources Standby reads', appliesPhrase: 'BTC price triggers only' },
-    { key: 'grace', title: 'Grace period', bodyPhrase: 'A pause for price and UTXO triggers', appliesPhrase: 'BTC price and UTXO triggers' },
+    { key: 'grace', title: 'Grace period', bodyPhrase: 'A pause for ALL triggers', appliesPhrase: 'Check-in, BTC price, UTXO, Block height, Set date, and Fee market triggers' },
     { key: 'agreement', title: 'Price agreement', bodyPhrase: 'How closely the two price sources must agree', appliesPhrase: 'BTC price triggers only' },
     { key: 'cadence', title: 'Check cadence', bodyPhrase: 'How often every trigger is checked', bodyPhrase2: 'refreshes once every 5 minutes regardless of this setting', bodyPhrase3: 'Public nodes rate-limit heavy use', appliesPhrase: 'BTC price, UTXO, Block height, Set date, and Fee market triggers' },
     { key: 'fee', title: 'Broadcast Fee Risk', bodyPhrase: 'Where the Low / Medium / High fee pill flips', appliesPhrase: 'General' },
@@ -2915,14 +3327,14 @@ function check(name, cond, detail) {
   // ASCII-safe substrings only: the source holds \u2019
   // escapes, not the decoded apostrophe.
   check('trim static: the moved facts still live in the "?" pop-outs',
-    appJs.indexOf('Price, UTXO, block-height, set-date, and fee-market triggers keep firing while you') !== -1
+    appJs.indexOf('price, UTXO, block-height, set-date, and fee-market triggers keep firing') !== -1
     && appJs.indexOf('It contains the signed hexes, which reveal the destination addresses and amounts') !== -1
-    && appJs.indexOf('A key can only record a check-in') !== -1
+    && appJs.indexOf('A key can only check in') !== -1
     && appJs.indexOf('The Low multiplier must stay above the Medium one') !== -1
     && appJs.indexOf('or your own mempool on the LAN') !== -1
-    && appJs.indexOf('Leave the secondary blank to use the primary alone') !== -1
-    && appJs.indexOf('is the one that decides') !== -1
-    && appJs.indexOf('Standby evaluates all triggers \u2014 check-in, price, UTXO, block-height, set-date, and fee-market \u2014 together every X seconds') !== -1, '');
+    && appJs.indexOf('Toggle the secondary off to use the primary alone') !== -1
+    && appJs.indexOf('price decides') !== -1
+    && appJs.indexOf('Standby evaluates all triggers together every X seconds') !== -1, '');
   // Dynamic: the default is All (everything visible).
   check('filter default: all eleven cards are visible before any filter click',
     JSON.stringify(visibleCards()) === JSON.stringify(CARD_KEYS), 'visible=' + visibleCards().join(', '));
@@ -2941,12 +3353,12 @@ function check(name, cond, detail) {
       els['filter-select'].value === name, 'value=' + els['filter-select'].value);
   }
   checkFilter('general', ['arm', 'nodes', 'fee', 'backup', 'version']);
-  checkFilter('checkin', ['vacation', 'keys']);
+  checkFilter('checkin', ['vacation', 'grace', 'keys']);
   checkFilter('price', ['price-sources', 'grace', 'agreement', 'cadence']);
   checkFilter('utxo', ['grace', 'cadence']);
-  checkFilter('blockheight', ['cadence']);
-  checkFilter('setdate', ['cadence']);
-  checkFilter('feemarket', ['cadence']);
+  checkFilter('blockheight', ['grace', 'cadence']);
+  checkFilter('setdate', ['grace', 'cadence']);
+  checkFilter('feemarket', ['grace', 'cadence']);
   checkFilter('all', CARD_KEYS);
   // A hidden card is display:none, so its inputs are not
   // reachable.
@@ -2968,7 +3380,7 @@ function check(name, cond, detail) {
   }
   const TRUTH = [
     { key: 'vacation', label: 'Check-in triggers only', visible: ['all', 'checkin'] },
-    { key: 'grace', label: 'BTC price and UTXO triggers', visible: ['all', 'price', 'utxo'] },
+    { key: 'grace', label: 'Check-in, BTC price, UTXO, Block height, Set date, and Fee market triggers', visible: ['all', 'checkin', 'price', 'utxo', 'blockheight', 'setdate', 'feemarket'] },
     { key: 'cadence', label: 'BTC price, UTXO, Block height, Set date, and Fee market triggers', visible: ['all', 'price', 'utxo', 'blockheight', 'setdate', 'feemarket'] },
     { key: 'fee', label: 'General — not tied to a specific trigger', visible: ['all', 'general'] },
     { key: 'keys', label: 'Check-in triggers only', visible: ['all', 'checkin'] },
@@ -3017,8 +3429,8 @@ function check(name, cond, detail) {
     && idx.indexOf('Installed version:') !== -1 && idx.indexOf('id="app-version"') !== -1, '');
   check('app version static: the card has no "?" button and no details (just the version line)',
     idx.indexOf('id="help-version"') === -1, '');
-  check('app version: the installed version reads 0.8.7.4 (from /api/health)',
-    els['app-version'] && els['app-version'].textContent === '0.8.7.4',
+  check('app version: the installed version reads 0.8.8 (from /api/health)',
+    els['app-version'] && els['app-version'].textContent === '0.8.8',
     els['app-version'] && els['app-version'].textContent);
   setFilter('general');
   check('app version: the card is visible under General',
@@ -3124,10 +3536,16 @@ function check(name, cond, detail) {
   // readings (healed by the release check after the restore in
   // the exchange-status section above), and the served price is
   // derived live from that cache — clearing it would drop the
-  // live values, and the release check below cannot re-fetch
-  // them because §16 left an offline-gap grace active for the
-  // width check, which skips price evaluation. The release check
-  // still runs so the blockheight / check-in rule slices land.
+  // live values. (0.8.8) The grace is resumed first: the
+  // extended grace holds block-height now, so a held release
+  // check could not land the blockheight slice (the OR subcard
+  // would read "Not evaluated yet", and the set-date sets in
+  // §28 would read Grace instead of armed). Resumed, the
+  // blockheight / check-in rule slices land as before. The
+  // finite grace is re-seeded at the end of the script, for the
+  // width check.
+  const resGrace25 = await fetch('/api/grace/resume', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+  check('rule sets 0.8.2: the grace is resumed so the rules evaluate', resGrace25.status === 200, 'status=' + resGrace25.status);
   const rel25 = await fetch('/api/release/check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
   check('rule sets 0.8.2: a release check runs so the rule state lines are fresh', rel25.status === 200, 'status=' + rel25.status);
   await rerender(appJs);
@@ -3426,28 +3844,47 @@ function check(name, cond, detail) {
   const nodeChecked26b = els['readiness-secondary-checked'] ? els['readiness-secondary-checked'].textContent : '';
   check('live view: each node row carries its own checked time left of the pill',
     /^checked /.test(nodeChecked26a) && /^checked /.test(nodeChecked26b), nodeChecked26a + ' / ' + nodeChecked26b);
-  // (0.8.5) Per-node stamps: the tick asks the primary every
-  // time (the blockheight rule's tip fetch, primary-first and
-  // cached once per tick) and the secondary only on fallback,
-  // so after a server tick the primary stamp is newer than the
-  // secondary's test time. The tip cache TTL equals the tick
-  // cadence, so a tick can occasionally find the cache still
-  // warm and skip the fetch — poll until a tick actually
-  // fetches (the next tick always does: the cache is then ~2x
-  // the TTL old).
+  // (0.8.5, restated 0.8.8) Per-node stamps: the tick asks the
+  // primary every time (the blockheight rule's tip fetch,
+  // primary-first and cached once per tick) — but the old
+  // assertion, that the primary stamp ends up NEWER than the
+  // secondary's, was false. This suite's `Dom Rules Unknown`
+  // watches a nonexistent outpoint, so its outspend check 404s
+  // on the primary and falls through to the secondary on
+  // null/404 (404s are never cached); every tick asks BOTH
+  // nodes, the secondary ~1ms after the primary, so the
+  // primary is newer only in a ~10ms window per tick and the
+  // 60s poll essentially never lands in it — a phase lottery,
+  // not a real failure. The restated check asserts the
+  // primary stamp ADVANCES during the poll instead: capture
+  // it once, then poll until a later reading is newer. The
+  // tip cache TTL equals the tick cadence, so a tick can
+  // occasionally find the cache still warm and skip the
+  // fetch — poll until a tick actually fetches (the next tick
+  // always does: the cache is then ~2x the TTL old).
   async function waitNodeStamps26(timeoutMs) {
     const t0 = Date.now();
+    // Baseline: the primary stamp as it stands when the poll
+    // starts. A missing baseline is a failure, not a pass.
+    let start = null;
+    while (start === null) {
+      const st = await (await fetch('/api/state')).json();
+      const nc = (st.bitcoin && st.bitcoin.connection && st.bitcoin.connection.nodeCheckedAt) || {};
+      if (nc.primary) { start = nc.primary; break; }
+      if (Date.now() - t0 > timeoutMs) return { start: null, end: null };
+      await sleep26(3000);
+    }
     for (;;) {
       const st = await (await fetch('/api/state')).json();
       const nc = (st.bitcoin && st.bitcoin.connection && st.bitcoin.connection.nodeCheckedAt) || {};
-      if (nc.primary && nc.secondary && nc.primary > nc.secondary) return nc;
-      if (Date.now() - t0 > timeoutMs) return nc;
+      if (nc.primary && nc.primary > start) return { start: start, end: nc.primary };
+      if (Date.now() - t0 > timeoutMs) return { start: start, end: nc.primary || null };
       await sleep26(3000);
     }
   }
   const nc26 = await waitNodeStamps26(60000);
-  check('live view: the primary node stamp is newer than the secondary stamp (tick asks primary only)',
-    !!(nc26.primary && nc26.secondary && nc26.primary > nc26.secondary), JSON.stringify(nc26));
+  check('live view: the primary node stamp advances during the poll (tick asks primary)',
+    !!(nc26.start && nc26.end && nc26.end > nc26.start), JSON.stringify(nc26));
   // Dom Rules OR stays disarmed until the end of (d): its price
   // rule (>= $150,000) would trip the enable gate while the
   // stub price sits at $160,000.
@@ -4641,6 +5078,14 @@ function check(name, cond, detail) {
     check('live view: the Dom Live New tx is removed', delLive.status === 200, 'status=' + delLive.status);
   }
   await rerender(appJs);
+
+  // (0.8.8) Re-seed the finite grace §25 resumed: the width check
+  // measures the grace card at 390px, so it must be visible.
+  setDomGrace({ graceUntil: new Date(Date.now() + 7 * 86400000).toISOString(), triggeredAt: new Date().toISOString(), offlineGapDays: 8 });
+  await rerender(appJs);
+  check('live view: a finite grace is left active for the width check',
+    els['grace-card'] && els['grace-card'].style.display !== 'none',
+    els['grace-card'] && els['grace-card'].style.display);
 
   console.log();
   console.log('FAILURES: ' + failures.length + (failures.length ? ' ' + JSON.stringify(failures) : ' (none)'));

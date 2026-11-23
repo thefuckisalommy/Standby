@@ -49,19 +49,15 @@ function setRuleTriggerState(tx, i, slice) {
 // vacation handling here (the evaluator holds it; the gate ignores
 // it — see evaluateRule / checkTriggerNow). The clock is measured
 // with the tx's live freeze offset, so a frozen clock is never
-// release-due while inactive.
+// release-due while inactive. The grace gate sits in
+// evaluateRule, above this: during a grace this function is not
+// called for a release evaluation at all, so a past-due clock
+// here means the rule really is due.
 function checkCheckinRule(state, rule, now, ctx) {
   const clock = checkinClock(state, now, rule.params.thresholdDays, ctx && ctx.liveOffsetMs);
   const detail = { daysSince: clock.daysSince, nextDue: clock.nextDue };
   if (clock.state === 'not-started') {
     return { fire: false, status: 'not-started', reason: 'No check-in recorded yet', slice: freshTriggerState(now, 'not-started', 'No check-in recorded yet'), detail, warning: null };
-  }
-  if (clock.state === 'held') {
-    // No special grace display: the bar just shows the longer
-    // held window ("40 of 52 days elapsed"), and the reason
-    // reads the same — the hold still gates the release (no fire
-    // while held), it just is not named on the card.
-    return { fire: false, status: 'held', reason: clock.daysSince + ' of ' + clock.windowDays + ' days elapsed', slice: freshTriggerState(now, 'held', clock.daysSince + ' of ' + clock.windowDays + ' days elapsed'), detail, warning: null };
   }
   if (clock.state === 'release-due') {
     return { fire: true, status: 'release-due', reason: 'Release due', slice: freshTriggerState(now, 'release-due', 'Release due'), detail, warning: 'This condition is already satisfied — it would fire on the next evaluation.' };
@@ -317,10 +313,11 @@ async function checkUtxoRule(state, rule, now, ctx) {
 // an AND set waits on another rule can be missed). A broadcast
 // that already happened is one-shot and never retracted.
 // Fail-safe: if neither node answers, the trigger is 'unknown' —
-// it never fires on data it cannot read. No grace period: the tip
-// height is the chain's own state, not a feed that can go stale —
-// an offline gap that ends past the height means the height was
-// genuinely reached.
+// it never fires on data it cannot read. The grace hold is
+// applied one level up, in evaluateRule — this check still
+// answers the raw condition (a height reached while the app was
+// offline genuinely was reached; the grace only delays firing on
+// it until the pause ends).
 async function checkBlockHeightRule(state, rule, now, ctx) {
   const target = rule.params.targetHeight;
   let comb;
@@ -365,9 +362,11 @@ async function checkBlockHeightRule(state, rule, now, ctx) {
 // The set-date trigger (0.8.1). Fires when the wall clock
 // reaches params.fireAt — a pure deadline, regardless of
 // check-ins. No network call, so it cannot be 'unknown' except
-// on a malformed date (which validation prevents). No grace
-// period: the clock is the clock — an offline gap that ends
-// past the date means the date genuinely passed. The
+// on a malformed date (which validation prevents). The grace
+// hold is applied one level up, in evaluateRule — this check
+// still answers the raw condition (a date passed while the app
+// was offline genuinely passed; the grace only delays firing
+// on it until the pause ends). The
 // "fire unless I check in" snooze variant is a later addition,
 // not this rule.
 function checkSetDateRule(state, rule, now, ctx) {
@@ -411,10 +410,11 @@ function checkSetDateRule(state, rule, now, ctx) {
 // The fee comes from the cached fetch (TTL = 5 minutes),
 // so the trigger may see a move up to 5 minutes late. Fail-safe: if no
 // usable fee can be read, the trigger is 'unknown' — it never
-// fires on data it cannot read. No grace period: the fee is a
-// live market reading, not a feed that can go stale in the
-// price-trigger sense — an offline gap that ends in a low-fee
-// market means fees genuinely are low.
+// fires on data it cannot read. The grace hold is applied one
+// level up, in evaluateRule — this check still answers the raw
+// condition (a fee move while the app was offline genuinely
+// happened; the grace only delays firing on it until the pause
+// ends).
 async function checkFeeMarketRule(state, rule, now, ctx) {
   const maxRate = rule.params.maxFeeRate;
   const dir = rule.params.direction === 'above' ? 'above' : 'below';
@@ -489,15 +489,23 @@ function checkManualRule(state, rule, now, ctx) {
 // and write the rule's triggerState slice when the check produces
 // one. Returns { rule, fire, status, reason, held, slice } — held
 // is null | 'grace' | 'vacation'.
-//   Grace (0.8.0): while it is active, a price or UTXO rule is not
-//     evaluated at all — it cannot fire, and its stored slice keeps
-//     the last real evaluation (so the subcard's current-state line
-//     still shows the live condition; only the pill says Grace).
-//     No network calls happen for it during the grace. The
-//     release-check result carries status 'grace' so the hold is
-//     named there. Grace is PER RULE: in an OR set a non-held rule
-//     can still fire during a grace; in an AND set a held rule is
-//     not satisfied, so the set cannot fire.
+//   Grace (0.8.0, extended 0.8.8, unified 0.8.8): while it is
+//     active, a price, UTXO, block-height, set-date, fee-market,
+//     or check-in rule is not evaluated at all — it cannot fire,
+//     and its stored slice keeps the last real evaluation (so
+//     the subcard's current-state line still shows the live
+//     condition; only the pill says Grace). No network calls
+//     happen for it during the grace. The release-check result
+//     carries status 'grace' so the hold is named there. Grace
+//     is PER RULE: in an OR set a non-held rule can still fire
+//     during a grace; in an AND set a held rule is not
+//     satisfied, so the set cannot fire. Check-in rules are
+//     held by the same grace as everything else now — the old
+//     separate offline-gap hold is gone, and the due date is
+//     NOT pushed out (the bar reads the plain clock; the
+//     grace state, not a past-due reading, is what the bar
+//     shows while held — see checkinStatus). Manual rules
+//     never fire anyway.
 //   Vacation (0.8.0): while it is on, a check-in rule does not
 //     fire — its slice records 'vacation', and the release holds
 //     it. Vacation touches check-in rules only; price, UTXO and
@@ -507,7 +515,7 @@ async function evaluateRule(state, tx, ruleIndex, now, utxoBatch) {
   const set = store.triggerOf(tx);
   const rule = set.rules[ruleIndex];
   const prevSlice = ruleTriggerState(tx, ruleIndex);
-  if ((rule.type === 'price' || rule.type === 'utxo') && isGraceActive(state, now)) {
+  if ((rule.type === 'checkin' || rule.type === 'price' || rule.type === 'utxo' || rule.type === 'blockheight' || rule.type === 'setdate' || rule.type === 'feemarket') && isGraceActive(state, now)) {
     return { rule, fire: false, status: 'grace', reason: 'grace period active — will evaluate when it ends', held: 'grace', slice: null };
   }
   if (rule.type === 'checkin' && state.settings.vacationMode) {
@@ -637,7 +645,11 @@ function ruleStatusFor(state, tx, rule, slice, now) {
     // Vacation is check-in-only (0.8.0): it freezes this tx's
     // clock and holds its release, and nothing else's.
     if (state.settings.vacationMode) return { ...base, status: 'vacation', reason: 'Vacation mode is on — the countdown is frozen' };
-    if (clock.state === 'held') return { ...base, status: 'held', reason: clock.daysSince + ' of ' + clock.windowDays + ' days elapsed', daysSince: clock.daysSince, windowDays: clock.windowDays, nextDue: clock.nextDue };
+    // (0.8.8) A past-due clock while a grace is active reads
+    // 'grace', not 'release-due' — the rule is held, it cannot
+    // fire; an on-track clock keeps its countdown (the grace
+    // card explains the hold). Mirrors checkinStatus.
+    if (isGraceActive(state, now) && clock.state === 'release-due') return { ...base, status: 'grace', reason: 'Grace period active — will evaluate when it ends', daysSince: clock.daysSince, windowDays: clock.windowDays, nextDue: clock.nextDue };
     if (clock.state === 'release-due') return { ...base, status: 'release-due', reason: 'Release due', daysSince: clock.daysSince, windowDays: clock.windowDays, nextDue: clock.nextDue };
     return { ...base, status: 'on-track', reason: clock.daysSince + ' of ' + clock.windowDays + ' days elapsed', daysSince: clock.daysSince, windowDays: clock.windowDays, nextDue: clock.nextDue };
   }
@@ -743,6 +755,68 @@ function ruleStatusFor(state, tx, rule, slice, now) {
   return { ...base, status: 'not-evaluated', reason: 'Not evaluated yet' };
 }
 
+// The cached tip height, or null when no usable reading is
+// cached (same endpoint-base match as the price/fee branches
+// in ruleStatusFor; no age check — the last known tip is
+// trusted until a fresh reading arrives, exactly like the
+// price and fee caches). Synchronous, no network: reading the
+// cache must never trigger a fetch, or the grace card would
+// defeat the grace it reports on.
+function tipFromCache(state) {
+  const eps = bitcoin.endpointsFor(state.settings);
+  const primary = eps[0] ? eps[0].base : null;
+  const secondary = eps[1] ? eps[1].base : null;
+  if (!caches.nodeTip.readings || !Object.keys(caches.nodeTip.readings).length) return null;
+  if (caches.nodeTip.primary !== primary || caches.nodeTip.secondary !== secondary) return null;
+  const comb = bitcoin.combineTipHeights(caches.nodeTip.readings);
+  return comb.valid ? comb.tip : null;
+}
+
+// Whether this tx/set WOULD fire right now if the grace lifted
+// (0.8.8, both-numbers grace card): the raw condition of each
+// rule, judged on the best data available WITHOUT any new
+// network calls — the grace suspends rule evaluation, and this
+// must not defeat that. Per rule:
+//   check-in — the live clock: past due (clock.state
+//     'release-due') means would fire. The served slice reads
+//     'grace' when past due + grace active, so the clock, not
+//     the slice status, is the authority here (the clock also
+//     honours the vacation freeze, via the live offset).
+//   set-date — the live clock: the date has passed (served
+//     status 'due').
+//   price / fee-market — the served status 'due': ruleStatusFor
+//     already judges these on the live caches when warm, else
+//     the stored last evaluation.
+//   block-height — the tip cache when warm (tipFromCache
+//     above), else the stored slice's 'due'.
+//   UTXO — the stored slice's 'due' ONLY: its checks ARE the
+//     rule evaluation, so they go stale during a grace — a
+//     spend that lands while the app is away is not seen until
+//     the rules run again. That staleness is by design; the
+//     number is the last known answer, not a live one.
+//   manual — never. unknown / not-evaluated — never (fail-safe:
+//     a condition that cannot be read cannot be claimed met).
+// Combined by the set's op, exactly like the evaluator:
+// OR fires if any rule is met, AND only if every rule is met.
+function wouldFireFor(state, tx, set, statuses, now) {
+  const met = set.rules.map((rule, i) => {
+    const s = statuses[i];
+    if (rule.type === 'manual') return false;
+    if (rule.type === 'checkin') {
+      const clock = checkinClock(state, now, rule.params.thresholdDays, checkinLiveOffsetMs(tx, now));
+      return clock.state === 'release-due';
+    }
+    if (rule.type === 'blockheight') {
+      const tip = tipFromCache(state);
+      if (typeof tip === 'number') return tip >= rule.params.targetHeight;
+      return s.status === 'due';
+    }
+    return s.status === 'due';
+  });
+  if (set.op === 'OR') return met.some(Boolean);
+  return met.length === set.rules.length && met.every(Boolean);
+}
+
 // The tx-level trigger status for the UI (0.8.2): a one-rule set
 // reads exactly as its single rule did (the object above); a
 // multi-rule set reads the same combine as the evaluator — 'due'
@@ -755,7 +829,8 @@ function ruleStatusFor(state, tx, rule, slice, now) {
 function triggerStatusFor(state, tx, now) {
   const set = store.triggerOf(tx);
   const statuses = set.rules.map((rule, i) => ruleStatusFor(state, tx, rule, ruleTriggerState(tx, i), now));
-  if (set.rules.length === 1) return statuses[0];
+  const wouldFire = wouldFireFor(state, tx, set, statuses, now);
+  if (set.rules.length === 1) return { ...statuses[0], wouldFire };
   const outcomes = statuses.map((s, i) => {
     const held = s.status === 'grace' ? 'grace' : s.status === 'vacation' ? 'vacation' : s.status === 'held' ? 'held' : null;
     const cls = (s.status === 'due' || s.status === 'release-due') ? 'satisfied'
@@ -769,7 +844,7 @@ function triggerStatusFor(state, tx, now) {
     label: set.op === 'AND' ? 'AND rules' : 'OR rules',
     condition: triggerConditionText(set),
     status: combined.status, reason: combined.reason,
-    rules: statuses,
+    rules: statuses, wouldFire,
   };
 }
 

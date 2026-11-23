@@ -65,6 +65,13 @@
     return fmtDateShort(iso);
   }
 
+  // The grace card's end date: short, e.g. "Nov 30" (the
+  // full fmtDateShort string is too long for the bar label).
+  function fmtGraceDate(iso) {
+    if (!iso) return '—';
+    return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  }
+
   // The per-tx History (0.8.2): the event titles, the dot colour
   // per type (green = confirmed, amber = fired / conflict, red =
   // failed / stale, grey = the rest), and the short timestamp
@@ -388,7 +395,7 @@
 
   var PILL_CLASS = {
     'on-track': 'ok', 'release-due': 'bad', 'broadcasted': 'bad',
-    'vacation': 'warn', 'not-started': 'muted',
+    'vacation': 'warn', 'not-started': 'muted', 'grace': 'warn',
   };
 
   // Triggers (0.8.0): the rule that fires a transaction. The tx's
@@ -592,48 +599,79 @@
     return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + 'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
   }
 
-  // Grace period (0.8.0): the card at the top of the dashboard,
-  // shown only while a grace is active for an armed price or
-  // UTXO tx. The text names how long the app was offline and
-  // when the pause ends (or "until you resume" for an
-  // indefinite grace); Resume now ends it immediately. The
-  // wording and bolding follow the approved mockup exactly:
-  // "Standby was offline for 12 days. Price and UTXO triggers
-  // are paused until Dec 22, 2026 (7 days) so they don't fire
-  // on conditions that changed while the app was away.
-  // Check-in triggers are not affected."
-  // (0.8.5) Shared with the live tick: patchLive calls this
+  // Grace period (0.8.0, extended 0.8.8, unified 0.8.8): the card at the top of the dashboard,
+  // shown whenever a grace is active — even with nothing held.
+  // The copy follows the approved mockup exactly:
+  // "Grace period has been activated because the device was offline
+  // for 3 days." / "2 transactions are held by grace, 1 of them
+  // would fire now." — the held line carries both numbers (held,
+  // then would-fire as a subset of held) and is the same line for
+  // 0 or more.
+  // The countdown bar fills as the grace elapses (same convention
+  // as the check-in bar): "Day N of M" left, "N days left · until
+  // Nov 30" right; under a day left it reads "less than a day
+  // left"; an indefinite grace has no bar, just "until you resume".
+  // The Resume row puts the button first with its note to the
+  // right. (0.8.5) Shared with the live tick: patchLive calls this
   // instead of rebuilding the dashboard, so the card's text
   // stays fresh without touching anything else.
   function renderGraceCard() {
     var graceCard = $('grace-card');
-    var graceApplies = graceActive() && (S.bitcoin.txs || []).some(function (t) { return graceHoldsTx(t); });
-    if (graceCard) {
-      graceCard.style.display = graceApplies ? '' : 'none';
-      if (graceApplies) {
-        var g = S.grace;
-        var gapDays = (typeof g.offlineGapDays === 'number') ? g.offlineGapDays : 0;
-        var gapText = gapDays === 1 ? '1 day' : gapDays + ' days';
-        var endsText;
-        if (g.indefinite) {
-          endsText = 'until you resume';
-        } else {
-          var durDays = (g.graceUntil && g.triggeredAt)
-            ? Math.max(1, Math.round((new Date(g.graceUntil).getTime() - new Date(g.triggeredAt).getTime()) / 86400000))
-            : 0;
-          endsText = 'until ' + fmtDateShort(g.graceUntil) + ' (' + (durDays === 1 ? '1 day' : durDays + ' days') + ')';
-        }
-        // Built from spans and <b> elements (not innerHTML) so
-        // the dynamic values are text, never markup.
-        var gt = $('grace-text');
-        gt.innerHTML = '';
-        var ts = function (t) { var s = document.createElement('span'); s.textContent = t; return s; };
-        gt.appendChild(ts('Standby was offline for '));
-        var b1 = document.createElement('b'); b1.textContent = gapText; gt.appendChild(b1);
-        gt.appendChild(ts('. Price and UTXO triggers are paused '));
-        var b2 = document.createElement('b'); b2.textContent = endsText; gt.appendChild(b2);
-        gt.appendChild(ts(' so they don\u2019t fire on conditions that changed while the app was away. Check-in triggers are not affected.'));
-      }
+    if (!graceCard) return;
+    graceCard.style.display = graceActive() ? '' : 'none';
+    if (!graceActive()) return;
+    var g = S.grace;
+    var gapDays = (typeof g.offlineGapDays === 'number') ? g.offlineGapDays : 0;
+    var gapText = gapDays === 1 ? '1 day' : gapDays + ' days';
+    var held = graceHeldTxCount();
+    var fire = graceWouldFireTxCount();
+    // Built from spans and <b> elements (not innerHTML) so
+    // the dynamic values are text, never markup.
+    var ts = function (t) { var s = document.createElement('span'); s.textContent = t; return s; };
+    var gt = $('grace-text');
+    gt.innerHTML = '';
+    gt.appendChild(ts('Grace period has been activated because the device was offline for '));
+    var b1 = document.createElement('b'); b1.textContent = gapText; gt.appendChild(b1);
+    gt.appendChild(ts('.'));
+    var gh = $('grace-held');
+    gh.innerHTML = '';
+    var b2 = document.createElement('b');
+    b2.textContent = held === 1 ? '1 transaction' : held + ' transactions';
+    gh.appendChild(b2);
+    gh.appendChild(ts(held === 1 ? ' is held by grace, ' : ' are held by grace, '));
+    var b3 = document.createElement('b');
+    b3.textContent = fire === 1 ? '1 of them' : fire + ' of them';
+    gh.appendChild(b3);
+    gh.appendChild(ts(' would fire now.'));
+    // Countdown bar (finite grace only): Day N of M, N days left.
+    // N is whole days elapsed since the grace was set (the bar
+    // fills as the grace elapses, like the check-in bar); the
+    // days-left count is the same whole-day math, so N + left
+    // is always the duration — except under a day left, when
+    // the label says so plainly instead of "0 days left".
+    var wrap = $('grace-bar-wrap');
+    if (g.indefinite) {
+      // No bar for an indefinite grace — just the labels row
+      // saying when it ends.
+      $('grace-bar').style.display = 'none';
+      $('grace-bar-day').textContent = '';
+      $('grace-bar-left').textContent = 'until you resume';
+    } else {
+      wrap.style.display = '';
+      $('grace-bar').style.display = '';
+      var triggeredMs = g.triggeredAt ? new Date(g.triggeredAt).getTime() : NaN;
+      var untilMs = g.graceUntil ? new Date(g.graceUntil).getTime() : NaN;
+      var durDays = Math.max(1, Math.round(((isFinite(triggeredMs) && isFinite(untilMs)) ? untilMs - triggeredMs : 7 * 86400000) / 86400000));
+      var elapsedDays = isFinite(triggeredMs) ? Math.max(0, Math.floor((Date.now() - triggeredMs) / 86400000)) : 0;
+      var leftMs = isFinite(untilMs) ? untilMs - Date.now() : 0;
+      var leftDays = durDays - elapsedDays;
+      var leftText = leftMs < 86400000 ? 'less than a day left'
+        : (leftDays === 1 ? '1 day left' : leftDays + ' days left');
+      $('grace-bar-day').textContent = 'Day ' + elapsedDays + ' of ' + durDays;
+      $('grace-bar-left').textContent = leftText + ' · until ' + fmtGraceDate(g.graceUntil);
+      var fillEl = $('grace-bar-fill');
+      fillEl.style.width = (Math.min(1, Math.max(0, elapsedDays / durDays)) * 100) + '%';
+      fillEl.style.background = 'var(--warn)';
     }
   }
 
@@ -653,6 +691,7 @@
       status.checkinReadError ? 'Warning: the check-in receiver state could not be read — releases are held until it can be read again.'
       : status.state === 'not-started' ? 'No check-in recorded yet. Tap “Check in” to start the clock.'
       : status.state === 'vacation' ? 'Vacation mode is on' + (status.vacationUntil ? ' until ' + status.vacationUntil : ' until you say you\u2019re back') + '. The check-in countdown is frozen — the days away never count.'
+      : status.state === 'grace' ? 'Grace period is active — the release is held until it ends.'
       : status.state === 'broadcasted' ? 'A broadcast went out. Check in to start a new cycle.'
       : status.state === 'release-due' ? 'Release is due — the stored transaction will be broadcast unless you check in.'
       : '';
@@ -699,12 +738,16 @@
           if (rule.type !== 'checkin') return;
           var ts = bstates[i] || {};
           var th = rule.params.thresholdDays;
+          // (0.8.8) A past-due slice while a grace is active reads
+          // 'grace', not 'release-due' — the rule is held.
+          var bst = ts.status || 'not-started';
+          if (graceActive() && bst === 'release-due') bst = 'grace';
           bars.push({
             id: t.id, label: t.label || '', ruleIndex: i,
             thresholdDays: th,
             daysSince: (typeof ts.daysSince === 'number') ? ts.daysSince : 0,
             windowDays: (typeof ts.windowDays === 'number' && ts.windowDays > 0) ? ts.windowDays : th,
-            nextDue: ts.nextDue || null, state: ts.status || 'not-started',
+            nextDue: ts.nextDue || null, state: bst,
             enabled: !!t.enabled,
           });
         });
@@ -717,12 +760,14 @@
           if (rule.type !== 'checkin') return;
           var sts = sstates[i] || {};
           var sth = rule.params.thresholdDays;
+          var sst = sts.status || 'not-started';
+          if (graceActive() && sst === 'release-due') sst = 'grace';
           bars.push({
             id: s.id, label: s.label || '', ruleIndex: i,
             thresholdDays: sth,
             daysSince: (typeof sts.daysSince === 'number') ? sts.daysSince : 0,
             windowDays: (typeof sts.windowDays === 'number' && sts.windowDays > 0) ? sts.windowDays : sth,
-            nextDue: sts.nextDue || null, state: sts.status || 'not-started',
+            nextDue: sts.nextDue || null, state: sst,
             enabled: !!s.enabled,
           });
         });
@@ -890,7 +935,8 @@
     // owner with only archived txs still gets the prompt to add
     // one. The first thing a fresh install sees; it disappears
     // as soon as the first transaction is staged. Independent of
-    // the grace card (which needs armed price/UTXO txs to show).
+    // the grace card (which shows whenever a grace is active,
+    // held txs or not).
     var anyStaged = (S.bitcoin.txs || []).some(function (t) { return !txStatus(t).settled && !txStatus(t).pending; });
     var gsCard = $('getting-started-card');
     if (gsCard) gsCard.style.display = anyStaged ? 'none' : '';
@@ -914,10 +960,7 @@
     // check-in tx — the label above, the bar, and "X of N
     // days elapsed" below. Each bar measures its OWN window: the
     // server sends it per tx as status.checkinTxs[].windowDays —
-    // the tx's own threshold on-track, the longer held window
-    // while an offline-gap grace is active — so a held bar just
-    // counts to the held date, with no special grace display.
-    // A DISARMED check-in tx keeps its bar, frozen at the day
+    // the tx's own threshold. A DISARMED check-in tx keeps its bar, frozen at the day
     // count it was left at: muted grey, marked disarmed, its
     // count never advancing while it is disarmed or on vacation.
     // Settled (archived) and pending check-in txs get no bar.
@@ -926,6 +969,10 @@
     // while more than 3/4 of the window remains, amber past
     // that, red in the last quarter. Overdue is a full red bar.
     // A frozen bar is grey instead — it is held, not live.
+    // (0.8.8) A bar past due while a grace is active reads
+    // 'grace', not 'release-due': amber, captioned "— held by
+    // grace" — the due date is not pushed out by the grace, so
+    // the bar must not read as due while the rule is held.
     var barsEl = $('checkin-tx-bars');
     barsEl.innerHTML = '';
     var bars = checkinBarsData(status);
@@ -955,12 +1002,12 @@
       var fill = document.createElement('div');
       fill.style.width = (Math.min(1, Math.max(0, daysSince / windowDays)) * 100) + '%';
       var remaining = (windowDays - daysSince) / windowDays;
-      fill.style.background = frozen ? 'var(--muted)' : remaining > 0.75 ? 'var(--ok)' : remaining > 0.25 ? 'var(--warn)' : 'var(--bad)';
+      fill.style.background = frozen ? 'var(--muted)' : b.state === 'grace' ? 'var(--warn)' : remaining > 0.75 ? 'var(--ok)' : remaining > 0.25 ? 'var(--warn)' : 'var(--bad)';
       bar.appendChild(fill);
       block.appendChild(bar);
       var cap = document.createElement('p');
       cap.className = 'progress-label';
-      cap.textContent = daysSince + ' of ' + windowDays + ' days elapsed' + (frozen ? ' — disarmed, frozen' : '');
+      cap.textContent = daysSince + ' of ' + windowDays + ' days elapsed' + (frozen ? ' — disarmed, frozen' : b.state === 'grace' ? ' — held by grace' : '');
       block.appendChild(cap);
       barsEl.appendChild(block);
     });
@@ -1457,7 +1504,12 @@
   // One node's row — the host, plus a pill for the last test of that
   // endpoint (OK / Failed / Not tested). `prefix` is 'readiness-' on the
   // Dashboard and 'btc-' on the Settings tab; both render the same
-  // data. A blank URL means no secondary node is set.
+  // data. A blank URL means no secondary node is set. One exception
+  // (0.8.8): while the secondary is DISABLED, the Dashboard
+  // secondary row names the slot, not the provider — it reads
+  // "Secondary Node" because there is no real node behind it
+  // (see slotName below). While enabled it shows the configured
+  // host, as before; Settings still shows the host.
   // One node's status line (0.8.1): the host plus an overall pill —
   // OK (all three capabilities ready), CAUTION (the height probe
   // works but broadcast and/or fees are not ready), FAIL (the
@@ -1481,15 +1533,40 @@
     // an invented one. Only the readiness rows have this
     // element; the Settings rows have none, so they are untouched.
     var checkedEl = $(prefix + label + '-checked');
+    // (0.8.8) The Dashboard readiness row names the slot, not the
+    // provider, but ONLY while the secondary is disabled: with no
+    // real node behind it there is no name to show, so the row
+    // reads "Secondary Node". While enabled the row shows the
+    // configured host (blockstream.info or whichever URL is set),
+    // as before. Settings still shows the host where it is
+    // configured (the btc- rows and the URL box).
+    var secondaryDisabled = (label === 'secondary' && S && S.settings && S.settings.secondaryEnabled === false);
+    var slotName = (prefix === 'readiness-' && secondaryDisabled) ? 'Secondary Node' : null;
     if (!url) {
-      host.textContent = 'Not set';
+      host.textContent = slotName || 'Not set';
       pill.textContent = 'Not set';
       pill.className = 'pill muted';
       if (checksEl) checksEl.style.display = 'none';
       if (checkedEl) checkedEl.textContent = '';
       return;
     }
-    host.textContent = hostOf(url);
+    // (0.8.8) Secondary disabled: the pill says Disabled — never
+    // Offline, Failed, or a stale timestamp — and no checks or
+    // checked time are shown. The saved secondary URL is still
+    // named in Settings (it comes back when the node is
+    // re-enabled), but nothing about it reads as failing. The
+    // "Secondary Node" naming lives in the readiness row label
+    // (slotName above, disabled only), not in the pill.
+    if (secondaryDisabled) {
+      host.textContent = slotName || hostOf(url);
+      pill.textContent = 'Disabled';
+      pill.className = 'pill muted';
+      pill.title = 'Secondary node is off — Standby talks to the primary node only.';
+      if (checksEl) checksEl.style.display = 'none';
+      if (checkedEl) checkedEl.textContent = '';
+      return;
+    }
+    host.textContent = slotName || hostOf(url);
     var res = (conn.results || []).find(function (r) { return r.endpoint === label && r.base === url; });
     var stamp = conn.nodeCheckedAt && conn.nodeCheckedAt[label];
     if (checkedEl) checkedEl.textContent = (res && stamp) ? 'checked ' + fmtCheckedAt(stamp) : '';
@@ -1695,7 +1772,7 @@
   // redundant: if it were not ready, the pill would already name
   // the problem, e.g. "Timelocked + armed"), and a problem state
   // reads "Label + armed". An unarmed card's pill reads just
-  // Grace period (0.8.0): whether the price/UTXO grace is
+  // Grace period (0.8.0, extended 0.8.8): whether the grace is
   // active right now. S.grace is the computed view the server
   // serves on /api/state and /api/status ({ active, indefinite,
   // graceUntil, triggeredAt, offlineGapDays }) — null when no
@@ -1705,15 +1782,70 @@
   function graceActive() {
     return !!(S && S.grace && S.grace.active);
   }
-  // Whether THIS tx is held by the grace: armed, price or UTXO,
-  // and still active (not settled or pending). The dashboard
-  // card only shows when at least one tx is held — a grace with
-  // nothing to pause is not worth a card.
+  // Whether THIS tx is held by the grace: armed, with a
+  // price, UTXO, block-height, set-date, fee-market, or
+  // check-in rule (0.8.8: check-in rules are held by the same
+  // grace as everything else), and still active (not settled
+  // or pending).
   function graceHoldsTx(tx) {
     if (!graceActive() || !tx || !tx.enabled) return false;
-    if (!hasRuleType(tx, 'price') && !hasRuleType(tx, 'utxo')) return false;
+    if (!hasRuleType(tx, 'price') && !hasRuleType(tx, 'utxo') && !hasRuleType(tx, 'blockheight') && !hasRuleType(tx, 'setdate') && !hasRuleType(tx, 'feemarket') && !hasRuleType(tx, 'checkin')) return false;
     var st = txStatus(tx);
     return !st.settled && !st.pending;
+  }
+  // Whether THIS set is held by the grace: the same rule as
+  // graceHoldsTx, at set level (see setStatus).
+  function graceHoldsSet(set) {
+    if (!graceActive() || !set || !set.enabled) return false;
+    if (!hasRuleType(set, 'price') && !hasRuleType(set, 'utxo') && !hasRuleType(set, 'blockheight') && !hasRuleType(set, 'setdate') && !hasRuleType(set, 'feemarket') && !hasRuleType(set, 'checkin')) return false;
+    var st = setStatus(set);
+    return !st.settled && !st.pending;
+  }
+  // How many transactions the grace is holding, for the card's
+  // held-count line: every armed active tx with a held rule
+  // type, plus every member of a held set — each tx counted
+  // once. This is the held count, NOT a fresh evaluation:
+  // held rules are not evaluated during a grace, so a held tx
+  // is one whose triggers are paused, whether or not its
+  // condition is met (see graceWouldFireTxCount for the ones
+  // whose condition is met).
+  function graceHeldTxCount() {
+    var ids = {};
+    // (0.8.8, audit finding 3) A set member's own trigger is
+    // parked while attached — the set's trigger is the one that
+    // fires — so members are skipped here and counted through
+    // their set below. Judging a member by its parked trigger
+    // counted it as held even when the set's trigger is manual
+    // (never held).
+    (S.bitcoin.txs || []).forEach(function (t) { if (!setOfTxId(t.id) && graceHoldsTx(t)) ids[t.id] = true; });
+    (S.bitcoin.sets || []).forEach(function (s) {
+      if (!graceHoldsSet(s)) return;
+      (s.txIds || []).forEach(function (id) { ids[id] = true; });
+    });
+    return Object.keys(ids).length;
+  }
+  // How many of the held transactions would fire right now if
+  // the grace lifted (0.8.8, both-numbers card): the same held
+  // population as graceHeldTxCount, restricted to txs/sets whose
+  // served triggerStatus reads wouldFire — the backend's raw
+  // condition, judged on the best data available without any new
+  // network calls (live clock for check-in/set-date, live caches
+  // for price/block-height/fee-market, the last stored evaluation
+  // for UTXO — see wouldFireFor in lib/rules.js). The second
+  // number is a subset of the first, so it never exceeds the held
+  // count.
+  function graceWouldFireTxCount() {
+    var ids = {};
+    (S.bitcoin.txs || []).forEach(function (t) {
+      // Members are skipped here, like graceHeldTxCount above —
+      // their parked trigger must not count them either.
+      if (!setOfTxId(t.id) && graceHoldsTx(t) && t.triggerStatus && t.triggerStatus.wouldFire) ids[t.id] = true;
+    });
+    (S.bitcoin.sets || []).forEach(function (s) {
+      if (!graceHoldsSet(s) || !s.triggerStatus || !s.triggerStatus.wouldFire) return;
+      (s.txIds || []).forEach(function (id) { ids[id] = true; });
+    });
+    return Object.keys(ids).length;
   }
 
   // "unarmed" (0.7.20 — "Disabled + unarmed" was silly: the arm
@@ -1723,7 +1855,7 @@
   function txPillText(tx, st) {
     if (st.settled || st.pending) return st.label;
     if (!tx.enabled) return 'unarmed';
-    // Grace (0.8.0): an armed price/UTXO tx held by the grace
+    // Grace (0.8.0, extended 0.8.8): an armed tx held by the grace
     // reads just "Grace" — the pill's text is the status, and
     // the arm state is already in the amber colour.
     if (st.label === 'Grace') return 'Grace';
@@ -1865,17 +1997,18 @@
     // here is the pill's text, and txPillText returns it plainly
     // for an unarmed tx instead of appending " + unarmed" to it.
     if (!tx.enabled) return { label: 'unarmed', cls: 'muted', settled: false, pending: false };
-    // Grace (0.8.0): while the price/UTXO grace is active, an
-    // armed price or UTXO tx reads "Grace" on an amber pill —
+    // Grace (0.8.0, extended 0.8.8, unified 0.8.8): while the grace is active, an
+    // armed tx with a price, UTXO, block-height, set-date,
+    // fee-market, or check-in rule reads "Grace" on an amber pill —
     // the rule is paused, not ready. Settled/pending txs return
-    // above, so only an active tx can show this; check-in and
-    // manual txs are not held by the grace and fall through to
+    // above, so only an active tx can show this; manual txs
+    // are not held by the grace and fall through to
     // Ready. (The readiness rows use the same txStatus /
     // txPillText, so their pill reads "Grace" too — the row's
     // state line, the trigger condition + current value, is
     // unchanged, because the grace does not change the rule.)
     if (graceActive()) {
-      if (hasRuleType(tx, 'price') || hasRuleType(tx, 'utxo')) return { label: 'Grace', cls: 'warn', settled: false, pending: false };
+      if (hasRuleType(tx, 'price') || hasRuleType(tx, 'utxo') || hasRuleType(tx, 'blockheight') || hasRuleType(tx, 'setdate') || hasRuleType(tx, 'feemarket') || hasRuleType(tx, 'checkin')) return { label: 'Grace', cls: 'warn', settled: false, pending: false };
     }
     return { label: 'Ready', cls: 'ok', settled: false, pending: false };
   }
@@ -2254,7 +2387,7 @@
     if (sts.every(function (s) { return s.settled; })) return { label: 'Broadcasted', cls: 'ok', settled: true, pending: false };
     if (sts.some(function (s) { return s.pending; })) return { label: 'Broadcast', cls: 'warn', settled: false, pending: true };
     if (!set.enabled) return { label: 'unarmed', cls: 'muted', settled: false, pending: false };
-    if (graceActive() && (hasRuleType(set, 'price') || hasRuleType(set, 'utxo'))) return { label: 'Grace', cls: 'warn', settled: false, pending: false };
+    if (graceActive() && (hasRuleType(set, 'price') || hasRuleType(set, 'utxo') || hasRuleType(set, 'blockheight') || hasRuleType(set, 'setdate') || hasRuleType(set, 'feemarket') || hasRuleType(set, 'checkin'))) return { label: 'Grace', cls: 'warn', settled: false, pending: false };
     return { label: 'Ready', cls: 'ok', settled: false, pending: false };
   }
   // The set card's pill text — the txPillText rule, at set level.
@@ -2467,9 +2600,26 @@
     return row;
   }
 
+  // (0.8.8) Secondary on/off: when the secondary is disabled,
+  // only the heading-row toggle shows — the URL box hides, but
+  // its value is never cleared, so re-enabling brings it back as
+  // saved. The toggle lives in the Secondary node heading row
+  // (right-aligned, like the arm/disarm switch on a card), so it
+  // never hides with the settings it controls.
+  function syncSecondaryEnabled() {
+    var on = $('btc-secondary-enabled').checked;
+    $('btc-secondary-fields').style.display = on ? '' : 'none';
+    $('btc-secondary-enabled-wrap').title = on ? 'Secondary node on — used if the primary fails' : 'Secondary node off — primary only';
+  }
   function renderBitcoin() {
     $('btc-primary-url').value = S.settings.primaryApiUrl || 'https://mempool.space';
     $('btc-secondary-url').value = S.settings.secondaryApiUrl || '';
+    // (0.8.8) Secondary on/off — missing in old state means
+    // enabled. The toggle sits in the secondary heading row and
+    // hides the rest of the secondary settings while off,
+    // without clearing them (see syncSecondaryEnabled).
+    $('btc-secondary-enabled').checked = S.settings.secondaryEnabled !== false;
+    syncSecondaryEnabled();
     var conn = S.bitcoin.connection || {};
     renderNodeStatus('btc-', 'primary', S.settings.primaryApiUrl, conn);
     renderNodeStatus('btc-', 'secondary', S.settings.secondaryApiUrl, conn);
@@ -4048,6 +4198,11 @@
     var s = await api('PUT', '/api/settings', {
       primaryApiUrl: $('btc-primary-url').value,
       secondaryApiUrl: $('btc-secondary-url').value,
+      // (0.8.8) Secondary on/off: the toggle's value rides with
+      // the rest of the node settings. The secondary URL is sent
+      // as it stands, so turning the node off never clears its
+      // saved settings — re-enabling brings it back as saved.
+      secondaryEnabled: $('btc-secondary-enabled').checked,
     });
     S.settings = s;
   }
@@ -4069,6 +4224,12 @@
       openFailedNodeDetails();
     } catch (e) { setMsg($('btc-nodes-msg'), e.message, false); }
   });
+
+
+  // (0.8.8) Secondary on/off: hiding/showing the secondary
+  // settings is immediate; the value itself is saved with the
+  // rest of the node settings (Save nodes).
+  $('btc-secondary-enabled').addEventListener('change', syncSecondaryEnabled);
 
   // The Add form's fallback row (0.7.17): shown only while the route
   // is Slipstream — when the route is public the setting is stored
@@ -4832,10 +4993,10 @@
       if (fill) {
         fill.style.width = (Math.min(1, Math.max(0, daysSince / windowDays)) * 100) + '%';
         var remaining = (windowDays - daysSince) / windowDays;
-        fill.style.background = frozen ? 'var(--muted)' : remaining > 0.75 ? 'var(--ok)' : remaining > 0.25 ? 'var(--warn)' : 'var(--bad)';
+        fill.style.background = frozen ? 'var(--muted)' : b.state === 'grace' ? 'var(--warn)' : remaining > 0.75 ? 'var(--ok)' : remaining > 0.25 ? 'var(--warn)' : 'var(--bad)';
       }
       var cap = block.children[2];
-      if (cap) cap.textContent = daysSince + ' of ' + windowDays + ' days elapsed' + (frozen ? ' — disarmed, frozen' : '');
+      if (cap) cap.textContent = daysSince + ' of ' + windowDays + ' days elapsed' + (frozen ? ' — disarmed, frozen' : b.state === 'grace' ? ' — held by grace' : '');
     });
   }
   // Patch the readiness rows in place (0.8.5): the status pill
@@ -5250,17 +5411,24 @@
     // mean. A changed dropdown never leaves the old name showing.
     refreshPriceSourceRow(1);
     refreshPriceSourceRow(2);
-    // Grace period (0.8.0): the two dropdowns reflect the saved
-    // settings — the offline gap that triggers a grace and how
-    // long it lasts (null = indefinite, until resumed). The
+    // Grace period (0.8.0, toggle 0.8.8): the toggle plus the two
+    // dropdowns reflect the saved settings — the toggle is the
+    // off switch (missing in old state means on), the offline gap
+    // that triggers a grace and how long it lasts (null =
+    // indefinite, until resumed). A stored duration of 0 (the old
+    // off switch) displays as 7 — the toggle carries the off
+    // state now, so flipping it on shows a real duration. The
     // options are static in index.html; renderSettings only sets
     // the value, so a re-render never clobbers a choice the
     // owner is mid-changing (the Save handler reads the
     // dropdowns, not S.settings).
+    $('grace-enabled').checked = S.settings.graceEnabled !== false;
     var go = (S.settings && typeof S.settings.graceOfflineDays === 'number') ? S.settings.graceOfflineDays : 7;
     $('set-grace-offline').value = String(go);
     var gd = (S.settings && S.settings.graceDurationDays !== undefined) ? S.settings.graceDurationDays : 7;
+    if (gd === 0) gd = 7; // a stored 0 meant off; the toggle says off now
     $('set-grace-duration').value = (gd === null) ? 'indefinite' : String(gd);
+    syncGraceEnabled();
     // User controls (0.8.0): the three number inputs reflect the
     // saved settings — price agreement (%), check cadence
     // (seconds), fee verdict multipliers (× peak). The inputs
@@ -5422,22 +5590,43 @@
     } catch (e) { setMsg($('price-sources-msg'), e.message, false); }
   });
 
-  // Grace period (0.8.0): save the two grace settings. The
+  // (0.8.8) Grace on/off: the toggle is the first option on the
+  // grace card, inline with the heading — off hides the two
+  // dropdowns, but their values are never cleared, so
+  // re-enabling brings them back as saved. The toggle lives in
+  // the card heading, so it never hides with the settings it
+  // controls. The title syncs with the state.
+  function syncGraceEnabled() {
+    var on = $('grace-enabled').checked;
+    $('grace-fields').style.display = on ? '' : 'none';
+    $('grace-enabled-wrap').title = on ? 'Grace period on — triggers pause after an offline gap' : 'Grace period off — triggers fire immediately';
+  }
+
+  // Grace period (0.8.0): save the grace settings. The
   // server rejects any value the dropdowns do not offer (400)
-  // — the error shows in the message line. Saving new values
-  // does NOT change an already-active grace (it keeps the
-  // duration it was created with).
+  // — the error shows in the message line. The toggle rides
+  // with the rest of the grace settings, so turning the grace
+  // off never clears the saved dropdowns — re-enabling brings
+  // them back as saved. Saving new values does NOT change an
+  // already-active grace (it keeps the duration it was created
+  // with) — but turning the toggle off makes the grace read as
+  // none everywhere at once, so held triggers fire immediately.
   $('btn-save-grace').addEventListener('click', async function () {
     var offline = parseInt($('set-grace-offline').value, 10);
     var durRaw = $('set-grace-duration').value;
     var duration = durRaw === 'indefinite' ? null : parseInt(durRaw, 10);
     try {
-      var s = await api('PUT', '/api/settings', { graceOfflineDays: offline, graceDurationDays: duration });
+      var s = await api('PUT', '/api/settings', { graceEnabled: $('grace-enabled').checked, graceOfflineDays: offline, graceDurationDays: duration });
       S.settings = s;
       setMsg($('grace-settings-msg'), 'Grace period saved.', true);
       await load();
     } catch (e) { setMsg($('grace-settings-msg'), e.message, false); }
   });
+
+  // (0.8.8) Grace on/off: hiding/showing the grace options is
+  // immediate; the value itself is saved with the rest of the
+  // grace settings (Save grace period).
+  $('grace-enabled').addEventListener('change', syncGraceEnabled);
 
   // User controls (0.8.0): each card saves only its own
   // field(s). The server rejects an out-of-range value or a
@@ -5567,28 +5756,28 @@
   var SETTINGS_HELP = {
     vacation: {
       title: 'Vacation mode',
-      body: 'Freezes the check-in countdown while you\u2019re away. Leave at 13 of 25 days and you come back to 13 of 25 \u2014 the days do not count while you\u2019re gone. Check-in transactions do not fire while you\u2019re away. Price, UTXO, block-height, set-date, and fee-market triggers keep firing while you\u2019re away. Set an end date, or leave it indefinite and it holds until you say you\u2019re back.',
+      body: 'Freezes the check-in countdown while you\u2019re away. Leave at 13 of 25 days and you come back to 13 of 25.\n\nCheck-in transactions do not fire while you\u2019re away, but price, UTXO, block-height, set-date, and fee-market triggers keep firing.\n\nSet an end date, or leave it indefinite and it holds until you say you\u2019re back.',
       triggers: ['checkin'],
     },
     arm: {
       title: 'Global Arm/Disarm',
-      body: 'Arms or disarms every staged transaction at once \u2014 check-in, BTC price, UTXO, block height, set date, fee market, and manual. Disarming stops automatic firing for all triggers \u2014 nothing broadcasts on its own. A manual broadcast still works while disarmed (it is you explicitly sending it). Disarmed check-in transactions freeze their countdown and resume from the same spot when re-armed. \u2018Arm all\u2019 arms everything, including transactions you had individually disarmed before.',
+      body: 'Arms or disarms every staged transaction at once \u2014 check-in, BTC price, UTXO, block height, set date, fee market, and manual.\n\nDisarming stops automatic firing for all triggers \u2014 nothing broadcasts on its own. A manual broadcast still works while disarmed.\n\nDisarmed check-in transactions freeze their countdown and resume from the same spot when re-armed.\n\n\u2018Arm all\u2019 arms everything, including transactions you had individually disarmed before.',
       triggers: ['general'],
     },
     nodes: {
       title: 'Bitcoin nodes',
-      body: 'The Bitcoin nodes Standby talks to. Standby reads the chain through these nodes \u2014 it checks whether a UTXO is spent, confirms a broadcast landed, and submits your transactions. The primary is tried first; if it fails, the secondary is used. Leave the secondary blank to use the primary alone. The address is a mempool instance \u2014 mempool.space by default, another public instance, or your own mempool on the LAN. UTXO triggers ask the node whether the watched UTXO is spent, and every transaction\u2019s broadcast goes through a node. Check-in, set-date, and manual triggers do not read the node to decide whether to fire; price triggers read the exchanges instead. Block-height and fee-market triggers read the node (the tip height and the fee estimate).',
+      body: 'The Bitcoin nodes Standby talks to. The primary is tried first; if it fails, the secondary is used.\n\nToggle the secondary off to use the primary alone with no fallback if it is down or unreachable.\n\nThe address is a mempool instance \u2014 mempool.space by default, another public instance, or your own mempool on the LAN.\n\nUTXO, block-height, and fee-market triggers read the node, and broadcasts go through it.',
       triggers: ['general'],
     },
     'price-sources': {
       title: 'Bitcoin price source',
-      body: 'The two price sources Standby reads the BTC price from. Every check, Standby fetches the price from both. A price trigger only fires when both agree within your price-agreement setting; if one is down, the other is used alone. When they agree, the primary price source\u2019s price is the one that decides. Pick Custom for either source to point Standby at your own endpoint \u2014 give its full URL and the Custom endpoint json path (for example, data.amount).',
+      body: 'The two price sources Standby reads the BTC price from. Every check, Standby fetches the price from both.\n\nA price trigger only fires when both agree within your price-agreement setting; if one is down, the other is used alone. When they agree, the primary\u2019s price decides.\n\nPick Custom for either source to point Standby at your own endpoint \u2014 give its full URL and the Custom endpoint json path (for example, data.amount).',
       triggers: ['price'],
     },
     grace: {
       title: 'Grace period',
-      body: 'A pause for price and UTXO triggers after the app has been offline. If Standby was offline longer than the \u2018offline\u2019 days, price and UTXO triggers are paused for the \u2018lasts\u2019 days (or until you resume) so they don\u2019t fire on conditions that changed while the app was away. Checking in does not clear a grace. Check-in triggers are not affected \u2014 they have their own offline-gap hold.',
-      triggers: ['price', 'utxo'],
+      body: 'A pause for ALL triggers after the app has been offline. If Standby was offline longer than the \u2018offline\u2019 days, automatic broadcasts pause for the \u2018lasts\u2019 days, or until you resume.\n\nTurn it off with the toggle in the card heading.\n\nExample: Your device is offline for 10 days. Rather than broadcasting any transactions when the device powers back on, you enter a grace period. Triggers stay paused for 7 days, or until you clear the grace manually.',
+      triggers: ['checkin', 'price', 'utxo', 'blockheight', 'setdate', 'feemarket'],
     },
     agreement: {
       title: 'Price agreement',
@@ -5597,22 +5786,22 @@
     },
     cadence: {
       title: 'Check cadence',
-      body: 'How often every trigger is checked. Standby evaluates all triggers — check-in, price, UTXO, block-height, set-date, and fee-market — together every X seconds. Faster catches an unconfirmed spend, a brief price spike, and a block height sooner; slower means fewer API calls. The price cache refreshes on this interval too, so a faster cadence fetches fresher prices. The fee-market cache does not: it refreshes once every 5 minutes regardless of this setting, so a fee move is only detected within 5 minutes. A very fast cadence makes many more requests to your nodes. Public nodes rate-limit heavy use, so a short interval can get this IP throttled or limited by the provider.',
+      body: 'How often every trigger is checked. Standby evaluates all triggers together every X seconds.\n\nFaster catches an unconfirmed spend, a brief price spike, or a block height sooner, but makes more API calls.\n\nThe price cache refreshes on this interval too. The fee cache does not: it refreshes once every 5 minutes regardless of this setting.\n\nPublic nodes rate-limit heavy use, so a very fast cadence can get this IP throttled.\n\nExample: at 60 seconds, a price spike that lasts 30 seconds may never be seen; at 10 seconds it will be \u2014 but that\u2019s six times the requests.',
       triggers: ['price', 'utxo', 'blockheight', 'setdate', 'feemarket'],
     },
     fee: {
       title: 'Broadcast Fee Risk',
-      body: 'Where the Low / Medium / High fee pill flips. Each transaction\u2019s fee rate is compared to the 90-day peak (the 90th percentile of block medians). Low Risk is at or above the Low multiplier, Medium Risk at or above the Medium multiplier, High Risk below it. A fee below the current economy fee is Critical Risk. The pill is informational \u2014 it never blocks a broadcast. The pill shows on every staged transaction. The Low multiplier must stay above the Medium one.',
+      body: 'Where the Low / Medium / High fee pill flips. Each transaction\u2019s fee rate is compared to the 90-day peak (the 90th percentile of block medians).\n\nLow Risk is at or above the Low multiplier, Medium Risk at or above the Medium multiplier, High Risk below it. A fee below the current economy fee is Critical Risk.\n\nThe pill is informational \u2014 it never blocks a broadcast \u2014 and shows on every staged transaction. The Low multiplier must stay above the Medium one.',
       triggers: ['general'],
     },
     keys: {
       title: 'Check-in API keys',
-      body: 'The keys that can check in through the API. Your gadget uses one of these keys to tell Standby you\u2019re still here. A check-in resets the countdown on every check-in transaction. A key can only record a check-in: it cannot read your transactions, broadcast anything, or change settings. Give each service its own key so you can revoke one without touching the others. Keep a key private \u2014 anyone with it can check in as you. The key is shown once, when it is created \u2014 copy it then. To add it as a custom integration: Name \u2018Standby Check-in\u2019, Base URL the connection IP above, Auth: Bearer token (Authorization: Bearer), Test path /health, API key / token the key you generate below. The check-in connection is plain HTTP \u2014 keep port 3101 on your trusted LAN and Tailscale network only; never expose it to the internet.',
+      body: 'The keys that can check in through the API. Your gadget uses one to tell Standby you\u2019re still here; each check-in resets the countdown on every check-in transaction.\n\nA key can only check in \u2014 no reading transactions, no broadcasts, no settings changes. One key per service, so revoking one leaves the others alone.\n\nKeep keys private: anyone holding one can check in as you. Shown once, at creation \u2014 copy it then.\n\nAs a custom integration: Name \u2018Standby Check-in\u2019, Base URL the connection IP above, Auth: Bearer <redacted> (Authorization: Bearer), Test path /health, API key / token the key you generate below.\n\nPlain HTTP only \u2014 keep port 3101 on your trusted LAN and Tailscale network; never expose it to the internet.',
       triggers: ['checkin'],
     },
     backup: {
       title: 'Data backup',
-      body: 'Back up or restore everything Standby knows. A backup is a file holding all your staged transactions, triggers, and settings. Restoring replaces the current state with the backup\u2019s \u2014 a restore counts as a check-in and clears any active grace period. It is a plain JSON file \u2014 keep it somewhere safe. It contains the signed hexes, which reveal the destination addresses and amounts, so treat it like the transactions themselves. The backup is not encrypted.',
+      body: 'Back up or restore everything Standby knows. A backup is a file holding all your staged transactions, triggers, and settings.\n\nRestoring replaces the current state with the backup\u2019s \u2014 a restore counts as a check-in and clears any active grace period.\n\nIt is a plain, unencrypted JSON file \u2014 keep it somewhere safe. It contains the signed hexes, which reveal the destination addresses and amounts, so treat it like the transactions themselves.',
       triggers: ['general'],
     },
     // No title/body: the version card has no "?" button and no

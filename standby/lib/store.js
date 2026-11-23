@@ -19,6 +19,7 @@ function defaultState() {
     settings: {
       primaryApiUrl: 'https://mempool.space', // the primary node: a mempool API endpoint (any mempool.space-compatible instance — another public one, or your own mempool on the LAN)
       secondaryApiUrl: 'https://blockstream.info/api', // the secondary node, tried only if the primary does not answer; blank = primary runs alone
+      secondaryEnabled: true, // (0.8.8) the secondary node is on by default — off means primary only, no fallback anywhere (see endpointsFor in lib/bitcoin.js); a missing flag in old state means enabled
       priceSources: { source1: 'coingecko', source2: 'coinbase' }, // the two BTC price feeds for price rules — each a provider id (see PRICE_PROVIDERS in lib/bitcoin.js) or a custom { id: 'custom', url, path } object (0.8.1); a reading is only trusted when the two agree within the configured agreement (Settings: Price agreement), and when they agree the primary source's price is the one that decides
       // Price agreement (0.8.0): the two BTC price sources must
       // agree within this % for a reading to count (Settings:
@@ -40,13 +41,22 @@ function defaultState() {
       // Risk; below Medium is High Risk. The Critical check (fee
       // below the current economy fee) is separate and unchanged.
       feeLowMultiplier: 2, feeMediumMultiplier: 1,
-      // Grace period (0.8.0): when the app comes back after being
-      // offline longer than graceOfflineDays, price and UTXO
-      // triggers are paused for graceDurationDays (null =
-      // indefinite, until the owner resumes) so they do not fire
-      // on conditions that changed while the app was away.
-      // Check-in triggers are not affected (they keep their own
-      // heldUntil hold). See server.js applyGrace.
+      // Grace period (0.8.0, extended 0.8.8, unified 0.8.8): when
+      // the app comes back after being offline longer than
+      // graceOfflineDays, ALL triggers — price, UTXO,
+      // block-height, set-date, fee-market, and check-in — are
+      // paused for graceDurationDays (null = indefinite, until
+      // the owner resumes) so they do not fire on conditions
+      // that changed while the app was away. There is no
+      // separate check-in hold any more: a check-in rule is
+      // held by the same grace, for the same duration, and its
+      // due date is NOT pushed out. graceEnabled is the on/off
+      // toggle (Settings grace card, first option): off means no
+      // grace at all, triggers fire immediately — and no outage
+      // protection for check-in either. A stored duration of 0
+      // (the old off switch, pre-toggle) still reads as off —
+      // see the loadState migration below.
+      graceEnabled: true,
       graceOfflineDays: 7, graceDurationDays: 7,
       // Vacation mode (0.8.0): while it is on, the check-in
       // countdown is FROZEN — the days away never count toward a
@@ -113,12 +123,13 @@ function defaultState() {
     // check-in, totalCheckins counts them. lastOnlineAt (0.7.22)
     // is the last time the app itself was alive — written on every
     // hourly release tick, so a long gap in it means the device was
-    // off, not that the owner stopped checking in. heldUntil
-    // (0.7.22) is the offline-gap grace: a persisted "broadcast no
-    // earlier than" instant, set when the app comes back after a
-    // long offline gap with the clock far along, cleared by a
-    // check-in. Both are null until first used.
-    checkin: { lastCheckinAt: null, totalCheckins: 0, lastOnlineAt: null, heldUntil: null },
+    // off, not that the owner stopped checking in. (0.8.8) The
+    // offline-gap hold (heldUntil) is gone — the grace is the only
+    // outage protection now, and it holds check-in rules like any
+    // other. A stored heldUntil is translated into a grace on load
+    // when unexpired, else pruned (see loadState);
+    // both fields are null until first used.
+    checkin: { lastCheckinAt: null, totalCheckins: 0, lastOnlineAt: null },
     // Grace period state (0.8.0): nulls = no grace was ever set
     // (or it was resumed / expired). graceUntil null = an
     // indefinite grace, active until resumed. See server.js
@@ -743,6 +754,46 @@ function loadState(dataDir) {
   // normalize it to null so every reader sees one shape.
   if (state.settings && typeof state.settings === 'object' && state.settings.vacationUntil === '') {
     state.settings.vacationUntil = null;
+  }
+  // (0.8.8) Grace on/off toggle replaces the "No grace period"
+  // duration: old state with graceDurationDays 0 and no
+  // graceEnabled field loads as grace OFF, not on — the 0 meant
+  // off, and the default (on) must not resurrect it. A saved
+  // flag always wins; this only covers state written before
+  // the toggle existed.
+  if (state.settings && typeof state.settings === 'object'
+    && saved && saved.settings && typeof saved.settings === 'object'
+    && !('graceEnabled' in saved.settings) && saved.settings.graceDurationDays === 0) {
+    state.settings.graceEnabled = false;
+  }
+  // (0.8.8) The check-in offline-gap hold (heldUntil) is gone —
+  // the grace holds check-in rules like any other. A stored
+  // heldUntil (from state written before the unification) is
+  // translated, not just dropped: an UNEXPIRED hold becomes an
+  // active grace ending at the heldUntil (audit finding 1 —
+  // dropping it let an already-due check-in broadcast on the
+  // next tick after an upgrade). An expired hold is dropped as
+  // before, and an already-active grace is never clobbered.
+  // mergeDefaults already excludes heldUntil (it is no longer
+  // in the default shape), and this delete makes the migration
+  // explicit.
+  if (state.checkin && typeof state.checkin === 'object' && 'heldUntil' in state.checkin) {
+    const heldRaw = state.checkin.heldUntil;
+    const heldMs = (typeof heldRaw === 'string' && heldRaw) ? new Date(heldRaw).getTime() : NaN;
+    const nowMs = Date.now();
+    const g = state.grace;
+    const graceActive = g && typeof g === 'object' && g.triggeredAt
+      && (!g.graceUntil || new Date(g.graceUntil).getTime() > nowMs);
+    if (Number.isFinite(heldMs) && heldMs > nowMs && !graceActive) {
+      const onlineRaw = state.checkin.lastOnlineAt;
+      const onlineMs = (typeof onlineRaw === 'string' && onlineRaw) ? new Date(onlineRaw).getTime() : NaN;
+      state.grace = {
+        graceUntil: new Date(heldMs).toISOString(),
+        triggeredAt: new Date(nowMs).toISOString(),
+        offlineGapDays: Number.isFinite(onlineMs) ? Math.max(0, Math.floor((nowMs - onlineMs) / 86400000)) : null,
+      };
+    }
+    delete state.checkin.heldUntil;
   }
   // 0.3.0 migration: the message release is gone. Prune everything it
   // left behind — including any stored Part 2 ciphertext — so no message

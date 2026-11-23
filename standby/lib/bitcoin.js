@@ -131,6 +131,13 @@ function timelockedUntil(tx, tipHeight, now) {
 // the primary is dropped — trying the same server twice buys nothing.
 function endpointsFor(settings) {
   const eps = [{ label: 'primary', base: mempoolBase(settings) }];
+  // (0.8.8) Secondary disabled (Settings: secondaryEnabled,
+  // default true): primary only, no fallback anywhere. Every
+  // consumer reads its endpoints from here — tip, fee, outspend,
+  // confirmations, node test, broadcast — so returning just the
+  // primary is the whole enforcement. Missing flag means enabled
+  // (mergeDefaults sets it true; old state behaves as before).
+  if (settings && settings.secondaryEnabled === false) return eps;
   const sec = mempoolSecondaryBase(settings);
   if (sec && sec !== eps[0].base) eps.push({ label: 'secondary', base: sec });
   return eps;

@@ -4,7 +4,7 @@ const store = require('./store');
 const bitcoin = require('./bitcoin');
 const fs = require('fs');
 const { caches } = require('./caches');
-const { applyGrace, applyOfflineHold, expireVacation, mergeExternalCheckin } = require('./checkin');
+const { applyGrace, expireVacation, mergeExternalCheckin } = require('./checkin');
 const { DATA_DIR } = require('./config');
 const { firedDetail, forwardMemberHistory, noteSetMemberStale, pushHistory, shortTxid } = require('./history');
 const { checkCadenceSecondsOf, fetchTipHeightsCached, refreshPriceIfStale } = require('./prices');
@@ -87,20 +87,19 @@ async function evaluateRelease(options) {
       console.error('release withheld: external check-in state is unreadable — not broadcasting until it can be read (see GET /api/status checkinReadError)');
       return { action: 'skipped', reason: 'check-in state unreadable', results: [] };
     }
-    // Offline-gap grace (0.7.22): judged on the stored "I was
+    // The grace (0.8.0, unified 0.8.8): judged on the stored "I was
     // online" stamp (the tick refreshes it; a manual release check
-    // does not). Sets + saves a hold when both conditions hold and
-    // none is active, so the evaluation below sees the held clock.
-    // Best-effort — a failure here must not block the evaluation
-    // (the hold is a grace, not a gate).
+    // does not). Sets + saves a grace when the gap is past the
+    // threshold and none is active, so the evaluation below sees
+    // the held rules. Best-effort — a failure here must not block
+    // the evaluation (the grace is a hold, not a gate).
     try {
       const stH = store.loadState(DATA_DIR);
       let changed = false;
-      if (applyOfflineHold(stH, new Date())) changed = true;
       if (applyGrace(stH, new Date())) changed = true;
       if (expireVacation(stH, new Date())) changed = true;
       if (changed) store.saveState(DATA_DIR, stH);
-    } catch (e) { console.error('offline-hold apply failed:', e); }
+    } catch (e) { console.error('grace apply failed:', e); }
     const _r = await evaluateReleaseInner(automatic);
     return _r;
   } finally {
@@ -1034,9 +1033,9 @@ function feePeakForState() {
 // evaluation is the same single-flight evaluateRelease() the
 // manual check uses, with no type filter — so every rule is
 // judged together, every tick.
-//   The stamp block (offline hold, grace, vacation expiry, the
+//   The stamp block (grace, vacation expiry, the
 //   "I was online" stamp) runs here, before the evaluation, on
-//   the same reasoning as before: the hold is judged on the stamp
+//   the same reasoning as before: the grace is judged on the stamp
 //   as it stands BEFORE this tick refreshes it. Refreshing it
 //   every minute instead of hourly changes nothing — while the
 //   app runs the stamp stays fresh, and only real downtime
@@ -1048,17 +1047,16 @@ function feePeakForState() {
 //   not re-time it.
 async function runFullTick() {
   const now = new Date();
-  // Offline-gap grace (0.7.22): the hold is judged on the "I was
+  // The grace (0.8.0, unified 0.8.8): judged on the "I was
   // online" stamp as it stands BEFORE this tick refreshes it —
-  // refreshing first would shrink the gap to zero and the hold
+  // refreshing first would shrink the gap to zero and the grace
   // could never be set. The stamp is then refreshed (so the gap is
   // measured from this tick onward) and recorded even when the
   // evaluation below is skipped.
   try {
     const st0 = store.loadState(DATA_DIR);
     mergeExternalCheckin(st0, now);
-    if (applyOfflineHold(st0, now)) store.saveState(DATA_DIR, st0);
-    applyGrace(st0, now); // the grace for price/UTXO triggers (0.8.0) — judged on the same stale stamp, before it is refreshed; the unconditional save below persists it
+    applyGrace(st0, now); // the grace for all triggers (0.8.0, extended 0.8.8, unified 0.8.8) — judged on the same stale stamp, before it is refreshed; the unconditional save below persists it
     // Vacation expiry (0.8.0): a dated vacation ends at the end
     // of its last day — the clock resumes from its frozen count.
     // Judged here on the full tick (and on every release
@@ -1068,7 +1066,7 @@ async function runFullTick() {
     st0.checkin.lastOnlineAt = now.toISOString();
     mergeNodeStamps(st0);
     store.saveState(DATA_DIR, st0);
-  } catch (e) { console.error('offline-hold / lastOnlineAt update failed:', e); }
+  } catch (e) { console.error('grace / lastOnlineAt update failed:', e); }
   // A receiver check-in lands in the clock before the release is
   // evaluated, so a check-in that arrived between ticks is honoured
   // even if nobody opened the app.

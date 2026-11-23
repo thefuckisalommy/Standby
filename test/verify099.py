@@ -7,7 +7,7 @@ Boots the branch-0.8.5 app (port 3438), the check-in receiver
 (both fixed: tip height 900000, economy fee 1 sat/vB, price 98200)
 — and checks the 0.8.1 trigger work:
 
-  1. health reports version 0.8.7.4.
+  1. health reports version 0.8.8.
   2. Block-height trigger: validation at add (bad heights rejected,
      good ones accepted), checkTriggerNow (a height already reached
      fires + warns, a future height watches), evaluation via the
@@ -31,9 +31,26 @@ Boots the branch-0.8.5 app (port 3438), the check-in receiver
   5. The already-satisfied guard at add/edit: a rule whose condition
      is already met is blocked unless triggerConfirmed is set — for
      all three new types, mirroring price/UTXO.
-  6. Grace does NOT hold the new types: an active grace period pauses
-     price/UTXO only — a set-date (and block-height / fee-market) tx
-     still fires during it.
+  6. Grace holds the new types too (0.8.8): an active grace period pauses
+     block-height, set-date, and fee-market txs like price/UTXO —
+     they are held, then fire once the grace is resumed. A
+     check-in tx is held by the same grace (0.8.8 unification):
+     held while the grace is active, then evaluates normally
+     once it is resumed.
+  6b. Grace on/off toggle (0.8.8): graceEnabled false means no grace
+      at all — an offline gap past the threshold sets none, and due
+      triggers fire normally. A stored duration of 0 still means
+      off (back-compat), and old state with duration 0 and no flag
+      loads as graceEnabled false; turning the toggle back on
+      restores the grace. 2 is not an offered duration (400), and
+      a non-boolean graceEnabled is a 400.
+  6c. Grace unification (0.8.8): a past-due check-in rule is held
+      by the grace (no separate offline-gap hold — heldUntil is
+      gone: a stored heldUntil loads dropped, and a backup
+      carrying one restores without a 400); once the grace
+      expires or is resumed the check-in rule evaluates and
+      fires; with the toggle off a past-due check-in fires on
+      schedule, with no grace at all.
   7. Vacation does NOT freeze the new types: vacation is check-in-only
      — a set-date tx still fires while vacation mode is on.
   8. Existing triggers still work (smoke): check-in, price, UTXO,
@@ -61,7 +78,7 @@ Boots the branch-0.8.5 app (port 3438), the check-in receiver
   17. Multi-trigger rule sets (0.8.2): OR fires on any rule; AND
       fires only when every rule holds on the same tick (no
       per-rule latching); an unknown rule blocks AND and is
-      ignored by OR; grace holds only the price/UTXO rule in a
+      ignored by OR; grace holds every non-check-in rule in a
       set; an already-satisfied set blocks the add with the
       combined semantics; a stored single trigger migrates to a
       one-rule OR set with per-rule state; per-rule triggerState
@@ -168,7 +185,6 @@ Boots the branch-0.8.5 app (port 3438), the check-in receiver
      nothing, and an already-stale tx is never re-checked
      (the stub outspend counters prove zero requests on a
      second hourly tick with no live staged txs left).
-
 Ports: app 3438, receiver 3439, stubs 18235/18236 — no collision
 with the 095 suite (app 3388, receiver 3389, stubs 18175/18176) or
 the 096 suite (app 3398, receiver 3399, stubs 18185/18186).
@@ -342,7 +358,7 @@ def main():
         shutil.rmtree(d, ignore_errors=True)
     app = None
 
-    def restart():
+    def restart(before_start=None):
         """Stop + start the app, wait up, then poll until the
         startup tick has fired (Optimization O2): the startup
         hourly tick stamps bitcoin.connection.nodeCheckedAt.primary
@@ -353,7 +369,10 @@ def main():
         full tick (fired at the same ~0.5 s) has finished before
         any post-restart read. Deadline 4 s, then proceed anyway
         (the old behavior as fallback). Call BEFORE seeding any
-        firing state."""
+        firing state. `before_start`, when given, runs after the
+        old app stops and before the new one starts — for seeding
+        state that must be on disk before boot (a backdated clock,
+        an active grace)."""
         nonlocal app
         # The pre-restart node-check stamp: the poll waits for a
         # stamp NEWER than this, so a stale stamp can never
@@ -367,6 +386,8 @@ def main():
             pass
         if app is not None:
             stop(app)
+        if before_start is not None:
+            before_start()
         app = start(['node', 'server.js'], env=APP_ENV, cwd=APP, log=LOG)
         ok = wait_up(BASE)
         if ok:
@@ -455,7 +476,7 @@ def main():
 
         # --- 1. health + version ----------------------------------------
         s, h = req('GET', '/api/health')
-        check('1 health reports version 0.8.7.4', h.get('version') == '0.8.7.4', h)
+        check('1 health reports version 0.8.8', h.get('version') == '0.8.8', h)
 
         # --- 2. block-height trigger --------------------------------------
         # Validation at add: bad heights rejected, good ones accepted.
@@ -855,10 +876,19 @@ def main():
         check('5 full tick: cadence restored to 60 s', s == 200, (s, r))
         delete_all_txs()
 
-        # --- 6. grace does NOT hold the new types -------------------------
+        # --- 6. grace holds the new types too (0.8.8) --------------------
         # Put the app into an active grace (offline 10 days, duration
-        # 7 days): price/UTXO would be held, but a set-date tx must
-        # still fire on the manual release check.
+        # 7 days): block-height, set-date, and fee-market txs that
+        # are already satisfied must be HELD by the grace, like
+        # price/UTXO — then fire once the grace is resumed. A
+        # check-in tx is held by the same grace (0.8.8
+        # unification): held while the grace is active, then it
+        # evaluates normally once resumed — its clock is fresh
+        # here, so it stays on-track instead of broadcasting.
+        # The check-in first makes the clock fresh, so adding the
+        # check-in tx does not restart it (danger-zone reset).
+        s, r = req('POST', '/api/checkin', {'method': 'app'})
+        check('6 grace: check-in lands so the clock is fresh for the add', s == 200 and r.get('ok') is True, r)
         stj = load_state_file()
         stj['checkin']['lastOnlineAt'] = iso_ago(days=10)
         stj['grace'] = {'offlineDays': 10, 'startedAt': iso_ago(hours=1), 'durationDays': 7, 'resumedAt': None}
@@ -866,15 +896,620 @@ def main():
         check('6 grace: app restarted with an active grace', restart())
         s, st = req('GET', '/api/state')
         check('6 grace: the grace is active', st.get('grace', {}).get('active') is True, st.get('grace'))
-        s, r = add_tx('G setdate', {'type': 'setdate', 'params': {'fireAt': iso_ago(hours=1)}}, 110700, trigger_confirmed=True)
+        s, r = add_tx('G blockheight', {'type': 'blockheight', 'params': {'targetHeight': STUB_TIP - 1000}}, 110700, trigger_confirmed=True)
+        g_bh = r['tx']['id'] if s == 201 else None
+        s, r = add_tx('G setdate', {'type': 'setdate', 'params': {'fireAt': iso_ago(hours=1)}}, 110702, trigger_confirmed=True)
         g_sd = r['tx']['id'] if s == 201 else None
+        s, r = add_tx('G feemarket', {'type': 'feemarket', 'params': {'maxFeeRate': 5}}, 110704, trigger_confirmed=True)
+        g_fm = r['tx']['id'] if s == 201 else None
+        s, r = add_tx('G checkin', {'type': 'checkin', 'params': {'thresholdDays': 35}}, 110706)
+        g_ck = r['tx']['id'] if s == 201 else None
+        check('6 grace: four txs added (block-height, set-date, fee-market, check-in)', g_bh and g_sd and g_fm and g_ck, (g_bh, g_sd, g_fm, g_ck))
         s, r, res = release_results()
-        check('6 grace: set-date tx still broadcasts during an active grace',
-              s == 200 and res.get(g_sd, {}).get('action') == 'broadcast', res.get(g_sd))
-        # Clear the grace for the remaining sections.
+        for gid, name in ((g_bh, 'block-height'), (g_sd, 'set-date'), (g_fm, 'fee-market'), (g_ck, 'check-in')):
+            check('6 grace: %s tx is held during the grace (skipped, status grace)' % name,
+                  s == 200 and res.get(gid, {}).get('action') == 'skipped' and res.get(gid, {}).get('triggerStatus') == 'grace', res.get(gid))
+        # Resume: the three satisfied txs fire on the next release
+        # check; the check-in tx stays staged (its clock is fresh,
+        # so it evaluates on-track, not due).
         s, r = req('POST', '/api/grace/resume', {})
         check('6 grace: resumed', s == 200, (s, r))
+        s, r, res = release_results()
+        for gid, name in ((g_bh, 'block-height'), (g_sd, 'set-date'), (g_fm, 'fee-market')):
+            check('6 grace: %s tx broadcasts once the grace is resumed' % name,
+                  s == 200 and res.get(gid, {}).get('action') == 'broadcast', res.get(gid))
+        check('6 grace: the check-in tx stays staged after resume (clock fresh, on-track)',
+              s == 200 and res.get(g_ck, {}).get('action') == 'skipped' and res.get(g_ck, {}).get('triggerStatus') == 'on-track', res.get(g_ck))
         delete_all_txs()
+
+        # --- 6b. grace on/off toggle (0.8.8) ---------------------------
+        # The toggle is the off switch: graceEnabled false means no
+        # grace period at all — an offline gap past the threshold
+        # sets no grace, and due triggers fire normally. A stored
+        # duration of 0 still means off (back-compat with the old
+        # dropdown), and old state with duration 0 and no flag loads
+        # as graceEnabled false. 2 is not an offered duration (400),
+        # and a non-boolean graceEnabled is a 400.
+        s, r = req('PUT', '/api/settings', {'graceDurationDays': 2})
+        check('6b grace off: duration 2 rejected (400)', s == 400, (s, r))
+        s, r = req('PUT', '/api/settings', {'graceDurationDays': 0})
+        check('6b grace off: duration 0 saved', s == 200, (s, r))
+        stj = load_state_file()
+        stj['checkin']['lastOnlineAt'] = iso_ago(days=10)
+        save_state_file(stj)
+        check('6b grace off: app restarted after a 10-day gap', restart())
+        s, st = req('GET', '/api/state')
+        check('6b grace off: no grace is set despite the gap (duration 0)', st.get('grace') is None, st.get('grace'))
+        s, r = add_tx('G0 setdate', {'type': 'setdate', 'params': {'fireAt': iso_ago(hours=1)}}, 110706, trigger_confirmed=True)
+        g0_sd = r['tx']['id'] if s == 201 else None
+        s, r, res = release_results()
+        check('6b grace off: set-date tx broadcasts with the grace disabled',
+              s == 200 and res.get(g0_sd, {}).get('action') == 'broadcast', res.get(g0_sd))
+        delete_all_txs()
+        # The toggle itself: a non-boolean is a 400; false means no
+        # grace even with a normal duration, and due txs fire.
+        s, r = req('PUT', '/api/settings', {'graceEnabled': 'yes'})
+        check('6b grace toggle: non-boolean graceEnabled rejected (400)', s == 400, (s, r))
+        s, r = req('PUT', '/api/settings', {'graceEnabled': False})
+        check('6b grace toggle: graceEnabled false saved', s == 200, (s, r))
+        stj = load_state_file()
+        stj['checkin']['lastOnlineAt'] = iso_ago(days=10)
+        save_state_file(stj)
+        check('6b grace toggle: app restarted after a 10-day gap', restart())
+        s, st = req('GET', '/api/state')
+        check('6b grace toggle: no grace is set despite the gap (toggle off)', st.get('grace') is None, st.get('grace'))
+        s, r = add_tx('G1 setdate', {'type': 'setdate', 'params': {'fireAt': iso_ago(hours=1)}}, 110708, trigger_confirmed=True)
+        g1_sd = r['tx']['id'] if s == 201 else None
+        s, r, res = release_results()
+        check('6b grace toggle: set-date tx broadcasts with the toggle off',
+              s == 200 and res.get(g1_sd, {}).get('action') == 'broadcast', res.get(g1_sd))
+        delete_all_txs()
+        # Migration: old state with duration 0 and no graceEnabled
+        # flag loads as grace off, not on.
+        stj = load_state_file()
+        stj['settings'].pop('graceEnabled', None)
+        stj['settings']['graceDurationDays'] = 0
+        save_state_file(stj)
+        check('6b grace toggle: app restarted with pre-toggle state', restart())
+        s, st = req('GET', '/api/state')
+        check('6b grace toggle: pre-toggle duration 0 loads as graceEnabled false',
+              st.get('settings', {}).get('graceEnabled') is False, st.get('settings'))
+        # Turning the toggle back on restores the grace: a 10-day
+        # gap sets one again. Restore the defaults for the
+        # remaining sections — grace on, duration 7.
+        s, r = req('PUT', '/api/settings', {'graceDurationDays': 7, 'graceEnabled': True})
+        check('6b grace toggle: duration 7 + toggle on saved', s == 200, (s, r))
+        stj = load_state_file()
+        stj['checkin']['lastOnlineAt'] = iso_ago(days=10)
+        save_state_file(stj)
+        check('6b grace toggle: app restarted after a 10-day gap', restart())
+        s, st = req('GET', '/api/state')
+        check('6b grace toggle: grace is set again with the toggle on', st.get('grace', {}).get('active') is True, st.get('grace'))
+        # Resume to clear it for the remaining sections (resume also
+        # refreshes lastOnlineAt, so no grace re-sets on the next read).
+        s, r = req('POST', '/api/grace/resume', {})
+        check('6b grace toggle: resumed to clear the grace', s == 200, (s, r))
+        s, st = req('GET', '/api/state')
+        check('6b grace toggle: grace cleared after resume', st.get('grace') is None, st.get('grace'))
+        delete_all_txs()
+
+        # --- 6c. grace unification: the check-in hold IS the grace (0.8.8) ---
+        # No separate offline-gap hold any more (heldUntil is gone):
+        # a past-due check-in rule is held by the grace like any
+        # other rule — skipped with status grace, nothing
+        # broadcasts — and fires once the grace is resumed or
+        # expires. With the toggle off there is no grace at all
+        # and a past-due check-in fires on schedule. A stored
+        # heldUntil loads dropped, and a backup carrying one
+        # (even a garbage one) restores without a 400.
+        # Past due + grace active: held, nothing broadcasts.
+        s, r = req('POST', '/api/checkin', {'method': 'app'})
+        check('6c unify: check-in lands so the clock is fresh for the add', s == 200 and r.get('ok') is True, r)
+        s, r = add_tx('U checkin', {'type': 'checkin', 'params': {'thresholdDays': 35}}, 110710)
+        u_ck = r['tx']['id'] if s == 201 else None
+        check('6c unify: the past-due check-in tx adds', s == 201, (s, r))
+        stj = load_state_file()
+        stj['checkin']['lastOnlineAt'] = iso_ago(days=10)
+        stj['checkin']['lastCheckinAt'] = iso_ago(days=40)
+        save_state_file(stj)
+        check('6c unify: app restarted with a 10-day gap and a 40-day-old clock', restart())
+        s, st = req('GET', '/api/state')
+        check('6c unify: the grace is active', st.get('grace', {}).get('active') is True, st.get('grace'))
+        check('6c unify: no heldUntil anywhere in the served check-in state',
+              'heldUntil' not in st.get('checkin', {}), st.get('checkin'))
+        s, r, res = release_results()
+        check('6c unify: the past-due check-in tx is held during the grace (skipped, status grace)',
+              s == 200 and res.get(u_ck, {}).get('action') == 'skipped' and res.get(u_ck, {}).get('triggerStatus') == 'grace', res.get(u_ck))
+        check('6c unify: nothing broadcasted during the grace',
+              (state_tx(u_ck) or {}).get('broadcasted') is None, (state_tx(u_ck) or {}).get('broadcasted'))
+        # Resume: the past-due check-in fires on the next check.
+        s, r = req('POST', '/api/grace/resume', {})
+        check('6c unify: resumed', s == 200, (s, r))
+        s, r, res = release_results()
+        check('6c unify: the past-due check-in tx broadcasts once the grace is resumed',
+              s == 200 and res.get(u_ck, {}).get('action') == 'broadcast', res.get(u_ck))
+        delete_all_txs()
+        # Expiry: a seeded expired grace reads as no grace, and a
+        # past-due check-in fires on the startup tick.
+        s, r = req('POST', '/api/checkin', {'method': 'app'})
+        check('6c unify: check-in lands so the clock is fresh for the expired-grace add', s == 200 and r.get('ok') is True, r)
+        s, r = add_tx('U checkin expired', {'type': 'checkin', 'params': {'thresholdDays': 35}}, 110712)
+        ux_ck = r['tx']['id'] if s == 201 else None
+        check('6c unify: the expired-grace check-in tx adds', s == 201, (s, r))
+        stj = load_state_file()
+        stj['grace'] = {'graceUntil': iso_ago(hours=1), 'triggeredAt': iso_ago(days=8), 'offlineGapDays': 8}
+        stj['checkin']['lastOnlineAt'] = iso_ago()
+        stj['checkin']['lastCheckinAt'] = iso_ago(days=40)
+        save_state_file(stj)
+        check('6c unify: app restarted with an expired grace and a 40-day-old clock', restart())
+        s, st = req('GET', '/api/state')
+        check('6c unify: an expired grace reads as no grace (grace null)',
+              st.get('grace') is None, st.get('grace'))
+        check('6c unify: the startup tick fired the past-due check-in tx after expiry',
+              ((state_tx(ux_ck) or {}).get('release') or {}).get('status') == 'broadcast', (state_tx(ux_ck) or {}).get('release'))
+        delete_all_txs()
+        # Toggle off: no grace at all — a past-due check-in fires
+        # on schedule (the startup tick broadcasts it).
+        s, r = req('PUT', '/api/settings', {'graceEnabled': False})
+        check('6c unify: toggle off saved', s == 200, (s, r))
+        s, r = req('POST', '/api/checkin', {'method': 'app'})
+        check('6c unify: check-in lands so the clock is fresh for the toggle-off add', s == 200 and r.get('ok') is True, r)
+        s, r = add_tx('U checkin off', {'type': 'checkin', 'params': {'thresholdDays': 35}}, 110714)
+        uo_ck = r['tx']['id'] if s == 201 else None
+        check('6c unify: the toggle-off check-in tx adds', s == 201, (s, r))
+        stj = load_state_file()
+        stj['checkin']['lastOnlineAt'] = iso_ago(days=10)
+        stj['checkin']['lastCheckinAt'] = iso_ago(days=40)
+        save_state_file(stj)
+        check('6c unify: app restarted with the toggle off, a 10-day gap, a 40-day-old clock', restart())
+        s, st = req('GET', '/api/state')
+        check('6c unify: no grace is set with the toggle off', st.get('grace') is None, st.get('grace'))
+        check('6c unify: the startup tick fired the past-due check-in tx with the toggle off',
+              ((state_tx(uo_ck) or {}).get('release') or {}).get('status') == 'broadcast', (state_tx(uo_ck) or {}).get('release'))
+        delete_all_txs()
+        s, r = req('PUT', '/api/settings', {'graceEnabled': True})
+        check('6c unify: toggle restored to on', s == 200, (s, r))
+        # Migration: a stored heldUntil loads dropped — the loaded
+        # state carries no heldUntil key at all.
+        stj = load_state_file()
+        stj['checkin']['heldUntil'] = iso_in(days=12)
+        save_state_file(stj)
+        check('6c unify: app restarted with a stored heldUntil', restart())
+        s, st = req('GET', '/api/state')
+        check('6c unify: a stored heldUntil loads dropped (no heldUntil key)',
+              'heldUntil' not in st.get('checkin', {}), st.get('checkin'))
+        # Backup/restore: a backup carrying a heldUntil — even a
+        # garbage one — restores without a 400, and the restored
+        # state carries no heldUntil.
+        s, bak = req('GET', '/api/backup')
+        check('6c unify: backup fetched', s == 200 and 'state' in bak, (s, list(bak.keys()) if isinstance(bak, dict) else bak))
+        bak['state']['checkin']['heldUntil'] = 'not-a-date'
+        s, r = req('POST', '/api/restore', bak)
+        check('6c unify: a backup with a garbage heldUntil restores (200, accept-and-drop)', s == 200, (s, r))
+        s, st = req('GET', '/api/state')
+        check('6c unify: the restored state carries no heldUntil',
+              'heldUntil' not in st.get('checkin', {}), st.get('checkin'))
+        # Restore a fresh clock for the remaining sections.
+        stj = load_state_file()
+        stj['checkin']['lastOnlineAt'] = iso_ago()
+        stj['checkin']['lastCheckinAt'] = iso_ago()
+        save_state_file(stj)
+        check('6c unify: check-in clock restored (restart)', restart())
+
+        # --- 6e. short-threshold check-in outage protection (0.8.8, audit finding 1) ---
+        # The unification (6c) replaced the old heldUntil hold with
+        # the flat 7-day offline grace — but the old hold activated
+        # on the CHECK-IN clock, not the offline threshold: gap >
+        # a quarter of the shortest ARMED check-in threshold AND
+        # more than half that threshold since the last check-in.
+        # A 1-day check-in rule used to earn protection after a
+        # 6-hour outage; the flat threshold alone left it
+        # unprotected (a 30-hour outage is under 7 days, so no
+        # grace, and a past-due 1-day clock would broadcast on
+        # the startup tick). The fix restores the ACTIVATION only:
+        # grace now sets when EITHER the flat threshold OR the
+        # check-in condition holds. The GRANT stays the unified
+        # grace duration (7 days by default) — never the old
+        # heldUntil pushout (now + half the threshold). The
+        # threshold is measured on the EFFECTIVE rules only:
+        # standalone txs plus sets — a set member's parked
+        # trigger cannot set it. And a stored unexpired heldUntil
+        # translates into an active grace on load instead of
+        # being dropped (an expired one is still dropped).
+        # NOTE on the 18h case: the audit's worked example showed
+        # the PRE-fix behaviour (no grace, due in 6h). After this
+        # fix the 18h case DOES activate the grace — 18h is over
+        # both a quarter (6h) and a half (12h) of a 1-day
+        # threshold, so the old code granted a hold there too.
+        # The true no-grace pin is the 5h case below.
+        def state_set_e(set_id):
+            s2, st2 = req('GET', '/api/state')
+            for x in st2.get('bitcoin', {}).get('sets', []):
+                if x.get('id') == set_id:
+                    return x
+            return None
+        def delete_all_sets_e():
+            s2, st2 = req('GET', '/api/state')
+            for x in st2.get('bitcoin', {}).get('sets', []):
+                req('DELETE', '/api/bitcoin/sets/' + x['id'], base=BASE)
+        # Leg 1 — 30h gap, 1-day threshold: the flat leg cannot
+        # fire (30h < 7d), so an active grace proves the
+        # check-in leg. Past due (30h > 24h), held, nothing
+        # broadcasts — and the grant is 7 days, not 12h.
+        s, r = req('POST', '/api/checkin', {'method': 'app'})
+        check('6e short: check-in lands so the clock is fresh for the add', s == 200 and r.get('ok') is True, r)
+        s, r = add_tx('E checkin 1d', {'type': 'checkin', 'params': {'thresholdDays': 1}}, 111200)
+        e1 = r['tx']['id'] if s == 201 else None
+        check('6e short: the 1-day check-in tx adds', s == 201, (s, r))
+        def seed_e1():
+            stj = load_state_file()
+            stj['checkin']['lastOnlineAt'] = iso_ago(hours=30)
+            stj['checkin']['lastCheckinAt'] = iso_ago(hours=30)
+            save_state_file(stj)
+        check('6e short: app restarted with a 30h gap and a 30h-old clock (1-day threshold)', restart(before_start=seed_e1))
+        s, st = req('GET', '/api/state')
+        check('6e short: the grace is active (check-in leg — the 30h gap is under the 7-day flat threshold)',
+              st.get('grace', {}).get('active') is True, st.get('grace'))
+        check('6e short: the offline gap reads 1 day (floor of 30h)',
+              st.get('grace', {}).get('offlineGapDays') == 1, st.get('grace'))
+        gu1 = st.get('grace', {}).get('graceUntil')
+        check('6e short: the grace lasts the configured 7 days, not the old 12h pushout',
+              gu1 is not None and (datetime.fromisoformat(gu1.replace('Z', '+00:00')) - datetime.now(timezone.utc)).total_seconds() > 6 * 86400,
+              gu1)
+        s, r, res = release_results()
+        check('6e short: the past-due 1-day check-in tx is held during the grace (skipped, status grace)',
+              s == 200 and res.get(e1, {}).get('action') == 'skipped' and res.get(e1, {}).get('triggerStatus') == 'grace', res.get(e1))
+        check('6e short: nothing broadcasted during the grace',
+              (state_tx(e1) or {}).get('broadcasted') is None, (state_tx(e1) or {}).get('broadcasted'))
+        delete_all_txs()
+        s, r = req('POST', '/api/grace/resume', {})
+        check('6e short: resumed', s == 200, (s, r))
+        # Leg 2 — 18h gap, 1-day threshold (the audit's corrected
+        # example, AFTER the fix): 18h clears both old bars
+        # (6h and 12h), so the grace activates and holds the
+        # not-yet-due tx (due in 6h) instead of leaving it to
+        # fire on schedule.
+        s, r = req('POST', '/api/checkin', {'method': 'app'})
+        check('6e 18h: check-in lands so the clock is fresh for the add', s == 200 and r.get('ok') is True, r)
+        s, r = add_tx('E checkin 1d 18h', {'type': 'checkin', 'params': {'thresholdDays': 1}}, 111202)
+        e2 = r['tx']['id'] if s == 201 else None
+        check('6e 18h: the 1-day check-in tx adds', s == 201, (s, r))
+        def seed_e2():
+            stj = load_state_file()
+            stj['checkin']['lastOnlineAt'] = iso_ago(hours=18)
+            stj['checkin']['lastCheckinAt'] = iso_ago(hours=18)
+            save_state_file(stj)
+        check('6e 18h: app restarted with an 18h gap and an 18h-old clock (1-day threshold)', restart(before_start=seed_e2))
+        s, st = req('GET', '/api/state')
+        check('6e 18h: the grace IS active (18h > 6h and > 12h — the old condition holds)',
+              st.get('grace', {}).get('active') is True, st.get('grace'))
+        s, r, res = release_results()
+        check('6e 18h: the not-yet-due 1-day check-in tx is held during the grace (skipped, status grace)',
+              s == 200 and res.get(e2, {}).get('action') == 'skipped' and res.get(e2, {}).get('triggerStatus') == 'grace', res.get(e2))
+        check('6e 18h: nothing broadcasted during the grace',
+              (state_tx(e2) or {}).get('broadcasted') is None, (state_tx(e2) or {}).get('broadcasted'))
+        delete_all_txs()
+        s, r = req('POST', '/api/grace/resume', {})
+        check('6e 18h: resumed', s == 200, (s, r))
+        # Leg 3 — 5h gap, 1-day threshold: the true no-grace pin.
+        # 5h is under a quarter of the threshold (6h) and under
+        # the flat 7 days, so no grace sets and the tx (due in
+        # 19h) stays staged.
+        s, r = req('POST', '/api/checkin', {'method': 'app'})
+        check('6e 5h: check-in lands so the clock is fresh for the add', s == 200 and r.get('ok') is True, r)
+        s, r = add_tx('E checkin 1d 5h', {'type': 'checkin', 'params': {'thresholdDays': 1}}, 111204)
+        e3 = r['tx']['id'] if s == 201 else None
+        check('6e 5h: the 1-day check-in tx adds', s == 201, (s, r))
+        def seed_e3():
+            stj = load_state_file()
+            stj['checkin']['lastOnlineAt'] = iso_ago(hours=5)
+            stj['checkin']['lastCheckinAt'] = iso_ago(hours=5)
+            save_state_file(stj)
+        check('6e 5h: app restarted with a 5h gap and a 5h-old clock (1-day threshold)', restart(before_start=seed_e3))
+        s, st = req('GET', '/api/state')
+        check('6e 5h: NO grace — 5h is under a quarter of the 1-day threshold (6h)',
+              st.get('grace') is None, st.get('grace'))
+        check('6e 5h: the 1-day check-in tx is still staged (not due for 19h, nothing broadcast)',
+              (state_tx(e3) or {}).get('release') is None and (state_tx(e3) or {}).get('broadcasted') is None,
+              (state_tx(e3) or {}))
+        delete_all_txs()
+        # Leg 4 — the threshold is the EFFECTIVE rules only: a
+        # member with a parked 1-day check-in trigger, in a set
+        # whose own trigger is 2 days. T is 2 days, not 1: a 7h
+        # gap with a 13h-old clock sets no grace (7h < 12h =
+        # T/4); a parked trigger setting T would have activated
+        # it (7h > 6h, 13h > 12h). At 30h/30h the grace sets
+        # (30h > 12h and > 24h) and the set is held.
+        s, r = req('POST', '/api/checkin', {'method': 'app'})
+        check('6e set: check-in lands so the clock is fresh for the adds', s == 200 and r.get('ok') is True, r)
+        s, r = add_tx('E set member 1d', {'type': 'checkin', 'params': {'thresholdDays': 1}}, 111206)
+        m4 = r['tx']['id'] if s == 201 else None
+        check('6e set: the member tx adds with its own 1-day check-in trigger', s == 201, (s, r))
+        s, r = req('POST', '/api/bitcoin/sets', {'label': 'E set 2d', 'txIds': [m4],
+              'trigger': {'type': 'checkin', 'params': {'thresholdDays': 2}}})
+        set4 = r.get('set', {}).get('id') if s == 201 else None
+        check('6e set: the set creates with a 2-day check-in trigger', s == 201, (s, r))
+        def seed_e4a():
+            stj = load_state_file()
+            stj['checkin']['lastOnlineAt'] = iso_ago(hours=7)
+            stj['checkin']['lastCheckinAt'] = iso_ago(hours=13)
+            save_state_file(stj)
+        check('6e set: app restarted with a 7h gap and a 13h-old clock (set threshold 2d)', restart(before_start=seed_e4a))
+        s, st = req('GET', '/api/state')
+        check('6e set: NO grace — T is the set\'s 2 days, not the parked 1 day (7h < 12h = T/4)',
+              st.get('grace') is None, st.get('grace'))
+        x4a = state_set_e(set4)
+        check('6e set: the set reads on-track (13h of 48h), not grace',
+              (x4a or {}).get('triggerStatus', {}).get('status') == 'on-track', (x4a or {}).get('triggerStatus'))
+        check('6e set: the member tx is still staged (nothing broadcast)',
+              (state_tx(m4) or {}).get('release') is None and (state_tx(m4) or {}).get('broadcasted') is None,
+              (state_tx(m4) or {}))
+        def seed_e4b():
+            stj = load_state_file()
+            stj['checkin']['lastOnlineAt'] = iso_ago(hours=30)
+            stj['checkin']['lastCheckinAt'] = iso_ago(hours=30)
+            save_state_file(stj)
+        check('6e set: app restarted with a 30h gap and a 30h-old clock (set threshold 2d)', restart(before_start=seed_e4b))
+        s, st = req('GET', '/api/state')
+        check('6e set: the grace IS active (30h > 12h = T/4 and > 24h = T/2)',
+              st.get('grace', {}).get('active') is True, st.get('grace'))
+        s, r, res = release_results()
+        check('6e set: the set is held during the grace (skipped, status grace)',
+              s == 200 and res.get(set4, {}).get('action') == 'skipped' and res.get(set4, {}).get('triggerStatus') == 'grace', res.get(set4))
+        check('6e set: the member tx is still staged (nothing broadcast)',
+              (state_tx(m4) or {}).get('release') is None and (state_tx(m4) or {}).get('broadcasted') is None,
+              (state_tx(m4) or {}))
+        s, r = req('DELETE', '/api/bitcoin/sets/' + set4)
+        check('6e set: the set deletes', s == 200, (s, r))
+        delete_all_txs()
+        s, r = req('POST', '/api/grace/resume', {})
+        check('6e set: resumed', s == 200, (s, r))
+        # Leg 5 — migration: a stored UNEXPIRED heldUntil
+        # translates into an active grace ending at the heldUntil,
+        # instead of being dropped. The clock is 40 days stale
+        # with a FRESH lastOnlineAt, so no new grace could set —
+        # the active grace below can only be the translation.
+        # The past-due tx is held, nothing broadcasts.
+        s, r = req('POST', '/api/checkin', {'method': 'app'})
+        check('6e mig: check-in lands so the clock is fresh for the add', s == 200 and r.get('ok') is True, r)
+        s, r = add_tx('E mig checkin', {'type': 'checkin', 'params': {'thresholdDays': 35}}, 111208)
+        e5 = r['tx']['id'] if s == 201 else None
+        check('6e mig: the 35-day check-in tx adds', s == 201, (s, r))
+        held_e5 = iso_in(hours=12)
+        def seed_e5():
+            stj = load_state_file()
+            stj['checkin']['lastOnlineAt'] = iso_ago()
+            stj['checkin']['lastCheckinAt'] = iso_ago(days=40)
+            stj['checkin']['heldUntil'] = held_e5
+            save_state_file(stj)
+        check('6e mig: app restarted with an unexpired heldUntil (+12h) and a 40-day-old clock', restart(before_start=seed_e5))
+        s, st = req('GET', '/api/state')
+        check('6e mig: a stored heldUntil still loads dropped (no heldUntil key)',
+              'heldUntil' not in st.get('checkin', {}), st.get('checkin'))
+        gu5 = st.get('grace', {}).get('graceUntil')
+        check('6e mig: the unexpired hold translated into an active grace ending at the heldUntil',
+              st.get('grace', {}).get('active') is True and gu5 is not None
+              and abs((datetime.fromisoformat(gu5.replace('Z', '+00:00')) - datetime.fromisoformat(held_e5.replace('Z', '+00:00'))).total_seconds()) < 1,
+              st.get('grace'))
+        s, r, res = release_results()
+        check('6e mig: the past-due check-in tx is held by the translated grace (skipped, status grace)',
+              s == 200 and res.get(e5, {}).get('action') == 'skipped' and res.get(e5, {}).get('triggerStatus') == 'grace', res.get(e5))
+        check('6e mig: nothing broadcasted during the translated grace',
+              (state_tx(e5) or {}).get('broadcasted') is None, (state_tx(e5) or {}).get('broadcasted'))
+        delete_all_txs()
+        s, r = req('POST', '/api/grace/resume', {})
+        check('6e mig: resumed', s == 200, (s, r))
+        # Leg 6 — migration: an EXPIRED heldUntil is still
+        # dropped, and the past-due tx broadcasts on the startup
+        # tick as before (no grace: the gap is fresh, the hold
+        # is spent).
+        s, r = req('POST', '/api/checkin', {'method': 'app'})
+        check('6e mig-exp: check-in lands so the clock is fresh for the add', s == 200 and r.get('ok') is True, r)
+        s, r = add_tx('E mig-exp checkin', {'type': 'checkin', 'params': {'thresholdDays': 35}}, 111210)
+        e6 = r['tx']['id'] if s == 201 else None
+        check('6e mig-exp: the 35-day check-in tx adds', s == 201, (s, r))
+        def seed_e6():
+            stj = load_state_file()
+            stj['checkin']['lastOnlineAt'] = iso_ago()
+            stj['checkin']['lastCheckinAt'] = iso_ago(days=40)
+            stj['checkin']['heldUntil'] = iso_ago(hours=1)
+            save_state_file(stj)
+        check('6e mig-exp: app restarted with an expired heldUntil and a 40-day-old clock', restart(before_start=seed_e6))
+        s, st = req('GET', '/api/state')
+        check('6e mig-exp: no grace (the expired hold is dropped, the gap is fresh)',
+              st.get('grace') is None, st.get('grace'))
+        check('6e mig-exp: the startup tick fired the past-due check-in tx after the expired hold was dropped',
+              ((state_tx(e6) or {}).get('release') or {}).get('status') == 'broadcast', (state_tx(e6) or {}).get('release'))
+        delete_all_txs()
+        delete_all_sets_e()
+        # Restore a fresh clock for the remaining sections.
+        stj = load_state_file()
+        stj['checkin']['lastOnlineAt'] = iso_ago()
+        stj['checkin']['lastCheckinAt'] = iso_ago()
+        save_state_file(stj)
+        check('6e short: check-in clock restored (restart)', restart())
+
+        # --- 6d. both-numbers grace card: wouldFire (0.8.8) ---
+        # The grace card's second number — how many of the held
+        # transactions would fire the moment the grace lifts — is
+        # served per tx/set as triggerStatus.wouldFire: the raw
+        # condition of each rule, judged on the best data
+        # available WITHOUT any new network calls (the grace
+        # suspends rule evaluation, and the card must not defeat
+        # that). Per rule: check-in and set-date read the live
+        # clock (exact); price and fee-market read the live caches
+        # when warm, else the stored last evaluation; block-height
+        # reads the tip cache when warm, else the stored slice;
+        # UTXO reads the stored slice ONLY (its checks ARE the
+        # rule evaluation, so they go stale during a grace);
+        # manual never fires; unknown / not-evaluated never fire.
+        # Combined by the set's op (OR: any met; AND: all met).
+        # The stub price is pinned to 98200 and the fee to 1
+        # sat/vB (earlier sections leave other values behind).
+        delete_all_txs()
+        check('6d wouldFire: caches cleared cold for a deterministic start', clear_caches())
+        s, r = req('POST', '/__test__/price', {'usd': 98200}, base=STUB_BASE_P)
+        check('6d wouldFire: stub price pinned to 98200', s == 200, (s, r))
+        s, r = req('POST', '/__test__/fees', {'economyFee': 1}, base=STUB_BASE_P)
+        check('6d wouldFire: stub fee pinned to 1 sat/vB', s == 200, (s, r))
+        s, r = req('POST', '/__test__/outspend', {'txid': SECOND, 'vout': 0, 'blockHeight': 899999}, base=STUB_BASE_P)
+        check('6d wouldFire: SECOND:0 driven to spent (2 confs)', s == 200, (s, r))
+        # The spent UTXO tx first, alone and disarmed: a real
+        # evaluation writes its slice 'due' without broadcasting
+        # (disarmed txs are evaluated for display but never enter
+        # the firing set). It stays disarmed — a real 'due' UTXO
+        # tx would broadcast before any grace could hold it, which
+        # is exactly why the number reads the last evaluation.
+        s, r = add_tx('WF UTXO spent', {'type': 'utxo', 'params': {'outpoint': SECOND + ':0'}}, 111000, trigger_confirmed=True)
+        check('6d wouldFire: the spent UTXO tx adds (triggerConfirmed)', s == 201, (s, r))
+        wf_utxo_spent = r['tx']['id'] if s == 201 else None
+        s, r = req('PUT', '/api/bitcoin/txs/' + wf_utxo_spent, {'enabled': False})
+        check('6d wouldFire: the spent UTXO tx is disarmed', s == 200, (s, r))
+        s, r, res = release_results()
+        check('6d wouldFire: the disarmed spent UTXO tx is skipped, not broadcast',
+              res.get(wf_utxo_spent, {}).get('action') == 'skipped', res.get(wf_utxo_spent))
+        check('6d wouldFire: the evaluation wrote its slice due',
+              rule_slice(state_tx(wf_utxo_spent)).get('status') == 'due', rule_slice(state_tx(wf_utxo_spent)))
+        # The rest, added with a fresh clock and no grace yet.
+        s, r = add_tx('WF check-in due', {'type': 'checkin', 'params': {'thresholdDays': 35}}, 111001)
+        check('6d wouldFire: the check-in tx adds', s == 201, (s, r))
+        wf_ck = r['tx']['id'] if s == 201 else None
+        s, r = add_tx('WF price holding', {'type': 'price', 'params': {'asset': 'BTC', 'op': '>=', 'value': 90000}}, 111002, trigger_confirmed=True)
+        check('6d wouldFire: the holding price tx adds (triggerConfirmed)', s == 201, (s, r))
+        wf_price = r['tx']['id'] if s == 201 else None
+        s, r = add_tx('WF price not holding', {'type': 'price', 'params': {'asset': 'BTC', 'op': '>=', 'value': 200000}}, 111003)
+        check('6d wouldFire: the not-holding price tx adds', s == 201, (s, r))
+        wf_price_no = r['tx']['id'] if s == 201 else None
+        s, r = add_tx('WF setdate past', {'type': 'setdate', 'params': {'fireAt': iso_ago(hours=1)}}, 111004, trigger_confirmed=True)
+        check('6d wouldFire: the past set-date tx adds (triggerConfirmed)', s == 201, (s, r))
+        wf_sd = r['tx']['id'] if s == 201 else None
+        s, r = add_tx('WF setdate future', {'type': 'setdate', 'params': {'fireAt': iso_in(days=1)}}, 111005)
+        check('6d wouldFire: the future set-date tx adds', s == 201, (s, r))
+        wf_sd_no = r['tx']['id'] if s == 201 else None
+        s, r = add_tx('WF blockheight reached', {'type': 'blockheight', 'params': {'targetHeight': 899000}}, 111006, trigger_confirmed=True)
+        check('6d wouldFire: the reached block-height tx adds (triggerConfirmed)', s == 201, (s, r))
+        wf_bh = r['tx']['id'] if s == 201 else None
+        s, r = add_tx('WF blockheight not reached', {'type': 'blockheight', 'params': {'targetHeight': 950000}}, 111007)
+        check('6d wouldFire: the unreached block-height tx adds', s == 201, (s, r))
+        wf_bh_no = r['tx']['id'] if s == 201 else None
+        s, r = add_tx('WF UTXO unspent', {'type': 'utxo', 'params': {'outpoint': FINNEY + ':1'}}, 111008)
+        check('6d wouldFire: the unspent UTXO tx adds', s == 201, (s, r))
+        wf_utxo_no = r['tx']['id'] if s == 201 else None
+        s, r = add_tx('WF feemarket met', {'type': 'feemarket', 'params': {'maxFeeRate': 5, 'direction': 'below'}}, 111009, trigger_confirmed=True)
+        check('6d wouldFire: the met fee-market tx adds (triggerConfirmed)', s == 201, (s, r))
+        wf_fm = r['tx']['id'] if s == 201 else None
+        s, r = add_tx('WF feemarket unmet', {'type': 'feemarket', 'params': {'maxFeeRate': 5, 'direction': 'above'}}, 111010)
+        check('6d wouldFire: the unmet fee-market tx adds', s == 201, (s, r))
+        wf_fm_no = r['tx']['id'] if s == 201 else None
+        s, r = add_tx('WF OR', {'op': 'OR', 'rules': [
+            {'type': 'price', 'params': {'asset': 'BTC', 'op': '>=', 'value': 200000}},
+            {'type': 'setdate', 'params': {'fireAt': iso_ago(hours=1)}}]}, 111011, trigger_confirmed=True)
+        check('6d wouldFire: the OR set adds (triggerConfirmed)', s == 201, (s, r))
+        wf_or = r['tx']['id'] if s == 201 else None
+        s, r = add_tx('WF AND unmet', {'op': 'AND', 'rules': [
+            {'type': 'price', 'params': {'asset': 'BTC', 'op': '>=', 'value': 90000}},
+            {'type': 'setdate', 'params': {'fireAt': iso_in(days=1)}}]}, 111012)
+        check('6d wouldFire: the unmet AND set adds', s == 201, (s, r))
+        wf_and_no = r['tx']['id'] if s == 201 else None
+        s, r = add_tx('WF AND met', {'op': 'AND', 'rules': [
+            {'type': 'price', 'params': {'asset': 'BTC', 'op': '>=', 'value': 90000}},
+            {'type': 'setdate', 'params': {'fireAt': iso_ago(hours=1)}}]}, 111013, trigger_confirmed=True)
+        check('6d wouldFire: the met AND set adds (triggerConfirmed)', s == 201, (s, r))
+        wf_and = r['tx']['id'] if s == 201 else None
+        s, r = add_tx('WF manual', {'type': 'manual', 'params': {}}, 111014)
+        check('6d wouldFire: the manual tx adds', s == 201, (s, r))
+        wf_manual = r['tx']['id'] if s == 201 else None
+        # Backdate the clock 40 days (past the 35-day check-in
+        # threshold) and the online stamp 10 days (past the
+        # 7-day grace threshold), then restart: the grace sets
+        # on the startup tick before any held rule evaluates.
+        stj = load_state_file()
+        stj['checkin']['lastOnlineAt'] = iso_ago(days=10)
+        stj['checkin']['lastCheckinAt'] = iso_ago(days=40)
+        save_state_file(stj)
+        check('6d wouldFire: app restarted with a 10-day gap and a 40-day-old clock', restart())
+        s, st = req('GET', '/api/state')
+        check('6d wouldFire: the grace is active', st.get('grace', {}).get('active') is True, st.get('grace'))
+        def wf(tx_id):
+            t = state_tx(tx_id)
+            return (t or {}).get('triggerStatus', {}).get('wouldFire')
+        # Cache-independent reads first: clock rules and stored
+        # slices are exact whether or not a cache is warm.
+        check('6d wouldFire: the past-due check-in tx would fire (live clock)', wf(wf_ck) is True, wf(wf_ck))
+        check('6d wouldFire: the unspent UTXO tx would not fire (never evaluated)', wf(wf_utxo_no) is False, wf(wf_utxo_no))
+        check('6d wouldFire: the spent UTXO tx would fire (stored slice due)', wf(wf_utxo_spent) is True, wf(wf_utxo_spent))
+        check('6d wouldFire: the past set-date tx would fire (live clock)', wf(wf_sd) is True, wf(wf_sd))
+        check('6d wouldFire: the future set-date tx would not fire', wf(wf_sd_no) is False, wf(wf_sd_no))
+        check('6d wouldFire: the not-holding price tx would not fire', wf(wf_price_no) is False, wf(wf_price_no))
+        check('6d wouldFire: the unmet fee-market tx would not fire', wf(wf_fm_no) is False, wf(wf_fm_no))
+        check('6d wouldFire: the unreached block-height tx would not fire', wf(wf_bh_no) is False, wf(wf_bh_no))
+        check('6d wouldFire: the manual tx would never fire', wf(wf_manual) is False, wf(wf_manual))
+        check('6d wouldFire: the unmet AND set would not fire (one rule unmet)', wf(wf_and_no) is False, wf(wf_and_no))
+        # Cold caches, one snapshot: the holding price, the met
+        # fee-market, and the reached block-height txs read false
+        # until their caches warm — the card must not claim a
+        # condition it has no data for. The OR set already reads
+        # true (its set-date rule is clock-exact); the met AND set
+        # reads false (its price rule is unreadable cold).
+        check('6d wouldFire: caches cleared cold', clear_caches())
+        s, st = req('GET', '/api/state')
+        cold = {t.get('id'): (t.get('triggerStatus') or {}).get('wouldFire') for t in st.get('bitcoin', {}).get('txs', [])}
+        check('6d wouldFire: the holding price tx reads false with a cold price cache', cold.get(wf_price) is False, cold.get(wf_price))
+        check('6d wouldFire: the met fee-market tx reads false with a cold fee cache', cold.get(wf_fm) is False, cold.get(wf_fm))
+        check('6d wouldFire: the reached block-height tx reads false with a cold tip cache', cold.get(wf_bh) is False, cold.get(wf_bh))
+        check('6d wouldFire: the OR set reads true cold (its set-date rule is clock-exact)', cold.get(wf_or) is True, cold.get(wf_or))
+        check('6d wouldFire: the met AND set reads false cold (its price rule is unreadable)', cold.get(wf_and) is False, cold.get(wf_and))
+        # Warm each cache explicitly via the stateless trigger
+        # gate (no state change, no evaluation) and re-read.
+        s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'price', 'params': {'asset': 'BTC', 'op': '>=', 'value': 90000}}})
+        check('6d wouldFire: the price gate warms the price cache', s == 200 and r.get('fire') is True, (s, r))
+        check('6d wouldFire: the holding price tx reads true once the price cache is warm', wf(wf_price) is True, wf(wf_price))
+        check('6d wouldFire: the met AND set reads true once its price rule is met', wf(wf_and) is True, wf(wf_and))
+        s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'feemarket', 'params': {'maxFeeRate': 5, 'direction': 'below'}}})
+        check('6d wouldFire: the fee gate warms the fee cache', s == 200 and r.get('fire') is True, (s, r))
+        check('6d wouldFire: the met fee-market tx reads true once the fee cache is warm', wf(wf_fm) is True, wf(wf_fm))
+        s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'blockheight', 'params': {'targetHeight': 899000}}})
+        check('6d wouldFire: the block-height gate warms the tip cache', s == 200 and r.get('fire') is True, (s, r))
+        check('6d wouldFire: the reached block-height tx reads true once the tip cache is warm', wf(wf_bh) is True, wf(wf_bh))
+        # Checking in clears the check-in rule's wouldFire (the
+        # clock is fresh again) but not the grace itself.
+        s, r = req('POST', '/api/checkin', {'method': 'app'})
+        check('6d wouldFire: a check-in lands', s == 200 and r.get('ok') is True, (s, r))
+        check('6d wouldFire: the check-in tx reads false once the clock is fresh', wf(wf_ck) is False, wf(wf_ck))
+        s, st = req('GET', '/api/state')
+        check('6d wouldFire: the grace is still active after the check-in', st.get('grace', {}).get('active') is True, st.get('grace'))
+        # A stale 'due' block-height slice still counts when the
+        # tip cache is cold (the fallback): seed one on the
+        # unreached tx via before_start — on disk before boot,
+        # race-free — and restart. The grace holds the rules, so
+        # the seeded slice survives the startup tick.
+        def seed_bh_due():
+            stj2 = load_state_file()
+            for t in stj2.get('bitcoin', {}).get('txs', []):
+                if t.get('id') == wf_bh_no:
+                    t['triggerState'] = {'lastEvalAt': iso_ago(), 'status': 'due', 'reason': 'block 900,000 reached — firing',
+                                         'lastPrice': None, 'lastPriceAt': None, 'lastOutspend': None, 'lastError': None,
+                                         'lastTipHeight': 900000}
+                    break
+            save_state_file(stj2)
+        check('6d wouldFire: app restarted with a seeded due block-height slice', restart(before_start=seed_bh_due))
+        s, st = req('GET', '/api/state')
+        check('6d wouldFire: the grace is still active after the restart', st.get('grace', {}).get('active') is True, st.get('grace'))
+        check('6d wouldFire: the seeded due slice survives the startup tick',
+              rule_slice(state_tx(wf_bh_no)).get('status') == 'due', rule_slice(state_tx(wf_bh_no)))
+        check('6d wouldFire: the stale due slice counts with a cold tip cache (fallback)', wf(wf_bh_no) is True, wf(wf_bh_no))
+        # Cleanup: resume the grace, drop the txs, clear the stub
+        # override, restore a fresh clock for the next sections.
+        s, r = req('POST', '/api/grace/resume', {})
+        check('6d wouldFire: resumed', s == 200, (s, r))
+        delete_all_txs()
+        s, r = req('POST', '/__test__/outspend', {'txid': SECOND, 'vout': 0, 'clear': True}, base=STUB_BASE_P)
+        check('6d wouldFire: SECOND:0 override cleared', s == 200, (s, r))
+        stj = load_state_file()
+        stj['checkin']['lastOnlineAt'] = iso_ago()
+        stj['checkin']['lastCheckinAt'] = iso_ago()
+        save_state_file(stj)
+        check('6d wouldFire: check-in clock restored (restart)', restart())
 
         # --- 7. vacation does NOT freeze the new types --------------------
         # Vacation is check-in-only: a set-date tx must still fire
@@ -1462,8 +2097,8 @@ def main():
         # --- 17. multi-trigger rule sets (0.8.2) --------------------------
         # OR fires on any rule; AND fires only when every rule holds
         # on the SAME tick (no per-rule latching); an unknown rule
-        # blocks AND and is ignored by OR; grace holds only the
-        # price/UTXO rule in a set; an already-satisfied set blocks
+        # blocks AND and is ignored by OR; grace holds every
+        # non-check-in rule in a set; an already-satisfied set blocks
         # the add with the combined semantics.
         # 17.1 OR fires on one rule: the price rule does not hold
         # ($98,200 < $200,000) but the set-date rule does.
@@ -1601,47 +2236,87 @@ def main():
         check('17 unknown: caches cleared to bust the price cache', clear_caches())
         delete_all_txs()
 
-        # 17.4 Grace holds only the price/UTXO rule in a set: the OR
-        # set fires on its set-date rule during the grace, the AND
-        # set cannot fire until the grace is resumed. The txs are
-        # added AFTER the restart: the startup tick is a full
-        # evaluation, so an already-satisfied OR set armed across
-        # it would broadcast before the manual check below.
+        # 17.4 Grace holds every rule in a set (0.8.8, unified 0.8.8):
+        # the OR set does NOT fire on its check-in rule during the
+        # grace (check-in rules are held by the same grace as
+        # everything else now — the old "never held" exemption is
+        # gone), and the AND set cannot fire while its price and
+        # set-date rules are held. Both stay staged through the
+        # grace, then broadcast once it is resumed — the OR set on
+        # both its rules (check-in + price), the AND set on both
+        # of its. The grace is seeded directly with a fresh
+        # lastOnlineAt, so no new grace re-sets on the read; the
+        # check-in rule is past due on a 2-day threshold (last
+        # check-in 3 days ago). The backdate lands AFTER the adds:
+        # adding a check-in tx while its clock is in the danger
+        # zone restarts the clock (resetCheckin, 0.7.22), so the
+        # txs go in while the clock is fresh (a check-in first —
+        # §16 left it 40 days stale) and the backdate + grace are
+        # seeded on disk before the restart (restart's
+        # before_start hook). Neither set broadcasts on the
+        # startup tick.
+        s, r = req('POST', '/api/checkin', {'method': 'app'})
+        check('17 grace: check-in lands so the clock is fresh for the adds', s == 200 and r.get('ok') is True, r)
         or_g = {'op': 'OR', 'rules': [
+            {'type': 'checkin', 'params': {'thresholdDays': 2}},
             {'type': 'price', 'params': {'asset': 'BTC', 'op': '>=', 'value': 90000}},
-            {'type': 'setdate', 'params': {'fireAt': iso_ago(hours=1)}},
         ]}
         and_g = {'op': 'AND', 'rules': [
             {'type': 'price', 'params': {'asset': 'BTC', 'op': '>=', 'value': 90000}},
             {'type': 'setdate', 'params': {'fireAt': iso_ago(hours=1)}},
         ]}
-        stj = load_state_file()
-        stj['checkin']['lastOnlineAt'] = iso_ago(days=10)
-        stj['grace'] = {'offlineDays': 10, 'startedAt': iso_ago(hours=1), 'durationDays': 7, 'resumedAt': None}
-        save_state_file(stj)
-        check('17 grace: app restarted with an active grace', restart())
         s, r = add_tx('17 OR grace', or_g, 116108, trigger_confirmed=True)
         check('17 grace: OR set accepted with confirm (201)', s == 201, (s, r))
         org17 = r['tx']['id'] if s == 201 else None
         s, r = add_tx('17 AND grace', and_g, 116110, trigger_confirmed=True)
         check('17 grace: AND set accepted with confirm (201)', s == 201, (s, r))
         andg17 = r['tx']['id'] if s == 201 else None
+        def seed_grace_17():
+            stj = load_state_file()
+            stj['checkin']['lastOnlineAt'] = iso_ago()
+            stj['checkin']['lastCheckinAt'] = iso_ago(days=3)
+            stj['grace'] = {'graceUntil': iso_in(days=7), 'triggeredAt': iso_ago(), 'offlineGapDays': 10}
+            save_state_file(stj)
+        check('17 grace: app restarted with an active grace', restart(before_start=seed_grace_17))
         s, st = req('GET', '/api/state')
         check('17 grace: the grace is active', st.get('grace', {}).get('active') is True, st.get('grace'))
+        org_tx = state_tx(org17)
+        check('17 grace: OR still staged after the restart (its check-in rule is held by the grace now)',
+              org_tx and org_tx.get('release') is None and not org_tx.get('broadcasted'),
+              org_tx and {'release': org_tx.get('release'), 'broadcasted': org_tx.get('broadcasted')})
+        and_tx = state_tx(andg17)
+        check('17 grace: AND still staged after the restart (its rules are held)',
+              and_tx and and_tx.get('release') is None and not and_tx.get('broadcasted'),
+              and_tx and {'release': and_tx.get('release'), 'broadcasted': and_tx.get('broadcasted')})
         s, r, res = release_results()
-        check('17 grace: OR fires on its non-held rule during a grace',
-              s == 200 and res.get(org17, {}).get('action') == 'broadcast', res.get(org17))
-        check('17 grace: AND does NOT fire while its price rule is held',
+        check('17 grace: OR does NOT fire while its check-in and price rules are held',
+              s == 200 and res.get(org17, {}).get('action') == 'skipped' and res.get(org17, {}).get('triggerStatus') == 'grace', res.get(org17))
+        check('17 grace: AND does NOT fire while its price and set-date rules are held',
               s == 200 and res.get(andg17, {}).get('action') == 'skipped' and res.get(andg17, {}).get('triggerStatus') == 'grace', res.get(andg17))
         s, r, res = release_results()
-        check('17 grace: a second release check still does not fire the AND set',
-              s == 200 and res.get(andg17, {}).get('action') == 'skipped' and res.get(andg17, {}).get('triggerStatus') == 'grace', res.get(andg17))
+        check('17 grace: a second release check still does not fire either set',
+              s == 200 and res.get(org17, {}).get('action') == 'skipped' and res.get(org17, {}).get('triggerStatus') == 'grace'
+              and res.get(andg17, {}).get('action') == 'skipped' and res.get(andg17, {}).get('triggerStatus') == 'grace', res.get(andg17))
         s, r = req('POST', '/api/grace/resume', {})
         check('17 grace: resumed', s == 200, (s, r))
         s, r, res = release_results()
+        check('17 grace: OR broadcasts once the grace is resumed (check-in + price)',
+              s == 200 and res.get(org17, {}).get('action') == 'broadcast', res.get(org17))
+        org_tx = state_tx(org17)
+        check('17 grace: OR release names both fired rules (checkin+price)',
+              org_tx and (org_tx.get('release') or {}).get('trigger') == 'checkin+price',
+              org_tx and org_tx.get('release'))
         check('17 grace: AND broadcasts once the grace is resumed',
               s == 200 and res.get(andg17, {}).get('action') == 'broadcast', res.get(andg17))
         delete_all_txs()
+        # Restore a fresh check-in clock for the remaining
+        # sections (the OR set's past-due check-in rule above
+        # needed lastCheckinAt 3 days back).
+        stj = load_state_file()
+        stj['checkin']['lastOnlineAt'] = iso_ago()
+        stj['checkin']['lastCheckinAt'] = iso_ago()
+        save_state_file(stj)
+        check('17 grace: check-in clock restored (restart)', restart())
 
         # 17.5 An already-satisfied set blocks the add with the
         # combined semantics: OR on any satisfied rule, AND only
@@ -4070,6 +4745,7 @@ def main():
         s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 60})
         check('30 cleanup: settings and cadence restored', s == 200, (s, r))
         delete_all_txs()
+
     finally:
         for p in list(v.procs):
             stop(p)

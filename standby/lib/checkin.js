@@ -230,9 +230,6 @@ function mergeExternalCheckin(state, now) {
   if (last && ext.at.getTime() <= last.getTime()) return false;
   state.checkin.lastCheckinAt = ext.raw;
   state.checkin.totalCheckins += 1;
-  // A check-in clears an offline-gap hold (0.7.22): the owner is
-  // alive, the clock resets, and there is nothing to hold back.
-  state.checkin.heldUntil = null;
   // (0.8.0) A check-in clears the cycle-scoped release records of
   // the CHECK-IN rules only — a price or UTXO rule's record belongs
   // to its own trigger's cycle, not the check-in clock, so a
@@ -259,60 +256,7 @@ function mergeExternalCheckin(state, now) {
   return true;
 }
 
-// Offline-gap grace (0.7.22). The release clock cannot tell "the
-// device was off" from "the owner stopped checking in" — both look
-// like a last check-in months ago, and the app would broadcast ~5s
-// after powering back on. The guard is a persisted hold on the
-// broadcast date, granted only when BOTH of these hold:
-//   1. Offline gap: the "I was online" stamp (state.checkin.
-//      lastOnlineAt, written on every hourly release tick) is more
-//      than a quarter of the threshold stale — the device was off
-//      for a meaningful chunk of the window.
-//   2. Clock far along: more than half the threshold has elapsed
-//      since the last check-in — the owner is in the danger zone,
-//      or already past due (past due implies more than half).
-// The hold is heldUntil = now + half the threshold, measured from
-// the moment the app notices — NOT added to the original due date.
-// Adding it to the original due leaves it in the past after a
-// months-long outage, so the release would still fire on boot;
-// measured from now, the owner gets a real grace window after
-// powering back on. Only set when there is no active hold: a
-// reboot during the grace window must not re-extend it (once the
-// app is running again it keeps updating lastOnlineAt, so a fresh
-// gap check would miss it — the persisted heldUntil is what
-// carries it). Returns true when it set a new hold (caller
-// saves); a check-in clears it (see both check-in paths).
-// There is no global threshold any more: the fallback is the
-// 35-day default, used only when no check-in rule is armed.
-function applyOfflineHold(state, now) {
-  const s = state.settings;
-  const last = state.checkin.lastCheckinAt ? new Date(state.checkin.lastCheckinAt) : null;
-  const online = state.checkin.lastOnlineAt ? new Date(state.checkin.lastOnlineAt) : null;
-  if (!last || !online) return false;
-  // (0.8.0) The hold protects the EARLIEST-firing check-in rule:
-  // the threshold that measures both conditions is the smallest
-  // thresholdDays among the ARMED check-in rules — a tx with a
-  // 7-day rule must not fire the moment the device comes back
-  // just because the 35-day fallback is longer. With no armed
-  // check-in rule the fallback is the threshold (the hold is
-  // inert then anyway — nothing fires on the check-in clock).
-  // (0.8.2) A tx may carry several check-in rules; every one of
-  // them is measured.
-  const ckThresholds = (state.bitcoin.txs || [])
-    .filter((t) => t.enabled && store.hasTriggerType(t, 'checkin'))
-    .flatMap((t) => store.triggerOf(t).rules.filter((r) => r.type === 'checkin').map((r) => r.params.thresholdDays));
-  const thresholdDays = ckThresholds.length ? Math.min.apply(null, ckThresholds) : store.FALLBACK_THRESHOLD_DAYS;
-  const thresholdMs = thresholdDays * 86400000;
-  if (now.getTime() - online.getTime() <= thresholdMs / 4) return false;
-  if (now.getTime() - last.getTime() <= thresholdMs / 2) return false;
-  const heldRaw = state.checkin.heldUntil;
-  const heldMs = (typeof heldRaw === 'string' && heldRaw) ? new Date(heldRaw).getTime() : NaN;
-  if (Number.isFinite(heldMs) && heldMs > now.getTime()) return false;
-  state.checkin.heldUntil = new Date(now.getTime() + thresholdMs / 2).toISOString();
-  return true;
-}
-
-// --- Grace period for price/UTXO triggers (0.8.0) ---
+// --- Grace period for all triggers (0.8.0, extended 0.8.8, unified 0.8.8) ---
 // state.grace = { graceUntil, triggeredAt, offlineGapDays }.
 // graceUntil is an ISO timestamp, or null for an indefinite
 // grace (until the owner resumes). triggeredAt is when the
@@ -320,16 +264,42 @@ function applyOfflineHold(state, now) {
 // been offline when it was set (the dashboard card explains
 // the pause with that number). The grace is app-level state:
 // it is set when the app notices an offline gap longer than
-// settings.graceOfflineDays, whatever txs exist at the time.
+// settings.graceOfflineDays, or the check-in outage condition
+// in applyGrace below (a short armed check-in threshold can
+// trigger it at a shorter gap) — whatever txs exist at the time.
 // It is NOT set while one is already active (an active grace
 // never re-extends itself), and it is NOT cleared by a
 // check-in — only by expiry (now past graceUntil) or by
-// POST /api/grace/resume. Check-in triggers are not affected
-// by it at all: they keep their own heldUntil hold above,
-// which is a separate mechanism with its own thresholds.
+// POST /api/grace/resume. (0.8.8) The grace holds ALL trigger
+// types, check-in included: the old separate check-in
+// offline-gap hold (heldUntil, 0.7.22) is gone — a check-in
+// rule is held by the same grace as everything else, for the
+// same duration, and the due date is NOT pushed out (the bar
+// reads the plain clock; see checkinStatus). The grace holds
+// price, UTXO, block-height, set-date, fee-market, and
+// check-in rules; the graceEnabled toggle is the off
+// switch — off means no grace at all, including no outage
+// protection for check-in. A stored duration of 0
+// (the old off switch) still reads as off, so state that never
+// went through loadState — tests, direct API writes — reads
+// the same way as migrated state (see loadState).
+function graceIsEnabled(settings) {
+  const s = settings || {};
+  if (s.graceEnabled === false) return false;
+  if (s.graceEnabled === undefined && s.graceDurationDays === 0) return false;
+  return true;
+}
 function graceStatus(state, now) {
   const g = (state && state.grace && typeof state.grace === 'object') ? state.grace : null;
   if (!g || !g.triggeredAt) return null;
+  // (0.8.8) Grace off means no grace at all — even a record set
+  // before the toggle went off reads as none, so the rules gate,
+  // the served state, and the dashboard card all agree that
+  // triggers fire immediately. The record itself stays (it
+  // expires on its own); re-enabling before it expires resumes
+  // the pause, like a saved duration change never disturbs an
+  // already-active grace.
+  if (!graceIsEnabled(state.settings)) return null;
   if (g.graceUntil && now.getTime() > new Date(g.graceUntil).getTime()) return null;
   return {
     active: true,
@@ -342,26 +312,83 @@ function graceStatus(state, now) {
 function isGraceActive(state, now) {
   return graceStatus(state, now) !== null;
 }
-// Notice an offline gap and start a grace period for the
-// price/UTXO triggers, if the gap is longer than the
-// configured threshold. Runs next to applyOfflineHold in
+// (0.8.8, audit finding 1) The smallest thresholdDays among the
+// ARMED check-in rules that can actually fire — standalone txs'
+// triggers plus sets' triggers. A set member's own trigger is
+// parked while it is attached (it resumes when the tx leaves the
+// set), so it never sets the threshold: the old heldUntil code
+// scanned every tx, parked triggers included, and could grant a
+// hold for a rule that cannot fire. Returns null when no
+// check-in rule is armed — the check-in leg below needs a rule
+// to protect (unlike the old code's 35-day fallback, which was
+// harmless there because a heldUntil with no check-in rule was
+// inert; a unified grace is not inert — it would pause the
+// other rules too).
+function smallestArmedCheckinThresholdDays(state) {
+  const txs = state.bitcoin.txs || [];
+  const memberIds = new Set();
+  for (const s of (state.bitcoin.sets || [])) for (const id of (s.txIds || [])) memberIds.add(id);
+  const thresholds = [];
+  for (const t of txs) {
+    if (!t.enabled || memberIds.has(t.id) || !store.hasTriggerType(t, 'checkin')) continue;
+    for (const r of store.triggerOf(t).rules) if (r.type === 'checkin') thresholds.push(r.params.thresholdDays);
+  }
+  for (const s of (state.bitcoin.sets || [])) {
+    if (!s.enabled || !store.hasTriggerType(s, 'checkin')) continue;
+    for (const r of store.triggerOf(s).rules) if (r.type === 'checkin') thresholds.push(r.params.thresholdDays);
+  }
+  return thresholds.length ? Math.min.apply(null, thresholds) : null;
+}
+
+// Notice an offline gap and start a grace period for all
+// triggers. Activation is an OR of two conditions (0.8.8,
+// audit finding 1): the flat offline threshold — the gap is
+// longer than settings.graceOfflineDays — OR the old
+// check-in outage condition, restored from the pre-unification
+// heldUntil logic (0.7.22): the gap is more than a quarter of
+// the shortest ARMED check-in threshold AND more than half
+// that threshold has passed since the last check-in. The
+// second leg matters for short thresholds: a 1-day check-in
+// rule used to earn protection after a 6-hour outage, and the
+// flat 7-day threshold alone leaves it unprotected. The GRANT
+// is unchanged either way — the configured graceDurationDays,
+// never the old heldUntil pushout (now + half the threshold),
+// which the unification deliberately removed. Runs in
 // evaluateRelease and on the GET /api/state and /api/status
 // reads, and on the hourly tick — so a returning app notices
-// the gap promptly, before any price/UTXO rule can fire.
+// the gap promptly, before any held rule can fire.
 // Returns true when it set a grace. (The hourly tick refreshes
 // lastOnlineAt right after this runs, so an expired grace is
 // not re-set on the same stale stamp — a fresh gap after the
-// app returns is what sets the next one.)
+// app returns is what sets the next one.) Grace off (the
+// toggle, or a stored duration of 0 kept for back-compat)
+// means no grace is ever set.
 function applyGrace(state, now) {
   if (isGraceActive(state, now)) return false;
   const online = state.checkin && state.checkin.lastOnlineAt ? new Date(state.checkin.lastOnlineAt) : null;
   if (!online || Number.isNaN(online.getTime())) return false;
   const s = state.settings || {};
+  if (!graceIsEnabled(s)) return false; // grace disabled: never set one
   const offlineDays = (typeof s.graceOfflineDays === 'number' && GRACE_OFFLINE_DAYS.includes(s.graceOfflineDays)) ? s.graceOfflineDays : 7;
   const gapMs = now.getTime() - online.getTime();
-  if (gapMs <= offlineDays * 86400000) return false;
+  let activates = gapMs > offlineDays * 86400000;
+  if (!activates) {
+    // Check-in leg (see above): only when a check-in rule is
+    // armed — with none armed there is no check-in rule to
+    // protect, and the flat leg already covers long gaps.
+    const thresholdDays = smallestArmedCheckinThresholdDays(state);
+    if (thresholdDays !== null) {
+      const thresholdMs = thresholdDays * 86400000;
+      const last = state.checkin.lastCheckinAt ? new Date(state.checkin.lastCheckinAt) : null;
+      if (last && !Number.isNaN(last.getTime())
+        && gapMs > thresholdMs / 4
+        && now.getTime() - last.getTime() > thresholdMs / 2) activates = true;
+    }
+  }
+  if (!activates) return false;
   const durationDays = (s.graceDurationDays === null) ? null
     : ((typeof s.graceDurationDays === 'number' && GRACE_DURATION_DAYS.includes(s.graceDurationDays)) ? s.graceDurationDays : 7);
+  if (durationDays === 0) return false; // grace disabled: never set one
   state.grace = {
     graceUntil: durationDays === null ? null : new Date(now.getTime() + durationDays * 86400000).toISOString(),
     triggeredAt: now.toISOString(),
@@ -406,15 +433,14 @@ function inDangerZone(state, now, thresholdDays, liveOffsetMs) {
 // doing something in the app that would otherwise let a due
 // release fire soon — shortening the threshold into the danger
 // zone, arming a transaction in the danger zone, or adding one
-// in the danger zone. The clock restarts at now (count +1, hold
-// cleared, "I was online" now) and the reset is recorded in the
+// in the danger zone. The clock restarts at now (count +1, "I
+// was online" now) and the reset is recorded in the
 // check-in history under the given method, so the displayed last
 // check-in matches. It only touches the clock — never a release
 // record.
 function resetCheckin(state, now, method) {
   state.checkin.lastCheckinAt = now.toISOString();
   state.checkin.totalCheckins += 1;
-  state.checkin.heldUntil = null;
   state.checkin.lastOnlineAt = now.toISOString();
   // The clock restarts at now: any frozen time is wiped (the
   // effective last check-in is now, so a carried offset would
@@ -512,23 +538,29 @@ function expireVacation(state, now) {
 }
 
 // The check-in clock, pure (0.8.0): the due instant for a given
-// threshold, the offline-gap hold's effect on it, and the clock
-// state — ignoring vacation / broadcast records (those
-// are checkinStatus's layer, below). Extracted from checkinStatus
-// so the per-transaction check-in trigger evaluates the same clock
-// at its own threshold instead of duplicating the math.
+// threshold and the clock state — ignoring vacation / broadcast
+// records (those are checkinStatus's layer, below). Extracted
+// from checkinStatus so the per-transaction check-in trigger
+// evaluates the same clock at its own threshold instead of
+// duplicating the math.
 //   state: 'not-started' (no check-in yet), 'on-track',
-//     'held' (an offline-gap grace is active and is the thing
-//     pushing the due out), 'release-due'.
-//   windowDays: the effective window in whole days (the threshold
-//     on-track, the longer held window while a grace is active) —
-//     the countdown bar and caption measure against it.
+//     'release-due'.
+//   windowDays: the effective window in whole days — the
+//     threshold — the countdown bar and caption measure
+//     against it.
 //   daysSince: whole days since the last check-in (display only).
 // The release decision compares real timestamps (now vs. the due
 // instant), not the floored day count — otherwise the release
 // lands up to a whole day after the displayed bar
 // (0.7.5 and earlier only released once the floored day count
 // passed the threshold).
+// (0.8.8) The offline-gap hold is gone — the grace is the only
+// outage protection now, and it does NOT push the due out: the
+// due is the plain clock due, and a past-due rule reads as held
+// by the grace (state 'grace') in checkinStatus / ruleStatusFor,
+// never as 'release-due', while the grace is active. heldMs /
+// heldActive stay in the return shape (null / false) so older
+// readers do not break on a missing field.
 function checkinClock(state, now, thresholdDays, liveOffsetMs) {
   const last = state.checkin.lastCheckinAt ? new Date(state.checkin.lastCheckinAt) : null;
   if (!last || !thresholdDays || thresholdDays <= 0) {
@@ -543,33 +575,14 @@ function checkinClock(state, now, thresholdDays, liveOffsetMs) {
   const effLast = new Date(last.getTime() + off);
   const d = Math.max(0, days(effLast, now));
   const dueMs = effLast.getTime() + thresholdDays * 86400000;
-  // Offline-gap grace (0.7.22): a hold pushes the effective due
-  // out. heldUntil is a persisted "broadcast no earlier than"
-  // instant; the effective due is the later of the original due and
-  // the hold. When the hold is active it IS the effective due (a
-  // hold is only set when the clock is more than halfway along,
-  // so heldUntil = now + threshold/2 is always past the original
-  // due at set time) — unless the owner changed the threshold
-  // after the hold was set, in which case the later date wins.
-  const heldRaw = state.checkin.heldUntil;
-  const heldMs = (typeof heldRaw === 'string' && heldRaw) ? new Date(heldRaw).getTime() : NaN;
-  const heldActive = Number.isFinite(heldMs) && heldMs > now.getTime();
-  const effectiveDueMs = Number.isFinite(heldMs) ? Math.max(dueMs, heldMs) : dueMs;
-  const nextDue = new Date(effectiveDueMs).toISOString();
-  // Effective window, whole days, for the countdown bar + caption:
-  // last check-in to the effective due. On-track it is the
-  // threshold; while held it is the longer held window. Measured
-  // from the EFFECTIVE last check-in (see the freeze above), so
-  // a frozen bar's window stays its threshold.
-  const windowDays = Math.max(1, Math.round((effectiveDueMs - effLast.getTime()) / 86400000));
-  // A hold is in force only when it is active AND it is the thing
-  // pushing the due out (heldUntil past the original due). A hold
-  // left over from before a threshold increase does not hold
-  // anything back — the original due is later, so on-track.
-  const st = now.getTime() < effectiveDueMs
-    ? ((heldActive && heldMs >= dueMs) ? 'held' : 'on-track')
-    : 'release-due';
-  return { dueMs, heldMs, heldActive, effectiveDueMs, nextDue, windowDays, daysSince: d, state: st };
+  const nextDue = new Date(dueMs).toISOString();
+  // Window, whole days, for the countdown bar + caption:
+  // last check-in to the due. Measured from the EFFECTIVE last
+  // check-in (see the freeze above), so a frozen bar's window
+  // stays its threshold.
+  const windowDays = Math.max(1, Math.round((dueMs - effLast.getTime()) / 86400000));
+  const st = now.getTime() < dueMs ? 'on-track' : 'release-due';
+  return { dueMs, heldMs: null, heldActive: false, effectiveDueMs: dueMs, nextDue, windowDays, daysSince: d, state: st };
 }
 
 // carries a 'failed' release record, the status stays 'release-due'
@@ -589,10 +602,16 @@ function checkinClock(state, now, thresholdDays, liveOffsetMs) {
 // bar — its fate is decided, so there is nothing to count down
 // to (see txSettledOrPending below, which mirrors the frontend
 // txStatus settled / pending split for the stored-state cases).
-// The bar's window is the EFFECTIVE one — the
-// tx's threshold on-track, the longer held window while an
-// offline-gap grace is active — so a held bar just counts to the
-// held date. A tx with no check-in yet reads 0 of its threshold.
+// The bar's window is the tx's own threshold, and the bar
+// counts to the plain due — the grace never pushes the due
+// out. (0.8.8) While a grace is active, a bar whose clock is
+// past due reads state 'grace', not 'release-due': nothing can
+// fire while the grace holds it, so a past-due reading would
+// be a lie. An on-track bar keeps counting during the grace
+// (its countdown is still real — the due is when the rule
+// becomes due, and the grace card explains the hold). The
+// top-level state is 'grace' while any ARMED entry is past
+// due and held; the check-in card's pill reads "Grace period".
 // A DISARMED check-in tx keeps its bar, frozen at the day count
 // it was left at (enabled: false, muted in the UI) — inactive
 // time does not count, so its count never advances while it is
@@ -644,7 +663,10 @@ function checkinStatus(state, now) {
         const off = checkinLiveOffsetMs(t, now);
         if (!last) return { id: t.id, label: t.label || '', ruleIndex, thresholdDays: th, daysSince: 0, windowDays: th, nextDue: null, state: 'not-started', enabled: !!t.enabled };
         const clock = checkinClock(state, now, th, off);
-        return { id: t.id, label: t.label || '', ruleIndex, thresholdDays: th, daysSince: clock.daysSince, windowDays: clock.windowDays, nextDue: clock.nextDue, state: clock.state, enabled: !!t.enabled };
+        // (0.8.8) Past due while a grace is active reads 'grace',
+        // not 'release-due' — the rule is held, it cannot fire.
+        const st = (isGraceActive(state, now) && clock.state === 'release-due') ? 'grace' : clock.state;
+        return { id: t.id, label: t.label || '', ruleIndex, thresholdDays: th, daysSince: clock.daysSince, windowDays: clock.windowDays, nextDue: clock.nextDue, state: st, enabled: !!t.enabled };
       }));
   for (const s of (state.bitcoin.sets || [])) {
     if (!store.hasTriggerType(s, 'checkin')) continue;
@@ -659,7 +681,8 @@ function checkinStatus(state, now) {
         return;
       }
       const clock = checkinClock(state, now, th, off);
-      checkinTxs.push({ id: s.id, label: s.label || '', ruleIndex, thresholdDays: th, daysSince: clock.daysSince, windowDays: clock.windowDays, nextDue: clock.nextDue, state: clock.state, enabled: !!s.enabled });
+      const st = (isGraceActive(state, now) && clock.state === 'release-due') ? 'grace' : clock.state;
+      checkinTxs.push({ id: s.id, label: s.label || '', ruleIndex, thresholdDays: th, daysSince: clock.daysSince, windowDays: clock.windowDays, nextDue: clock.nextDue, state: st, enabled: !!s.enabled });
     });
   }
   // The top level is driven by the ARMED entries only — a
@@ -708,8 +731,12 @@ function checkinStatus(state, now) {
   // (0.8.0) Only ARMED check-in txs can make the card
   // 'release-due' — a disarmed tx frozen past its due cannot fire,
   // so it must not drive the overall state either.
+  // (0.8.8) While a grace is active, a past-due armed entry is
+  // held, not due: the top-level state is 'grace' ("Grace
+  // period"), never 'release-due'.
+  if (armedEntries.some((c) => c.state === 'grace')) return { ...base, state: 'grace', label: 'Grace period' };
   if (armedEntries.some((c) => c.state === 'release-due')) return { ...base, state: 'release-due', label: 'Release due' };
   return { ...base, state: 'on-track', label: 'On track' };
 }
 
-module.exports = { sanitizeState, hashCheckinKey, newCheckinKeyId, publicCheckinKey, writeReceiverKeys, readReceiverKeys, startupWarnings, addStartupWarning, verifyCheckinKeyStore, readExternalCheckin, mergeExternalCheckin, applyOfflineHold, graceStatus, isGraceActive, applyGrace, inDangerZone, resetCheckin, checkinLiveOffsetMs, syncCheckinFreeze, vacationEndMs, expireVacation, checkinClock, txSettledOrPending, checkinStatus };
+module.exports = { sanitizeState, hashCheckinKey, newCheckinKeyId, publicCheckinKey, writeReceiverKeys, readReceiverKeys, startupWarnings, addStartupWarning, verifyCheckinKeyStore, readExternalCheckin, mergeExternalCheckin, graceStatus, isGraceActive, applyGrace, inDangerZone, resetCheckin, checkinLiveOffsetMs, syncCheckinFreeze, vacationEndMs, expireVacation, checkinClock, txSettledOrPending, checkinStatus };
