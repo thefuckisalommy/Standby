@@ -46,7 +46,7 @@
 const crypto = require('crypto');
 const http = require('http');
 const https = require('https');
-const { appendBroadcastLog, PRICE_MIN_USD, PRICE_MAX_USD } = require('./store');
+const { appendBroadcastLog, PRICE_MIN_USD, PRICE_MAX_USD, sanitizeFeeHistory, FEE_HISTORY_WINDOW_DAYS, FEE_HISTORY_MIN_OBSERVATIONS, FEE_HISTORY_MAX_ENTRIES } = require('./store');
 
 const MAX_TX_BYTES = 1000000; // 1 MB, same ceiling as the API body limit
 const MAX_RESPONSE_BYTES = 1024 * 1024; // 1 MB — a mempool reply is a 64-char txid or small JSON; anything bigger is a faulty endpoint, not data
@@ -750,28 +750,21 @@ const nodeCheckedAtByBase = {};
 function nodeCheckedAt() { return { ...nodeCheckedAtByBase }; }
 
 // ---------------------------------------------------------------------------
-// Fee verdict (0.7.20): is a stored transaction's FIXED fee good
-// enough for a long-term hold? The fee was set when the tx was
-// signed; if the fee market spikes before the release fires, the tx
-// can sit unconfirmed or be evicted. The verdict compares the tx's
-// own fee rate against the "90-day peak" — the 90th percentile of
-// block medians (avgFee_50) over the 3-month window from mempool.
+// Fee verdict (0.7.20, peak accumulated 0.8.9): is a stored
+// transaction's FIXED fee good enough for a long-term hold? The fee
+// was set when the tx was signed; if the fee market spikes before
+// the release fires, the tx can sit unconfirmed or be evicted. The
+// verdict compares the tx's own fee rate against the "90-day peak"
+// — the 90th percentile of the hourly economy-fee observations
+// Standby records from its own nodes (see lib/store.js
+// FEE_HISTORY_* and lib/release.js recordFeeHistoryObservation),
+// up to 90 days back. There is NO public fee endpoint any more:
+// the peak and the current fees both come from the configured
+// primary node, falling back to the secondary — never from a
+// hardcoded public base. The ladder itself is unchanged (Low 2x /
+// Medium 1x / High below, Critical below the current economy fee);
+// see feeVerdict below.
 // ---------------------------------------------------------------------------
-const DEFAULT_FEE_RATES_URL = 'https://mempool.space';
-
-// The fee-rates base URL. The history endpoint is mempool.space-
-// specific — a plain Esplora primary cannot serve it — so the
-// fetch always goes to the mempool.space public endpoint, NOT to
-// the configured node. FEE_RATES_URL lets a test point it at a
-// stub instead (same pattern as SLIPSTREAM_API_URL).
-function feeRatesBase() {
-  const v = (process.env.FEE_RATES_URL || '').trim();
-  if (!v) return DEFAULT_FEE_RATES_URL;
-  let u;
-  try { u = new URL(v); } catch { throw new Error('invalid fee-rates URL: ' + v); }
-  if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error('fee-rates URL must be http(s): ' + v);
-  return u.protocol + '//' + u.host;
-}
 
 // The 90th percentile of a sorted ascending array of numbers
 // (linear interpolation, the standard definition). Returns null
@@ -784,77 +777,178 @@ function percentile90(sorted) {
   return sorted[f] * (c - k) + sorted[c] * (k - f);
 }
 
-// The "90-day peak" from a fee-rates response: the 90th percentile
-// of the per-block median fee rates (avgFee_50, sat/vB). The peak
-// is a percentile, NOT the literal maximum — one fee spike (a
-// single block at 31,514 sat/vB was seen in the 3m window) would
-// poison a max and make every fee read High Risk.
-function feePeakFromRates(data) {
-  if (!Array.isArray(data)) return null;
-  const medians = [];
-  for (const d of data) {
-    const m = d && d.avgFee_50;
-    if (typeof m === 'number' && Number.isFinite(m) && m >= 0) medians.push(m);
+// The peak from a recorded fee history (0.8.9): the 90th
+// percentile of the observations' fees — the same percentile math
+// as before, now over Standby's own hourly readings instead of a
+// fetched block-median series. A percentile, NOT the literal
+// maximum — one fee spike would poison a max and make every fee
+// read High Risk. Observations older than the 90-day window are
+// ignored (defense in depth; the recorder and the load sanitizer
+// already prune them). Returns { peak, windowDays, observations,
+// fetchedAt }: peak is null until FEE_HISTORY_MIN_OBSERVATIONS
+// (24) have accumulated — before that the historical check is
+// skipped and the UI notes the history is still building.
+// windowDays is the span the history actually covers, in whole
+// days (0..90; 0 when the history has fewer than two distinct
+// timestamps); fetchedAt is the latest
+// observation's timestamp, so the value is clearly labelled,
+// never silently stale.
+function feePeakFromObservations(observations, nowMs) {
+  const now = (typeof nowMs === 'number' && Number.isFinite(nowMs)) ? nowMs : Date.now();
+  const cutoff = now - FEE_HISTORY_WINDOW_DAYS * 86400000;
+  const fees = [];
+  let firstTs = null, lastTs = null;
+  if (Array.isArray(observations)) {
+    for (const e of observations) {
+      if (!e || typeof e !== 'object') continue;
+      const t = (typeof e.t === 'string' && e.t) ? new Date(e.t).getTime() : NaN;
+      const fee = e.fee;
+      if (!Number.isFinite(t) || t <= cutoff || t > now + 60000) continue;
+      if (typeof fee !== 'number' || !Number.isFinite(fee) || fee < 0) continue;
+      fees.push(fee);
+      if (firstTs === null || t < firstTs) firstTs = t;
+      if (lastTs === null || t > lastTs) lastTs = t;
+    }
   }
-  if (!medians.length) return null;
-  medians.sort((a, b) => a - b);
-  return percentile90(medians);
+  const count = fees.length;
+  const windowDays = (firstTs === null || lastTs === null) ? 0
+    : Math.min(FEE_HISTORY_WINDOW_DAYS, Math.ceil((lastTs - firstTs) / 86400000));
+  const fetchedAt = (lastTs === null) ? null : new Date(lastTs).toISOString();
+  if (count < FEE_HISTORY_MIN_OBSERVATIONS) return { peak: null, windowDays, observations: count, fetchedAt };
+  fees.sort((a, b) => a - b);
+  return { peak: percentile90(fees), windowDays, observations: count, fetchedAt };
 }
 
-// Fetch the 3-month fee-rates window and return the 90-day peak
-// (sat/vB). Throws on a non-200 answer, an unparseable body, or an
-// empty series — the caller treats that as "no fee data", never
+// Append one hourly observation to a history (0.8.9): pure —
+// returns the new array, the input untouched. The observation is
+// { t, fee } at nowMs; entries older than the window are pruned
+// and the series is capped at the max entries (oldest dropped
+// first), so the history can never grow past ~2,160 entries. A
+// fee that is not a finite non-negative number appends nothing
+// (the recorder checks validity first; this is the backstop). The
+// caller (recordFeeHistoryObservation) saves the result.
+function appendFeeHistoryObservation(observations, fee, nowMs) {
+  const now = (typeof nowMs === 'number' && Number.isFinite(nowMs)) ? nowMs : Date.now();
+  const next = sanitizeFeeHistory(Array.isArray(observations) ? observations : [], now);
+  if (typeof fee !== 'number' || !Number.isFinite(fee) || fee < 0) return next;
+  next.push({ t: new Date(now).toISOString(), fee });
+  return next.slice(-FEE_HISTORY_MAX_ENTRIES);
+}
+
+// Fee estimates, one measurement for every node type (0.8.9):
+// the "economy" fee is the day-scale estimate everywhere —
+// mempool's /fees/recommended.economyFee IS a ~1-day estimate, so
+// Esplora's equivalent is /fee-estimates at the 144-block target
+// and RPC's is estimatesmartfee at 144. (No RPC mode exists in
+// this tree — the RPC path was removed in 0.5.4 and lives on the
+// `rpc` branch, which wires estimatesmartfee 144 the same way;
+// the mapping below is the contract it must match.) The tier
+// mapping turns an Esplora /fee-estimates map into the same
+// { fastestFee, halfHourFee, hourFee, economyFee, minimumFee }
+// shape mempool serves, so the current-fees cache, the Critical
+// check, and the fee-market trigger all read one shape no matter
+// which node answered. Targets are confirmation targets in
+// blocks: fastest 1, half-hour 3, hour 6, economy 144 (~1 day),
+// minimum 1008 (~1 week).
+const ESPLORA_FEE_TARGETS = { fastest: 1, halfHour: 3, hour: 6, economy: 144, minimum: 1008 };
+
+// The rate at one confirmation target from a /fee-estimates map:
+// the exact target when present, else the nearest available
+// target (ties go to the higher target — the cheaper, more
+// patient reading). Returns null when the map carries no usable
+// rate at all.
+function feeEstimateAtTarget(estimates, target) {
+  if (!estimates || typeof estimates !== 'object') return null;
+  const keys = Object.keys(estimates)
+    .map((k) => parseInt(k, 10))
+    .filter((n) => Number.isFinite(n) && n > 0
+      && typeof estimates[String(n)] === 'number'
+      && Number.isFinite(estimates[String(n)]) && estimates[String(n)] >= 0);
+  if (!keys.length) return null;
+  if (keys.includes(target)) return estimates[String(target)];
+  let best = keys[0];
+  for (const k of keys) {
+    const dBest = Math.abs(best - target), dK = Math.abs(k - target);
+    if (dK < dBest || (dK === dBest && k > best)) best = k;
+  }
+  return estimates[String(best)];
+}
+
+// Map an Esplora /fee-estimates response to the mempool
+// recommended-fees shape. Returns null when the economy tier has
+// no usable rate — without an economy rate the object is useless
+// for the Critical check and the observation, so the caller
+// treats it as no data (the other tiers fall back the same way,
+// so a sparse map still yields a usable object as long as ANY
+// rate exists).
+function feeEstimatesToRecommended(estimates) {
+  if (!estimates || typeof estimates !== 'object') return null;
+  const out = {};
+  for (const [tier, target] of Object.entries(ESPLORA_FEE_TARGETS)) {
+    out[tier + 'Fee'] = feeEstimateAtTarget(estimates, target);
+  }
+  if (typeof out.economyFee !== 'number') return null;
+  return out;
+}
+
+// Fetch the current recommended fees from ONE node base (0.8.9):
+// the mempool endpoint first — /api/v1/fees/recommended returns
+// the named tiers — and Esplora's /fee-estimates when the mempool
+// endpoint 404s (a plain Esplora has no /api/v1/*), mapped to the
+// same shape. The base is the CONFIGURED node, never a public
+// default: the caller tries the primary first and the secondary
+// on failure. Throws on a non-200 answer, an unparseable body, or
+// a shape without a usable economy fee — the caller treats that
+// as "no current-fee data" and skips the Critical check, never
 // as a verdict.
-async function fetchFeePeak() {
-  const base = feeRatesBase();
-  const u = new URL(base);
-  const r = await requestText({
-    protocol: u.protocol,
-    hostname: u.hostname,
-    port: u.port ? parseInt(u.port, 10) : (u.protocol === 'https:' ? 443 : 80),
-    path: '/api/v1/mining/blocks/fee-rates/3m',
-    method: 'GET',
-    headers: {},
-    timeoutMs: NET_TIMEOUT_MS,
-  });
-  if (r.status !== 200) throw new Error('fee-rates answered ' + r.status);
+async function fetchCurrentFeesFromNode(base) {
+  let res;
+  try {
+    res = await mempoolReq('/api/v1/fees/recommended', 'GET', undefined, base);
+  } catch (e) {
+    throw new Error(e.message);
+  }
+  if (res.status === 200) {
+    let data;
+    try { data = JSON.parse(res.body); } catch { throw new Error('fees/recommended body is not JSON'); }
+    const econ = data && data.economyFee;
+    if (typeof econ !== 'number' || !Number.isFinite(econ) || econ < 0) throw new Error('fees/recommended has no usable economyFee');
+    return {
+      fastestFee: data.fastestFee, halfHourFee: data.halfHourFee,
+      hourFee: data.hourFee, economyFee: econ, minimumFee: data.minimumFee,
+    };
+  }
+  if (res.status !== 404) throw new Error('fees/recommended answered HTTP ' + res.status);
+  try {
+    res = await mempoolReq('/api/fee-estimates', 'GET', undefined, base);
+  } catch (e) {
+    throw new Error(e.message);
+  }
+  if (res.status !== 200) throw new Error('no fee endpoint (404 on both)');
   let data;
-  try { data = JSON.parse(r.body); } catch { throw new Error('fee-rates body is not JSON'); }
-  const peak = feePeakFromRates(data);
-  if (peak === null) throw new Error('fee-rates returned no usable block medians');
-  return peak;
+  try { data = JSON.parse(res.body); } catch { throw new Error('fee-estimates body is not JSON'); }
+  const mapped = feeEstimatesToRecommended(data);
+  if (!mapped) throw new Error('fee-estimates has no usable economy rate');
+  return mapped;
 }
 
-// Fetch the current recommended fees and return the parsed
-// object {fastestFee, halfHourFee, hourFee, economyFee,
-// minimumFee} (sat/vB, integers). Same base as the fee-rates fetch
-// — the mempool.space public endpoint, NOT the configured node
-// (a plain Esplora has no /api/v1/fees/recommended; it has
-// /api/fee-estimates instead). Throws on a non-200 answer, an
-// unparseable body, or a shape without a usable economy fee —
-// the caller treats that as "no current-fee data" and skips the
-// Critical check, never as a verdict.
-async function fetchCurrentFees() {
-  const base = feeRatesBase();
-  const u = new URL(base);
-  const r = await requestText({
-    protocol: u.protocol,
-    hostname: u.hostname,
-    port: u.port ? parseInt(u.port, 10) : (u.protocol === 'https:' ? 443 : 80),
-    path: '/api/v1/fees/recommended',
-    method: 'GET',
-    headers: {},
-    timeoutMs: NET_TIMEOUT_MS,
-  });
-  if (r.status !== 200) throw new Error('fees/recommended answered ' + r.status);
-  let data;
-  try { data = JSON.parse(r.body); } catch { throw new Error('fees/recommended body is not JSON'); }
-  const econ = data && data.economyFee;
-  if (typeof econ !== 'number' || !Number.isFinite(econ) || econ < 0) throw new Error('fees/recommended has no usable economyFee');
-  return {
-    fastestFee: data.fastestFee, halfHourFee: data.halfHourFee,
-    hourFee: data.hourFee, economyFee: econ, minimumFee: data.minimumFee,
-  };
+// Fetch the current recommended fees from the configured nodes,
+// PRIMARY FIRST (0.8.9): the primary node's tiers are tried first
+// and the secondary is only asked when the primary cannot answer
+// — the same primary-first rule as the fee, tip, and outspend
+// reads. Throws when neither node answers — the caller keeps the
+// last cached fees, never a verdict.
+async function fetchCurrentFeesFromEndpoints(endpoints) {
+  if (!endpoints || !endpoints.length) throw new Error('no fee endpoints configured');
+  let lastErr = null;
+  for (const ep of endpoints) {
+    try {
+      return await fetchCurrentFeesFromNode(ep.base);
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error('no fee endpoint answered');
 }
 
 // ---------------------------------------------------------------------------
@@ -869,8 +963,7 @@ async function fetchCurrentFees() {
 // Kraken's c[0] is the last trade price; Bitstamp's `last` is the
 // last trade price.
 // PRICE_API_URL lets a test point every provider at a stub (the
-// same pattern as FEE_RATES_URL / SLIPSTREAM_API_URL) — when it is
-// set, all providers fetch from that base on their own paths.
+// same pattern as SLIPSTREAM_API_URL) — when it is set, all providers fetch from that base on their own paths.
 // ---------------------------------------------------------------------------
 const PRICE_PROVIDERS = [
   { id: 'coingecko', label: 'CoinGecko', baseUrl: 'https://api.coingecko.com',
@@ -2411,20 +2504,20 @@ async function testNodeHeight(apiBase) {
 // a 200 with a usable economyFee is ready, and the value is that
 // economy fee ("1 sat/vB"). A plain Esplora answers that with
 // 404, so the fallback is /api/fee-estimates, which returns a map
-// of confirmation target to fee rate — a 200 with at least one
-// numeric rate is ready, and the value is the 6-block rate (the
-// economy analogue), falling back to the cheapest rate if the
-// 6-block target is missing. Either shape proves the node can
-// provide fee estimates. On failure the value IS the reason.
+// of confirmation target to fee rate — a 200 with a usable rate
+// at the 144-block target (the economy analogue, one consistent
+// measurement — see feeEstimatesToRecommended) is ready. Either
+// shape proves the node can provide fee estimates. On failure
+// the value IS the reason.
 // The economy fee from ONE node (0.8.1): the mempool endpoint
 // first, then Esplora's. Returns { fee, source } — source is
 // 'mempool' (the /api/v1/fees/recommended economyFee) or
-// 'esplora' (the 6-block rate from /api/fee-estimates, falling
-// back to the cheapest rate if the 6-block target is missing).
-// Throws with an informative message when the node has no usable
-// fee endpoint, so callers can tell "no fee data" from "bad data".
-// The fee-market trigger and the node capability test share this
-// — one rule for what a node's fee reading is.
+// 'esplora' (the 144-block rate from /api/fee-estimates, nearest
+// target when 144 is missing). Throws with an informative
+// message when the node has no usable fee endpoint, so callers
+// can tell "no fee data" from "bad data". The fee-market
+// trigger, the hourly observation, and the node capability test
+// share this — one rule for what a node's fee reading is.
 async function fetchNodeFee(apiBase) {
   let res;
   try {
@@ -2450,10 +2543,14 @@ async function fetchNodeFee(apiBase) {
   if (res.status !== 200) throw new Error('no fee endpoint (404 on both)');
   let data;
   try { data = JSON.parse(res.body); } catch { throw new Error('fee-estimates body is not JSON'); }
-  const rates = data && Object.values(data).filter((v) => typeof v === 'number' && Number.isFinite(v) && v >= 0);
-  if (!rates || !rates.length) throw new Error('fee-estimates has no usable rates');
-  const six = data && data['6'];
-  const fee = (typeof six === 'number' && Number.isFinite(six) && six >= 0) ? six : Math.min.apply(null, rates);
+  // (0.8.9) One consistent measurement: the economy fee is the
+  // day-scale estimate everywhere, so Esplora's is the 144-block
+  // target — the same target the observation records and the
+  // current-fees mapping uses — not the 6-block rate this branch
+  // used to take. A map without a usable 144 (or nearest-target)
+  // rate has no economy fee at all.
+  const fee = feeEstimateAtTarget(data, ESPLORA_FEE_TARGETS.economy);
+  if (typeof fee !== 'number') throw new Error('fee-estimates has no usable rates');
   return { fee, source: 'esplora' };
 }
 
@@ -2462,8 +2559,8 @@ async function fetchNodeFee(apiBase) {
 // a 200 with a usable economyFee is ready. A plain Esplora
 // answers that with 404, so the fallback is /api/fee-estimates,
 // which returns a map of confirmation target to fee rate — a 200
-// with at least one numeric rate is ready. Either shape proves
-// the node can provide fee estimates.
+// with a usable rate at the 144-block target is ready. Either
+// shape proves the node can provide fee estimates.
 async function testNodeFees(apiBase) {
   try {
     const r = await fetchNodeFee(apiBase);
@@ -2609,7 +2706,8 @@ module.exports = {
   parseTx, extractTxFromPsbt, checkInputsUnspent, checkOutspend, checkOutspends, createOutspendBatch, dryRun, broadcastTx, testConnection,
   getConfirmations, getTipHeight, findSharedInputs, isArchivedTx, timelockedUntil, computeFee, txIoDetail, scriptPubKeyInfo,
   broadcastViaSlipstream, getSlipstreamTxStatus,
-  feePeakFromRates, fetchFeePeak, fetchCurrentFees, feeVerdict, DEFAULT_FEE_RATES_URL,
+  feePeakFromObservations, appendFeeHistoryObservation, feeEstimatesToRecommended, feeEstimateAtTarget, ESPLORA_FEE_TARGETS,
+  fetchCurrentFeesFromNode, fetchCurrentFeesFromEndpoints, feeVerdict,
   priceApiBase, DEFAULT_PRICE_API_URL,
   PRICE_PROVIDERS, priceProviderById, priceProviderLabel, fetchPriceFromProvider, PRICE_USER_AGENT,
   fetchPriceReadings, combinePriceReadings, priceConsensus,
@@ -2622,3 +2720,4 @@ module.exports = {
   DEFAULT_PUBLIC_API_URL, DEFAULT_SECONDARY_API_URL,
   DEFAULT_SLIPSTREAM_API_URL,
 };
+

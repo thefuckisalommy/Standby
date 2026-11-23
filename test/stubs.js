@@ -102,13 +102,19 @@ const PRICE_PROVIDERS = ['coingecko', 'coinbase', 'binance', 'kraken', 'bitstamp
 const priceState = {};
 // The economy fee this stub serves (0.8.1): settable via POST
 // /__test__/fees { economyFee }, default 1 sat/vB.
+// Test hook (0.8.9, accumulated peak): the fee mode this stub
+// serves — 'mempool' (default) answers /api/v1/fees/recommended,
+// 'esplora' 404s it, so the app falls back to /api/fee-estimates
+// exactly like a plain Esplora node. Settable per stub via POST
+// /__test__/fee-mode { mode }. Per stub process; restarting the
+// stub clears it.
+let feeMode = 'mempool';
 // Test hook (0.8.5, fee fetch): feeRequests counts every
 // /api/v1/fees/recommended request this stub has answered —
 // the node fee fetch and the verdict's hourly current-fees
-// fetch both hit this route (FEE_RATES_URL points at the
-// primary stub), so a suite reads the count as a delta across
-// a controlled window. Runtime-readable via GET
-// /__test__/fee-count below.
+// fetch both hit this route from the configured node, so a suite
+// reads the count as a delta across a controlled window.
+// Runtime-readable via GET /__test__/fee-count below.
 let feeRequests = 0;
 const feeState = { economyFee: 1 };
 // Test hook (0.8.6, UTXO cache/batch): outspendRequests counts
@@ -257,32 +263,21 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     return res.end(String(tipHeight));
   }
-  // Fee history (0.7.20): GET /api/v1/mining/blocks/fee-rates/3m
-  // returns a fixed 10-point series whose avgFee_50 medians are
-  // [1,1,1,1,1,1,1,1,2,2] — the 90th percentile is 2.0 sat/vB (the
-  // measured live 3m peak), so an app pointed at a stub via
-  // FEE_RATES_URL always sees feePeak 2.0. Older suites never call
-  // this route, so the stub stays forward-compatible.
-  if (req.method === 'GET' && p === '/api/v1/mining/blocks/fee-rates/3m') {
-    const medians = [1, 1, 1, 1, 1, 1, 1, 1, 2, 2];
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify(medians.map((m, i) => ({
-      avgHeight: TIP - (9 - i), timestamp: 1762800000 + i * 600,
-      avgFee_0: 0, avgFee_10: 1, avgFee_25: 1, avgFee_50: m,
-      avgFee_75: m, avgFee_90: m, avgFee_100: m,
-    }))));
-  }
   // Current recommended fees (0.7.21): GET /api/v1/fees/recommended
   // returns a fixed object whose economyFee is 1 sat/vB — the
-  // measured live floor — so an app pointed at a stub via
-  // FEE_RATES_URL always sees economyFee 1 and a fee below 1
-  // sat/vB reads Critical Risk. Older suites never call this
-  // route, so the stub stays forward-compatible. The economy fee
-  // is settable per stub via POST /__test__/fees { economyFee }
-  // (0.8.1, two-node fee logic) — a suite can drive the two
-  // nodes' fees apart, or make one implausible.
+  // measured live floor — so an app pointed at a stub always sees
+  // economyFee 1 and a fee below 1 sat/vB reads Critical Risk. The
+  // economy fee is settable per stub via POST /__test__/fees
+  // { economyFee } (0.8.1, two-node fee logic) — a suite can drive
+  // the two nodes' fees apart, or make one implausible. In
+  // 'esplora' fee mode (POST /__test__/fee-mode) this route 404s,
+  // so the app falls back to /api/fee-estimates below.
   if (req.method === 'GET' && p === '/api/v1/fees/recommended') {
     feeRequests++;
+    if (feeMode === 'esplora') {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'not found (stub esplora mode)' }));
+    }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ fastestFee: feeState.economyFee, halfHourFee: feeState.economyFee, hourFee: feeState.economyFee, economyFee: feeState.economyFee, minimumFee: 1 }));
   }
@@ -290,7 +285,7 @@ const server = http.createServer((req, res) => {
   // returns a map of confirmation target to fee rate — the shape
   // a plain Esplora serves instead of /api/v1/fees/recommended.
   // The node capability test falls back to it when the mempool
-  // fee endpoint 404s. The 6-block rate tracks the settable
+  // fee endpoint 404s. The 144-block rate tracks the settable
   // economy fee, so the same hook drives it.
   if (req.method === 'GET' && p === '/api/fee-estimates') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -308,6 +303,21 @@ const server = http.createServer((req, res) => {
       if (typeof b.economyFee === 'number' && Number.isFinite(b.economyFee) && b.economyFee >= 0) feeState.economyFee = b.economyFee;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ ok: true, economyFee: feeState.economyFee }));
+    });
+    return;
+  }
+  // Test control for the fee mode (0.8.9, accumulated peak):
+  // POST /__test__/fee-mode { mode: 'mempool'|'esplora' } — see
+  // the feeMode declaration above. Answers the current mode.
+  if (req.method === 'POST' && p === '/__test__/fee-mode') {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      let b = {};
+      try { b = JSON.parse(body); } catch { b = {}; }
+      if (b.mode === 'mempool' || b.mode === 'esplora') feeMode = b.mode;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ ok: true, mode: feeMode }));
     });
     return;
   }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Launch Standby 0.8.8 (branch-0.8.8-nonrpc) + mempool stubs with
+"""Launch Standby 0.8.9 (branch-local-peak) + mempool stubs with
 seeded trigger data, run dom_check099.js against it, then stop
 everything. Reuses the verify script's helpers (importing it does
 not run its main()).
@@ -24,12 +24,14 @@ check-in, and one POST /api/release/check so the trigger subcards
 show live statuses before the DOM script runs.
 """
 import importlib.util
+import json
 import os
 import shutil
 import subprocess
 import sys
 import urllib.error
 import urllib.request
+from datetime import datetime, timedelta, timezone
 
 spec = importlib.util.spec_from_file_location('v70', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'verify094.py'))
 v = importlib.util.module_from_spec(spec)
@@ -65,9 +67,24 @@ def port_closed(port):
 
 shutil.rmtree(DATA, ignore_errors=True)
 shutil.rmtree(CHECKIN_DIR, ignore_errors=True)
-# Primary stub answers the Slipstream API, the fee-rates series
-# and the BTC price feed too (same port), so the app never touches
-# the real slipstream.mara.com, mempool.space or CoinGecko.
+# Fee-history seed (0.8.9, accumulated peak): the fee-pill checks
+# need a served peak of 2.0 sat/vB, and a fresh app has no history
+# (the peak appears only after 24 hourly observations). Seed the
+# state file with 24 hourly observations at 2.0 sat/vB over the
+# last 23 hours — the 90th percentile is 2.0 over a 1-day window —
+# before the app boots. loadState merges the seed over the defaults,
+# so only version, bitcoin.txs, and feeHistory need to be present.
+# The startup hourly tick appends one more observation (fee 1, from the
+# primary stub), which leaves the peak at 2.0.
+os.makedirs(DATA, exist_ok=True)
+_now = datetime.now(timezone.utc)
+_seed_history = [{'t': (_now - timedelta(hours=23 - i)).isoformat().replace('+00:00', 'Z'), 'fee': 2.0} for i in range(24)]
+# The seed must be a plausible state document (version + bitcoin.txs)
+# or loadState rejects it as corrupt; mergeDefaults fills the rest.
+json.dump({'version': 7, 'bitcoin': {'txs': []}, 'feeHistory': _seed_history}, open(os.path.join(DATA, 'state.json'), 'w'), indent=2)
+# Primary stub answers the Slipstream API and the BTC price feed
+# too (same port), so the app never touches the real
+# slipstream.mara.com, mempool.space or CoinGecko.
 p1 = v.start(['node', v.STUB, '18275'], log=LOG)
 p2 = v.start(['node', v.STUB, '18276'], log=LOG)
 recv = v.start(['node', 'checkin-receiver/server.js'],
@@ -75,7 +92,6 @@ recv = v.start(['node', 'checkin-receiver/server.js'],
 app = v.start(['node', 'server.js'],
               env={'PORT': '3478', 'DATA_DIR': DATA, 'CHECKIN_DIR': CHECKIN_DIR,
                    'SLIPSTREAM_API_URL': 'http://127.0.0.1:18275',
-                   'FEE_RATES_URL': 'http://127.0.0.1:18275',
                    'PRICE_API_URL': 'http://127.0.0.1:18275'},
               cwd=BRANCH, log=LOG)
 rc = 1
@@ -83,7 +99,7 @@ try:
     assert v.wait_up(BASE), 'app did not come up'
     assert v.wait_up(RBASE, path='/health'), 'receiver did not come up'
     s, h = v.req('GET', '/api/health', base=BASE)
-    assert h.get('version') == '0.8.8', h
+    assert h.get('version') == '0.8.9', h
     s, r = v.req('PUT', '/api/settings', {'primaryApiUrl': 'http://127.0.0.1:18275',
                                           'secondaryApiUrl': 'http://127.0.0.1:18276'}, base=BASE)
     assert s == 200, r
@@ -154,7 +170,6 @@ try:
     eapp = v.start(['node', 'server.js'],
                    env={'PORT': '3468', 'DATA_DIR': err_data, 'CHECKIN_DIR': err_checkin,
                         'SLIPSTREAM_API_URL': 'http://127.0.0.1:18265',
-                        'FEE_RATES_URL': 'http://127.0.0.1:18265',
                         'PRICE_API_URL': 'http://127.0.0.1:18265'},
                    cwd=BRANCH, log=LOG)
     try:

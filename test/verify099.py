@@ -7,7 +7,7 @@ Boots the branch-0.8.5 app (port 3438), the check-in receiver
 (both fixed: tip height 900000, economy fee 1 sat/vB, price 98200)
 — and checks the 0.8.1 trigger work:
 
-  1. health reports version 0.8.8.
+  1. health reports version 0.8.9.
   2. Block-height trigger: validation at add (bad heights rejected,
      good ones accepted), checkTriggerNow (a height already reached
      fires + warns, a future height watches), evaluation via the
@@ -235,7 +235,7 @@ STUB_S = 18236
 STUB_BASE_P = 'http://127.0.0.1:%d' % STUB_P
 STUB_BASE_S = 'http://127.0.0.1:%d' % STUB_S
 APP_ENV = {'PORT': str(PORT), 'DATA_DIR': DATA, 'CHECKIN_DIR': CHECKIN_DIR,
-           'SLIPSTREAM_API_URL': STUB_BASE_P, 'FEE_RATES_URL': STUB_BASE_P,
+           'SLIPSTREAM_API_URL': STUB_BASE_P,
            'PRICE_API_URL': STUB_BASE_P}
 LOG = '/tmp/heirloom099-proc.log'
 
@@ -362,17 +362,20 @@ def main():
         """Stop + start the app, wait up, then poll until the
         startup tick has fired (Optimization O2): the startup
         hourly tick stamps bitcoin.connection.nodeCheckedAt.primary
-        and the +2 s refresh fills bitcoin.feePeak — both are
+        and the +2 s refresh fills bitcoin.currentFees — both are
         observable in /api/state, so poll for them instead of
         sleeping a fixed 7 s past the 5 s startup tick. The
-        feePeak condition also guarantees the concurrent startup
+        currentFees condition also guarantees the concurrent startup
         full tick (fired at the same ~0.5 s) has finished before
         any post-restart read. Deadline 4 s, then proceed anyway
-        (the old behavior as fallback). Call BEFORE seeding any
-        firing state. `before_start`, when given, runs after the
-        old app stops and before the new one starts — for seeding
-        state that must be on disk before boot (a backdated clock,
-        an active grace)."""
+        (the old behavior as fallback). On the very first boot the
+        node URLs are not pointed at the stubs yet, so the +2 s
+        refresh cannot fill currentFees and the poll runs its 4 s
+        course — the 4 s itself still guarantees the 500 ms startup
+        ticks finished. Call BEFORE seeding any firing state.
+        `before_start`, when given, runs after the old app stops
+        and before the new one starts — for seeding state that must
+        be on disk before boot (a backdated clock, an active grace)."""
         nonlocal app
         # The pre-restart node-check stamp: the poll waits for a
         # stamp NEWER than this, so a stale stamp can never
@@ -397,9 +400,9 @@ def main():
                     _, st = req('GET', '/api/state')
                     conn = st.get('bitcoin', {}).get('connection', {})
                     stamp = (conn.get('nodeCheckedAt') or {}).get('primary')
-                    fee_peak = st.get('bitcoin', {}).get('feePeak')
+                    cur_fees = st.get('bitcoin', {}).get('currentFees') or {}
                     if (isinstance(stamp, str) and stamp != prev_stamp
-                            and isinstance(fee_peak, (int, float))):
+                            and isinstance(cur_fees.get('economyFee'), (int, float))):
                         break
                 except Exception:
                     pass
@@ -409,13 +412,16 @@ def main():
     def clear_caches():
         """POST /api/__test__/clear-caches — cold caches without a
         restart (speedup): the same empty price / fee / tip /
-        fee-peak / current-fee / outspend caches a restart
-        produces, but no state re-read, no tick-timer reset, no
-        restart startup wait (~2.5 s poll). Use ONLY where a cold cache is all the
-        test needs. Keep restart() where a real restart is the
-        subject (state persistence, migration, crash recovery), or
-        where the fresh tick window is load-bearing (a background
-        tick must not fire before the manual check)."""
+        current-fee / outspend caches a restart produces, but no
+        state re-read, no tick-timer reset, no restart startup wait
+        (~2.5 s poll). (There is no fee-peak cache any more — the
+        peak is derived from the recorded history in state.json,
+        so a restart is the only way to re-read it.) Use ONLY where
+        a cold cache is all the test needs. Keep restart() where a
+        real restart is the subject (state persistence, migration,
+        crash recovery), or where the fresh tick window is
+        load-bearing (a background tick must not fire before the
+        manual check)."""
         s, r = req('POST', '/api/__test__/clear-caches', {})
         return s == 200 and r.get('ok') is True
 
@@ -476,7 +482,7 @@ def main():
 
         # --- 1. health + version ----------------------------------------
         s, h = req('GET', '/api/health')
-        check('1 health reports version 0.8.8', h.get('version') == '0.8.8', h)
+        check('1 health reports version 0.8.9', h.get('version') == '0.8.9', h)
 
         # --- 2. block-height trigger --------------------------------------
         # Validation at add: bad heights rejected, good ones accepted.
@@ -4746,12 +4752,340 @@ def main():
         check('30 cleanup: settings and cadence restored', s == 200, (s, r))
         delete_all_txs()
 
+        # --- 31. accumulated fee peak (0.8.9) ---------------------------
+        # The peak is no longer fetched from anywhere — Standby
+        # records one economy-fee observation per hourly tick (the
+        # startup tick counts) from the primary node, falling back
+        # to the secondary, and the peak is the 90th percentile of
+        # the recorded history in state.json. No public endpoint is
+        # involved at any point: the current fees come from the
+        # configured nodes too (mempool /fees/recommended, or
+        # Esplora /fee-estimates mapped to the same tiers). A
+        # second app on port 3440 proves the live behaviour — the
+        # main app's own history is already long (one observation
+        # per restart), so only a seeded second app gives
+        # controlled counts. The unit checks prove the pure
+        # helpers without a server.
+        lp_dir = '/tmp/heirloom099-accumpeak'
+        lp_checkin = lp_dir + '-checkin'
+        lp_port = 3440
+        lp_base = 'http://127.0.0.1:%d' % lp_port
+        lp_log = '/tmp/heirloom099-accumpeak-proc.log'
+        app_lp = None
+
+        def lp_state():
+            s, st = req('GET', '/api/state', base=lp_base)
+            return st
+
+        def lp_bitcoin():
+            return (lp_state().get('bitcoin', {}) or {})
+
+        def lp_state_file():
+            return json.load(open(os.path.join(lp_dir, 'state.json')))
+
+        def lp_seed_state(fee_history, primary=STUB_BASE_P, secondary=STUB_BASE_S):
+            # Seed the second app's state from the main app's, with
+            # the node URLs pinned and the fee history replaced by
+            # exactly the given observations — the main app's own
+            # history is already long (one observation per restart),
+            # so only an overwritten history gives controlled counts.
+            shutil.rmtree(lp_dir, ignore_errors=True)
+            shutil.rmtree(lp_checkin, ignore_errors=True)
+            os.makedirs(lp_dir, exist_ok=True)
+            st = load_state_file()
+            (st.get('settings', {}) or {})['primaryApiUrl'] = primary
+            (st.get('settings', {}) or {})['secondaryApiUrl'] = secondary
+            st['feeHistory'] = fee_history
+            json.dump(st, open(os.path.join(lp_dir, 'state.json'), 'w'), indent=2)
+
+        def lp_start(env_extra=None):
+            env = {'PORT': str(lp_port), 'DATA_DIR': lp_dir, 'CHECKIN_DIR': lp_checkin}
+            if env_extra:
+                env.update(env_extra)
+            return start(['node', 'server.js'], env=env, cwd=APP, log=lp_log)
+
+        def lp_wait_obs(n, deadline=15):
+            # Poll until the second app has recorded at least n
+            # observations (or the deadline expires); returns the
+            # state bitcoin object from the last read.
+            end = time.time() + deadline
+            st = {}
+            while time.time() < end:
+                try:
+                    st = lp_bitcoin()
+                    if isinstance(st.get('feePeakObservations'), int) and st.get('feePeakObservations') >= n:
+                        return st
+                except Exception:
+                    pass
+                time.sleep(0.5)
+            return st
+
+        def lp_wait_current_fee(fee, deadline=15):
+            # Poll until the served current economy fee equals fee
+            # (the +2 s startup refresh, from the configured nodes).
+            end = time.time() + deadline
+            while time.time() < end:
+                try:
+                    cf = (lp_bitcoin().get('currentFees') or {})
+                    if cf.get('economyFee') == fee:
+                        return True
+                except Exception:
+                    pass
+                time.sleep(0.5)
+            return False
+
+        def obs_hours_ago(hours, fee):
+            # One observation `hours` hours ago at `fee` — the
+            # timestamps the seed histories are built from.
+            return {'t': iso_ago(hours=hours), 'fee': fee}
+
+        try:
+            # (a) Unit checks for the pure helpers (same pattern as
+            # the 0.7.20 ladder check): percentile, minimum, window,
+            # pruning, append cap, sanitizer, and the Esplora
+            # mapping — without a server.
+            node_js = (
+                "const b = require('./lib/bitcoin.js');"
+                "const s = require('./lib/store.js');"
+                "const now = Date.now();"
+                "const h = (n) => new Date(now - n * 3600000).toISOString();"
+                "const h24 = Array.from({length: 24}, (_, i) => ({ t: h(23 - i), fee: 2 }));"
+                "const h23 = h24.slice(0, 23);"
+                "const pct = Array.from({length: 24}, (_, i) => ({ t: h(23 - i), fee: i < 21 ? 1 : (i < 23 ? 2 : 10) }));"
+                "const win3 = Array.from({length: 24}, (_, i) => ({ t: new Date(now - (3 * 86400000 - i * 3 * 3600000)).toISOString(), fee: 2 }));"
+                "const old = [{ t: new Date(now - 91 * 86400000).toISOString(), fee: 100 }].concat(h23);"
+                "const full = Array.from({length: 2160}, (_, i) => ({ t: h(2159 - i), fee: 2 }));"
+                "const dirty = [{ t: h(1), fee: 2 }, { fee: 2 }, { t: h(1), fee: -1 }, { t: 'not-a-date', fee: 2 }, { t: new Date(now + 3600000).toISOString(), fee: 2 }, { t: new Date(now - 91 * 86400000).toISOString(), fee: 2 }];"
+                "console.log(JSON.stringify({"
+                " p24: b.feePeakFromObservations(h24, now),"
+                " p23: b.feePeakFromObservations(h23, now),"
+                " pPct: b.feePeakFromObservations(pct, now),"
+                " pWin3: b.feePeakFromObservations(win3, now),"
+                " pOld: b.feePeakFromObservations(old, now),"
+                " pEmpty: b.feePeakFromObservations([], now),"
+                " a4: b.appendFeeHistoryObservation([{t: h(3), fee: 1}, {t: h(2), fee: 1}, {t: h(1), fee: 1}], 2, now).length,"
+                " aCap: b.appendFeeHistoryObservation(full, 3, now).length,"
+                " aBad: b.appendFeeHistoryObservation([{t: h(1), fee: 1}], -1, now).length,"
+                " sClean: s.sanitizeFeeHistory(dirty, now).length,"
+                " mFull: b.feeEstimatesToRecommended({'1': 9, '2': 8, '3': 7, '6': 6, '144': 5, '1008': 1}),"
+                " mSparse: b.feeEstimatesToRecommended({'6': 7}),"
+                " mNull: b.feeEstimatesToRecommended({}),"
+                " tExact: b.feeEstimateAtTarget({'6': 7, '144': 5, '1008': 1}, 144),"
+                " tNear: b.feeEstimateAtTarget({'6': 7, '1008': 1}, 144),"
+                " tTie: b.feeEstimateAtTarget({'143': 5, '145': 6}, 144),"
+                "}));"
+            )
+            nr = subprocess.run(['node', '-e', node_js], capture_output=True, text=True, cwd=APP, timeout=30)
+            try:
+                nv = json.loads(nr.stdout.strip())
+            except Exception:
+                nv = {}
+            check('31 unit: 24 hourly observations at 2.0 peak at 2.0 over a 1-day window',
+                  (nv.get('p24') or {}).get('peak') == 2.0 and (nv.get('p24') or {}).get('windowDays') == 1
+                  and (nv.get('p24') or {}).get('observations') == 24, nv.get('p24'))
+            check('31 unit: 23 observations serve no peak (24-observation minimum)',
+                  (nv.get('p23') or {}).get('peak') is None and (nv.get('p23') or {}).get('observations') == 23, nv.get('p23'))
+            check('31 unit: the peak is a percentile, not the max ([1x21, 2, 2, 10] peaks at ~1.7, not 10)',
+                  abs(((nv.get('pPct') or {}).get('peak') or 0) - 1.7) < 1e-9, nv.get('pPct'))
+            check('31 unit: a 3-day span windows at 3 days',
+                  (nv.get('pWin3') or {}).get('windowDays') == 3, nv.get('pWin3'))
+            check('31 unit: a 91-day-old observation is ignored by the peak (23 kept, no peak yet)',
+                  (nv.get('pOld') or {}).get('observations') == 23 and (nv.get('pOld') or {}).get('peak') is None, nv.get('pOld'))
+            check('31 unit: an empty history serves no peak, a 0-day window, 0 observations',
+                  (nv.get('pEmpty') or {}).get('peak') is None and (nv.get('pEmpty') or {}).get('windowDays') == 0
+                  and (nv.get('pEmpty') or {}).get('observations') == 0, nv.get('pEmpty'))
+            check('31 unit: appending grows the history by one',
+                  nv.get('a4') == 4, nv)
+            check('31 unit: appending to a full 2,160-entry history caps it (oldest dropped)',
+                  nv.get('aCap') == 2160, nv)
+            check('31 unit: appending an invalid fee appends nothing',
+                  nv.get('aBad') == 1, nv)
+            check('31 unit: the sanitizer keeps only the one clean entry of six dirty ones',
+                  nv.get('sClean') == 1, nv)
+            check('31 unit: Esplora fee-estimates map exactly to the mempool tiers (144, not 6, is the economy tier)',
+                  nv.get('mFull') == {'fastestFee': 9, 'halfHourFee': 7, 'hourFee': 6, 'economyFee': 5, 'minimumFee': 1}, nv.get('mFull'))
+            check('31 unit: a sparse Esplora map falls back to the nearest target for every tier',
+                  nv.get('mSparse') == {'fastestFee': 7, 'halfHourFee': 7, 'hourFee': 7, 'economyFee': 7, 'minimumFee': 7}, nv.get('mSparse'))
+            check('31 unit: an empty Esplora map maps to null (no economy rate, no data)',
+                  nv.get('mNull') is None, nv)
+            check('31 unit: the 144 target is exact when present, nearest when absent, higher on a tie',
+                  nv.get('tExact') == 5 and nv.get('tNear') == 7 and nv.get('tTie') == 6, nv)
+            # (b) Fresh app: the startup hourly tick records one
+            # observation from the primary stub (economyFee 1) and
+            # the peak stays null — the history is still building.
+            # The served state never carries the raw history.
+            lp_seed_state([])
+            app_lp = lp_start()
+            check('31 fresh: second app (empty history) up', wait_up(lp_base))
+            st = lp_wait_obs(1)
+            check('31 fresh: one observation recorded by the startup tick',
+                  st.get('feePeakObservations') == 1, st.get('feePeakObservations'))
+            check('31 fresh: the peak stays null below 24 observations',
+                  st.get('feePeak') is None, st.get('feePeak'))
+            check('31 fresh: one observation spans a 0-day window',
+                  st.get('feePeakWindowDays') == 0, st.get('feePeakWindowDays'))
+            check('31 fresh: the served basis is fee-estimates',
+                  st.get('feePeakBasis') == 'fee-estimates', st.get('feePeakBasis'))
+            check('31 fresh: the served peak time is the observation time (ISO)',
+                  isinstance(st.get('feePeakAt'), str) and 'T' in st.get('feePeakAt'), st.get('feePeakAt'))
+            fh = (lp_state_file().get('feeHistory') or [])
+            check('31 fresh: the observation persists on disk (fee 1, from the primary stub)',
+                  len(fh) == 1 and fh[0].get('fee') == 1, fh)
+            check('31 fresh: the served peak time matches the stored observation',
+                  len(fh) == 1 and fh[0].get('t') == st.get('feePeakAt'), (fh, st.get('feePeakAt')))
+            check('31 fresh: the served state never carries the raw history',
+                  'feeHistory' not in lp_state(), 'feeHistory' in lp_state())
+            # (c) The 24th observation serves the peak: seed 23
+            # hourly readings at 2.0 and the startup tick records
+            # the 24th (fee 1, from the stub) — the 90th
+            # percentile of [1, 2x23] is 2.0.
+            stop(app_lp)
+            lp_seed_state([obs_hours_ago(23 - i, 2.0) for i in range(23)])
+            app_lp = lp_start()
+            check('31 24th: second app up again', wait_up(lp_base))
+            st = lp_wait_obs(24)
+            check('31 24th: 24 observations after the startup tick',
+                  st.get('feePeakObservations') == 24, st.get('feePeakObservations'))
+            check('31 24th: the peak appears at 2.0 sat/vB',
+                  st.get('feePeak') == 2.0, st.get('feePeak'))
+            check('31 24th: the served window is 1 day',
+                  st.get('feePeakWindowDays') == 1, st.get('feePeakWindowDays'))
+            fh = (lp_state_file().get('feeHistory') or [])
+            check('31 24th: the recorded 24th observation is the stub economy fee (1)',
+                  len(fh) == 24 and fh[-1].get('fee') == 1, fh[-1] if fh else fh)
+            # (h) Restart survival: the history is in state.json,
+            # so a restart keeps it — the next startup tick appends
+            # a 25th observation and the peak stays 2.0.
+            stop(app_lp)
+            app_lp = lp_start()
+            check('31 restart: second app up after restart', wait_up(lp_base))
+            st = lp_wait_obs(25)
+            check('31 restart: 25 observations after the restart startup tick',
+                  st.get('feePeakObservations') == 25, st.get('feePeakObservations'))
+            check('31 restart: the peak stays 2.0 across the restart',
+                  st.get('feePeak') == 2.0, st.get('feePeak'))
+            fh = (lp_state_file().get('feeHistory') or [])
+            check('31 restart: the seeded entries survive (first fee still 2.0, 25th is 1)',
+                  len(fh) == 25 and fh[0].get('fee') == 2.0 and fh[-1].get('fee') == 1, (len(fh), fh[0] if fh else None, fh[-1] if fh else None))
+            # (i) Restore round-trip: the backup carries the
+            # history, so restoring it keeps the peak — the verdict
+            # does not reset to "still building" for a day.
+            s, bak = req('GET', '/api/backup', base=lp_base)
+            check('31 restore: the backup carries the 25-observation history',
+                  s == 200 and len((bak.get('state', {}) or {}).get('feeHistory') or []) == 25, s)
+            s, r = req('POST', '/api/restore', bak, base=lp_base)
+            check('31 restore: the round-trip lands (200)', s == 200, (s, r))
+            st = lp_bitcoin()
+            check('31 restore: the peak survives the restore (25 observations, 2.0)',
+                  st.get('feePeakObservations') == 25 and st.get('feePeak') == 2.0, (st.get('feePeakObservations'), st.get('feePeak')))
+            # (d) Primary-to-secondary fallback: the primary is a
+            # dead port and the secondary stub's economy fee is 5 —
+            # the observation still records, from the secondary,
+            # and the history continues the primary's picture.
+            s, r = req('POST', '/__test__/fees', {'economyFee': 5}, base=STUB_BASE_S)
+            check('31 fallback: secondary stub fee set to 5', s == 200 and r.get('economyFee') == 5, (s, r))
+            stop(app_lp)
+            lp_seed_state([obs_hours_ago(23 - i, 2.0) for i in range(23)],
+                          primary='http://127.0.0.1:9', secondary=STUB_BASE_S)
+            app_lp = lp_start()
+            check('31 fallback: second app (dead primary) up', wait_up(lp_base))
+            st = lp_wait_obs(24)
+            check('31 fallback: the observation still records with the primary dead',
+                  st.get('feePeakObservations') == 24, st.get('feePeakObservations'))
+            check('31 fallback: the peak still appears at 2.0',
+                  st.get('feePeak') == 2.0, st.get('feePeak'))
+            fh = (lp_state_file().get('feeHistory') or [])
+            check('31 fallback: the recorded observation is the secondary fee (5), not the primary',
+                  len(fh) == 24 and fh[-1].get('fee') == 5, fh[-1] if fh else fh)
+            check('31 fallback: the current fees come from the secondary too (economy 5)',
+                  lp_wait_current_fee(5), lp_bitcoin().get('currentFees'))
+            s, r = req('POST', '/__test__/fees', {'economyFee': 1}, base=STUB_BASE_S)
+            check('31 fallback: secondary stub fee restored to 1', s == 200 and r.get('economyFee') == 1, (s, r))
+            # (e) Both nodes fail: the hour records nothing and the
+            # peak stays null — a dead hour leaves the history
+            # (and the peak) unchanged, never a wrong value.
+            stop(app_lp)
+            lp_seed_state([obs_hours_ago(23 - i, 2.0) for i in range(23)],
+                          primary='http://127.0.0.1:9', secondary='http://127.0.0.1:19998')
+            open(lp_log, 'w').close()
+            app_lp = lp_start()
+            check('31 both-fail: second app (both nodes dead) up', wait_up(lp_base))
+            time.sleep(4)  # past the 500 ms startup hourly tick
+            st = lp_bitcoin()
+            check('31 both-fail: still 23 observations after the startup tick (nothing recorded)',
+                  st.get('feePeakObservations') == 23, st.get('feePeakObservations'))
+            check('31 both-fail: the peak stays null with both nodes dead',
+                  st.get('feePeak') is None, st.get('feePeak'))
+            check('31 both-fail: the current fees stay null too (no data, not a guess)',
+                  st.get('currentFees') is None, st.get('currentFees'))
+            fh = (lp_state_file().get('feeHistory') or [])
+            check('31 both-fail: the stored history is untouched (23 entries)',
+                  len(fh) == 23, len(fh))
+            lp_log_text = open(lp_log, errors='ignore').read() if os.path.exists(lp_log) else ''
+            check('31 both-fail: the skipped hour is logged',
+                  'fee-history observation skipped' in lp_log_text, lp_log_text[-500:])
+            # (f) Esplora mode: the primary stub 404s
+            # /fees/recommended, so the app reads /fee-estimates —
+            # the 144-block rate (economy 3) is the observation,
+            # and the current fees map to the mempool tiers.
+            s, r = req('POST', '/__test__/fee-mode', {'mode': 'esplora'}, base=STUB_BASE_P)
+            check('31 esplora: primary stub in esplora mode', s == 200 and r.get('mode') == 'esplora', (s, r))
+            s, r = req('POST', '/__test__/fees', {'economyFee': 3}, base=STUB_BASE_P)
+            check('31 esplora: primary stub economy fee set to 3', s == 200 and r.get('economyFee') == 3, (s, r))
+            stop(app_lp)
+            lp_seed_state([obs_hours_ago(23 - i, 2.0) for i in range(23)])
+            app_lp = lp_start()
+            check('31 esplora: second app (esplora primary) up', wait_up(lp_base))
+            st = lp_wait_obs(24)
+            check('31 esplora: the observation records from the Esplora primary',
+                  st.get('feePeakObservations') == 24, st.get('feePeakObservations'))
+            fh = (lp_state_file().get('feeHistory') or [])
+            check('31 esplora: the recorded observation is the Esplora economy fee (3)',
+                  len(fh) == 24 and fh[-1].get('fee') == 3, fh[-1] if fh else fh)
+            check('31 esplora: the peak is 2.0 (the 24th reading does not move it)',
+                  st.get('feePeak') == 2.0, st.get('feePeak'))
+            check('31 esplora: the current fees map from fee-estimates to the mempool tiers',
+                  lp_wait_current_fee(3) and (lp_bitcoin().get('currentFees') or {}) == {'fastestFee': 4, 'halfHourFee': 3, 'hourFee': 3, 'economyFee': 3, 'minimumFee': 1},
+                  lp_bitcoin().get('currentFees'))
+            s, r = req('POST', '/__test__/fee-mode', {'mode': 'mempool'}, base=STUB_BASE_P)
+            check('31 esplora: primary stub back in mempool mode', s == 200 and r.get('mode') == 'mempool', (s, r))
+            s, r = req('POST', '/__test__/fees', {'economyFee': 1}, base=STUB_BASE_P)
+            check('31 esplora: primary stub economy fee restored to 1', s == 200 and r.get('economyFee') == 1, (s, r))
+            # (g) Pruning on load: a 91-day-old observation is
+            # dropped when the state loads, so it can never
+            # pollute the peak — the history after the startup
+            # tick is 23 kept readings + 1 new one.
+            stop(app_lp)
+            old_obs = {'t': iso_ago(days=91), 'fee': 100}
+            lp_seed_state([old_obs] + [obs_hours_ago(23 - i, 2.0) for i in range(23)])
+            app_lp = lp_start()
+            check('31 prune: second app (stale history) up', wait_up(lp_base))
+            st = lp_wait_obs(24)
+            check('31 prune: 24 observations after load-prune + the new one',
+                  st.get('feePeakObservations') == 24, st.get('feePeakObservations'))
+            check('31 prune: the peak is 2.0, not polluted by the 100 sat/vB outlier',
+                  st.get('feePeak') == 2.0, st.get('feePeak'))
+            fh = (lp_state_file().get('feeHistory') or [])
+            check('31 prune: the 91-day-old entry is gone from the stored history',
+                  len(fh) == 24 and all(e.get('fee') != 100 for e in fh), [e.get('fee') for e in fh])
+        finally:
+            if app_lp is not None:
+                stop(app_lp)
+            # The stub fee modes and fees are reset either way, so
+            # no later section (or suite) reads a doctored node.
+            try:
+                req('POST', '/__test__/fee-mode', {'mode': 'mempool'}, base=STUB_BASE_P)
+                req('POST', '/__test__/fees', {'economyFee': 1}, base=STUB_BASE_P)
+                req('POST', '/__test__/fees', {'economyFee': 1}, base=STUB_BASE_S)
+            except Exception:
+                pass
+
     finally:
         for p in list(v.procs):
             stop(p)
 
     # --- 11. no server left running -------------------------------------
-    for port in (PORT, RECEIVER_PORT, STUB_P, STUB_S, 18190, 18191):
+    for port in (PORT, RECEIVER_PORT, STUB_P, STUB_S, 18190, 18191, 3440):
         check('11 no server left running on port %d' % port, port_closed(port))
 
     print()
@@ -4761,3 +5095,4 @@ def main():
 
 if __name__ == '__main__':
     sys.exit(main())
+
