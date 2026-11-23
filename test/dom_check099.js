@@ -1190,7 +1190,7 @@ function check(name, cond, detail) {
   check('price sources: the note explains the 5% agreement rule (static HTML)',
     idx.indexOf('agree within <span id="price-sources-agreement">5%</span>') !== -1, '');
   check('price sources: the "?" pop-out names the primary-decides rule',
-    appJs.indexOf('is the one that decides') !== -1, '');
+    appJs.indexOf('price decides') !== -1, '');
   check('price sources: the "?" pop-out names the single-source fallback',
     appJs.indexOf('the other is used alone') !== -1, '');
   check('price sources: the card has a per-source display with a status pill and a price value span (static HTML)',
@@ -3081,7 +3081,7 @@ function check(name, cond, detail) {
   // holds \u2019 escapes, not the decoded apostrophe.
   check('redesign static: the vacation "?" pop-out says the countdown freezes and the five fast triggers keep firing (check-in-only)',
     appJs.indexOf('Freezes the check-in countdown') !== -1
-    && appJs.indexOf('Price, UTXO, block-height, set-date, and fee-market triggers keep firing while you') !== -1,
+    && appJs.indexOf('price, UTXO, block-height, set-date, and fee-market triggers keep firing') !== -1,
     '');
   check('redesign static: the vacation card has the indefinite option ("Until I say I\'m back")',
     idx.indexOf('id="set-vacation-indefinite"') !== -1 && idx.indexOf("Until I say I'm back") !== -1, '');
@@ -3327,14 +3327,14 @@ function check(name, cond, detail) {
   // ASCII-safe substrings only: the source holds \u2019
   // escapes, not the decoded apostrophe.
   check('trim static: the moved facts still live in the "?" pop-outs',
-    appJs.indexOf('Price, UTXO, block-height, set-date, and fee-market triggers keep firing while you') !== -1
+    appJs.indexOf('price, UTXO, block-height, set-date, and fee-market triggers keep firing') !== -1
     && appJs.indexOf('It contains the signed hexes, which reveal the destination addresses and amounts') !== -1
-    && appJs.indexOf('A key can only record a check-in') !== -1
+    && appJs.indexOf('A key can only check in') !== -1
     && appJs.indexOf('The Low multiplier must stay above the Medium one') !== -1
     && appJs.indexOf('or your own mempool on the LAN') !== -1
-    && appJs.indexOf('Leave the secondary blank to use the primary alone') !== -1
-    && appJs.indexOf('is the one that decides') !== -1
-    && appJs.indexOf('Standby evaluates all triggers \u2014 check-in, price, UTXO, block-height, set-date, and fee-market \u2014 together every X seconds') !== -1, '');
+    && appJs.indexOf('Toggle the secondary off to use the primary alone') !== -1
+    && appJs.indexOf('price decides') !== -1
+    && appJs.indexOf('Standby evaluates all triggers together every X seconds') !== -1, '');
   // Dynamic: the default is All (everything visible).
   check('filter default: all eleven cards are visible before any filter click',
     JSON.stringify(visibleCards()) === JSON.stringify(CARD_KEYS), 'visible=' + visibleCards().join(', '));

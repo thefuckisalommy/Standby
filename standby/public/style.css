@@ -747,7 +747,7 @@ p.inline-btns { display: flex; gap: 8px; flex-wrap: nowrap; align-items: center;
    strings (a txid, a hex) instead of forcing the modal wider than
    the screen — the modal is a flex item, so its min-content would
    otherwise beat its max-width on a phone. */
-#confirm-body, #modal-details { overflow-wrap: anywhere; }
+#confirm-body, #modal-details { overflow-wrap: anywhere; white-space: pre-line; }
 .modal .kv { grid-template-columns: 110px 1fr; }
 .modal .kv dd { overflow-wrap: anywhere; }
 /* The broadcast-log details pop-out renders the full signed tx hex

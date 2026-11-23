@@ -5756,27 +5756,27 @@
   var SETTINGS_HELP = {
     vacation: {
       title: 'Vacation mode',
-      body: 'Freezes the check-in countdown while you\u2019re away. Leave at 13 of 25 days and you come back to 13 of 25 \u2014 the days do not count while you\u2019re gone. Check-in transactions do not fire while you\u2019re away. Price, UTXO, block-height, set-date, and fee-market triggers keep firing while you\u2019re away. Set an end date, or leave it indefinite and it holds until you say you\u2019re back.',
+      body: 'Freezes the check-in countdown while you\u2019re away. Leave at 13 of 25 days and you come back to 13 of 25.\n\nCheck-in transactions do not fire while you\u2019re away, but price, UTXO, block-height, set-date, and fee-market triggers keep firing.\n\nSet an end date, or leave it indefinite and it holds until you say you\u2019re back.',
       triggers: ['checkin'],
     },
     arm: {
       title: 'Global Arm/Disarm',
-      body: 'Arms or disarms every staged transaction at once \u2014 check-in, BTC price, UTXO, block height, set date, fee market, and manual. Disarming stops automatic firing for all triggers \u2014 nothing broadcasts on its own. A manual broadcast still works while disarmed (it is you explicitly sending it). Disarmed check-in transactions freeze their countdown and resume from the same spot when re-armed. \u2018Arm all\u2019 arms everything, including transactions you had individually disarmed before.',
+      body: 'Arms or disarms every staged transaction at once \u2014 check-in, BTC price, UTXO, block height, set date, fee market, and manual.\n\nDisarming stops automatic firing for all triggers \u2014 nothing broadcasts on its own. A manual broadcast still works while disarmed.\n\nDisarmed check-in transactions freeze their countdown and resume from the same spot when re-armed.\n\n\u2018Arm all\u2019 arms everything, including transactions you had individually disarmed before.',
       triggers: ['general'],
     },
     nodes: {
       title: 'Bitcoin nodes',
-      body: 'The Bitcoin nodes Standby talks to. Standby reads the chain through these nodes \u2014 it checks whether a UTXO is spent, confirms a broadcast landed, and submits your transactions. The primary is tried first; if it fails, the secondary is used. Leave the secondary blank to use the primary alone, or turn it off with the toggle in the Secondary node heading: off means the primary node only, with no fallback if it is down or unreachable. The address is a mempool instance \u2014 mempool.space by default, another public instance, or your own mempool on the LAN. UTXO triggers ask the node whether the watched UTXO is spent, and every transaction\u2019s broadcast goes through a node. Check-in, set-date, and manual triggers do not read the node to decide whether to fire; price triggers read the exchanges instead. Block-height and fee-market triggers read the node (the tip height and the fee estimate).',
+      body: 'The Bitcoin nodes Standby talks to. The primary is tried first; if it fails, the secondary is used.\n\nToggle the secondary off to use the primary alone with no fallback if it is down or unreachable.\n\nThe address is a mempool instance \u2014 mempool.space by default, another public instance, or your own mempool on the LAN.\n\nUTXO, block-height, and fee-market triggers read the node, and broadcasts go through it.',
       triggers: ['general'],
     },
     'price-sources': {
       title: 'Bitcoin price source',
-      body: 'The two price sources Standby reads the BTC price from. Every check, Standby fetches the price from both. A price trigger only fires when both agree within your price-agreement setting; if one is down, the other is used alone. When they agree, the primary price source\u2019s price is the one that decides. Pick Custom for either source to point Standby at your own endpoint \u2014 give its full URL and the Custom endpoint json path (for example, data.amount).',
+      body: 'The two price sources Standby reads the BTC price from. Every check, Standby fetches the price from both.\n\nA price trigger only fires when both agree within your price-agreement setting; if one is down, the other is used alone. When they agree, the primary\u2019s price decides.\n\nPick Custom for either source to point Standby at your own endpoint \u2014 give its full URL and the Custom endpoint json path (for example, data.amount).',
       triggers: ['price'],
     },
     grace: {
       title: 'Grace period',
-      body: 'A pause for ALL triggers — price, UTXO, block-height, set-date, fee-market, and check-in — after the app has been offline. If Standby was offline longer than the \u2018offline\u2019 days, those triggers are paused for the \u2018lasts\u2019 days (or until you resume) so they don\u2019t fire on conditions that changed while the app was away. A check-in rule is held by the same grace as everything else: its due date is not pushed out, and while the grace is active a past-due check-in reads as held, not due. Turn the grace off with the toggle in the card heading: off means triggers fire immediately, with no pause after an offline gap — and no outage protection for check-in either. Checking in does not clear a grace. A short check-in threshold can also start the grace sooner: if the device was offline for more than a quarter of that threshold and the check-in clock is more than half spent.',
+      body: 'A pause for ALL triggers after the app has been offline. If Standby was offline longer than the \u2018offline\u2019 days, automatic broadcasts pause for the \u2018lasts\u2019 days, or until you resume.\n\nTurn it off with the toggle in the card heading.\n\nExample: Your device is offline for 10 days. Rather than broadcasting any transactions when the device powers back on, you enter a grace period. Triggers stay paused for 7 days, or until you clear the grace manually.',
       triggers: ['checkin', 'price', 'utxo', 'blockheight', 'setdate', 'feemarket'],
     },
     agreement: {
@@ -5786,22 +5786,22 @@
     },
     cadence: {
       title: 'Check cadence',
-      body: 'How often every trigger is checked. Standby evaluates all triggers — check-in, price, UTXO, block-height, set-date, and fee-market — together every X seconds. Faster catches an unconfirmed spend, a brief price spike, and a block height sooner; slower means fewer API calls. The price cache refreshes on this interval too, so a faster cadence fetches fresher prices. The fee-market cache does not: it refreshes once every 5 minutes regardless of this setting, so a fee move is only detected within 5 minutes. A very fast cadence makes many more requests to your nodes. Public nodes rate-limit heavy use, so a short interval can get this IP throttled or limited by the provider.',
+      body: 'How often every trigger is checked. Standby evaluates all triggers together every X seconds.\n\nFaster catches an unconfirmed spend, a brief price spike, or a block height sooner, but makes more API calls.\n\nThe price cache refreshes on this interval too. The fee cache does not: it refreshes once every 5 minutes regardless of this setting.\n\nPublic nodes rate-limit heavy use, so a very fast cadence can get this IP throttled.\n\nExample: at 60 seconds, a price spike that lasts 30 seconds may never be seen; at 10 seconds it will be \u2014 but that\u2019s six times the requests.',
       triggers: ['price', 'utxo', 'blockheight', 'setdate', 'feemarket'],
     },
     fee: {
       title: 'Broadcast Fee Risk',
-      body: 'Where the Low / Medium / High fee pill flips. Each transaction\u2019s fee rate is compared to the 90-day peak (the 90th percentile of block medians). Low Risk is at or above the Low multiplier, Medium Risk at or above the Medium multiplier, High Risk below it. A fee below the current economy fee is Critical Risk. The pill is informational \u2014 it never blocks a broadcast. The pill shows on every staged transaction. The Low multiplier must stay above the Medium one.',
+      body: 'Where the Low / Medium / High fee pill flips. Each transaction\u2019s fee rate is compared to the 90-day peak (the 90th percentile of block medians).\n\nLow Risk is at or above the Low multiplier, Medium Risk at or above the Medium multiplier, High Risk below it. A fee below the current economy fee is Critical Risk.\n\nThe pill is informational \u2014 it never blocks a broadcast \u2014 and shows on every staged transaction. The Low multiplier must stay above the Medium one.',
       triggers: ['general'],
     },
     keys: {
       title: 'Check-in API keys',
-      body: 'The keys that can check in through the API. Your gadget uses one of these keys to tell Standby you\u2019re still here. A check-in resets the countdown on every check-in transaction. A key can only record a check-in: it cannot read your transactions, broadcast anything, or change settings. Give each service its own key so you can revoke one without touching the others. Keep a key private \u2014 anyone with it can check in as you. The key is shown once, when it is created \u2014 copy it then. To add it as a custom integration: Name \u2018Standby Check-in\u2019, Base URL the connection IP above, Auth: Bearer token (Authorization: Bearer), Test path /health, API key / token the key you generate below. The check-in connection is plain HTTP \u2014 keep port 3101 on your trusted LAN and Tailscale network only; never expose it to the internet.',
+      body: 'The keys that can check in through the API. Your gadget uses one to tell Standby you\u2019re still here; each check-in resets the countdown on every check-in transaction.\n\nA key can only check in \u2014 no reading transactions, no broadcasts, no settings changes. One key per service, so revoking one leaves the others alone.\n\nKeep keys private: anyone holding one can check in as you. Shown once, at creation \u2014 copy it then.\n\nAs a custom integration: Name \u2018Standby Check-in\u2019, Base URL the connection IP above, Auth: Bearer <redacted> (Authorization: Bearer), Test path /health, API key / token the key you generate below.\n\nPlain HTTP only \u2014 keep port 3101 on your trusted LAN and Tailscale network; never expose it to the internet.',
       triggers: ['checkin'],
     },
     backup: {
       title: 'Data backup',
-      body: 'Back up or restore everything Standby knows. A backup is a file holding all your staged transactions, triggers, and settings. Restoring replaces the current state with the backup\u2019s \u2014 a restore counts as a check-in and clears any active grace period. It is a plain JSON file \u2014 keep it somewhere safe. It contains the signed hexes, which reveal the destination addresses and amounts, so treat it like the transactions themselves. The backup is not encrypted.',
+      body: 'Back up or restore everything Standby knows. A backup is a file holding all your staged transactions, triggers, and settings.\n\nRestoring replaces the current state with the backup\u2019s \u2014 a restore counts as a check-in and clears any active grace period.\n\nIt is a plain, unencrypted JSON file \u2014 keep it somewhere safe. It contains the signed hexes, which reveal the destination addresses and amounts, so treat it like the transactions themselves.',
       triggers: ['general'],
     },
     // No title/body: the version card has no "?" button and no
