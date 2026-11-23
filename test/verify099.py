@@ -4766,7 +4766,9 @@ def main():
         # spanning a full day, so the 25th hourly reading is the
         # first that can serve one. Esplora is exact-target-or-
         # nothing, like mempool: a map without 144 yields no
-        # reading. A second app on port 3440 proves the live
+        # reading. A rate that IS present floors at 1 sat/vB (the
+        # relay minimum) — Esplora estimates can drift below 1,
+        # which no transaction could propagate at. A second app on port 3440 proves the live
         # behaviour — the main app's own history is already long
         # (one observation per restart), so only a seeded second
         # app gives controlled counts. The unit checks prove the
@@ -4882,9 +4884,11 @@ def main():
                 " mSparse: b.feeEstimatesToRecommended({'6': 7}),"
                 " mNear: b.feeEstimatesToRecommended({'120': 5, '168': 4}),"
                 " mNull: b.feeEstimatesToRecommended({}),"
+                " mSub1: b.feeEstimatesToRecommended({'1': 0.213, '2': 0.213, '3': 0.152, '6': 0.132, '144': 0.12, '1008': 0.108}),"
                 " tExact: b.feeEstimateAtTarget({'6': 7, '144': 5, '1008': 1}, 144),"
                 " tNear: b.feeEstimateAtTarget({'6': 7, '1008': 1}, 144),"
                 " tTie: b.feeEstimateAtTarget({'143': 5, '145': 6}, 144),"
+                " tSub1: b.feeEstimateAtTarget({'144': 0.12}, 144),"
                 "}));"
             )
             nr = subprocess.run(['node', '-e', node_js], capture_output=True, text=True, cwd=APP, timeout=30)
@@ -4928,6 +4932,10 @@ def main():
                   nv.get('mNull') is None, nv)
             check('31 unit: the 144 target is exact when present, null when absent (no nearest-target fallback, no tie rule)',
                   nv.get('tExact') == 5 and nv.get('tNear') is None and nv.get('tTie') is None, nv)
+            check('31 unit: sub-1 Esplora rates floor at 1 sat/vB (the relay minimum) — a 0.12 economy rate maps to 1, not 0.12',
+                  nv.get('mSub1') == {'fastestFee': 1, 'halfHourFee': 1, 'hourFee': 1, 'economyFee': 1, 'minimumFee': 1}, nv.get('mSub1'))
+            check('31 unit: feeEstimateAtTarget floors a present sub-1 rate at 1 and still returns null for a missing target',
+                  nv.get('tSub1') == 1, nv.get('tSub1'))
             # (b) Fresh app: the startup hourly tick records one
             # observation from the primary stub (economyFee 1) and
             # the peak stays null — the history is still building.
@@ -5185,6 +5193,42 @@ def main():
             check('31 sparse: primary stub fee-estimates map restored', s == 200 and r.get('map') is None, (s, r))
             s, r = req('POST', '/__test__/fee-mode', {'mode': 'mempool'}, base=STUB_BASE_P)
             check('31 sparse: primary stub back in mempool mode', s == 200 and r.get('mode') == 'mempool', (s, r))
+            # (l) Sub-1 Esplora floor: the primary serves the
+            # live blockstream-style /fee-estimates map (144 at
+            # 0.12, fastest at 0.213 — below the 1 sat/vB relay
+            # minimum, so no transaction could propagate at those
+            # rates). Every tier floors at 1: the recorded
+            # observation is 1, the served current economy fee is
+            # 1, and the node-test value reads '1 sat/vB'.
+            s, r = req('POST', '/__test__/fee-mode', {'mode': 'esplora'}, base=STUB_BASE_P)
+            check('31 floor: primary stub in esplora mode', s == 200 and r.get('mode') == 'esplora', (s, r))
+            sub1_map = {'1': 0.213, '2': 0.213, '3': 0.152, '6': 0.132, '144': 0.12, '1008': 0.108}
+            s, r = req('POST', '/__test__/fee-estimates-map', {'map': sub1_map}, base=STUB_BASE_P)
+            check('31 floor: primary stub serves the sub-1 fee-estimates map', s == 200 and r.get('map') == sub1_map, (s, r))
+            stop(app_lp)
+            lp_seed_state([obs_hours_ago(24 - i, 2.0) for i in range(24)],
+                          primary=STUB_BASE_P, secondary='http://127.0.0.1:19998')
+            app_lp = lp_start()
+            check('31 floor: second app up', wait_up(lp_base))
+            time.sleep(4)  # past the 500 ms startup hourly tick
+            st = lp_bitcoin()
+            check('31 floor: 25 observations after the startup tick (one recorded)',
+                  st.get('feePeakObservations') == 25, st.get('feePeakObservations'))
+            fh = (lp_state_file().get('feeHistory') or [])
+            check('31 floor: the recorded observation is floored at 1, not 0.12',
+                  len(fh) == 25 and fh[-1].get('fee') == 1, fh[-1] if fh else fh)
+            check('31 floor: the peak stays 2.0 (the floored reading does not distort it)',
+                  st.get('feePeak') == 2.0, st.get('feePeak'))
+            check('31 floor: the served current economy fee is 1, not 0.12',
+                  lp_wait_current_fee(1), (lp_bitcoin().get('currentFees') or {}))
+            conn = (lp_state().get('bitcoin', {}) or {}).get('connection', {}) or {}
+            prim = [x for x in (conn.get('results') or []) if x.get('endpoint') == 'primary']
+            check('31 floor: the node-test value for the Esplora primary reads 1 sat/vB',
+                  len(prim) == 1 and ((prim[0].get('checks') or {}).get('fees') or {}).get('value') == '1 sat/vB', prim)
+            s, r = req('POST', '/__test__/fee-estimates-map', {'map': None}, base=STUB_BASE_P)
+            check('31 floor: primary stub fee-estimates map restored', s == 200 and r.get('map') is None, (s, r))
+            s, r = req('POST', '/__test__/fee-mode', {'mode': 'mempool'}, base=STUB_BASE_P)
+            check('31 floor: primary stub back in mempool mode', s == 200 and r.get('mode') == 'mempool', (s, r))
         finally:
             if app_lp is not None:
                 stop(app_lp)

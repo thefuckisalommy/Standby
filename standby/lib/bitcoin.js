@@ -870,6 +870,15 @@ function appendFeeHistoryObservation(observations, fee, nowMs) {
 // minimum 1008 (~1 week).
 const ESPLORA_FEE_TARGETS = { fastest: 1, halfHour: 3, hour: 6, economy: 144, minimum: 1008 };
 
+// The lowest usable fee rate (0.8.9): 1 sat/vB — the minimum relay
+// fee. Below it a transaction will not propagate, so a sub-1
+// estimate is not a price anyone could pay. Esplora/electrs
+// fee-estimates are historical statistics and can drift below 1
+// (a live check showed 0.12 sat/vB at 144 blocks while mempool's
+// economy fee read 1); mempool's tiers are already integers >= 1,
+// so only the Esplora mapping needs the floor.
+const MIN_FEE_RATE_SATVB = 1;
+
 // The rate at one confirmation target from a /fee-estimates map:
 // the EXACT target when present, else null — the same rule as
 // mempool's /fees/recommended, which serves the named tier or no
@@ -877,10 +886,15 @@ const ESPLORA_FEE_TARGETS = { fastest: 1, halfHour: 3, hour: 6, economy: 144, mi
 // mix different confirmation horizons into one historical dataset
 // (a 6-block rate recorded as the day-scale economy fee), so a
 // sparse map yields no reading for its missing tiers instead.
+// A rate that IS present is floored at MIN_FEE_RATE_SATVB —
+// below the relay minimum a transaction will not propagate, so
+// a sub-1 estimate is not a usable fee. A missing target still
+// returns null; the floor never invents a reading.
 function feeEstimateAtTarget(estimates, target) {
   if (!estimates || typeof estimates !== 'object') return null;
   const v = estimates[String(target)];
-  return (typeof v === 'number' && Number.isFinite(v) && v >= 0) ? v : null;
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) return null;
+  return Math.max(v, MIN_FEE_RATE_SATVB);
 }
 
 // Map an Esplora /fee-estimates response to the mempool
