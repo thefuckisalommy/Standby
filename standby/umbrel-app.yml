@@ -5,8 +5,10 @@ manifestVersion: 1
 id: standby
 category: automation
 name: Standby
-version: "0.8.7.4"
+version: "0.8.8"
 releaseNotes: |-
+  0.8.8 — Each node can now talk to your own Bitcoin Core directly over JSON-RPC instead of going through a mempool API: turn on RPC mode for the primary or secondary node in Settings and give it your Core address, RPC username, and RPC password. Everything the app asks a node — block height, whether an input is spent, confirmations, fees, broadcast — goes straight to Core. Two things to know: plain RPC cannot tell a confirmed spend from an unconfirmed one, so in RPC mode an unconfirmed spend reads as stale in a dry run, and a UTXO trigger that asks for 1 or more confirmations will not fire on a spend it cannot count (it waits instead); and if Core cannot estimate a fee yet — a fresh or still-syncing node answers "insufficient data" — the fee reads as unknown, never zero. The RPC password is stored in the app's settings file unencrypted, like all other settings.
+
   0.8.7.4 — A staged transaction whose inputs were spent elsewhere now reads stale on its own: the hourly check re-tests every armed staged transaction's inputs, so one that can no longer broadcast is marked stale — in red — instead of sitting at Ready until a dry run or a firing trigger finds out. An unconfirmed spend still only warns; it never marks a transaction stale.
 
   0.8.7.3 — The server is now split into modules: the single large server file is divided into focused files — one each for configuration, trigger rules, release evaluation, the API, check-ins, and the rest — with a small entry point that starts them. Nothing about how the app works changes: same routes, same settings, same state file. It is a code-organisation change so each piece is easier to work on separately.

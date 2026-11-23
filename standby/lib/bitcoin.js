@@ -29,9 +29,20 @@
 //   endpoint); only a failed check falls through to the next endpoint.
 //   "Already in mempool" counts as broadcast.
 //
-// There is no Bitcoin Core RPC path any more (removed in 0.5.4): the
-// mempool API is the only broadcast path, and a self-hosted mempool
-// instance is how an own-node user keeps it on their own hardware.
+// PER-NODE RPC MODE (0.8.8): either node can instead be a Bitcoin
+// Core JSON-RPC endpoint (settings.*RpcEnabled / *RpcUrl / *RpcUser /
+// *RpcPass). An RPC node answers the same questions through Core
+// directly — getblockcount, gettxout, getrawtransaction,
+// estimatesmartfee, sendrawtransaction — with no mempool service in
+// between. RPC mode has one hard limit the mempool path does not:
+// plain RPC cannot tell a CONFIRMED spend from an UNCONFIRMED one
+// (there is no outspend lookup and the spender's txid is not
+// returned), so a spend seen over RPC reads as a confirmed spend in
+// the freshness / dry-run path (an unconfirmed spend reads as
+// stale), while the UTXO trigger refuses to fire on it at all
+// unless it asked for confirmations 0 — see checkUtxoRule in
+// lib/rules.js. With RPC disabled (the default) nothing changes:
+// every call below takes the mempool path exactly as before.
 //
 // HARD RULES:
 //   - Never accept, store, or log private keys, seeds, or passwords.
@@ -127,12 +138,63 @@ function timelockedUntil(tx, tipHeight, now) {
   return now.getTime() < locktime * 1000 ? { timelocked: true, until } : { timelocked: false, until: null };
 }
 
-// The endpoints in the order they are tried. A secondary identical to
-// the primary is dropped — trying the same server twice buys nothing.
+// Normalise a user-supplied Core RPC URL to
+// "protocol://host[:port]" (no path, no userinfo — the user and
+// password live in the *RpcUser / *RpcPass settings, never in the
+// URL, so the URL is safe to use as a cache key and a log label).
+// A bare host gets http:// (Core RPC on the LAN is plain HTTP by
+// default); an empty string stays empty (not configured). Throws
+// on anything that is not a usable http(s) URL, or on a URL
+// carrying a username or password.
+function normalizeRpcUrl(raw) {
+  let s = (raw || '').trim();
+  if (!s) return '';
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) s = 'http://' + s;
+  let u;
+  try { u = new URL(s); } catch { throw new Error('invalid RPC URL: ' + raw); }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error('RPC URL must be http(s): ' + raw);
+  if (!u.hostname) throw new Error('RPC URL needs a host: ' + raw);
+  if (u.username || u.password) throw new Error('RPC URL must not contain a username or password — use the RPC user / password fields');
+  return u.protocol + '//' + u.host;
+}
+
+// The RPC endpoint for one slot ('primary' | 'secondary'), or null
+// when RPC is not enabled for it. Enabled with a blank or invalid
+// URL is NOT an RPC endpoint — the node falls back to its mempool
+// mode, never a crash: the settings validator (PUT /api/settings)
+// rejects an invalid URL, but a hand-edited state must never break
+// the endpoint list.
+function rpcEndpointFor(settings, slot) {
+  if (!settings || settings[slot + 'RpcEnabled'] !== true) return null;
+  const url = typeof settings[slot + 'RpcUrl'] === 'string' ? settings[slot + 'RpcUrl'].trim() : '';
+  if (!url) return null;
+  let rpcUrl;
+  try { rpcUrl = normalizeRpcUrl(url); } catch { return null; }
+  if (!rpcUrl) return null;
+  const user = typeof settings[slot + 'RpcUser'] === 'string' ? settings[slot + 'RpcUser'] : '';
+  const pass = typeof settings[slot + 'RpcPass'] === 'string' ? settings[slot + 'RpcPass'] : '';
+  return { label: slot, mode: 'rpc', base: rpcUrl, rpc: { url: rpcUrl, user, pass } };
+}
+
+// The endpoints in the order they are tried. Each endpoint is
+// { label: 'primary'|'secondary', mode: 'mempool'|'rpc', base,
+// rpc? }: `base` is the mempool URL in mempool mode and the RPC URL
+// in RPC mode — in both cases the cache / stamp / label key for
+// that endpoint — and `rpc` (only in RPC mode) carries the
+// connection details. A secondary identical to the primary (same
+// mode, same base) is dropped — trying the same server twice buys
+// nothing. A secondary with neither a mempool URL nor an RPC URL
+// does not exist (primary runs alone).
 function endpointsFor(settings) {
-  const eps = [{ label: 'primary', base: mempoolBase(settings) }];
+  const primaryRpc = rpcEndpointFor(settings, 'primary');
+  const eps = [primaryRpc || { label: 'primary', mode: 'mempool', base: mempoolBase(settings) }];
+  const secRpc = rpcEndpointFor(settings, 'secondary');
+  if (secRpc) {
+    if (!(secRpc.base === eps[0].base && eps[0].mode === 'rpc')) eps.push(secRpc);
+    return eps;
+  }
   const sec = mempoolSecondaryBase(settings);
-  if (sec && sec !== eps[0].base) eps.push({ label: 'secondary', base: sec });
+  if (sec && !(eps[0].mode === 'mempool' && sec === eps[0].base)) eps.push({ label: 'secondary', mode: 'mempool', base: sec });
   return eps;
 }
 
@@ -743,6 +805,54 @@ const nodeCheckedAtByBase = {};
 function nodeCheckedAt() { return { ...nodeCheckedAtByBase }; }
 
 // ---------------------------------------------------------------------------
+// Bitcoin Core JSON-RPC (0.8.8) — one call against an RPC-mode endpoint.
+// ---------------------------------------------------------------------------
+// rpcCall(endpoint, method, params): POST the JSON-RPC 2.0 envelope
+// {jsonrpc:'2.0', id, method, params} with HTTP Basic auth
+// (rpcUser:rpcPass) and Content-Type application/json, and return the
+// `result`. A non-200 answer throws (the status is named, never the
+// URL — the URL carries no credentials, but there is nothing to gain
+// by printing it); a JSON `error` object throws preserving Core's
+// own message and numeric code (err.code, err.rpcError = true — the
+// broadcast path reads the code to recognise an already-out tx).
+// The same hard wall-clock deadline as the mempool client
+// (NET_TIMEOUT_MS). The password is NEVER logged and NEVER appears
+// in an error message: it travels only in the Authorization header,
+// and no error string below interpolates the endpoint object, the
+// URL, or the credentials. Any HTTP answer (any status) stamps the
+// endpoint's last-checked time, exactly like mempoolReq does — a
+// rejection (timeout, refused, DNS) stamps nothing.
+let rpcCallId = 0;
+async function rpcCall(endpoint, method, params) {
+  const rpc = endpoint.rpc;
+  const u = new URL(rpc.url);
+  const body = JSON.stringify({ jsonrpc: '2.0', id: ++rpcCallId, method, params: params || [] });
+  const auth = Buffer.from((rpc.user || '') + ':' + (rpc.pass || '')).toString('base64');
+  const res = await requestText({
+    protocol: u.protocol,
+    hostname: u.hostname,
+    port: u.port ? parseInt(u.port, 10) : (u.protocol === 'https:' ? 443 : 80),
+    path: (u.pathname || '/') + (u.search || ''),
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: 'Basic ' + auth },
+    body,
+    timeoutMs: NET_TIMEOUT_MS,
+  });
+  nodeCheckedAtByBase[endpoint.base] = new Date().toISOString();
+  if (res.status !== 200) throw new Error('RPC node answered HTTP ' + res.status);
+  let data;
+  try { data = JSON.parse(res.body); } catch { throw new Error('RPC node answered 200 with a non-JSON body'); }
+  if (data && data.error) {
+    const err = new Error('Bitcoin Core RPC error: ' + (data.error.message || 'unknown error'));
+    err.code = data.error.code;
+    err.rpcError = true;
+    throw err;
+  }
+  if (!data || !('result' in data)) throw new Error('RPC node answered 200 without a result');
+  return data.result;
+}
+
+// ---------------------------------------------------------------------------
 // Fee verdict (0.7.20): is a stored transaction's FIXED fee good
 // enough for a long-term hold? The fee was set when the tx was
 // signed; if the fee market spikes before the release fires, the tx
@@ -1213,8 +1323,14 @@ function feeVerdict(rate, peak, economyFee, lowMult, medMult) {
 // the transaction but the reply was lost (timeout, dropped connection),
 // the fallback endpoint — or the next hourly retry — will see "already
 // in mempool" and must not report it as a failure. The funds already moved.
+// (0.8.8) The same rule covers Core RPC: code -27 is "transaction
+// already in block chain", and a duplicate in the mempool comes back
+// with a message containing 'already' (code -26). The message check is
+// deliberately the bare word 'already' — it subsumes the mempool
+// path's "already in mempool" — so one rule serves both transports.
 function isAlreadyOut(err) {
-  return /already in mempool/i.test(err && err.message ? err.message : String(err || ''));
+  if (err && err.code === -27) return true;
+  return /already/i.test(err && err.message ? err.message : String(err || ''));
 }
 
 // Mempool API: POST /api/tx with the raw hex. Returns the txid as
@@ -1242,6 +1358,29 @@ async function broadcastViaApi(hex, txid, apiBase) {
   }
   if (isAlreadyOut(new Error(res.body))) return txid;
   throw new Error('mempool rejected the transaction (HTTP ' + res.status + '): ' + res.body.slice(0, 200));
+}
+
+// Bitcoin Core RPC: sendrawtransaction(hex). Returns the txid on
+// success. An already-out transaction (code -27, or a message
+// containing 'already') counts as broadcast, exactly like the
+// mempool path — see isAlreadyOut. Any other Core rejection throws
+// with Core's message; a network failure throws as unreachable.
+// The returned txid must be the one we sent, same as the mempool
+// path's 200-body check — a 200 carrying anything else is a failed
+// attempt, never a broadcast.
+async function broadcastViaRpc(hex, txid, ep) {
+  let returned;
+  try {
+    returned = await rpcCall(ep, 'sendrawtransaction', [hex]);
+  } catch (e) {
+    if (isAlreadyOut(e)) return txid;
+    if (e && e.rpcError) throw new Error('Bitcoin Core rejected the transaction: ' + e.message);
+    throw new Error('could not reach ' + mempoolHostLabel(ep.base) + ': ' + e.message);
+  }
+  if (typeof returned !== 'string' || returned.toLowerCase() !== txid.toLowerCase()) {
+    throw new Error('Core answered with an unexpected txid: ' + String(returned).slice(0, 200));
+  }
+  return txid;
 }
 
 // ---------------------------------------------------------------------------
@@ -1512,6 +1651,61 @@ async function mempoolOutspends(prevTxid, apiBase, ttlMs) {
   finally { if (outspendsInflight.get(key) === p) outspendsInflight.delete(key); }
 }
 
+// Bitcoin Core RPC (0.8.8): is one outpoint spent yet?
+//   gettxout(txid, vout, true) — include_mempool = true, so a spend
+//   sitting in the mempool is visible — answers it: a non-null
+//   result is unspent. A null result is spent OR the parent is
+//   unknown, and getrawtransaction(parent, true) decides which:
+//   error code -5 (or a null answer) means the parent is unknown
+//   to this node — unknown, NEVER cached, never unspent — while a
+//   parent that exists (confirmed or in the mempool) means spent.
+//   Any other failure (node down, auth) throws, so the caller
+//   falls through to the next endpoint.
+//   The answer is in the mempool /outspend entry shape
+//   {spent, txid, vin, status} so the callers above need no second
+//   shape — with one addition: a spent entry carries
+//   spendConfirmationsUnknown = true, because plain RPC cannot say
+//   whether the spending tx is confirmed (there is no outspend
+//   lookup and the spender's txid is not returned). Callers that
+//   need a confirmation count must read that flag, never the
+//   status: the freshness path treats an RPC spend as a confirmed
+//   spend (it reads as stale — see checkInputsUnspentVia), while
+//   the UTXO trigger refuses to fire on it unless it asked for
+//   confirmations 0 (see checkUtxoRule). Same cache rules as the
+//   mempool path, keyed by the RPC URL: a spent/unspent answer is
+//   cached for the TTL, an unknown one never is, and a failed
+//   request never is; in-flight dedup is shared with the mempool
+//   path through the same maps.
+async function rpcOutspend(prevTxid, prevVout, ep, ttlMs) {
+  const cached = outspendCacheGet(ep.base, prevTxid, prevVout, ttlMs);
+  if (cached !== undefined) return cached;
+  const key = outspendCacheKey(ep.base, prevTxid, prevVout);
+  const inflight = outspendInflight.get(key);
+  if (inflight) return inflight;
+  const p = (async () => {
+    const utxo = await rpcCall(ep, 'gettxout', [prevTxid, prevVout, true]);
+    if (utxo !== null && typeof utxo === 'object') {
+      const entry = { spent: false };
+      outspendCachePut(ep.base, prevTxid, prevVout, entry);
+      return entry;
+    }
+    let parent;
+    try {
+      parent = await rpcCall(ep, 'getrawtransaction', [prevTxid, true]);
+    } catch (e) {
+      if (e && e.rpcError && e.code === -5) return null; // parent unknown — NEVER cached
+      throw e;
+    }
+    if (parent === null || typeof parent !== 'object') return null; // parent unknown — NEVER cached
+    const entry = { spent: true, txid: null, status: null, spendConfirmationsUnknown: true };
+    outspendCachePut(ep.base, prevTxid, prevVout, entry);
+    return entry;
+  })();
+  outspendInflight.set(key, p);
+  try { return await p; }
+  finally { if (outspendInflight.get(key) === p) outspendInflight.delete(key); }
+}
+
 // Batch outspend check against the endpoints, primary-first — the
 // /outspends twin of checkOutspend below. Returns { txid, results,
 // unknown, checkedVia, checkedBase, error? }: `results` is the
@@ -1521,7 +1715,14 @@ async function mempoolOutspends(prevTxid, apiBase, ttlMs) {
 async function checkOutspends(prevTxid, endpoints, ttlMs) {
   const errors = [];
   let first404 = null;
+  let triedMempool = false;
   for (const ep of endpoints) {
+    // (0.8.8) RPC nodes have no /outspends batch endpoint — the
+    // batch is a mempool-API shape, so an RPC endpoint is skipped
+    // here (the singular rpcOutspend path answers the same
+    // question for it) and the next mempool endpoint is asked.
+    if (ep.mode === 'rpc') continue;
+    triedMempool = true;
     try {
       const arr = await mempoolOutspends(prevTxid, ep.base, ttlMs);
       if (arr === null) {
@@ -1532,6 +1733,9 @@ async function checkOutspends(prevTxid, endpoints, ttlMs) {
     } catch (e) {
       errors.push(ep.label + ' (' + mempoolHostLabel(ep.base) + '): ' + e.message);
     }
+  }
+  if (!triedMempool) {
+    return { txid: prevTxid, results: null, unknown: true, checkedVia: null, checkedBase: null, error: 'no mempool endpoint available for the batch lookup (RPC nodes have no /outspends)' };
   }
   if (first404) {
     return { txid: prevTxid, results: null, unknown: true, checkedVia: first404.label, checkedBase: first404.base };
@@ -1604,7 +1808,15 @@ function outspendEntryToResult(outpoint, entry, checkedVia, checkedBase) {
   const spent = !!entry.spent;
   const confirmed = !!(entry.status && entry.status.confirmed === true);
   const blockHeight = (confirmed && entry.status && Number.isFinite(entry.status.block_height)) ? entry.status.block_height : null;
-  return { outpoint, spent, confirmed, txid: spent ? (entry.txid || null) : null, blockHeight, unknown: false, checkedVia, checkedBase };
+  // (0.8.8) An RPC spend carries no confirmation information —
+  // spendConfirmationsUnknown rides through so the UTXO trigger
+  // can fail safe on it (see checkUtxoRule); it is only ever set
+  // on a spent entry, and only an RPC endpoint produces it. The
+  // key is added only when true, so the mempool path's result
+  // shape is unchanged.
+  const result = { outpoint, spent, confirmed, txid: spent ? (entry.txid || null) : null, blockHeight, unknown: false, checkedVia, checkedBase };
+  if (spent && entry.spendConfirmationsUnknown === true) result.confirmationsUnknown = true;
+  return result;
 }
 
 // One input-freshness check against a single endpoint. A spent input
@@ -1622,20 +1834,63 @@ function outspendEntryToResult(outpoint, entry, checkedVia, checkedBase) {
 //              may still be evicted or replaced, so the transaction
 //              stays active with a warning, and a broadcast is still
 //              attempted — the network is the arbiter.
-async function checkInputsUnspentVia(parsed, apiBase, ttlMs) {
+async function checkInputsUnspentVia(parsed, ep, ttlMs) {
+  // (0.8.8) RPC own check: plain RPC cannot name the spender of
+  // an input, so before the per-input gettxout checks, ask whether
+  // the transaction ITSELF is known to the node —
+  // getrawtransaction(own txid, true). If it exists (confirmed or
+  // in the mempool), every input is spent by the transaction
+  // itself: 'own', never stale — so a dry run of an
+  // already-broadcast tx reads broadcast, not stale. A -5
+  // (unknown tx) means proceed with the per-input checks; a null
+  // answer means the same. Any other failure throws, so the
+  // caller falls through to the next endpoint. The mempool path
+  // below is untouched — it already names the spender.
+  if (ep.mode === 'rpc') {
+    let ownTx = null;
+    try {
+      ownTx = await rpcCall(ep, 'getrawtransaction', [parsed.txid, true]);
+    } catch (e) {
+      if (!(e && e.rpcError && e.code === -5)) throw e;
+    }
+    if (ownTx !== null && typeof ownTx === 'object') {
+      const confs = ownTx.confirmations;
+      const confirmed = typeof confs === 'number' && confs > 0;
+      const blockHeight = (confirmed && Number.isFinite(ownTx.blockheight)) ? ownTx.blockheight : null;
+      return {
+        checked: parsed.inputs.length,
+        unspent: [], spent: [], conflict: [], unknown: [],
+        own: parsed.inputs.map((inp) => ({ ...inp, spentBy: parsed.txid, confirmed, blockHeight })),
+      };
+    }
+  }
   const unspent = [];
   const spent = [];
   const conflict = [];
   const own = [];
   const unknown = [];
   for (const inp of parsed.inputs) {
-    const out = await mempoolOutspend(inp.prevTxid, inp.prevVout, apiBase, ttlMs);
+    const out = ep.mode === 'rpc'
+      ? await rpcOutspend(inp.prevTxid, inp.prevVout, ep, ttlMs)
+      : await mempoolOutspend(inp.prevTxid, inp.prevVout, ep.base, ttlMs);
     if (out === null) unknown.push(inp);
     else if (!out.spent) unspent.push(inp);
     else if (out.txid && out.txid.toLowerCase() === parsed.txid.toLowerCase()) {
       own.push({ ...inp, spentBy: out.txid, confirmed: !!(out.status && out.status.confirmed),
         blockHeight: (out.status && Number.isFinite(out.status.block_height)) ? out.status.block_height : null });
-    } else if (out.status && out.status.confirmed === true) spent.push({ ...inp, spentBy: out.txid || null,
+    // (0.8.8) An RPC spend has no spender txid and no confirmation
+    // information — plain RPC cannot tell a confirmed spend from
+    // an unconfirmed one — so it reads here as a CONFIRMED spend
+    // by an unknown transaction: the input is stale. That is the
+    // documented RPC limitation (an unconfirmed spend reads as
+    // stale in RPC mode); the UTXO trigger, which must count
+    // confirmations, instead refuses to fire on it — see
+    // checkUtxoRule. An RPC spend reaches `own` only through the
+    // own-tx check at the top of this function (the tx itself is
+    // known to the node); a spend by another tx can never land
+    // there, because the spender is unnamed.
+    } else if (ep.mode === 'rpc') spent.push({ ...inp, spentBy: null, blockHeight: null });
+    else if (out.status && out.status.confirmed === true) spent.push({ ...inp, spentBy: out.txid || null,
       blockHeight: (out.status && Number.isFinite(out.status.block_height)) ? out.status.block_height : null });
     else conflict.push({ ...inp, spentBy: out.txid || null });
   }
@@ -1665,7 +1920,7 @@ async function checkInputsUnspent(parsed, endpoints, ttlMs) {
   for (const ep of endpoints) {
     if (!remaining.length) break;
     try {
-      const result = await checkInputsUnspentVia({ ...parsed, inputs: remaining }, ep.base, ttlMs);
+      const result = await checkInputsUnspentVia({ ...parsed, inputs: remaining }, ep, ttlMs);
       if (!acc) {
         acc = { checked: parsed.inputs.length, unspent: [], spent: [], conflict: [], own: [], unknown: [], checkedVia: ep.label, checkedBase: ep.base };
       }
@@ -1711,6 +1966,10 @@ async function checkInputsUnspent(parsed, endpoints, ttlMs) {
 // may still be evicted or replaced, so it only watches) — unless
 // the trigger asked for the unconfirmed mode (confirmations 0),
 // which the caller decides from this answer.
+// (0.8.8) An RPC spend adds `confirmationsUnknown: true`: the
+// node confirmed the outpoint is spent but plain RPC cannot say
+// whether the spending tx is confirmed, so the caller must fail
+// safe on it — see checkUtxoRule.
 async function checkOutspend(outpoint, endpoints, opts) {
   const parts = String(outpoint || '').split(':');
   const prevTxid = parts[0] || '';
@@ -1735,7 +1994,9 @@ async function checkOutspend(outpoint, endpoints, opts) {
   let first404 = null;
   for (const ep of endpoints) {
     try {
-      const out = await mempoolOutspend(prevTxid, prevVout, ep.base, ttlMs);
+      const out = ep.mode === 'rpc'
+        ? await rpcOutspend(prevTxid, prevVout, ep, ttlMs)
+        : await mempoolOutspend(prevTxid, prevVout, ep.base, ttlMs);
       if (out === null) {
         if (!first404) first404 = ep;
         continue;
@@ -1808,7 +2069,13 @@ async function dryRun(dataDir, { tx, endpoints, ttlMs }) {
   if (parsed.locktime && parsed.locktime < 500000000
     && (parsed.inputs || []).some((i) => (i.sequence >>> 0) !== 0xffffffff)) {
     let tipHeight = null;
-    try { tipHeight = await mempoolTipHeight(check.checkedBase); } catch { tipHeight = null; }
+    try {
+      // (0.8.8) The tip comes from the endpoint that actually
+      // answered the freshness check — an RPC endpoint answers
+      // getblockcount, not the mempool REST probe.
+      const tipEp = endpoints.find((e) => e.label === check.checkedVia) || endpoints[0];
+      if (tipEp) tipHeight = await tipHeightFor(tipEp);
+    } catch { tipHeight = null; }
     timelock = timelockedUntil(parsed, tipHeight, new Date());
   } else if (parsed.locktime && parsed.locktime >= 500000000
     && (parsed.inputs || []).some((i) => (i.sequence >>> 0) !== 0xffffffff)) {
@@ -1891,7 +2158,9 @@ async function broadcastTx(dataDir, { hex, txid, endpoints, notePrefix }) {
   const errors = [];
   for (const ep of endpoints) {
     try {
-      const outTxid = await broadcastViaApi(hex, txid, ep.base);
+      const outTxid = ep.mode === 'rpc'
+        ? await broadcastViaRpc(hex, txid, ep)
+        : await broadcastViaApi(hex, txid, ep.base);
       const fellBack = ep !== endpoints[0];
       appendBroadcastLog(dataDir, {
         ts: new Date().toISOString(),
@@ -1924,6 +2193,56 @@ async function broadcastTx(dataDir, { hex, txid, endpoints, notePrefix }) {
 // ---------------------------------------------------------------------------
 // Confirmation lookup — how many blocks deep is a broadcast transaction?
 // ---------------------------------------------------------------------------
+
+// A BTC amount as exact satoshis. Core reports values in BTC (a
+// float); the mempool API reports them in satoshis (an integer).
+// Math.round guards the float dust (0.00000001 BTC * 1e8 is
+// 1.0000000000000002 in binary). Returns null when the value is
+// not a usable non-negative number.
+function btcToSats(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return null;
+  return Math.round(value * 1e8);
+}
+
+// One transaction's status + outputs from one endpoint, in the
+// mempool /api/tx shape { status: { confirmed, block_height,
+// block_time }, vout: [{ value (SATOSHIS), ... }] } — or null when
+// the network does not know the transaction. Throws when the
+// endpoint is down, so the caller falls through to the next one.
+//   mempool: GET /api/tx/:txid (404 = unknown).
+//   RPC: getrawtransaction(txid, true) — code -5 = unknown;
+//   confirmations > 0 means confirmed, with blockheight; in the
+//   mempool confirmations is 0 and there is no blockheight. The
+//   vout values are converted BTC → satoshis here, so callers
+//   read one unit (satoshis) from either transport.
+async function txStatusFor(ep, txid, timeoutMs) {
+  if (ep.mode === 'rpc') {
+    let raw;
+    try {
+      raw = await rpcCall(ep, 'getrawtransaction', [txid, true]);
+    } catch (e) {
+      if (e && e.rpcError && e.code === -5) return null; // unknown to this node
+      throw e;
+    }
+    if (raw === null || typeof raw !== 'object') return null;
+    const confs = raw.confirmations;
+    const confirmed = typeof confs === 'number' && confs > 0;
+    const vout = Array.isArray(raw.vout) ? raw.vout.map((o) => {
+      if (!o || typeof o !== 'object') return o;
+      const sats = btcToSats(o.value);
+      return { ...o, value: sats };
+    }) : [];
+    return {
+      status: {
+        confirmed,
+        block_height: (confirmed && Number.isFinite(raw.blockheight)) ? raw.blockheight : undefined,
+        block_time: raw.blocktime,
+      },
+      vout,
+    };
+  }
+  return mempoolTxStatus(txid, ep.base, timeoutMs);
+}
 
 // mempool API: GET /api/tx/:txid
 //   200 { status: { confirmed, block_height, block_time, ... } }
@@ -1969,7 +2288,7 @@ async function parentOutputValue(prevTxid, prevVout, endpoints, timeoutMs) {
   for (const ep of endpoints) {
     let st;
     try {
-      st = await mempoolTxStatus(prevTxid, ep.base, timeoutMs);
+      st = await txStatusFor(ep, prevTxid, timeoutMs);
     } catch {
       continue; // endpoint down — try the next
     }
@@ -2150,6 +2469,19 @@ function txIoDetail(parsed) {
   };
 }
 
+// Tip height from one endpoint, either mode: getblockcount over
+// RPC, GET /api/blocks/tip/height over the mempool API. Throws
+// when the endpoint cannot answer, so the caller falls through
+// to the next one.
+async function tipHeightFor(ep) {
+  if (ep.mode === 'rpc') {
+    const h = await rpcCall(ep, 'getblockcount', []);
+    if (typeof h !== 'number' || !Number.isFinite(h) || h < 0) throw new Error('RPC getblockcount returned an unusable height');
+    return h;
+  }
+  return mempoolTipHeight(ep.base);
+}
+
 // Tip height from one endpoint (the same probe the connection test uses).
 async function mempoolTipHeight(apiBase) {
   const res = await mempoolReq('/api/blocks/tip/height', 'GET', undefined, apiBase);
@@ -2174,7 +2506,7 @@ async function fetchTipHeights(endpoints) {
   const primary = endpoints[0];
   let primaryReading;
   try {
-    const h = await mempoolTipHeight(primary.base);
+    const h = await tipHeightFor(primary);
     primaryReading = { endpoint: primary.label, height: h, error: null };
   } catch (e) {
     primaryReading = { endpoint: primary.label, height: null, error: e.message || String(e) };
@@ -2193,7 +2525,7 @@ async function fetchTipHeights(endpoints) {
       continue;
     }
     try {
-      const h = await mempoolTipHeight(ep.base);
+      const h = await tipHeightFor(ep);
       out[ep.label] = { endpoint: ep.label, height: h, error: null };
     } catch (e) {
       out[ep.label] = { endpoint: ep.label, height: null, error: e.message || String(e) };
@@ -2249,7 +2581,7 @@ function combineTipHeights(readings) {
 async function getTipHeight(endpoints) {
   const errors = [];
   for (const ep of endpoints) {
-    try { return await mempoolTipHeight(ep.base); }
+    try { return await tipHeightFor(ep); }
     catch (e) { errors.push(ep.label + ' (' + mempoolHostLabel(ep.base) + '): ' + e.message); }
   }
   throw new Error('could not fetch tip height (' + errors.join('; ') + ')');
@@ -2266,9 +2598,9 @@ async function getConfirmations(txid, endpoints) {
   const errors = [];
   for (const ep of endpoints) {
     try {
-      const st = await mempoolTxStatus(txid, ep.base);
+      const st = await txStatusFor(ep, txid);
       if (st === null) continue; // unknown here — maybe the other endpoint knows it
-      const tip = await mempoolTipHeight(ep.base);
+      const tip = await tipHeightFor(ep);
       const status = st.status || {};
       if (!status.confirmed) {
         return { found: true, confirmed: false, blockHeight: null, confirmations: 0, checkedVia: ep.label, checkedBase: ep.base };
@@ -2340,7 +2672,7 @@ function findSharedInputs(txs) {
 // ---------------------------------------------------------------------------
 async function testConnection(endpoints) {
   const results = [];
-  for (const ep of endpoints) results.push({ endpoint: ep.label, base: ep.base, ...(await testOnePath(ep.base)) });
+  for (const ep of endpoints) results.push({ endpoint: ep.label, base: ep.base, ...(await testOnePath(ep)) });
   const ok = results.some((r) => r.ok);
   const detail = results
     .map((r) => (r.endpoint === 'primary' ? 'Primary' : 'Secondary') + ' (' + mempoolHostLabel(r.base) + '): ' + r.status.toUpperCase() + ' — ' + r.detail)
@@ -2361,8 +2693,8 @@ async function testConnection(endpoints) {
 // `ok` stays true for OK and CAUTION (the old meaning: the height
 // probe passed, so the node is usable) and false for FAIL, so the
 // stored connection.ok keeps its old semantics.
-async function testOnePath(apiBase) {
-  const height = await testNodeHeight(apiBase);
+async function testOnePath(ep) {
+  const height = await testNodeHeight(ep);
   if (!height.ok) {
     return {
       ok: false, status: 'fail',
@@ -2370,8 +2702,8 @@ async function testOnePath(apiBase) {
       checks: { height, fees: { ok: false, detail: 'not checked — height failed', value: '—' }, broadcast: { ok: false, detail: 'not checked — height failed', value: '—' } },
     };
   }
-  const fees = await testNodeFees(apiBase);
-  const broadcast = await testNodeBroadcast(apiBase);
+  const fees = await testNodeFees(ep);
+  const broadcast = await testNodeBroadcast(ep);
   const allOk = fees.ok && broadcast.ok;
   const detail = 'height ' + height.detail + ' · fees: ' + fees.detail + ' · broadcast: ' + broadcast.detail;
   return {
@@ -2382,11 +2714,23 @@ async function testOnePath(apiBase) {
 
 // Block height: GET /api/blocks/tip/height — answered by both
 // mempool.space and Esplora, so it is the probe that works for
-// any endpoint. A 200 with a parseable integer is ready. `value`
+// any mempool endpoint — or getblockcount over RPC. A 200 with a
+// parseable integer (or a numeric getblockcount) is ready. `value`
 // is the short display string shown next to the status pill
 // ("Height 976,200"); `detail` is the tooltip text. On failure
 // the value IS the reason, so the row shows why it failed.
-async function testNodeHeight(apiBase) {
+async function testNodeHeight(ep) {
+  if (ep.mode === 'rpc') {
+    try {
+      const height = await rpcCall(ep, 'getblockcount', []);
+      return (typeof height === 'number' && Number.isFinite(height) && height >= 0)
+        ? { ok: true, detail: 'tip height ' + height, value: 'Height ' + height.toLocaleString('en-US') }
+        : { ok: false, detail: 'getblockcount returned an unusable height', value: 'unparseable height' };
+    } catch (e) {
+      return { ok: false, detail: e.message, value: e.message };
+    }
+  }
+  const apiBase = ep.base;
   try {
     const res = await mempoolReq('/api/blocks/tip/height', 'GET', undefined, apiBase);
     if (res.status !== 200) return { ok: false, detail: 'answered HTTP ' + res.status, value: 'answered HTTP ' + res.status };
@@ -2409,6 +2753,49 @@ async function testNodeHeight(apiBase) {
 // economy analogue), falling back to the cheapest rate if the
 // 6-block target is missing. Either shape proves the node can
 // provide fee estimates. On failure the value IS the reason.
+// The economy fee from one RPC node (0.8.8): estimatesmartfee
+// with conf_target RPC_FEE_CONF_TARGET. Core answers
+// { feerate, blocks } with feerate in BTC/kB; 1 BTC/kB is 1e5
+// sat/vB. Returns { fee, source: 'rpc' } — the same shape as
+// fetchNodeFee, so fetchNodeFeeReadings and the fee-verdict
+// refresh need no second shape.
+//   conf_target = 6 (~1 hour). Three reasons: (a) it is the
+//   shortest horizon Core estimates reliably — a longer horizon
+//   needs more mempool history and fails with "insufficient data"
+//   far more often on a young or recently restarted node; (b) it
+//   matches the Esplora fallback in fetchNodeFee below, which
+//   already reads the 6-block rate as the economy analogue, so an
+//   RPC reading and a mempool/Esplora reading stay comparable;
+//   (c) the app's own fee checks run hourly. It reads slightly
+//   higher than mempool.space's day-scale economy fee, so the fee
+//   verdict's Critical check is conservative in RPC mode (it warns
+//   sooner, never later).
+//   Floor at 1 sat/vB: Core can estimate below 1 on an empty
+//   mempool, but 1 is the smallest rate a transaction can actually
+//   pay. An estimatesmartfee error — e.g. "insufficient data" on a
+//   fresh or syncing node — or a missing / negative feerate throws:
+//   unknown, never zero, never cached as a fee. The caller treats
+//   that as "no fee data" and the trigger / verdict waits.
+const RPC_FEE_CONF_TARGET = 6;
+async function rpcFee(ep) {
+  const res = await rpcCall(ep, 'estimatesmartfee', [RPC_FEE_CONF_TARGET]);
+  const rate = res && res.feerate;
+  if (typeof rate !== 'number' || !Number.isFinite(rate) || rate < 0) {
+    throw new Error('estimatesmartfee returned no usable feerate (insufficient data)');
+  }
+  return { fee: Math.max(1, Math.round(rate * 1e5 * 100) / 100), source: 'rpc' };
+}
+
+// The economy fee from one endpoint, either mode — the single
+// dispatcher for fetchNodeFeeReadings, the connection test, and
+// the fee-verdict current-fee refresh. fetchNodeFee stays the
+// mempool-only implementation (still exported, same signature),
+// so existing callers and tests keep working.
+async function nodeFeeFor(ep) {
+  if (ep.mode === 'rpc') return rpcFee(ep);
+  return fetchNodeFee(ep.base);
+}
+
 // The economy fee from ONE node (0.8.1): the mempool endpoint
 // first, then Esplora's. Returns { fee, source } — source is
 // 'mempool' (the /api/v1/fees/recommended economyFee) or
@@ -2456,15 +2843,18 @@ async function fetchNodeFee(apiBase) {
 // answers that with 404, so the fallback is /api/fee-estimates,
 // which returns a map of confirmation target to fee rate — a 200
 // with at least one numeric rate is ready. Either shape proves
-// the node can provide fee estimates.
-async function testNodeFees(apiBase) {
+// the node can provide fee estimates. Over RPC the probe is
+// estimatesmartfee (see rpcFee): a usable feerate is ready, and
+// an "insufficient data" error is reported, not hidden.
+async function testNodeFees(ep) {
   try {
-    const r = await fetchNodeFee(apiBase);
+    const r = await nodeFeeFor(ep);
     if (r.source === 'mempool') return { ok: true, detail: 'ready (economy ' + r.fee + ' sat/vB)', value: r.fee + ' sat/vB' };
+    if (r.source === 'rpc') return { ok: true, detail: 'ready (estimatesmartfee ' + r.fee + ' sat/vB)', value: r.fee + ' sat/vB' };
     return { ok: true, detail: 'ready (Esplora estimates)', value: r.fee + ' sat/vB' };
   } catch (e) {
     const msg = e.message || String(e);
-    const value = /no fee endpoint/.test(msg) ? 'no fee endpoint' : /no usable economyFee/.test(msg) ? 'no economy fee' : /no usable rates/.test(msg) ? 'no usable rates' : /not JSON/.test(msg) ? 'not JSON' : msg;
+    const value = /no fee endpoint/.test(msg) ? 'no fee endpoint' : /no usable economyFee/.test(msg) ? 'no economy fee' : /no usable rates/.test(msg) ? 'no usable rates' : /insufficient data/i.test(msg) ? 'insufficient data' : /not JSON/.test(msg) ? 'not JSON' : msg;
     return { ok: false, detail: msg, value };
   }
 }
@@ -2492,7 +2882,7 @@ async function fetchNodeFeeReadings(endpoints) {
   const primary = endpoints[0];
   let primaryReading;
   try {
-    const r = await fetchNodeFee(primary.base);
+    const r = await nodeFeeFor(primary);
     primaryReading = { endpoint: primary.label, fee: r.fee, source: r.source, error: null };
   } catch (e) {
     primaryReading = { endpoint: primary.label, fee: null, source: null, error: e.message || String(e) };
@@ -2510,7 +2900,7 @@ async function fetchNodeFeeReadings(endpoints) {
       continue;
     }
     try {
-      const r = await fetchNodeFee(ep.base);
+      const r = await nodeFeeFor(ep);
       out[ep.label] = { endpoint: ep.label, fee: r.fee, source: r.source, error: null };
     } catch (e) {
       out[ep.label] = { endpoint: ep.label, fee: null, source: null, error: e.message || String(e) };
@@ -2586,7 +2976,24 @@ function combineFeeReadings(readings) {
 // A 404 means the endpoint does not exist; anything else (or a
 // network error) means the broadcast path is not ready. The
 // value on success is "Reachable"; on failure it IS the reason.
-async function testNodeBroadcast(apiBase) {
+// Over RPC the same idea is sendrawtransaction('00'): Core
+// rejects it at decode time (a JSON-RPC error, e.g. -22), which
+// proves the method is live without broadcasting anything — a
+// Core that ANSWERS with an error is ready; one that cannot be
+// reached, or rejects the auth, is not.
+async function testNodeBroadcast(ep) {
+  if (ep.mode === 'rpc') {
+    try {
+      await rpcCall(ep, 'sendrawtransaction', ['00']);
+      // Unreachable in practice ('00' cannot decode) — but a
+      // node that accepted it would still be a live broadcast path.
+      return { ok: true, detail: 'ready (endpoint live)', value: 'Reachable' };
+    } catch (e) {
+      if (e && e.rpcError) return { ok: true, detail: 'ready (endpoint live — rejects invalid tx as expected)', value: 'Reachable' };
+      return { ok: false, detail: e.message, value: e.message };
+    }
+  }
+  const apiBase = ep.base;
   try {
     const res = await mempoolReq('/api/tx', 'POST', '00', apiBase);
     if (res.status === 200 || res.status === 400 || res.status === 422) {
@@ -2609,8 +3016,9 @@ module.exports = {
   parseJsonPath, priceFromPath, customPriceProvider,
   normalizePriceSourceValue, priceSourceKey, resolvePriceSource,
   fetchNodeFee, fetchNodeFeeReadings, combineFeeReadings, FEE_IMPLAUSIBLE_SATVB,
+  rpcCall, nodeFeeFor, RPC_FEE_CONF_TARGET,
   fetchTipHeights, combineTipHeights,
-  normalizePublicApiUrl, mempoolBase, endpointsFor, nodeCheckedAt,
+  normalizePublicApiUrl, normalizeRpcUrl, mempoolBase, endpointsFor, nodeCheckedAt,
   clearOutspendCache,
   DEFAULT_PUBLIC_API_URL, DEFAULT_SECONDARY_API_URL,
   DEFAULT_SLIPSTREAM_API_URL,

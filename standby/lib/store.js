@@ -19,6 +19,24 @@ function defaultState() {
     settings: {
       primaryApiUrl: 'https://mempool.space', // the primary node: a mempool API endpoint (any mempool.space-compatible instance — another public one, or your own mempool on the LAN)
       secondaryApiUrl: 'https://blockstream.info/api', // the secondary node, tried only if the primary does not answer; blank = primary runs alone
+      // Per-node Bitcoin Core JSON-RPC mode (0.8.8): when a node's
+      // *RpcEnabled is true, that node is talked to over its own
+      // Core RPC (getblockcount / gettxout / getrawtransaction /
+      // estimatesmartfee / sendrawtransaction) instead of the
+      // mempool API endpoint above. The URL is the Core RPC
+      // address (http(s)://host:8332, no path, no userinfo — the
+      // user and password go in the fields below). The RPC
+      // password is stored in state.json unencrypted, like every
+      // other setting. Disabled (false) is exactly today's
+      // mempool-API behavior.
+      primaryRpcEnabled: false,
+      primaryRpcUrl: '',
+      primaryRpcUser: '',
+      primaryRpcPass: '',
+      secondaryRpcEnabled: false,
+      secondaryRpcUrl: '',
+      secondaryRpcUser: '',
+      secondaryRpcPass: '',
       priceSources: { source1: 'coingecko', source2: 'coinbase' }, // the two BTC price feeds for price rules — each a provider id (see PRICE_PROVIDERS in lib/bitcoin.js) or a custom { id: 'custom', url, path } object (0.8.1); a reading is only trusted when the two agree within the configured agreement (Settings: Price agreement), and when they agree the primary source's price is the one that decides
       // Price agreement (0.8.0): the two BTC price sources must
       // agree within this % for a reading to count (Settings:

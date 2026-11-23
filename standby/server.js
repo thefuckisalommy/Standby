@@ -15,8 +15,7 @@
 // via the mempool API — a primary node and a secondary node (both
 // user-chosen mempool endpoints, default mempool.space and
 // blockstream.info/api), primary first, secondary if the primary does
-// not answer. There is no Bitcoin Core RPC path any more (removed in
-// 0.5.4). The "test" buttons are dry-runs that check the inputs are
+// not answer. Either node can instead be a Bitcoin Core JSON-RPC endpoint (0.8.8, lib/bitcoin.js rpcCall). The "test" buttons are dry-runs that check the inputs are
 // still unspent and never broadcast. A dry-run that finds spent inputs
 // records the transaction stale on the spot: staleness is a durable
 // fact about the inputs, not a cycle record and not page memory, so it

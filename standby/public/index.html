@@ -205,11 +205,28 @@
         <h2>Bitcoin nodes</h2>
         <button class="help-btn" id="help-nodes" data-help="nodes" aria-label="About this setting" title="About this setting">?</button>
       </div>
-      <p class="muted">A mempool API endpoint — not an Electrum server or Bitcoin Core RPC.</p>
-      <label for="btc-primary-url">Primary node</label>
-      <input id="btc-primary-url" type="text" placeholder="https://mempool.space">
-      <label for="btc-secondary-url">Secondary node</label>
-      <input id="btc-secondary-url" type="text" placeholder="https://blockstream.info/api">
+      <label for="btc-primary-url" id="btc-primary-label">Primary node (mempool endpoint)</label>
+      <div class="node-row">
+        <input id="btc-primary-url" type="text" placeholder="https://mempool.space">
+        <label class="rpc-check"><input type="checkbox" id="btc-primary-rpc"> RPC</label>
+      </div>
+      <div class="rpc-fields" id="btc-primary-rpc-fields" style="display:none">
+        <label for="btc-primary-rpc-user">RPC username</label>
+        <input id="btc-primary-rpc-user" type="text" placeholder="standby">
+        <label for="btc-primary-rpc-pass">RPC password</label>
+        <input id="btc-primary-rpc-pass" type="password" placeholder="••••••••">
+      </div>
+      <label for="btc-secondary-url" id="btc-secondary-label">Secondary node (mempool endpoint)</label>
+      <div class="node-row">
+        <input id="btc-secondary-url" type="text" placeholder="https://blockstream.info/api">
+        <label class="rpc-check"><input type="checkbox" id="btc-secondary-rpc"> RPC</label>
+      </div>
+      <div class="rpc-fields" id="btc-secondary-rpc-fields" style="display:none">
+        <label for="btc-secondary-rpc-user">RPC username</label>
+        <input id="btc-secondary-rpc-user" type="text" placeholder="standby">
+        <label for="btc-secondary-rpc-pass">RPC password</label>
+        <input id="btc-secondary-rpc-pass" type="password" placeholder="••••••••">
+      </div>
       <p>
         <button id="btn-btc-save-nodes" class="primary">Save nodes</button>
         <button id="btn-btc-test-conn">Test connection</button>

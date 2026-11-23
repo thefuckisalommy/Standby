@@ -1,5 +1,5 @@
 // Standby 0.8.2 DOM checks — block-height, set-date, and fee-market triggers.
-// Runs public/app.js from branch-split in Node with the
+// Runs public/app.js from branch-0.8.8 in Node with the
 // minimal DOM shim from dom_check094.js (same El class, same
 // document/window/fetch/setInterval stubs) and verifies the 0.8.0
 // trigger UI only — the 094 suite still owns everything else.
@@ -1771,6 +1771,158 @@ function check(name, cond, detail) {
     els['btc-primary-status'] && els['btc-primary-status'].textContent);
   toggleDetails(detP, false);
 
+  // --- 10c. Per-node RPC mode (0.8.8) ---
+  // Each node has an RPC checkbox: the label swaps between
+  // "(mempool endpoint)" and "(RPC endpoint)", the RPC
+  // username/password fields appear only in RPC mode, the URL box
+  // swaps between the two saved URLs (the inactive one is parked,
+  // never lost), and Save round-trips both URLs per mode. The
+  // launcher started Core RPC stubs on 18277 (primary) and 18278
+  // (secondary): same tip (900,000) and a 5 sat/vB
+  // estimatesmartfee, so the connection test proves the RPC path
+  // end to end. Cleanup at the end restores the seeded mempool
+  // nodes and re-tests them, so later sections see the seeded
+  // state.
+  const RPC_P = 'http://127.0.0.1:18277';
+  const RPC_S = 'http://127.0.0.1:18278';
+  for (const lbl of ['primary', 'secondary']) {
+    check('rpc static: the ' + lbl + ' node has an RPC checkbox (static HTML)',
+      idx.indexOf('id="btc-' + lbl + '-rpc"') !== -1, '');
+    check('rpc static: the ' + lbl + ' RPC fields hold a username + password input (static HTML)',
+      idx.indexOf('id="btc-' + lbl + '-rpc-fields"') !== -1
+      && idx.indexOf('id="btc-' + lbl + '-rpc-user"') !== -1
+      && idx.indexOf('id="btc-' + lbl + '-rpc-pass"') !== -1, '');
+    check('rpc static: the ' + lbl + ' RPC fields are hidden by default (static HTML)',
+      idx.indexOf('id="btc-' + lbl + '-rpc-fields" style="display:none"') !== -1, '');
+    check('rpc static: the ' + lbl + ' label reads "(mempool endpoint)" by default (static HTML)',
+      idx.indexOf('>' + (lbl === 'primary' ? 'Primary' : 'Secondary') + ' node (mempool endpoint)<') !== -1, '');
+  }
+  await rerender(appJs);
+  check('rpc initial: both RPC checkboxes start unchecked',
+    els['btc-primary-rpc'] && els['btc-primary-rpc'].checked === false
+    && els['btc-secondary-rpc'] && els['btc-secondary-rpc'].checked === false, '');
+  check('rpc initial: the primary label reads "(mempool endpoint)"',
+    els['btc-primary-label'] && els['btc-primary-label'].textContent === 'Primary node (mempool endpoint)',
+    els['btc-primary-label'] && els['btc-primary-label'].textContent);
+  check('rpc initial: the primary RPC fields are hidden',
+    els['btc-primary-rpc-fields'] && els['btc-primary-rpc-fields'].style.display === 'none',
+    els['btc-primary-rpc-fields'] && els['btc-primary-rpc-fields'].style.display);
+  check('rpc initial: the primary URL box holds the mempool stub',
+    els['btc-primary-url'] && els['btc-primary-url'].value === 'http://127.0.0.1:18275',
+    els['btc-primary-url'] && els['btc-primary-url'].value);
+  // Toggle the primary on: the label swaps, the fields appear,
+  // and the box swaps to the (empty) RPC URL — the mempool URL is
+  // parked, not lost.
+  els['btc-primary-rpc'].checked = true;
+  fireChange(els['btc-primary-rpc']);
+  check('rpc toggle: the primary label swaps to "(RPC endpoint)"',
+    els['btc-primary-label'] && els['btc-primary-label'].textContent === 'Primary node (RPC endpoint)',
+    els['btc-primary-label'] && els['btc-primary-label'].textContent);
+  check('rpc toggle: the primary RPC fields appear on toggle',
+    els['btc-primary-rpc-fields'] && els['btc-primary-rpc-fields'].style.display !== 'none',
+    els['btc-primary-rpc-fields'] && els['btc-primary-rpc-fields'].style.display);
+  check('rpc toggle: the primary URL box swaps to the (empty) RPC URL',
+    els['btc-primary-url'] && els['btc-primary-url'].value === '',
+    els['btc-primary-url'] && els['btc-primary-url'].value);
+  els['btc-primary-url'].value = RPC_P;
+  els['btc-primary-rpc-user'].value = 'standby';
+  els['btc-primary-rpc-pass'].value = 'testpass';
+  els['btn-btc-save-nodes'].click();
+  await new Promise((r) => setTimeout(r, 1500));
+  await waitForRender();
+  const stRpc = await (await fetch('/api/state')).json();
+  check('rpc save: the primary RPC settings round-trip (enabled, URL, user, password)',
+    stRpc.settings.primaryRpcEnabled === true && stRpc.settings.primaryRpcUrl === RPC_P
+    && stRpc.settings.primaryRpcUser === 'standby' && stRpc.settings.primaryRpcPass === 'testpass',
+    JSON.stringify({ e: stRpc.settings.primaryRpcEnabled, u: stRpc.settings.primaryRpcUrl }));
+  check('rpc save: the primary mempool URL survives the toggle to RPC',
+    stRpc.settings.primaryApiUrl === 'http://127.0.0.1:18275', stRpc.settings.primaryApiUrl);
+  check('rpc save: the UI still shows RPC after the save + reload',
+    els['btc-primary-rpc'] && els['btc-primary-rpc'].checked === true
+    && els['btc-primary-label'] && els['btc-primary-label'].textContent === 'Primary node (RPC endpoint)'
+    && els['btc-primary-url'] && els['btc-primary-url'].value === RPC_P, '');
+  // Test connection over RPC: the primary answers getblockcount +
+  // estimatesmartfee + sendrawtransaction, so the pill reads OK
+  // with the RPC fee (5 sat/vB); the secondary is still the
+  // mempool stub at 1 sat/vB.
+  els['btn-btc-test-conn'].click();
+  await new Promise((r) => setTimeout(r, 1500));
+  await waitForRender();
+  check('rpc test: the primary pill reads OK after the RPC connection test',
+    els['btc-primary-status'] && els['btc-primary-status'].textContent === 'OK',
+    els['btc-primary-status'] && els['btc-primary-status'].textContent);
+  check('rpc test: the primary Fee estimates value reads 5 sat/vB (estimatesmartfee)',
+    els['btc-primary-fees-value'] && els['btc-primary-fees-value'].textContent === '5 sat/vB',
+    els['btc-primary-fees-value'] && els['btc-primary-fees-value'].textContent);
+  check('rpc test: the primary Block height value reads Height 900,000 (getblockcount)',
+    els['btc-primary-height-value'] && els['btc-primary-height-value'].textContent === 'Height 900,000',
+    els['btc-primary-height-value'] && els['btc-primary-height-value'].textContent);
+  check('rpc test: the secondary still reads its mempool fee (1 sat/vB)',
+    els['btc-secondary-fees-value'] && els['btc-secondary-fees-value'].textContent === '1 sat/vB',
+    els['btc-secondary-fees-value'] && els['btc-secondary-fees-value'].textContent);
+  // Toggle the primary back off: the label swaps back, the fields
+  // hide, and the parked mempool URL returns to the box.
+  els['btc-primary-rpc'].checked = false;
+  fireChange(els['btc-primary-rpc']);
+  check('rpc toggle off: the primary label swaps back to "(mempool endpoint)"',
+    els['btc-primary-label'] && els['btc-primary-label'].textContent === 'Primary node (mempool endpoint)',
+    els['btc-primary-label'] && els['btc-primary-label'].textContent);
+  check('rpc toggle off: the primary RPC fields hide again',
+    els['btc-primary-rpc-fields'] && els['btc-primary-rpc-fields'].style.display === 'none',
+    els['btc-primary-rpc-fields'] && els['btc-primary-rpc-fields'].style.display);
+  check('rpc toggle off: the parked mempool URL returns to the primary box',
+    els['btc-primary-url'] && els['btc-primary-url'].value === 'http://127.0.0.1:18275',
+    els['btc-primary-url'] && els['btc-primary-url'].value);
+  els['btn-btc-save-nodes'].click();
+  await new Promise((r) => setTimeout(r, 1500));
+  await waitForRender();
+  const stRpcOff = await (await fetch('/api/state')).json();
+  check('rpc save off: the primary is mempool again, the RPC URL kept for re-enable',
+    stRpcOff.settings.primaryRpcEnabled === false && stRpcOff.settings.primaryApiUrl === 'http://127.0.0.1:18275'
+    && stRpcOff.settings.primaryRpcUrl === RPC_P, JSON.stringify(stRpcOff.settings));
+  // The secondary, same round-trip in miniature: toggle on, save,
+  // test, toggle off, save.
+  els['btc-secondary-rpc'].checked = true;
+  fireChange(els['btc-secondary-rpc']);
+  check('rpc secondary: the label swaps and the fields appear',
+    els['btc-secondary-label'] && els['btc-secondary-label'].textContent === 'Secondary node (RPC endpoint)'
+    && els['btc-secondary-rpc-fields'] && els['btc-secondary-rpc-fields'].style.display !== 'none', '');
+  els['btc-secondary-url'].value = RPC_S;
+  els['btc-secondary-rpc-user'].value = 'standby';
+  els['btc-secondary-rpc-pass'].value = 'testpass';
+  els['btn-btc-save-nodes'].click();
+  await new Promise((r) => setTimeout(r, 1500));
+  await waitForRender();
+  const stRpcS = await (await fetch('/api/state')).json();
+  check('rpc secondary: the secondary RPC settings round-trip, mempool URL preserved',
+    stRpcS.settings.secondaryRpcEnabled === true && stRpcS.settings.secondaryRpcUrl === RPC_S
+    && stRpcS.settings.secondaryApiUrl === 'http://127.0.0.1:18276', JSON.stringify(stRpcS.settings));
+  els['btn-btc-test-conn'].click();
+  await new Promise((r) => setTimeout(r, 1500));
+  await waitForRender();
+  check('rpc secondary: the secondary pill reads OK over RPC with the 5 sat/vB fee',
+    els['btc-secondary-status'] && els['btc-secondary-status'].textContent === 'OK'
+    && els['btc-secondary-fees-value'] && els['btc-secondary-fees-value'].textContent === '5 sat/vB',
+    els['btc-secondary-fees-value'] && els['btc-secondary-fees-value'].textContent);
+  els['btc-secondary-rpc'].checked = false;
+  fireChange(els['btc-secondary-rpc']);
+  els['btn-btc-save-nodes'].click();
+  await new Promise((r) => setTimeout(r, 1500));
+  await waitForRender();
+  const stRpcSOff = await (await fetch('/api/state')).json();
+  check('rpc secondary: the secondary is mempool again after toggle off + save',
+    stRpcSOff.settings.secondaryRpcEnabled === false && stRpcSOff.settings.secondaryApiUrl === 'http://127.0.0.1:18276'
+    && stRpcSOff.settings.secondaryRpcUrl === RPC_S, JSON.stringify(stRpcSOff.settings));
+  // Cleanup: re-test the mempool nodes so the pills read OK again
+  // for the later sections (the stored RPC results no longer match
+  // the mempool URLs, so the render would otherwise say Not tested).
+  els['btn-btc-test-conn'].click();
+  await new Promise((r) => setTimeout(r, 1500));
+  await waitForRender();
+  check('rpc cleanup: both pills read OK again on the mempool stubs',
+    els['btc-primary-status'] && els['btc-primary-status'].textContent === 'OK'
+    && els['btc-secondary-status'] && els['btc-secondary-status'].textContent === 'OK', '');
+
   // --- 11. Staged Transactions card (0.8.0) ---
   // Static HTML: the transactions card is renamed "Staged
   // Transactions" and is a <details> open by default — the whole
@@ -2905,11 +3057,17 @@ function check(name, cond, detail) {
     check('trim static: the long paragraph is gone from the page — "' + phrase.slice(0, 40) + '"',
       idx.indexOf(phrase) === -1, phrase);
   }
+  // (0.8.8) The nodes hint is gone by design: "not ... Bitcoin Core
+  // RPC" is false now that each node can BE a Core RPC endpoint —
+  // the guidance moved into the nodes "?" pop-out (the pop-out
+  // check below covers the RPC wording). The other three kept
+  // hints still read on the page.
   check('trim static: the kept short hints are still in the page',
-    idx.indexOf('A mempool API endpoint — not an Electrum server or Bitcoin Core RPC') !== -1
-    && idx.indexOf('The backup is not encrypted') !== -1
+    idx.indexOf('The backup is not encrypted') !== -1
     && idx.indexOf('POST /checkin to check in, GET /health to test') !== -1
     && idx.indexOf('A reading is only trusted when the two agree within <span id="price-sources-agreement">5%</span>.') !== -1, '');
+  check('trim static: the removed nodes hint is gone (RPC is a mode now, not a mistake)',
+    idx.indexOf('not an Electrum server or Bitcoin Core RPC') === -1, '');
   // The trimmed facts still live in the "?" pop-outs (app.js).
   // The trimmed facts still live in the "?" pop-outs (app.js).
   // ASCII-safe substrings only: the source holds \u2019
@@ -3017,8 +3175,8 @@ function check(name, cond, detail) {
     && idx.indexOf('Installed version:') !== -1 && idx.indexOf('id="app-version"') !== -1, '');
   check('app version static: the card has no "?" button and no details (just the version line)',
     idx.indexOf('id="help-version"') === -1, '');
-  check('app version: the installed version reads 0.8.7.4 (from /api/health)',
-    els['app-version'] && els['app-version'].textContent === '0.8.7.4',
+  check('app version: the installed version reads 0.8.8 (from /api/health)',
+    els['app-version'] && els['app-version'].textContent === '0.8.8',
     els['app-version'] && els['app-version'].textContent);
   setFilter('general');
   check('app version: the card is visible under General',

@@ -529,6 +529,37 @@ async function handleApi(req, res, pathname) {
       try { s.secondaryApiUrl = v ? bitcoin.normalizePublicApiUrl(v) : ''; }
       catch (e) { return sendError(res, 400, e.message); }
     }
+    // Per-node Bitcoin Core JSON-RPC mode (0.8.8): each node can
+    // be switched from its mempool API endpoint above to its own
+    // Core RPC. *RpcEnabled is a boolean; *RpcUrl is an http(s)
+    // URL when non-empty (same validation as the node URLs, via
+    // normalizeRpcUrl — a bare host gets http://, and a URL
+    // carrying a username or password is rejected: the user and
+    // password belong in the fields below, never in the URL);
+    // *RpcUser / *RpcPass are plain strings, empty when unset.
+    // The password is stored in state.json unencrypted, like
+    // every other setting, and flows back to the UI with the rest
+    // of the settings so a re-save does not wipe it.
+    for (const slot of ['primary', 'secondary']) {
+      const enKey = slot + 'RpcEnabled', urlKey = slot + 'RpcUrl', userKey = slot + 'RpcUser', passKey = slot + 'RpcPass';
+      if (body[enKey] !== undefined) {
+        if (typeof body[enKey] !== 'boolean') return sendError(res, 400, enKey + ' must be true or false');
+        s[enKey] = body[enKey];
+      }
+      if (body[urlKey] !== undefined) {
+        const v = typeof body[urlKey] === 'string' ? body[urlKey].trim() : '';
+        try { s[urlKey] = v ? bitcoin.normalizeRpcUrl(v) : ''; }
+        catch (e) { return sendError(res, 400, e.message); }
+      }
+      if (body[userKey] !== undefined) {
+        if (typeof body[userKey] !== 'string') return sendError(res, 400, userKey + ' must be a string');
+        s[userKey] = body[userKey];
+      }
+      if (body[passKey] !== undefined) {
+        if (typeof body[passKey] !== 'string') return sendError(res, 400, passKey + ' must be a string');
+        s[passKey] = body[passKey];
+      }
+    }
     if (body.priceSources !== undefined) {
       const ps = body.priceSources;
       if (!ps || typeof ps !== 'object') return sendError(res, 400, 'priceSources must be {source1, source2}');
@@ -1637,6 +1668,41 @@ async function handleApi(req, res, pathname) {
     if (typeof bsSettings.secondaryApiUrl === 'string' && bsSettings.secondaryApiUrl.trim()) {
       try { settings.secondaryApiUrl = bitcoin.normalizePublicApiUrl(bsSettings.secondaryApiUrl); }
       catch (e) { return sendError(res, 400, 'backup secondary node URL: ' + e.message); }
+    }
+    // (0.8.8) The per-node RPC settings ride along the same way:
+    // a backup from before 0.8.8 carries none, which restores as
+    // disabled/blank; a present but invalid value rejects the
+    // whole restore, like a bad node URL. The RPC password rides
+    // along in the backup like every other setting (state.json
+    // stores it unencrypted, and so does the backup file).
+    for (const slot of ['primary', 'secondary']) {
+      const enKey = slot + 'RpcEnabled', urlKey = slot + 'RpcUrl', userKey = slot + 'RpcUser', passKey = slot + 'RpcPass';
+      if (bsSettings[enKey] !== undefined && bsSettings[enKey] !== null) {
+        if (typeof bsSettings[enKey] !== 'boolean') return sendError(res, 400, 'backup ' + enKey + ' must be true or false');
+        settings[enKey] = bsSettings[enKey];
+      } else {
+        settings[enKey] = false;
+      }
+      if (typeof bsSettings[urlKey] === 'string' && bsSettings[urlKey].trim()) {
+        try { settings[urlKey] = bitcoin.normalizeRpcUrl(bsSettings[urlKey]); }
+        catch (e) { return sendError(res, 400, 'backup ' + slot + ' RPC URL: ' + e.message); }
+      } else if (bsSettings[urlKey] !== undefined && bsSettings[urlKey] !== null && typeof bsSettings[urlKey] !== 'string') {
+        return sendError(res, 400, 'backup ' + urlKey + ' must be a string');
+      } else {
+        settings[urlKey] = '';
+      }
+      if (bsSettings[userKey] !== undefined && bsSettings[userKey] !== null) {
+        if (typeof bsSettings[userKey] !== 'string') return sendError(res, 400, 'backup ' + userKey + ' must be a string');
+        settings[userKey] = bsSettings[userKey];
+      } else {
+        settings[userKey] = '';
+      }
+      if (bsSettings[passKey] !== undefined && bsSettings[passKey] !== null) {
+        if (typeof bsSettings[passKey] !== 'string') return sendError(res, 400, 'backup ' + passKey + ' must be a string');
+        settings[passKey] = bsSettings[passKey];
+      } else {
+        settings[passKey] = '';
+      }
     }
     // (0.8.0) The price sources ride along: a backup from before
     // 0.8.0 carries none, which restores as the defaults; a present

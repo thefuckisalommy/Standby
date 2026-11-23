@@ -253,6 +253,26 @@ async function checkUtxoRule(state, rule, now, ctx) {
       warning: 'This UTXO is already spent — it would fire on the next evaluation.',
     };
   }
+  // (0.8.8) RPC mode: the node confirmed the outpoint is spent,
+  // but plain RPC cannot say whether the spending transaction is
+  // confirmed — there is no outspend lookup and the spender's
+  // txid is not returned. A confirmations>=1 rule cannot verify
+  // the confirmations, so it is 'unknown' and NEVER fires: firing
+  // would claim N confirmations nobody measured. (A confs=0 rule
+  // already fired above — any spend is enough for it.) The rule
+  // retries on the next evaluation; if the spend confirms, the
+  // node still cannot count it, so an RPC-mode rule at confs>=1
+  // stays unknown until the owner switches the node back to the
+  // mempool API or drops the rule to 0. The single-trigger check
+  // endpoint answers the same way, so the add-time guard never
+  // reports such a rule as already met.
+  if (res.confirmationsUnknown) {
+    return {
+      fire: false, status: 'unknown', reason: 'spent, but the RPC node cannot say whether the spend is confirmed — will retry',
+      slice: { ...freshTriggerState(now, 'unknown', 'spent, but the RPC node cannot say whether the spend is confirmed — will retry'), lastOutspend, lastError: 'spend confirmations unverifiable via RPC' },
+      detail: { spent: true, confirmed: false, txid: res.txid, confirmationsUnknown: true }, warning: null,
+    };
+  }
   // N-confirmation mode: an unconfirmed spend only watches.
   if (!res.confirmed) {
     lastOutspend.confirmations = 0;

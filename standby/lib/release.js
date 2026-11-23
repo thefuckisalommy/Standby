@@ -979,22 +979,42 @@ async function refreshFeePeakIfStale() {
 
 // The current recommended fees (0.7.21): the same mempool.space
 // public base, the /api/v1/fees/recommended endpoint — NOT the
-// configured node (a plain Esplora has no such endpoint). Cached
-// in memory and refreshed once an hour: on the hourly tick when
-// the cached value is older than 1h, and once shortly after
-// startup. The current fee moves fast, so a value older than 2h
-// is served as null — the Critical check is then skipped and the
-// verdict falls back to the historical ladder, rather than
-// judging a live fee against a stale one. Like the peak, the
-// current fees are derived, never stored in state.json.
+// configured node (a plain Esplora has no such endpoint) — UNLESS
+// the primary node is in RPC mode (0.8.8): then the current
+// economy fee comes from the PRIMARY node's own estimatesmartfee,
+// so a node-only setup judges its fees against its own mempool
+// instead of a public one. The 90-day peak is unaffected: it
+// still comes from public mempool.space (see
+// refreshFeePeakIfStale). Cached in memory and refreshed once an
+// hour: on the hourly tick when the cached value is older than 1h,
+// and once shortly after startup. The current fee moves fast, so a
+// value older than 2h is served as null — the Critical check is
+// then skipped and the verdict falls back to the historical
+// ladder, rather than judging a live fee against a stale one.
+// Like the peak, the current fees are derived, never stored in
+// state.json. In RPC mode only the economy fee is known — the
+// other tiers stay null (the frontend's Critical check reads
+// economyFee only; a null tier is "no data", never a fabricated
+// number). A failed refresh keeps the last cached value, and an
+// RPC estimatesmartfee failure ("insufficient data" on a fresh or
+// syncing node) is a failed refresh, never a zero fee.
 const FEE_CURRENT_REFRESH_MS = 60 * 60 * 1000; // refresh once an hour
 const FEE_CURRENT_MAX_AGE_MS = 2 * 60 * 60 * 1000; // older than this: no Critical check
 
-async function refreshCurrentFeesIfStale() {
+async function refreshCurrentFeesIfStale(settings) {
   if (caches.currentFees.fetchedAt && (Date.now() - caches.currentFees.fetchedAt) < FEE_CURRENT_REFRESH_MS) return;
   try {
-    const fees = await bitcoin.fetchCurrentFees();
-    caches.currentFees = { fees, fetchedAt: Date.now() };
+    const s = settings || store.loadState(DATA_DIR).settings;
+    const eps = bitcoin.endpointsFor(s);
+    const primary = eps && eps[0];
+    if (primary && primary.mode === 'rpc') {
+      const r = await bitcoin.nodeFeeFor(primary);
+      if (!r || typeof r.fee !== 'number') throw new Error('primary RPC node gave no usable fee');
+      caches.currentFees = { fees: { fastestFee: null, halfHourFee: null, hourFee: null, economyFee: r.fee, minimumFee: null }, fetchedAt: Date.now() };
+    } else {
+      const fees = await bitcoin.fetchCurrentFees();
+      caches.currentFees = { fees, fetchedAt: Date.now() };
+    }
   } catch (e) {
     console.error('current-fees refresh failed (keeping last cached value):', e.message);
   }
@@ -1144,7 +1164,10 @@ async function runHourlyTick() {
   // a live fee against a live market. Best-effort — a failed
   // refresh never breaks the tick (the Critical check is skipped
   // until the fees come back).
-  try { await refreshCurrentFeesIfStale(); } catch (e) { console.error('current-fees refresh failed:', e); }
+  try {
+    const st = store.loadState(DATA_DIR);
+    await refreshCurrentFeesIfStale(st.settings);
+  } catch (e) { console.error('current-fees refresh failed:', e); }
 }
 
 // Per-endpoint "last checked" stamps (0.8.5): the tick asks the

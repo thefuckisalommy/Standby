@@ -1079,8 +1079,8 @@
     // endpoint it was measured against: if the settings changed since
     // the test ran, the pill goes back to Not tested.
     var conn = S.bitcoin.connection || {};
-    renderNodeStatus('readiness-', 'primary', status.primaryApiUrl, conn);
-    renderNodeStatus('readiness-', 'secondary', status.secondaryApiUrl, conn);
+    renderNodeStatus('readiness-', 'primary', settingsActiveNodeUrl('primary', status.primaryApiUrl), conn);
+    renderNodeStatus('readiness-', 'secondary', settingsActiveNodeUrl('secondary', status.secondaryApiUrl), conn);
     renderExchangeRows(status);
   }
 
@@ -2467,12 +2467,76 @@
     return row;
   }
 
+  // (0.8.8) Per-node RPC mode: each node has a mempool URL and an
+  // RPC URL, and the URL box shows the active mode's one. The
+  // checkbox swaps between them; nodeRpcOther holds the inactive
+  // mode's URL while editing, seeded from settings by
+  // renderBitcoin and swapped by the toggle. Both URLs persist
+  // on Save — saveBitcoinSettings reads the box for the active
+  // mode and nodeRpcOther for the other.
+  var nodeRpcOther = { primary: '', secondary: '' };
+  function nodeRpcLabel(which, rpc) {
+    return (which === 'primary' ? 'Primary node ' : 'Secondary node ') + (rpc ? '(RPC endpoint)' : '(mempool endpoint)');
+  }
+  function syncNodeRpcRow(which) {
+    var rpc = $('btc-' + which + '-rpc').checked;
+    $('btc-' + which + '-label').textContent = nodeRpcLabel(which, rpc);
+    $('btc-' + which + '-rpc-fields').style.display = rpc ? '' : 'none';
+    // The placeholder is the example for the active mode: the
+    // mempool URL in mempool mode, Core's default RPC endpoint
+    // (localhost — the same on every machine, no one's address)
+    // in RPC mode.
+    $('btc-' + which + '-url').placeholder = rpc ? 'http://127.0.0.1:8332'
+      : (which === 'primary' ? 'https://mempool.space' : 'https://blockstream.info/api');
+  }
+  function toggleNodeRpc(which) {
+    var input = $('btc-' + which + '-url');
+    var other = nodeRpcOther[which];
+    nodeRpcOther[which] = input.value;
+    input.value = other;
+    syncNodeRpcRow(which);
+    // The status row shows the currently-active endpoint, so it
+    // follows the toggle at once (the pill falls back to Not
+    // tested — the last test was against the other endpoint).
+    renderNodeStatus('btc-', which, activeNodeUrl(which), (S.bitcoin && S.bitcoin.connection) || {});
+  }
+  // (0.8.8) The endpoint a node is actually using. The Settings
+  // rows read it from the URL box, which always holds the active
+  // mode's URL — including an unsaved toggle. The Dashboard
+  // readiness rows read it from saved settings instead, falling
+  // back to the status payload's URL when the settings do not
+  // carry the new keys yet.
+  function activeNodeUrl(which) {
+    return $('btc-' + which + '-url').value;
+  }
+  function settingsActiveNodeUrl(which, fallback) {
+    var st = S.settings || {};
+    var rpc = which === 'primary' ? st.primaryRpcEnabled : st.secondaryRpcEnabled;
+    if (rpc) return (which === 'primary' ? st.primaryRpcUrl : st.secondaryRpcUrl) || '';
+    var api = which === 'primary' ? st.primaryApiUrl : st.secondaryApiUrl;
+    return (typeof api === 'string' && api !== '') ? api : (fallback || '');
+  }
+
   function renderBitcoin() {
-    $('btc-primary-url').value = S.settings.primaryApiUrl || 'https://mempool.space';
-    $('btc-secondary-url').value = S.settings.secondaryApiUrl || '';
+    var st = S.settings;
+    var pRpc = !!st.primaryRpcEnabled, sRpc = !!st.secondaryRpcEnabled;
+    $('btc-primary-rpc').checked = pRpc;
+    $('btc-secondary-rpc').checked = sRpc;
+    $('btc-primary-rpc-user').value = st.primaryRpcUser || '';
+    $('btc-primary-rpc-pass').value = st.primaryRpcPass || '';
+    $('btc-secondary-rpc-user').value = st.secondaryRpcUser || '';
+    $('btc-secondary-rpc-pass').value = st.secondaryRpcPass || '';
+    // The inactive mode's URL lives in nodeRpcOther while
+    // editing; the box shows the active mode's URL.
+    nodeRpcOther.primary = pRpc ? (st.primaryApiUrl || 'https://mempool.space') : (st.primaryRpcUrl || '');
+    nodeRpcOther.secondary = sRpc ? (st.secondaryApiUrl || '') : (st.secondaryRpcUrl || '');
+    $('btc-primary-url').value = pRpc ? (st.primaryRpcUrl || '') : (st.primaryApiUrl || 'https://mempool.space');
+    $('btc-secondary-url').value = sRpc ? (st.secondaryRpcUrl || '') : (st.secondaryApiUrl || '');
+    syncNodeRpcRow('primary');
+    syncNodeRpcRow('secondary');
     var conn = S.bitcoin.connection || {};
-    renderNodeStatus('btc-', 'primary', S.settings.primaryApiUrl, conn);
-    renderNodeStatus('btc-', 'secondary', S.settings.secondaryApiUrl, conn);
+    renderNodeStatus('btc-', 'primary', activeNodeUrl('primary'), conn);
+    renderNodeStatus('btc-', 'secondary', activeNodeUrl('secondary'), conn);
 
     var txs = S.bitcoin.txs || [];
     var overlapsByTx = computeOverlaps();
@@ -4045,9 +4109,20 @@
   }
 
   async function saveBitcoinSettings() {
+    // (0.8.8) Both URLs persist: the box holds the active mode's
+    // URL, nodeRpcOther the other mode's.
+    var pRpc = $('btc-primary-rpc').checked, sRpc = $('btc-secondary-rpc').checked;
     var s = await api('PUT', '/api/settings', {
-      primaryApiUrl: $('btc-primary-url').value,
-      secondaryApiUrl: $('btc-secondary-url').value,
+      primaryApiUrl: pRpc ? nodeRpcOther.primary : $('btc-primary-url').value,
+      secondaryApiUrl: sRpc ? nodeRpcOther.secondary : $('btc-secondary-url').value,
+      primaryRpcEnabled: pRpc,
+      primaryRpcUrl: pRpc ? $('btc-primary-url').value : nodeRpcOther.primary,
+      primaryRpcUser: $('btc-primary-rpc-user').value,
+      primaryRpcPass: $('btc-primary-rpc-pass').value,
+      secondaryRpcEnabled: sRpc,
+      secondaryRpcUrl: sRpc ? $('btc-secondary-url').value : nodeRpcOther.secondary,
+      secondaryRpcUser: $('btc-secondary-rpc-user').value,
+      secondaryRpcPass: $('btc-secondary-rpc-pass').value,
     });
     S.settings = s;
   }
@@ -4069,6 +4144,12 @@
       openFailedNodeDetails();
     } catch (e) { setMsg($('btc-nodes-msg'), e.message, false); }
   });
+
+  // (0.8.8) RPC mode toggle: the URL box swaps between the
+  // mempool URL and the RPC URL, each mode keeping its own
+  // value; the username/password fields show only in RPC mode.
+  $('btc-primary-rpc').addEventListener('change', function () { toggleNodeRpc('primary'); });
+  $('btc-secondary-rpc').addEventListener('change', function () { toggleNodeRpc('secondary'); });
 
   // The Add form's fallback row (0.7.17): shown only while the route
   // is Slipstream — when the route is public the setting is stored
@@ -4988,8 +5069,8 @@
     patchCheckinBars(status);
     patchReadinessRows();
     var conn = (S.bitcoin && S.bitcoin.connection) || {};
-    renderNodeStatus('readiness-', 'primary', status.primaryApiUrl, conn);
-    renderNodeStatus('readiness-', 'secondary', status.secondaryApiUrl, conn);
+    renderNodeStatus('readiness-', 'primary', settingsActiveNodeUrl('primary', status.primaryApiUrl), conn);
+    renderNodeStatus('readiness-', 'secondary', settingsActiveNodeUrl('secondary', status.secondaryApiUrl), conn);
     renderExchangeRows(status);
     // The Logs tab has no inputs in it — rebuilding its rows is
     // safe any time, even with a pop-out open over it.
@@ -5001,8 +5082,8 @@
     // node rows, price-source rows (they read the dropdowns,
     // never write them), the agreement span, and the fee zone
     // bar (it reads the two number inputs and moves the ranges).
-    renderNodeStatus('btc-', 'primary', S.settings.primaryApiUrl, conn);
-    renderNodeStatus('btc-', 'secondary', S.settings.secondaryApiUrl, conn);
+    renderNodeStatus('btc-', 'primary', activeNodeUrl('primary'), conn);
+    renderNodeStatus('btc-', 'secondary', activeNodeUrl('secondary'), conn);
     refreshPriceSourceRow(1);
     refreshPriceSourceRow(2);
     var agreeSpan = $('price-sources-agreement');
@@ -5577,7 +5658,7 @@
     },
     nodes: {
       title: 'Bitcoin nodes',
-      body: 'The Bitcoin nodes Standby talks to. Standby reads the chain through these nodes \u2014 it checks whether a UTXO is spent, confirms a broadcast landed, and submits your transactions. The primary is tried first; if it fails, the secondary is used. Leave the secondary blank to use the primary alone. The address is a mempool instance \u2014 mempool.space by default, another public instance, or your own mempool on the LAN. UTXO triggers ask the node whether the watched UTXO is spent, and every transaction\u2019s broadcast goes through a node. Check-in, set-date, and manual triggers do not read the node to decide whether to fire; price triggers read the exchanges instead. Block-height and fee-market triggers read the node (the tip height and the fee estimate).',
+      body: 'The Bitcoin nodes Standby talks to. Standby reads the chain through these nodes \u2014 it checks whether a UTXO is spent, confirms a broadcast landed, and submits your transactions. The primary is tried first; if it fails, the secondary is used. Leave the secondary blank to use the primary alone. Each node is either a mempool API endpoint \u2014 mempool.space by default, another public instance, or your own mempool on the LAN \u2014 or, with the RPC box ticked, your own Bitcoin Core node over JSON-RPC, with the username and password it asks for. UTXO triggers ask the node whether the watched UTXO is spent, and every transaction\u2019s broadcast goes through a node. Check-in, set-date, and manual triggers do not read the node to decide whether to fire; price triggers read the exchanges instead. Block-height and fee-market triggers read the node (the tip height and the fee estimate).',
       triggers: ['general'],
     },
     'price-sources': {
