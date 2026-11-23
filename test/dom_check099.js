@@ -3844,28 +3844,47 @@ function check(name, cond, detail) {
   const nodeChecked26b = els['readiness-secondary-checked'] ? els['readiness-secondary-checked'].textContent : '';
   check('live view: each node row carries its own checked time left of the pill',
     /^checked /.test(nodeChecked26a) && /^checked /.test(nodeChecked26b), nodeChecked26a + ' / ' + nodeChecked26b);
-  // (0.8.5) Per-node stamps: the tick asks the primary every
-  // time (the blockheight rule's tip fetch, primary-first and
-  // cached once per tick) and the secondary only on fallback,
-  // so after a server tick the primary stamp is newer than the
-  // secondary's test time. The tip cache TTL equals the tick
-  // cadence, so a tick can occasionally find the cache still
-  // warm and skip the fetch — poll until a tick actually
-  // fetches (the next tick always does: the cache is then ~2x
-  // the TTL old).
+  // (0.8.5, restated 0.8.8) Per-node stamps: the tick asks the
+  // primary every time (the blockheight rule's tip fetch,
+  // primary-first and cached once per tick) — but the old
+  // assertion, that the primary stamp ends up NEWER than the
+  // secondary's, was false. This suite's `Dom Rules Unknown`
+  // watches a nonexistent outpoint, so its outspend check 404s
+  // on the primary and falls through to the secondary on
+  // null/404 (404s are never cached); every tick asks BOTH
+  // nodes, the secondary ~1ms after the primary, so the
+  // primary is newer only in a ~10ms window per tick and the
+  // 60s poll essentially never lands in it — a phase lottery,
+  // not a real failure. The restated check asserts the
+  // primary stamp ADVANCES during the poll instead: capture
+  // it once, then poll until a later reading is newer. The
+  // tip cache TTL equals the tick cadence, so a tick can
+  // occasionally find the cache still warm and skip the
+  // fetch — poll until a tick actually fetches (the next tick
+  // always does: the cache is then ~2x the TTL old).
   async function waitNodeStamps26(timeoutMs) {
     const t0 = Date.now();
+    // Baseline: the primary stamp as it stands when the poll
+    // starts. A missing baseline is a failure, not a pass.
+    let start = null;
+    while (start === null) {
+      const st = await (await fetch('/api/state')).json();
+      const nc = (st.bitcoin && st.bitcoin.connection && st.bitcoin.connection.nodeCheckedAt) || {};
+      if (nc.primary) { start = nc.primary; break; }
+      if (Date.now() - t0 > timeoutMs) return { start: null, end: null };
+      await sleep26(3000);
+    }
     for (;;) {
       const st = await (await fetch('/api/state')).json();
       const nc = (st.bitcoin && st.bitcoin.connection && st.bitcoin.connection.nodeCheckedAt) || {};
-      if (nc.primary && nc.secondary && nc.primary > nc.secondary) return nc;
-      if (Date.now() - t0 > timeoutMs) return nc;
+      if (nc.primary && nc.primary > start) return { start: start, end: nc.primary };
+      if (Date.now() - t0 > timeoutMs) return { start: start, end: nc.primary || null };
       await sleep26(3000);
     }
   }
   const nc26 = await waitNodeStamps26(60000);
-  check('live view: the primary node stamp is newer than the secondary stamp (tick asks primary only)',
-    !!(nc26.primary && nc26.secondary && nc26.primary > nc26.secondary), JSON.stringify(nc26));
+  check('live view: the primary node stamp advances during the poll (tick asks primary)',
+    !!(nc26.start && nc26.end && nc26.end > nc26.start), JSON.stringify(nc26));
   // Dom Rules OR stays disarmed until the end of (d): its price
   // rule (>= $150,000) would trip the enable gate while the
   // stub price sits at $160,000.
