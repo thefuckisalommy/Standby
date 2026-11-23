@@ -7,7 +7,7 @@ category: automation
 name: Standby
 version: "0.8.8"
 releaseNotes: |-
-  0.8.8 — The secondary node can now be turned off in Settings — off means the primary node only, with no fallback anywhere. The offline grace period now also pauses block-height, set-date, and fee-market triggers — not just price and UTXO — and setting the grace duration to 0 in Settings turns the grace off entirely.
+  0.8.8 — The secondary node can now be turned off in Settings — off means the primary node only, with no fallback anywhere. The offline grace period now also pauses block-height, set-date, and fee-market triggers — not just price and UTXO — and it now has its own on/off toggle in Settings: off means triggers fire immediately, with no pause after an offline gap.
 
   0.8.7.4 — A staged transaction whose inputs were spent elsewhere now reads stale on its own: the hourly check re-tests every armed staged transaction's inputs, so one that can no longer broadcast is marked stale — in red — instead of sitting at Ready until a dry run or a firing trigger finds out. An unconfirmed spend still only warns; it never marks a transaction stale.
 

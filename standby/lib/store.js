@@ -45,10 +45,15 @@ function defaultState() {
       // offline longer than graceOfflineDays, price, UTXO,
       // block-height, set-date, and fee-market triggers are paused
       // for graceDurationDays (null = indefinite, until the owner
-      // resumes; 0 = no grace period at all) so they do not fire
-      // on conditions that changed while the app was away.
-      // Check-in triggers are not affected (they keep their own
-      // heldUntil hold). See server.js applyGrace.
+      // resumes) so they do not fire on conditions that changed
+      // while the app was away. graceEnabled is the on/off toggle
+      // (Settings grace card, first option): off means no grace
+      // at all, triggers fire immediately. A stored duration of 0
+      // (the old off switch, pre-toggle) still reads as off —
+      // see the loadState migration below. Check-in triggers are
+      // not affected (they keep their own heldUntil hold). See
+      // server.js applyGrace.
+      graceEnabled: true,
       graceOfflineDays: 7, graceDurationDays: 7,
       // Vacation mode (0.8.0): while it is on, the check-in
       // countdown is FROZEN — the days away never count toward a
@@ -745,6 +750,17 @@ function loadState(dataDir) {
   // normalize it to null so every reader sees one shape.
   if (state.settings && typeof state.settings === 'object' && state.settings.vacationUntil === '') {
     state.settings.vacationUntil = null;
+  }
+  // (0.8.8) Grace on/off toggle replaces the "No grace period"
+  // duration: old state with graceDurationDays 0 and no
+  // graceEnabled field loads as grace OFF, not on — the 0 meant
+  // off, and the default (on) must not resurrect it. A saved
+  // flag always wins; this only covers state written before
+  // the toggle existed.
+  if (state.settings && typeof state.settings === 'object'
+    && saved && saved.settings && typeof saved.settings === 'object'
+    && !('graceEnabled' in saved.settings) && saved.settings.graceDurationDays === 0) {
+    state.settings.graceEnabled = false;
   }
   // 0.3.0 migration: the message release is gone. Prune everything it
   // left behind — including any stored Part 2 ciphertext — so no message

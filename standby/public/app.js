@@ -1459,9 +1459,11 @@
   // endpoint (OK / Failed / Not tested). `prefix` is 'readiness-' on the
   // Dashboard and 'btc-' on the Settings tab; both render the same
   // data. A blank URL means no secondary node is set. One exception
-  // (0.8.8): the Dashboard secondary row names the slot, not the
-  // provider — it reads "Secondary Node" whatever URL is configured
-  // (see slotName below); Settings still shows the host.
+  // (0.8.8): while the secondary is DISABLED, the Dashboard
+  // secondary row names the slot, not the provider — it reads
+  // "Secondary Node" because there is no real node behind it
+  // (see slotName below). While enabled it shows the configured
+  // host, as before; Settings still shows the host.
   // One node's status line (0.8.1): the host plus an overall pill —
   // OK (all three capabilities ready), CAUTION (the height probe
   // works but broadcast and/or fees are not ready), FAIL (the
@@ -1485,13 +1487,15 @@
     // an invented one. Only the readiness rows have this
     // element; the Settings rows have none, so they are untouched.
     var checkedEl = $(prefix + label + '-checked');
-    // (0.8.8) The Dashboard readiness rows name the slot, not the
-    // provider: the secondary row reads "Secondary Node" whatever
-    // URL is configured — what is off (or failing) is the whole
-    // secondary-node slot, not blockstream.info or whichever host
-    // is behind it. Settings still shows the host where it is
+    // (0.8.8) The Dashboard readiness row names the slot, not the
+    // provider, but ONLY while the secondary is disabled: with no
+    // real node behind it there is no name to show, so the row
+    // reads "Secondary Node". While enabled the row shows the
+    // configured host (blockstream.info or whichever URL is set),
+    // as before. Settings still shows the host where it is
     // configured (the btc- rows and the URL box).
-    var slotName = (prefix === 'readiness-' && label === 'secondary') ? 'Secondary Node' : null;
+    var secondaryDisabled = (label === 'secondary' && S && S.settings && S.settings.secondaryEnabled === false);
+    var slotName = (prefix === 'readiness-' && secondaryDisabled) ? 'Secondary Node' : null;
     if (!url) {
       host.textContent = slotName || 'Not set';
       pill.textContent = 'Not set';
@@ -1506,8 +1510,8 @@
     // named in Settings (it comes back when the node is
     // re-enabled), but nothing about it reads as failing. The
     // "Secondary Node" naming lives in the readiness row label
-    // (slotName above), not in the pill.
-    if (label === 'secondary' && S && S.settings && S.settings.secondaryEnabled === false) {
+    // (slotName above, disabled only), not in the pill.
+    if (secondaryDisabled) {
       host.textContent = slotName || hostOf(url);
       pill.textContent = 'Disabled';
       pill.className = 'pill muted';
@@ -5307,17 +5311,24 @@
     // mean. A changed dropdown never leaves the old name showing.
     refreshPriceSourceRow(1);
     refreshPriceSourceRow(2);
-    // Grace period (0.8.0): the two dropdowns reflect the saved
-    // settings — the offline gap that triggers a grace and how
-    // long it lasts (null = indefinite, until resumed). The
+    // Grace period (0.8.0, toggle 0.8.8): the toggle plus the two
+    // dropdowns reflect the saved settings — the toggle is the
+    // off switch (missing in old state means on), the offline gap
+    // that triggers a grace and how long it lasts (null =
+    // indefinite, until resumed). A stored duration of 0 (the old
+    // off switch) displays as 7 — the toggle carries the off
+    // state now, so flipping it on shows a real duration. The
     // options are static in index.html; renderSettings only sets
     // the value, so a re-render never clobbers a choice the
     // owner is mid-changing (the Save handler reads the
     // dropdowns, not S.settings).
+    $('grace-enabled').checked = S.settings.graceEnabled !== false;
     var go = (S.settings && typeof S.settings.graceOfflineDays === 'number') ? S.settings.graceOfflineDays : 7;
     $('set-grace-offline').value = String(go);
     var gd = (S.settings && S.settings.graceDurationDays !== undefined) ? S.settings.graceDurationDays : 7;
+    if (gd === 0) gd = 7; // a stored 0 meant off; the toggle says off now
     $('set-grace-duration').value = (gd === null) ? 'indefinite' : String(gd);
+    syncGraceEnabled();
     // User controls (0.8.0): the three number inputs reflect the
     // saved settings — price agreement (%), check cadence
     // (seconds), fee verdict multipliers (× peak). The inputs
@@ -5479,22 +5490,43 @@
     } catch (e) { setMsg($('price-sources-msg'), e.message, false); }
   });
 
-  // Grace period (0.8.0): save the two grace settings. The
+  // (0.8.8) Grace on/off: the toggle is the first option on the
+  // grace card, inline with the heading — off hides the two
+  // dropdowns, but their values are never cleared, so
+  // re-enabling brings them back as saved. The toggle lives in
+  // the card heading, so it never hides with the settings it
+  // controls. The title syncs with the state.
+  function syncGraceEnabled() {
+    var on = $('grace-enabled').checked;
+    $('grace-fields').style.display = on ? '' : 'none';
+    $('grace-enabled-wrap').title = on ? 'Grace period on — triggers pause after an offline gap' : 'Grace period off — triggers fire immediately';
+  }
+
+  // Grace period (0.8.0): save the grace settings. The
   // server rejects any value the dropdowns do not offer (400)
-  // — the error shows in the message line. Saving new values
-  // does NOT change an already-active grace (it keeps the
-  // duration it was created with).
+  // — the error shows in the message line. The toggle rides
+  // with the rest of the grace settings, so turning the grace
+  // off never clears the saved dropdowns — re-enabling brings
+  // them back as saved. Saving new values does NOT change an
+  // already-active grace (it keeps the duration it was created
+  // with) — but turning the toggle off makes the grace read as
+  // none everywhere at once, so held triggers fire immediately.
   $('btn-save-grace').addEventListener('click', async function () {
     var offline = parseInt($('set-grace-offline').value, 10);
     var durRaw = $('set-grace-duration').value;
     var duration = durRaw === 'indefinite' ? null : parseInt(durRaw, 10);
     try {
-      var s = await api('PUT', '/api/settings', { graceOfflineDays: offline, graceDurationDays: duration });
+      var s = await api('PUT', '/api/settings', { graceEnabled: $('grace-enabled').checked, graceOfflineDays: offline, graceDurationDays: duration });
       S.settings = s;
       setMsg($('grace-settings-msg'), 'Grace period saved.', true);
       await load();
     } catch (e) { setMsg($('grace-settings-msg'), e.message, false); }
   });
+
+  // (0.8.8) Grace on/off: hiding/showing the grace options is
+  // immediate; the value itself is saved with the rest of the
+  // grace settings (Save grace period).
+  $('grace-enabled').addEventListener('change', syncGraceEnabled);
 
   // User controls (0.8.0): each card saves only its own
   // field(s). The server rejects an out-of-range value or a
@@ -5644,7 +5676,7 @@
     },
     grace: {
       title: 'Grace period',
-      body: 'A pause for price, UTXO, block-height, set-date, and fee-market triggers after the app has been offline. If Standby was offline longer than the \u2018offline\u2019 days, those triggers are paused for the \u2018lasts\u2019 days (or until you resume) so they don\u2019t fire on conditions that changed while the app was away. Set \u2018lasts\u2019 to \u201cNo grace period\u201d to turn the grace off entirely. Checking in does not clear a grace. Check-in triggers are not affected \u2014 they have their own offline-gap hold.',
+      body: 'A pause for price, UTXO, block-height, set-date, and fee-market triggers after the app has been offline. If Standby was offline longer than the \u2018offline\u2019 days, those triggers are paused for the \u2018lasts\u2019 days (or until you resume) so they don\u2019t fire on conditions that changed while the app was away. Turn the grace off with the toggle in the card heading: off means triggers fire immediately, with no pause after an offline gap. Checking in does not clear a grace. Check-in triggers are not affected \u2014 they have their own offline-gap hold.',
       triggers: ['price', 'utxo', 'blockheight', 'setdate', 'feemarket'],
     },
     agreement: {

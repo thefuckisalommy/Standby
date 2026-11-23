@@ -546,12 +546,22 @@ async function handleApi(req, res, pathname) {
       if (bitcoin.priceSourceKey(s1) === bitcoin.priceSourceKey(s2)) return sendError(res, 400, 'price sources must be different');
       s.priceSources = { source1: s1, source2: s2 };
     }
-    // Grace period (0.8.0, extended 0.8.8): the offline gap that triggers a
-    // grace and how long it lasts (null = indefinite, until the
-    // owner resumes; 0 = no grace period at all). Only the values the Settings dropdowns
-    // offer are accepted — anything else is a 400. Saving new
-    // values does NOT change an already-active grace (it keeps
-    // the duration it was created with).
+    // Grace period (0.8.0, extended 0.8.8): the on/off toggle plus
+    // the offline gap that triggers a grace and how long it lasts
+    // (null = indefinite, until the owner resumes; a stored 0
+    // still means off, kept for back-compat — the UI never sends
+    // 0 anymore). Only the values the Settings card offers are
+    // accepted — anything else is a 400. Saving new values does
+    // NOT change an already-active grace (it keeps the duration
+    // it was created with) — but turning the toggle off makes the
+    // grace read as none everywhere at once (see graceStatus),
+    // so held triggers fire immediately.
+    if (body.graceEnabled !== undefined) {
+      if (typeof body.graceEnabled !== 'boolean') {
+        return sendError(res, 400, 'graceEnabled must be a boolean');
+      }
+      s.graceEnabled = body.graceEnabled;
+    }
     if (body.graceOfflineDays !== undefined) {
       if (typeof body.graceOfflineDays !== 'number' || !GRACE_OFFLINE_DAYS.includes(body.graceOfflineDays)) {
         return sendError(res, 400, 'graceOfflineDays must be one of ' + GRACE_OFFLINE_DAYS.join(', ') + ' days');
@@ -560,7 +570,7 @@ async function handleApi(req, res, pathname) {
     }
     if (body.graceDurationDays !== undefined) {
       if (body.graceDurationDays !== null && (typeof body.graceDurationDays !== 'number' || !GRACE_DURATION_DAYS.includes(body.graceDurationDays))) {
-        return sendError(res, 400, 'graceDurationDays must be one of ' + GRACE_DURATION_DAYS.join(', ') + ' days (0 = no grace period), or null for indefinite');
+        return sendError(res, 400, 'graceDurationDays must be one of ' + GRACE_DURATION_DAYS.join(', ') + ' days (0 = off, kept for back-compat), or null for indefinite');
       }
       s.graceDurationDays = body.graceDurationDays;
     }
@@ -1676,7 +1686,18 @@ async function handleApi(req, res, pathname) {
     // value rejects the whole restore, like a bad node URL. The active
     // grace itself does NOT ride along — a restore counts as a check-in
     // (the owner is present), so the grace is cleared, just like the
-    // check-in hold (heldUntil).
+    // check-in hold (heldUntil). (0.8.8) The toggle rides along too:
+    // a backup from before the toggle carries no flag, which restores
+    // as on — except a stored duration of 0, which meant off, so it
+    // restores as off.
+    if (bsSettings.graceEnabled !== undefined) {
+      if (typeof bsSettings.graceEnabled !== 'boolean') {
+        return sendError(res, 400, 'backup graceEnabled must be a boolean');
+      }
+      settings.graceEnabled = bsSettings.graceEnabled;
+    } else {
+      settings.graceEnabled = (bsSettings.graceDurationDays === 0) ? false : true;
+    }
     if (bsSettings.graceOfflineDays !== undefined && bsSettings.graceOfflineDays !== null) {
       if (typeof bsSettings.graceOfflineDays !== 'number' || !GRACE_OFFLINE_DAYS.includes(bsSettings.graceOfflineDays)) {
         return sendError(res, 400, 'backup graceOfflineDays must be one of ' + GRACE_OFFLINE_DAYS.join(', ') + ' days');
@@ -1687,7 +1708,7 @@ async function handleApi(req, res, pathname) {
     }
     if (bsSettings.graceDurationDays !== undefined) {
       if (bsSettings.graceDurationDays !== null && (typeof bsSettings.graceDurationDays !== 'number' || !GRACE_DURATION_DAYS.includes(bsSettings.graceDurationDays))) {
-        return sendError(res, 400, 'backup graceDurationDays must be one of ' + GRACE_DURATION_DAYS.join(', ') + ' days (0 = no grace period), or null for indefinite');
+        return sendError(res, 400, 'backup graceDurationDays must be one of ' + GRACE_DURATION_DAYS.join(', ') + ' days (0 = off, kept for back-compat), or null for indefinite');
       }
       settings.graceDurationDays = bsSettings.graceDurationDays;
     } else {

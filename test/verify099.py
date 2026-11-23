@@ -34,9 +34,13 @@ Boots the branch-0.8.5 app (port 3438), the check-in receiver
   6. Grace holds the new types too (0.8.8): an active grace period pauses
      block-height, set-date, and fee-market txs like price/UTXO —
      they are held, then fire once the grace is resumed.
-  6b. Grace duration 0 disables the grace (0.8.8): an offline gap
-      past the threshold sets no grace, and due triggers fire
-      normally; 2 is not an offered duration (400).
+  6b. Grace on/off toggle (0.8.8): graceEnabled false means no grace
+      at all — an offline gap past the threshold sets none, and due
+      triggers fire normally. A stored duration of 0 still means
+      off (back-compat), and old state with duration 0 and no flag
+      loads as graceEnabled false; turning the toggle back on
+      restores the grace. 2 is not an offered duration (400), and
+      a non-boolean graceEnabled is a 400.
   7. Vacation does NOT freeze the new types: vacation is check-in-only
      — a set-date tx still fires while vacation mode is on.
   8. Existing triggers still work (smoke): check-in, price, UTXO,
@@ -894,10 +898,14 @@ def main():
                   s == 200 and res.get(gid, {}).get('action') == 'broadcast', res.get(gid))
         delete_all_txs()
 
-        # --- 6b. grace duration 0 disables the grace (0.8.8) --------------
-        # A duration of 0 means no grace period at all: an offline
-        # gap past the threshold sets no grace, and due triggers
-        # fire normally. 2 is not an offered duration (400).
+        # --- 6b. grace on/off toggle (0.8.8) ---------------------------
+        # The toggle is the off switch: graceEnabled false means no
+        # grace period at all — an offline gap past the threshold
+        # sets no grace, and due triggers fire normally. A stored
+        # duration of 0 still means off (back-compat with the old
+        # dropdown), and old state with duration 0 and no flag loads
+        # as graceEnabled false. 2 is not an offered duration (400),
+        # and a non-boolean graceEnabled is a 400.
         s, r = req('PUT', '/api/settings', {'graceDurationDays': 2})
         check('6b grace off: duration 2 rejected (400)', s == 400, (s, r))
         s, r = req('PUT', '/api/settings', {'graceDurationDays': 0})
@@ -907,15 +915,58 @@ def main():
         save_state_file(stj)
         check('6b grace off: app restarted after a 10-day gap', restart())
         s, st = req('GET', '/api/state')
-        check('6b grace off: no grace is set despite the gap', st.get('grace') is None, st.get('grace'))
+        check('6b grace off: no grace is set despite the gap (duration 0)', st.get('grace') is None, st.get('grace'))
         s, r = add_tx('G0 setdate', {'type': 'setdate', 'params': {'fireAt': iso_ago(hours=1)}}, 110706, trigger_confirmed=True)
         g0_sd = r['tx']['id'] if s == 201 else None
         s, r, res = release_results()
         check('6b grace off: set-date tx broadcasts with the grace disabled',
               s == 200 and res.get(g0_sd, {}).get('action') == 'broadcast', res.get(g0_sd))
-        # Restore the default duration for the remaining sections.
-        s, r = req('PUT', '/api/settings', {'graceDurationDays': 7})
-        check('6b grace off: duration restored to 7', s == 200, (s, r))
+        delete_all_txs()
+        # The toggle itself: a non-boolean is a 400; false means no
+        # grace even with a normal duration, and due txs fire.
+        s, r = req('PUT', '/api/settings', {'graceEnabled': 'yes'})
+        check('6b grace toggle: non-boolean graceEnabled rejected (400)', s == 400, (s, r))
+        s, r = req('PUT', '/api/settings', {'graceEnabled': False})
+        check('6b grace toggle: graceEnabled false saved', s == 200, (s, r))
+        stj = load_state_file()
+        stj['checkin']['lastOnlineAt'] = iso_ago(days=10)
+        save_state_file(stj)
+        check('6b grace toggle: app restarted after a 10-day gap', restart())
+        s, st = req('GET', '/api/state')
+        check('6b grace toggle: no grace is set despite the gap (toggle off)', st.get('grace') is None, st.get('grace'))
+        s, r = add_tx('G1 setdate', {'type': 'setdate', 'params': {'fireAt': iso_ago(hours=1)}}, 110708, trigger_confirmed=True)
+        g1_sd = r['tx']['id'] if s == 201 else None
+        s, r, res = release_results()
+        check('6b grace toggle: set-date tx broadcasts with the toggle off',
+              s == 200 and res.get(g1_sd, {}).get('action') == 'broadcast', res.get(g1_sd))
+        delete_all_txs()
+        # Migration: old state with duration 0 and no graceEnabled
+        # flag loads as grace off, not on.
+        stj = load_state_file()
+        stj['settings'].pop('graceEnabled', None)
+        stj['settings']['graceDurationDays'] = 0
+        save_state_file(stj)
+        check('6b grace toggle: app restarted with pre-toggle state', restart())
+        s, st = req('GET', '/api/state')
+        check('6b grace toggle: pre-toggle duration 0 loads as graceEnabled false',
+              st.get('settings', {}).get('graceEnabled') is False, st.get('settings'))
+        # Turning the toggle back on restores the grace: a 10-day
+        # gap sets one again. Restore the defaults for the
+        # remaining sections — grace on, duration 7.
+        s, r = req('PUT', '/api/settings', {'graceDurationDays': 7, 'graceEnabled': True})
+        check('6b grace toggle: duration 7 + toggle on saved', s == 200, (s, r))
+        stj = load_state_file()
+        stj['checkin']['lastOnlineAt'] = iso_ago(days=10)
+        save_state_file(stj)
+        check('6b grace toggle: app restarted after a 10-day gap', restart())
+        s, st = req('GET', '/api/state')
+        check('6b grace toggle: grace is set again with the toggle on', st.get('grace', {}).get('active') is True, st.get('grace'))
+        # Resume to clear it for the remaining sections (resume also
+        # refreshes lastOnlineAt, so no grace re-sets on the next read).
+        s, r = req('POST', '/api/grace/resume', {})
+        check('6b grace toggle: resumed to clear the grace', s == 200, (s, r))
+        s, st = req('GET', '/api/state')
+        check('6b grace toggle: grace cleared after resume', st.get('grace') is None, st.get('grace'))
         delete_all_txs()
 
         # --- 7. vacation does NOT freeze the new types --------------------

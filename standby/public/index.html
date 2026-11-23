@@ -285,8 +285,13 @@
     <div class="card" id="card-grace">
       <div class="section-head">
         <h2>Grace period</h2>
+        <label class="switch green" id="grace-enabled-wrap" title="Grace period on — triggers pause after an offline gap">
+          <input type="checkbox" id="grace-enabled" checked>
+          <span class="slider"></span>
+        </label>
         <button class="help-btn" id="help-grace" data-help="grace" aria-label="About this setting" title="About this setting">?</button>
       </div>
+      <div id="grace-fields">
       <label for="set-grace-offline">Trigger grace after offline for</label>
       <select id="set-grace-offline">
         <option value="1">1 day</option>
@@ -297,7 +302,6 @@
       </select>
       <label for="set-grace-duration">Grace period lasts</label>
       <select id="set-grace-duration">
-        <option value="0">No grace period</option>
         <option value="1">1 day</option>
         <option value="3">3 days</option>
         <option value="7" selected>7 days</option>
@@ -305,6 +309,7 @@
         <option value="30">30 days</option>
         <option value="indefinite">Indefinite — until you resume</option>
       </select>
+      </div>
       <p>
         <button id="btn-save-grace" class="primary">Save grace period</button>
       </p>

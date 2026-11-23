@@ -328,11 +328,28 @@ function applyOfflineHold(state, now) {
 // by it at all: they keep their own heldUntil hold above,
 // which is a separate mechanism with its own thresholds.
 // (0.8.8) The grace holds price, UTXO, block-height, set-date,
-// and fee-market rules; a grace duration of 0 disables it
-// entirely (applyGrace never sets one).
+// and fee-market rules; the graceEnabled toggle is the off
+// switch — off means no grace at all. A stored duration of 0
+// (the old off switch) still reads as off, so state that never
+// went through loadState — tests, direct API writes — reads
+// the same way as migrated state (see loadState).
+function graceIsEnabled(settings) {
+  const s = settings || {};
+  if (s.graceEnabled === false) return false;
+  if (s.graceEnabled === undefined && s.graceDurationDays === 0) return false;
+  return true;
+}
 function graceStatus(state, now) {
   const g = (state && state.grace && typeof state.grace === 'object') ? state.grace : null;
   if (!g || !g.triggeredAt) return null;
+  // (0.8.8) Grace off means no grace at all — even a record set
+  // before the toggle went off reads as none, so the rules gate,
+  // the served state, and the dashboard card all agree that
+  // triggers fire immediately. The record itself stays (it
+  // expires on its own); re-enabling before it expires resumes
+  // the pause, like a saved duration change never disturbs an
+  // already-active grace.
+  if (!graceIsEnabled(state.settings)) return null;
   if (g.graceUntil && now.getTime() > new Date(g.graceUntil).getTime()) return null;
   return {
     active: true,
@@ -354,13 +371,15 @@ function isGraceActive(state, now) {
 // Returns true when it set a grace. (The hourly tick refreshes
 // lastOnlineAt right after this runs, so an expired grace is
 // not re-set on the same stale stamp — a fresh gap after the
-// app returns is what sets the next one.) A grace duration of
-// 0 disables the grace entirely: no grace is ever set.
+// app returns is what sets the next one.) Grace off (the
+// toggle, or a stored duration of 0 kept for back-compat)
+// means no grace is ever set.
 function applyGrace(state, now) {
   if (isGraceActive(state, now)) return false;
   const online = state.checkin && state.checkin.lastOnlineAt ? new Date(state.checkin.lastOnlineAt) : null;
   if (!online || Number.isNaN(online.getTime())) return false;
   const s = state.settings || {};
+  if (!graceIsEnabled(s)) return false; // grace disabled: never set one
   const offlineDays = (typeof s.graceOfflineDays === 'number' && GRACE_OFFLINE_DAYS.includes(s.graceOfflineDays)) ? s.graceOfflineDays : 7;
   const gapMs = now.getTime() - online.getTime();
   if (gapMs <= offlineDays * 86400000) return false;

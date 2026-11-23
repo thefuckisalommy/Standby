@@ -76,14 +76,17 @@ function validPublicFallbackDays(v) {
 // graceOfflineDays is the offline gap that
 // triggers it; graceDurationDays is how long it lasts, or null
 // = indefinite (until the owner resumes from the dashboard
-// card), or 0 = no grace period at all. The allowed values are exactly the ones the Settings
+// card). A stored 0 still means off (back-compat with the old
+// dropdown, which offered it) — but the UI never sends 0
+// anymore: the graceEnabled toggle is the off switch. The
+// allowed values are exactly the ones the Settings
 // dropdowns offer; anything else is a 400 at PUT /api/settings
 // — a bad grace setting must not silently become a different
 // one (unlike the lenient per-tx fallback above, where a
 // missing value becomes Never at serve time).
 const GRACE_OFFLINE_DAYS = [1, 3, 7, 14, 30];
-// 0 = no grace period: the grace is never set, so every trigger
-// evaluates normally (0.8.8). null (indefinite) is separate —
+// 0 = off, kept for back-compat: the grace is never set, so every
+// trigger evaluates normally (0.8.8). null (indefinite) is separate —
 // it is not in this list because the dropdown sends it as the
 // string 'indefinite', which the save handler maps to null.
 const GRACE_DURATION_DAYS = [0, 1, 3, 7, 14, 30];

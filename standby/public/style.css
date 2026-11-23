@@ -446,6 +446,11 @@ a { color: #f59e0b; }
 .node-subhead { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 12px 0 4px; }
 .node-subhead label[for="btc-secondary-url"] { margin: 0; }
 .node-subhead .switch { flex-shrink: 0; }
+/* A switch inside a card heading (0.8.8, grace card): the heading
+   is the switch's label, and margin-left auto pins the switch
+   right, next to the "?" button, instead of space-between
+   stranding it mid-row. */
+.section-head .switch { margin-left: auto; flex-shrink: 0; }
 /* Scrollable table (recent check-ins): room for ~10 rows, scroll for more. */
 .scroll-table { max-height: 400px; overflow-y: auto; }
 .scroll-table thead th { position: sticky; top: 0; background: var(--card); }

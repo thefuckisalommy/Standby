@@ -44,13 +44,13 @@ grace period for price, UTXO, block-height, set-date, and fee-market
 triggers (0.8.0, extended 0.8.8): when the app comes back
 after being offline longer than settings.graceOfflineDays (default 7),
 those triggers are paused for settings.graceDurationDays
-(default 7, null = indefinite until resumed, 0 = no grace period
-at all) — a blanket hold, so no held trigger fires during it, even one whose condition first
+(default 7, null = indefinite until resumed) while the grace
+toggle is on — a blanket hold, so no held trigger fires during it, even one whose condition first
 becomes true during the grace; after expiry (or POST /api/grace/resume)
 they evaluate normally and fire if the condition still holds. Check-in
 triggers are NOT held by it, and checking in does NOT clear it. The
-settings validation (only 0/1/3/7/14/30, null duration valid) and the
-grace served on /api/state are covered there too (/api/status stays
+settings validation (only 0/1/3/7/14/30, null duration valid, graceEnabled
+a boolean) and the grace served on /api/state are covered there too (/api/status stays
 grace-free — it is the check-in endpoint, and the check-in hold must
 not read as a Grace period there). Section 19 covers the Getting
 Started empty-state card (0.8.0): the served markup and CSS only
@@ -1990,12 +1990,24 @@ def main():
         s, r = req('PUT', '/api/settings', {'graceDurationDays': 7})
         check('18 graceDurationDays restored to 7', s == 200, (s, r))
         s, r = req('PUT', '/api/settings', {'graceDurationDays': 0})
-        check('18 graceDurationDays 0 (no grace period) is valid (0.8.8)', s == 200, (s, r))
+        check('18 graceDurationDays 0 (off, back-compat) is valid (0.8.8)', s == 200, (s, r))
         s, st = req('GET', '/api/state')
         check('18 graceDurationDays reads back as 0',
               st['settings'].get('graceDurationDays') == 0, st['settings'])
         s, r = req('PUT', '/api/settings', {'graceDurationDays': 7})
         check('18 graceDurationDays restored to 7 after the 0 check', s == 200, (s, r))
+        # The toggle (0.8.8): a non-boolean is a 400; false reads
+        # back as false. Restored to true right away — the rest of
+        # this section needs the grace on.
+        s, r = req('PUT', '/api/settings', {'graceEnabled': 'yes'})
+        check('18 graceEnabled non-boolean is rejected (400)', s == 400, (s, r))
+        s, r = req('PUT', '/api/settings', {'graceEnabled': False})
+        check('18 graceEnabled false is valid', s == 200, (s, r))
+        s, st = req('GET', '/api/state')
+        check('18 graceEnabled reads back as false',
+              st['settings'].get('graceEnabled') is False, st['settings'])
+        s, r = req('PUT', '/api/settings', {'graceEnabled': True})
+        check('18 graceEnabled restored to true', s == 200, (s, r))
 
         # A price rule that HOLDS at the stub price ($98,200 >=
         # $90,000), a UTXO rule on an unspent outpoint, and a

@@ -1779,7 +1779,10 @@ function check(name, cond, detail) {
   // its saved value, and the secondary pill reads Disabled —
   // never Offline, Failed, or a stale timestamp. The Dashboard
   // readiness row names the slot ("Secondary Node"), not the
-  // provider host; Settings still shows the host. Save
+  // provider host — but ONLY while the secondary is disabled,
+  // when there is no real node to name. While enabled the
+  // readiness row shows the node name (the configured host),
+  // as before; Settings still shows the host. Save
   // round-trips it.
   check('secondary toggle static: the toggle exists in the HTML',
     idx.indexOf('id="btc-secondary-enabled"') !== -1, '');
@@ -1802,11 +1805,12 @@ function check(name, cond, detail) {
     els['btc-secondary-enabled'] && els['btc-secondary-enabled'].checked === true, '');
   check('secondary toggle: the secondary fields show while enabled',
     els['btc-secondary-fields'] && els['btc-secondary-fields'].style.display !== 'none', '');
-  check('secondary toggle: the Dashboard readiness row names the slot "Secondary Node", not the provider host',
-    els['readiness-secondary'] && els['readiness-secondary'].textContent === 'Secondary Node',
+  check('secondary toggle: the Dashboard readiness row shows the node name (host) while enabled',
+    els['readiness-secondary'] && els['readiness-secondary'].textContent === '127.0.0.1:18276',
     els['readiness-secondary'] && els['readiness-secondary'].textContent);
-  check('secondary toggle: the readiness row never shows the provider hostname as its name',
-    els['readiness-secondary'] && els['readiness-secondary'].textContent.indexOf('127.0.0.1') === -1,
+  check('secondary toggle: the readiness row shows the same host as the Settings row while enabled',
+    els['readiness-secondary'] && els['btc-secondary']
+    && els['readiness-secondary'].textContent === els['btc-secondary'].textContent,
     els['readiness-secondary'] && els['readiness-secondary'].textContent);
   check('secondary toggle: the Settings row still shows the configured host',
     els['btc-secondary'] && els['btc-secondary'].textContent === '127.0.0.1:18276',
@@ -1838,8 +1842,11 @@ function check(name, cond, detail) {
   check('secondary toggle: the Dashboard readiness secondary pill reads Disabled',
     els['readiness-secondary-status'] && els['readiness-secondary-status'].textContent === 'Disabled',
     els['readiness-secondary-status'] && els['readiness-secondary-status'].textContent);
-  check('secondary toggle: the disabled readiness row still reads "Secondary Node"',
+  check('secondary toggle: the disabled readiness row falls back to "Secondary Node" (no real name)',
     els['readiness-secondary'] && els['readiness-secondary'].textContent === 'Secondary Node',
+    els['readiness-secondary'] && els['readiness-secondary'].textContent);
+  check('secondary toggle: the disabled readiness row shows no provider hostname',
+    els['readiness-secondary'] && els['readiness-secondary'].textContent.indexOf('127.0.0.1') === -1,
     els['readiness-secondary'] && els['readiness-secondary'].textContent);
   // Re-enable: the fields return with their saved values intact.
   els['btc-secondary-enabled'].checked = true;
@@ -1866,6 +1873,9 @@ function check(name, cond, detail) {
   check('secondary toggle: both pills read OK again after re-enabling + re-test',
     els['btc-primary-status'] && els['btc-primary-status'].textContent === 'OK'
     && els['btc-secondary-status'] && els['btc-secondary-status'].textContent === 'OK', '');
+  check('secondary toggle: the readiness row shows the host name again after re-enabling',
+    els['readiness-secondary'] && els['readiness-secondary'].textContent === '127.0.0.1:18276',
+    els['readiness-secondary'] && els['readiness-secondary'].textContent);
 
   // --- 11. Staged Transactions card (0.8.0) ---
   // Static HTML: the transactions card is renamed "Staged
@@ -2163,15 +2173,21 @@ function check(name, cond, detail) {
   // settings.graceOfflineDays (default 7), price, UTXO,
   // block-height, set-date, and fee-market triggers are paused
   // for settings.graceDurationDays (default 7, null = indefinite
-  // until resumed, 0 = no grace period at all). The dashboard shows a
+  // until resumed). The grace has an on/off toggle as the first
+  // option on the Settings grace card (in the heading, like the
+  // secondary-node toggle): off hides the two dropdowns without
+  // clearing them, and no grace is ever set — nor does an
+  // already-active grace show or hold — while it is off. The
+  // duration dropdown offers 1/3/7/14/30 days + indefinite only
+  // (no 0: the toggle is the off switch now). The dashboard shows a
   // "Grace period active" card at the top (only while a grace
   // is active for an armed held tx) with the offline
   // days and the end date bolded, a Resume now button, and the
   // muted note; armed held tx cards read "Grace" on an
   // amber pill instead of "armed"; the Settings grace card has
-  // the two dropdowns (offline days to trigger, how long it
-  // lasts) with Save. (Direct state.json edits for the grace,
-  // like §14's held-clock edit and §16b's fate edits. The
+  // the toggle + the two dropdowns (offline days to trigger, how
+  // long it lasts) with Save. (Direct state.json edits for the
+  // grace, like §14's held-clock edit and §16b's fate edits. The
   // launcher's lastOnlineAt is fresh — the app booted minutes
   // ago — so seeding a grace directly never re-triggers one on
   // the read.)
@@ -2199,18 +2215,30 @@ function check(name, cond, detail) {
     && idx.indexOf('id="grace-card"') < idx.indexOf('id="checkin-card"'), '');
   check('grace card static: the Resume button reads "Resume now" and is orange (primary)',
     idx.indexOf('id="btn-resume-grace" class="primary"') !== -1, '');
-  check('grace settings static: the Settings grace card exists (title, two dropdowns, Save; the explainer lives in the "?" pop-out)',
-    idx.indexOf('Grace period</h2>') !== -1 && idx.indexOf('id="set-grace-offline"') !== -1
+  check('grace settings static: the Settings grace card exists (title, toggle, two dropdowns, Save; the explainer lives in the "?" pop-out)',
+    idx.indexOf('Grace period</h2>') !== -1 && idx.indexOf('id="grace-enabled"') !== -1
+    && idx.indexOf('id="set-grace-offline"') !== -1
     && idx.indexOf('id="set-grace-duration"') !== -1 && idx.indexOf('id="btn-save-grace"') !== -1
     && appJs.indexOf('A pause for price, UTXO, block-height, set-date, and fee-market triggers after the app has been offline') !== -1, '');
+  check('grace settings static: the toggle is the first option on the grace card (in the heading, before the offline dropdown)',
+    idx.indexOf('id="grace-enabled"') !== -1 && idx.indexOf('id="set-grace-offline"') !== -1
+    && idx.indexOf('id="grace-enabled"') < idx.indexOf('id="set-grace-offline"'), '');
+  check('grace settings static: the toggle is the same switch as the arm/disarm toggle (class "switch green")',
+    idx.indexOf('class="switch green" id="grace-enabled-wrap"') !== -1, '');
+  check('grace settings static: the toggle sits inline with the Grace period heading (heading, then switch, then the "?" button)',
+    idx.indexOf('Grace period</h2>') !== -1 && idx.indexOf('id="grace-enabled"') !== -1 && idx.indexOf('id="help-grace"') !== -1
+    && idx.indexOf('Grace period</h2>') < idx.indexOf('id="grace-enabled"')
+    && idx.indexOf('id="grace-enabled"') < idx.indexOf('id="help-grace"'), '');
+  check('grace settings static: the grace fields wrapper exists in the HTML',
+    idx.indexOf('id="grace-fields"') !== -1, '');
   check('grace settings static: the grace card sits after the Bitcoin price source card',
     idx.indexOf('id="btn-save-grace"') !== -1 && idx.indexOf('id="btn-save-price-sources"') !== -1
     && idx.indexOf('id="btn-save-grace"') > idx.indexOf('id="btn-save-price-sources"'), '');
   check('grace settings static: the offline dropdown offers 1/3/7/14/30 days',
     JSON.stringify(selectValues(idx, 'set-grace-offline')) === JSON.stringify(['1', '3', '7', '14', '30']),
     JSON.stringify(selectValues(idx, 'set-grace-offline')));
-  check('grace settings static: the duration dropdown offers 0 (no grace period) + 1/3/7/14/30 days + indefinite',
-    JSON.stringify(selectValues(idx, 'set-grace-duration')) === JSON.stringify(['0', '1', '3', '7', '14', '30', 'indefinite']),
+  check('grace settings static: the duration dropdown offers 1/3/7/14/30 days + indefinite (no 0 — the toggle is the off switch)',
+    JSON.stringify(selectValues(idx, 'set-grace-duration')) === JSON.stringify(['1', '3', '7', '14', '30', 'indefinite']),
     JSON.stringify(selectValues(idx, 'set-grace-duration')));
   check('grace settings static: the Save button reads "Save grace period" and is orange (primary)',
     idx.indexOf('id="btn-save-grace" class="primary"') !== -1, '');
@@ -2331,6 +2359,71 @@ function check(name, cond, detail) {
   check('grace card: Resume now hides the indefinite grace card too',
     els['grace-card'] && els['grace-card'].style.display === 'none',
     els['grace-card'] && els['grace-card'].style.display);
+  // The toggle: off hides the dashboard card even with a grace
+  // seeded active, and held pills read "armed" again — off means
+  // triggers fire immediately. On brings the card back (the
+  // seeded grace record itself survives the toggle).
+  setDomGrace({ graceUntil, triggeredAt: graceTriggeredAt, offlineGapDays: 8 });
+  await rerender(appJs);
+  check('grace toggle: the card shows again with a seeded grace (toggle on)',
+    els['grace-card'] && els['grace-card'].style.display !== 'none',
+    els['grace-card'] && els['grace-card'].style.display);
+  check('grace toggle: the toggle starts checked (grace on by default)',
+    els['grace-enabled'] && els['grace-enabled'].checked === true, '');
+  check('grace toggle: the grace fields show while enabled',
+    els['grace-fields'] && els['grace-fields'].style.display !== 'none', '');
+  els['grace-enabled'].checked = false;
+  fireChange(els['grace-enabled']);
+  check('grace toggle: unchecking hides the grace fields',
+    els['grace-fields'] && els['grace-fields'].style.display === 'none', '');
+  check('grace toggle: the toggle itself stays visible while disabled (it lives in the heading, not the fields)',
+    els['grace-enabled-wrap'] && els['grace-enabled-wrap'].style.display !== 'none', '');
+  check('grace toggle: the switch title names the off state while disabled',
+    els['grace-enabled-wrap'] && els['grace-enabled-wrap'].title === 'Grace period off — triggers fire immediately',
+    els['grace-enabled-wrap'] && els['grace-enabled-wrap'].title);
+  check('grace toggle: hiding keeps the dropdown values (7 / 7)',
+    els['set-grace-offline'] && els['set-grace-offline'].value === '7'
+    && els['set-grace-duration'] && els['set-grace-duration'].value === '7',
+    'offline=' + (els['set-grace-offline'] && els['set-grace-offline'].value)
+    + ' duration=' + (els['set-grace-duration'] && els['set-grace-duration'].value));
+  els['btn-save-grace'].click();
+  await waitForRender();
+  const gOff = await (await fetch('/api/state')).json();
+  check('grace toggle: saving off persists graceEnabled false (dropdowns kept at 7 / 7)',
+    gOff.settings && gOff.settings.graceEnabled === false
+    && gOff.settings.graceOfflineDays === 7 && gOff.settings.graceDurationDays === 7,
+    JSON.stringify(gOff.settings && { graceEnabled: gOff.settings.graceEnabled, graceOfflineDays: gOff.settings.graceOfflineDays, graceDurationDays: gOff.settings.graceDurationDays }));
+  check('grace toggle: the dashboard card hides while the grace is off, even with a seeded active grace',
+    els['grace-card'] && els['grace-card'].style.display === 'none',
+    els['grace-card'] && els['grace-card'].style.display);
+  check('grace toggle: held pills read "armed" again while the grace is off',
+    (function () {
+      const pill = cardByTitle('Dom Price') && cardStatus(cardByTitle('Dom Price'));
+      return !!pill && pill.textContent === 'armed';
+    })(), '');
+  els['grace-enabled'].checked = true;
+  fireChange(els['grace-enabled']);
+  check('grace toggle: re-checking shows the grace fields again',
+    els['grace-fields'] && els['grace-fields'].style.display !== 'none',
+    els['grace-fields'] && els['grace-fields'].style.display);
+  check('grace toggle: the switch title names the on state again after re-enabling',
+    els['grace-enabled-wrap'] && els['grace-enabled-wrap'].title === 'Grace period on — triggers pause after an offline gap',
+    els['grace-enabled-wrap'] && els['grace-enabled-wrap'].title);
+  els['btn-save-grace'].click();
+  await waitForRender();
+  const gOn = await (await fetch('/api/state')).json();
+  check('grace toggle: saving on persists graceEnabled true',
+    gOn.settings && gOn.settings.graceEnabled === true,
+    JSON.stringify(gOn.settings && { graceEnabled: gOn.settings.graceEnabled }));
+  check('grace toggle: the dashboard card shows again with the toggle back on (the seeded grace survived)',
+    els['grace-card'] && els['grace-card'].style.display !== 'none',
+    els['grace-card'] && els['grace-card'].style.display);
+  // Clear the seeded grace so the settings tests below start clean.
+  els['btn-resume-grace'].click();
+  await waitForRender();
+  check('grace toggle: Resume now hides the card after re-enabling',
+    els['grace-card'] && els['grace-card'].style.display === 'none',
+    els['grace-card'] && els['grace-card'].style.display);
   // Settings grace card: the dropdowns reflect the saved
   // defaults (7 / 7); saving a change persists it and the
   // selects re-render with the new values; restore the defaults.
@@ -2356,25 +2449,19 @@ function check(name, cond, detail) {
   check('grace settings: the Save confirmation shows',
     els['grace-settings-msg'] && els['grace-settings-msg'].textContent === 'Grace period saved.',
     els['grace-settings-msg'] && els['grace-settings-msg'].textContent);
-  els['set-grace-offline'].value = '7';
-  els['set-grace-duration'].value = '0';
-  els['btn-save-grace'].click();
-  await waitForRender();
-  const gZero = await (await fetch('/api/state')).json();
-  check('grace settings: saving duration 0 (no grace period) persists in /api/state',
-    gZero.settings && gZero.settings.graceDurationDays === 0,
-    JSON.stringify(gZero.settings && { graceDurationDays: gZero.settings.graceDurationDays }));
-  check('grace settings: after saving 0, the duration dropdown re-renders as 0',
-    els['set-grace-duration'] && els['set-grace-duration'].value === '0',
-    'duration=' + (els['set-grace-duration'] && els['set-grace-duration'].value));
+  // The toggle is the off switch now: saving with it off keeps the
+  // dropdown values, and the duration dropdown has no 0 to save.
+  check('grace settings: the toggle is on while saving the defaults',
+    els['grace-enabled'] && els['grace-enabled'].checked === true, '');
   els['set-grace-offline'].value = '7';
   els['set-grace-duration'].value = '7';
   els['btn-save-grace'].click();
   await waitForRender();
   const gRestored = await (await fetch('/api/state')).json();
-  check('grace settings: restoring the defaults (7 / 7) persists',
-    gRestored.settings && gRestored.settings.graceOfflineDays === 7 && gRestored.settings.graceDurationDays === 7,
-    JSON.stringify(gRestored.settings && { graceOfflineDays: gRestored.settings.graceOfflineDays, graceDurationDays: gRestored.settings.graceDurationDays }));
+  check('grace settings: restoring the defaults (7 / 7, toggle on) persists',
+    gRestored.settings && gRestored.settings.graceEnabled === true
+    && gRestored.settings.graceOfflineDays === 7 && gRestored.settings.graceDurationDays === 7,
+    JSON.stringify(gRestored.settings && { graceEnabled: gRestored.settings.graceEnabled, graceOfflineDays: gRestored.settings.graceOfflineDays, graceDurationDays: gRestored.settings.graceDurationDays }));
   // Leave a finite grace active at the end, so the width check
   // can measure the grace card at 390px.
   setDomGrace({ graceUntil, triggeredAt: graceTriggeredAt, offlineGapDays: 8 });
