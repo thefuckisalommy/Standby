@@ -40,15 +40,16 @@ condition / current state, one line each) and the dry-run note of
 a price tx carries the source detail (both readings, single-source
 fallback, or the disagreement) — that is where the source detail
 lives, alongside the Exchange Status section. Section 18 covers the
-grace period for price/UTXO triggers (0.8.0): when the app comes back
+grace period for price, UTXO, block-height, set-date, and fee-market
+triggers (0.8.0, extended 0.8.8): when the app comes back
 after being offline longer than settings.graceOfflineDays (default 7),
-price and UTXO triggers are paused for settings.graceDurationDays
-(default 7, null = indefinite until resumed) — a blanket hold, so no
-price/UTXO trigger fires during it, even one whose condition first
+those triggers are paused for settings.graceDurationDays
+(default 7, null = indefinite until resumed, 0 = no grace period
+at all) — a blanket hold, so no held trigger fires during it, even one whose condition first
 becomes true during the grace; after expiry (or POST /api/grace/resume)
 they evaluate normally and fire if the condition still holds. Check-in
 triggers are NOT held by it, and checking in does NOT clear it. The
-settings validation (only 1/3/7/14/30, null duration valid) and the
+settings validation (only 0/1/3/7/14/30, null duration valid) and the
 grace served on /api/state are covered there too (/api/status stays
 grace-free — it is the check-in endpoint, and the check-in hold must
 not read as a Grace period there). Section 19 covers the Getting
@@ -1969,7 +1970,7 @@ def main():
             s, r = req('PUT', '/api/settings', {'graceOfflineDays': bad_off})
             check('18 graceOfflineDays %r is a 400' % (bad_off,),
                   s == 400 and 'graceOfflineDays' in (r.get('error') or ''), (s, r))
-        for bad_dur in (5, 0, 31, '7'):
+        for bad_dur in (5, 31, '7'):
             s, r = req('PUT', '/api/settings', {'graceDurationDays': bad_dur})
             check('18 graceDurationDays %r is a 400' % (bad_dur,),
                   s == 400 and 'graceDurationDays' in (r.get('error') or ''), (s, r))
@@ -1988,6 +1989,13 @@ def main():
               st['settings'].get('graceDurationDays') is None, st['settings'])
         s, r = req('PUT', '/api/settings', {'graceDurationDays': 7})
         check('18 graceDurationDays restored to 7', s == 200, (s, r))
+        s, r = req('PUT', '/api/settings', {'graceDurationDays': 0})
+        check('18 graceDurationDays 0 (no grace period) is valid (0.8.8)', s == 200, (s, r))
+        s, st = req('GET', '/api/state')
+        check('18 graceDurationDays reads back as 0',
+              st['settings'].get('graceDurationDays') == 0, st['settings'])
+        s, r = req('PUT', '/api/settings', {'graceDurationDays': 7})
+        check('18 graceDurationDays restored to 7 after the 0 check', s == 200, (s, r))
 
         # A price rule that HOLDS at the stub price ($98,200 >=
         # $90,000), a UTXO rule on an unspent outpoint, and a

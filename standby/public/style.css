@@ -140,17 +140,6 @@ input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent); bo
 .inline-unit select { flex: 0 0 auto; width: auto; min-width: 0; }
 .inline-unit input { flex: 1; min-width: 0; }
 .inline-unit span { color: var(--muted); white-space: nowrap; }
-/* Bitcoin nodes card (0.8.8): the RPC checkbox sits at the right
-   of the URL box; the RPC username/password fields show only in
-   RPC mode. The input's min-width: 0 lets it shrink below its
-   intrinsic size inside the flex row — without it, the row
-   overflows on a 390px phone. */
-.node-row { display: flex; gap: 12px; align-items: center; }
-.node-row input[type="text"] { flex: 1; min-width: 0; margin: 0; }
-.node-row label.rpc-check { display: flex; align-items: center; gap: 6px; margin: 0; white-space: nowrap; cursor: pointer; }
-.node-row label.rpc-check input[type="checkbox"] { width: 18px; height: 18px; margin: 0; flex-shrink: 0; }
-.rpc-fields { margin-top: 2px; }
-.rpc-fields label { margin-top: 10px; }
 button {
   font: inherit; font-size: 15px; cursor: pointer;
   padding: 9px 16px; border-radius: 6px;
@@ -213,8 +202,8 @@ button:disabled { opacity: 0.5; cursor: default; }
   font-size: 14px;
 }
 .notice.bad { border-left-color: var(--bad); background: #2a1215; }
-/* Grace period card (0.8.0): the dashboard card that appears
-   while a price/UTXO grace is active — the amber left border
+/* Grace period card (0.8.0, extended 0.8.8): the dashboard card that appears
+   while a grace is active — the amber left border
    marks it as a warning, like the Grace pill. */
 .grace-card { border-left: 4px solid var(--warn); }
 /* Getting Started card (0.8.0): the empty-state card at the top
@@ -449,6 +438,14 @@ a { color: #f59e0b; }
 /* The arm/disarm toggle on a transaction card is green when armed
    (the pill next to it says so in words). */
 .switch.green input:checked + .slider { background: var(--ok); }
+/* The secondary-node toggle sits in the Secondary node heading
+   row, right-aligned — the same switch as the arm/disarm toggle
+   on a transaction card. The heading label takes the left, the
+   switch the right; the row never hides, so the toggle stays
+   reachable even while the secondary is off. */
+.node-subhead { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 12px 0 4px; }
+.node-subhead label[for="btc-secondary-url"] { margin: 0; }
+.node-subhead .switch { flex-shrink: 0; }
 /* Scrollable table (recent check-ins): room for ~10 rows, scroll for more. */
 .scroll-table { max-height: 400px; overflow-y: auto; }
 .scroll-table thead th { position: sticky; top: 0; background: var(--card); }

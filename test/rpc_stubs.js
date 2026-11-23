@@ -4,9 +4,17 @@
 // shape (POST /, {jsonrpc:'2.0', id, method, params} ->
 // {result, error, id}; a Core error is {code, message}):
 //   getblockcount       -> fixed tip height (default 900000)
-//   gettxout            -> FINNEY:0 null (spent), FINNEY:1 unspent,
-//                          SECOND:0 unspent, CONFLICT:0 null (spent),
-//                          anything else null with an unknown parent
+//   gettxout            -> FINNEY:0 null (spent, confirmed — hidden
+//                          under both include_mempool values),
+//                          FINNEY:1 unspent, SECOND:0 unspent,
+//                          CONFLICT:0 null when include_mempool is
+//                          true but the UTXO when false (spent in
+//                          the mempool only — the two-call
+//                          comparison, see rpcOutspend),
+//                          UNCONF_PARENT:0 null under both (spent,
+//                          parent itself unconfirmed — the edge
+//                          that stays unknown), anything else null
+//                          with an unknown parent
 //   getrawtransaction   -> the parent tx (FINNEY / SECOND / CONFLICT /
 //                          OWN_SPEND) or a tx registered via
 //                          /__test__/rpc-known or recorded by a
@@ -51,6 +59,12 @@ const FINNEY = 'f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16
 const SECOND = 'aa'.repeat(32);
 const CONFLICT = 'cc'.repeat(32);
 const OWN_SPEND = 'ee'.repeat(32);
+// (0.8.8) UNCONF_PARENT: a parent that is itself unconfirmed
+// (mempool-only). Its child outpoint reads null under BOTH
+// include_mempool values — the edge where the two-call spend
+// comparison cannot separate a confirmed spend from a
+// mempool-only one, so the app reads unknown.
+const UNCONF_PARENT = 'dd'.repeat(32);
 // A block hash for a height: deterministic and non-zero, so a
 // getblockheader(hash) round-trips to the height it was issued
 // for — the way real Core behaves (a zero hash would break any
@@ -77,6 +91,7 @@ known[FINNEY] = parentEntry(FINNEY, 100, 899900, [2.0, 1.5]);
 known[SECOND] = parentEntry(SECOND, 100, 899900, [2.0]);
 known[CONFLICT] = parentEntry(CONFLICT, 50, 899950, [1.0]);
 known[OWN_SPEND] = parentEntry(OWN_SPEND, 50, 899950, [1.0]);
+known[UNCONF_PARENT] = parentEntry(UNCONF_PARENT, 0, null, [1.0]);
 // The sentinel txid is deliberately NOT pre-registered here: a
 // broadcast of it must reach sendrawtransaction and come back as
 // Core error -27 ("already in block chain") — the race window
@@ -116,13 +131,24 @@ function handleMethod(method, params) {
       counts.gettxout++;
       const txid = String(p[0] || '').toLowerCase();
       const vout = parseInt(p[1], 10);
+      // (0.8.8) The include_mempool flag (third param, default
+      // true) models real Core: a mempool-only spend still shows
+      // the UTXO when include_mempool is false (chain only) and
+      // hides it when true. CONFLICT:0 is the mempool-spent
+      // outpoint; FINNEY:0 is confirmed-spent (hidden under
+      // both); UNCONF_PARENT:0 is spent with an unconfirmed
+      // parent (hidden under both — the edge that stays unknown).
+      const includeMempool = p[2] !== false;
       if (txid === FINNEY && vout === 1) {
         return { bestblock: '00'.repeat(32), confirmations: 100, value: 1.5, scriptPubKey: { asm: '', hex: '', type: 'pubkeyhash' }, coinbase: false };
       }
       if (txid === SECOND && vout === 0) {
         return { bestblock: '00'.repeat(32), confirmations: 100, value: 2.0, scriptPubKey: { asm: '', hex: '', type: 'pubkeyhash' }, coinbase: false };
       }
-      return null; // spent (FINNEY:0, CONFLICT:0, OWN_SPEND:0) or unknown parent — getrawtransaction decides which
+      if (txid === CONFLICT && vout === 0 && !includeMempool) {
+        return { bestblock: '00'.repeat(32), confirmations: 50, value: 1.0, scriptPubKey: { asm: '', hex: '', type: 'pubkeyhash' }, coinbase: false };
+      }
+      return null; // spent (FINNEY:0, CONFLICT:0, OWN_SPEND:0, UNCONF_PARENT:0) or unknown parent — getrawtransaction decides which
     }
     case 'getrawtransaction': {
       counts.getrawtransaction++;
@@ -133,14 +159,17 @@ function handleMethod(method, params) {
       if (!verbose) return '00'; // non-verbose is raw hex; the app always asks verbose
       const out = { txid: entry.txid, hash: entry.txid, version: 1, size: 100, vsize: 100, weight: 400, locktime: 0,
         vin: [], vout: entry.vout.map((o, i) => ({ value: o.value, n: i, scriptPubKey: { asm: '', hex: '', type: 'pubkeyhash' } })) };
-      if (typeof entry.confirmations === 'number') {
+      if (typeof entry.confirmations === 'number' && entry.confirmations > 0) {
         out.confirmations = entry.confirmations;
         // Real Core: a confirmed tx carries blockhash/blocktime/
         // time — and NO blockheight. The height is recovered via
         // getblockheader(blockhash); a zero blockhash here would
         // break that lookup, so the hash is a real one for the
-        // confirming height.
-        if (entry.confirmations > 0) { out.blockhash = blockHashForHeight(entry.blockheight); out.blocktime = 0; out.time = 0; }
+        // confirming height. A mempool (0-confirmation) tx
+        // carries NO confirmations key at all — the app reads
+        // "no key" the same as 0, and the distinction matters for
+        // the two-call spend comparison (see rpcOutspend).
+        out.blockhash = blockHashForHeight(entry.blockheight); out.blocktime = 0; out.time = 0;
       }
       return out;
     }

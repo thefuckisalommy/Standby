@@ -31,9 +31,12 @@ Boots the branch-0.8.5 app (port 3438), the check-in receiver
   5. The already-satisfied guard at add/edit: a rule whose condition
      is already met is blocked unless triggerConfirmed is set — for
      all three new types, mirroring price/UTXO.
-  6. Grace does NOT hold the new types: an active grace period pauses
-     price/UTXO only — a set-date (and block-height / fee-market) tx
-     still fires during it.
+  6. Grace holds the new types too (0.8.8): an active grace period pauses
+     block-height, set-date, and fee-market txs like price/UTXO —
+     they are held, then fire once the grace is resumed.
+  6b. Grace duration 0 disables the grace (0.8.8): an offline gap
+      past the threshold sets no grace, and due triggers fire
+      normally; 2 is not an offered duration (400).
   7. Vacation does NOT freeze the new types: vacation is check-in-only
      — a set-date tx still fires while vacation mode is on.
   8. Existing triggers still work (smoke): check-in, price, UTXO,
@@ -61,7 +64,7 @@ Boots the branch-0.8.5 app (port 3438), the check-in receiver
   17. Multi-trigger rule sets (0.8.2): OR fires on any rule; AND
       fires only when every rule holds on the same tick (no
       per-rule latching); an unknown rule blocks AND and is
-      ignored by OR; grace holds only the price/UTXO rule in a
+      ignored by OR; grace holds every non-check-in rule in a
       set; an already-satisfied set blocks the add with the
       combined semantics; a stored single trigger migrates to a
       one-rule OR set with per-rule state; per-rule triggerState
@@ -168,28 +171,9 @@ Boots the branch-0.8.5 app (port 3438), the check-in receiver
      nothing, and an already-stale tx is never re-checked
      (the stub outspend counters prove zero requests on a
      second hourly tick with no live staged txs left).
-  31. Per-node Bitcoin Core JSON-RPC mode (0.8.8): either node
-     can be a Core RPC endpoint instead of a mempool API
-     endpoint — settings validation, mode-toggle persistence
-     (the mempool URL survives across toggles, both URLs
-     round-trip), the RPC tip (getblockcount), UTXO unspent /
-     spent / parent-unknown (gettxout + getrawtransaction —
-     the unknown is never cached, the spent answer is),
-     confirmations incl. the 6-confirmation gate + derived
-     display (getrawtransaction), the fee from
-     estimatesmartfee, broadcast via sendrawtransaction
-     (incl. the already-out -27 mapping), the node capability
-     test in RPC mode, the mempool-mode regression
-     (rpcEnabled false = unchanged behavior), the dry-run of
-     an already-broadcast tx in RPC mode (the own-tx
-     getrawtransaction check reads 'own', not stale), and
-     estimatesmartfee "insufficient data" -> unknown (never
-     zero, never cached as a fee).
-
-Ports: app 3438, receiver 3439, stubs 18235/18236, RPC stubs
-18237/18238 — no collision with the 095 suite (app 3388,
-receiver 3389, stubs 18175/18176) or the 096 suite (app 3398,
-receiver 3399, stubs 18185/18186).
+Ports: app 3438, receiver 3439, stubs 18235/18236 — no collision
+with the 095 suite (app 3388, receiver 3389, stubs 18175/18176) or
+the 096 suite (app 3398, receiver 3399, stubs 18185/18186).
 Reuses the 094 helpers (import verify094 — importing does not run
 main()) and never touches the 095 files or the main app/ copy.
 """
@@ -236,11 +220,6 @@ STUB_P = 18235
 STUB_S = 18236
 STUB_BASE_P = 'http://127.0.0.1:%d' % STUB_P
 STUB_BASE_S = 'http://127.0.0.1:%d' % STUB_S
-RPC_STUB = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'rpc_stubs.js')
-RPC_P = 18237
-RPC_S = 18238
-RPC_BASE_P = 'http://127.0.0.1:%d' % RPC_P
-RPC_BASE_S = 'http://127.0.0.1:%d' % RPC_S
 APP_ENV = {'PORT': str(PORT), 'DATA_DIR': DATA, 'CHECKIN_DIR': CHECKIN_DIR,
            'SLIPSTREAM_API_URL': STUB_BASE_P, 'FEE_RATES_URL': STUB_BASE_P,
            'PRICE_API_URL': STUB_BASE_P}
@@ -365,7 +344,7 @@ def main():
         shutil.rmtree(d, ignore_errors=True)
     app = None
 
-    def restart():
+    def restart(before_start=None):
         """Stop + start the app, wait up, then poll until the
         startup tick has fired (Optimization O2): the startup
         hourly tick stamps bitcoin.connection.nodeCheckedAt.primary
@@ -376,7 +355,10 @@ def main():
         full tick (fired at the same ~0.5 s) has finished before
         any post-restart read. Deadline 4 s, then proceed anyway
         (the old behavior as fallback). Call BEFORE seeding any
-        firing state."""
+        firing state. `before_start`, when given, runs after the
+        old app stops and before the new one starts — for seeding
+        state that must be on disk before boot (a backdated clock,
+        an active grace)."""
         nonlocal app
         # The pre-restart node-check stamp: the poll waits for a
         # stamp NEWER than this, so a stale stamp can never
@@ -390,6 +372,8 @@ def main():
             pass
         if app is not None:
             stop(app)
+        if before_start is not None:
+            before_start()
         app = start(['node', 'server.js'], env=APP_ENV, cwd=APP, log=LOG)
         ok = wait_up(BASE)
         if ok:
@@ -446,7 +430,7 @@ def main():
 
     try:
         # --- pre-flight: our ports are free (nothing 09x left running) ---
-        for port in (PORT, RECEIVER_PORT, STUB_P, STUB_S, RPC_P, RPC_S):
+        for port in (PORT, RECEIVER_PORT, STUB_P, STUB_S):
             check('preflight: port %d free' % port, port_closed(port))
         # --- stubs + receiver + app ---
         p_primary = start(['node', STUB, str(STUB_P)],
@@ -455,15 +439,6 @@ def main():
         p_secondary = start(['node', STUB, str(STUB_S)],
                             env={'SENTINEL_TXID': SENTINEL_TXID, 'STUB_CONFLICT_MODE': 'confirmed',
                                  'STUB_PRICE_USD': '98200'}, log=LOG)
-        # (0.8.8, §31) The Core JSON-RPC stubs — same tip (900000)
-        # and fee (5 sat/vB) as the mempool stubs, so the two
-        # transports answer the same chain. Started here, used
-        # only by §31; the mempool stubs above stay the default
-        # endpoints for every earlier section.
-        p_rpc_primary = start(['node', RPC_STUB, str(RPC_P)],
-                              env={'SENTINEL_TXID': SENTINEL_TXID}, log=LOG)
-        p_rpc_secondary = start(['node', RPC_STUB, str(RPC_S)],
-                                env={'SENTINEL_TXID': SENTINEL_TXID}, log=LOG)
         p_receiver = start(['node', 'checkin-receiver/server.js'],
                            env={'PORT': str(RECEIVER_PORT), 'CHECKIN_DIR': CHECKIN_DIR},
                            cwd=APP, log=LOG)
@@ -472,8 +447,6 @@ def main():
         # and the probe below used to crash on Connection refused.
         wait_up(STUB_BASE_P, path='/api/v3/simple/price')
         wait_up(STUB_BASE_S, path='/api/v3/simple/price')
-        wait_up(RPC_BASE_P, path='/__test__/rpc-count')
-        wait_up(RPC_BASE_S, path='/__test__/rpc-count')
         s, pr = req('GET', '/api/v3/simple/price', base=STUB_BASE_P)
         check('stubs up: primary price route answers 98200', s == 200 and pr.get('bitcoin', {}).get('usd') == 98200, pr)
         s, pr = req('GET', '/api/v3/simple/price', base=STUB_BASE_S)
@@ -889,10 +862,11 @@ def main():
         check('5 full tick: cadence restored to 60 s', s == 200, (s, r))
         delete_all_txs()
 
-        # --- 6. grace does NOT hold the new types -------------------------
+        # --- 6. grace holds the new types too (0.8.8) --------------------
         # Put the app into an active grace (offline 10 days, duration
-        # 7 days): price/UTXO would be held, but a set-date tx must
-        # still fire on the manual release check.
+        # 7 days): block-height, set-date, and fee-market txs that
+        # are already satisfied must be HELD by the grace, like
+        # price/UTXO — then fire once the grace is resumed.
         stj = load_state_file()
         stj['checkin']['lastOnlineAt'] = iso_ago(days=10)
         stj['grace'] = {'offlineDays': 10, 'startedAt': iso_ago(hours=1), 'durationDays': 7, 'resumedAt': None}
@@ -900,14 +874,48 @@ def main():
         check('6 grace: app restarted with an active grace', restart())
         s, st = req('GET', '/api/state')
         check('6 grace: the grace is active', st.get('grace', {}).get('active') is True, st.get('grace'))
-        s, r = add_tx('G setdate', {'type': 'setdate', 'params': {'fireAt': iso_ago(hours=1)}}, 110700, trigger_confirmed=True)
+        s, r = add_tx('G blockheight', {'type': 'blockheight', 'params': {'targetHeight': STUB_TIP - 1000}}, 110700, trigger_confirmed=True)
+        g_bh = r['tx']['id'] if s == 201 else None
+        s, r = add_tx('G setdate', {'type': 'setdate', 'params': {'fireAt': iso_ago(hours=1)}}, 110702, trigger_confirmed=True)
         g_sd = r['tx']['id'] if s == 201 else None
+        s, r = add_tx('G feemarket', {'type': 'feemarket', 'params': {'maxFeeRate': 5}}, 110704, trigger_confirmed=True)
+        g_fm = r['tx']['id'] if s == 201 else None
+        check('6 grace: three already-satisfied txs added', g_bh and g_sd and g_fm, (g_bh, g_sd, g_fm))
         s, r, res = release_results()
-        check('6 grace: set-date tx still broadcasts during an active grace',
-              s == 200 and res.get(g_sd, {}).get('action') == 'broadcast', res.get(g_sd))
-        # Clear the grace for the remaining sections.
+        for gid, name in ((g_bh, 'block-height'), (g_sd, 'set-date'), (g_fm, 'fee-market')):
+            check('6 grace: %s tx is held during the grace (skipped, status grace)' % name,
+                  s == 200 and res.get(gid, {}).get('action') == 'skipped' and res.get(gid, {}).get('triggerStatus') == 'grace', res.get(gid))
+        # Resume: all three fire on the next release check.
         s, r = req('POST', '/api/grace/resume', {})
         check('6 grace: resumed', s == 200, (s, r))
+        s, r, res = release_results()
+        for gid, name in ((g_bh, 'block-height'), (g_sd, 'set-date'), (g_fm, 'fee-market')):
+            check('6 grace: %s tx broadcasts once the grace is resumed' % name,
+                  s == 200 and res.get(gid, {}).get('action') == 'broadcast', res.get(gid))
+        delete_all_txs()
+
+        # --- 6b. grace duration 0 disables the grace (0.8.8) --------------
+        # A duration of 0 means no grace period at all: an offline
+        # gap past the threshold sets no grace, and due triggers
+        # fire normally. 2 is not an offered duration (400).
+        s, r = req('PUT', '/api/settings', {'graceDurationDays': 2})
+        check('6b grace off: duration 2 rejected (400)', s == 400, (s, r))
+        s, r = req('PUT', '/api/settings', {'graceDurationDays': 0})
+        check('6b grace off: duration 0 saved', s == 200, (s, r))
+        stj = load_state_file()
+        stj['checkin']['lastOnlineAt'] = iso_ago(days=10)
+        save_state_file(stj)
+        check('6b grace off: app restarted after a 10-day gap', restart())
+        s, st = req('GET', '/api/state')
+        check('6b grace off: no grace is set despite the gap', st.get('grace') is None, st.get('grace'))
+        s, r = add_tx('G0 setdate', {'type': 'setdate', 'params': {'fireAt': iso_ago(hours=1)}}, 110706, trigger_confirmed=True)
+        g0_sd = r['tx']['id'] if s == 201 else None
+        s, r, res = release_results()
+        check('6b grace off: set-date tx broadcasts with the grace disabled',
+              s == 200 and res.get(g0_sd, {}).get('action') == 'broadcast', res.get(g0_sd))
+        # Restore the default duration for the remaining sections.
+        s, r = req('PUT', '/api/settings', {'graceDurationDays': 7})
+        check('6b grace off: duration restored to 7', s == 200, (s, r))
         delete_all_txs()
 
         # --- 7. vacation does NOT freeze the new types --------------------
@@ -1496,8 +1504,8 @@ def main():
         # --- 17. multi-trigger rule sets (0.8.2) --------------------------
         # OR fires on any rule; AND fires only when every rule holds
         # on the SAME tick (no per-rule latching); an unknown rule
-        # blocks AND and is ignored by OR; grace holds only the
-        # price/UTXO rule in a set; an already-satisfied set blocks
+        # blocks AND and is ignored by OR; grace holds every
+        # non-check-in rule in a set; an already-satisfied set blocks
         # the add with the combined semantics.
         # 17.1 OR fires on one rule: the price rule does not hold
         # ($98,200 < $200,000) but the set-date rule does.
@@ -1635,37 +1643,59 @@ def main():
         check('17 unknown: caches cleared to bust the price cache', clear_caches())
         delete_all_txs()
 
-        # 17.4 Grace holds only the price/UTXO rule in a set: the OR
-        # set fires on its set-date rule during the grace, the AND
-        # set cannot fire until the grace is resumed. The txs are
-        # added AFTER the restart: the startup tick is a full
-        # evaluation, so an already-satisfied OR set armed across
-        # it would broadcast before the manual check below.
+        # 17.4 Grace holds every non-check-in rule in a set (0.8.8):
+        # the OR set fires on its check-in rule during the grace
+        # (check-in rules are never held by the grace), the AND
+        # set cannot fire while its price and set-date rules are
+        # held. The grace is seeded directly with a fresh
+        # lastOnlineAt, so no offline-gap hold intervenes for the
+        # check-in rule; the check-in rule is past due on a 2-day
+        # threshold (last check-in 3 days ago). The backdate
+        # lands AFTER the adds: adding a check-in tx while its
+        # clock is in the danger zone restarts the clock
+        # (resetCheckin, 0.7.22), so the txs go in while the
+        # clock is fresh (a check-in first — §16 left it 40 days
+        # stale) and the backdate + grace are seeded on disk
+        # before the restart (restart's before_start hook). The
+        # OR set then broadcasts on the startup tick — its
+        # release record names the check-in rule — while the AND
+        # set stays staged.
+        s, r = req('POST', '/api/checkin', {'method': 'app'})
+        check('17 grace: check-in lands so the clock is fresh for the adds', s == 200 and r.get('ok') is True, r)
         or_g = {'op': 'OR', 'rules': [
+            {'type': 'checkin', 'params': {'thresholdDays': 2}},
             {'type': 'price', 'params': {'asset': 'BTC', 'op': '>=', 'value': 90000}},
-            {'type': 'setdate', 'params': {'fireAt': iso_ago(hours=1)}},
         ]}
         and_g = {'op': 'AND', 'rules': [
             {'type': 'price', 'params': {'asset': 'BTC', 'op': '>=', 'value': 90000}},
             {'type': 'setdate', 'params': {'fireAt': iso_ago(hours=1)}},
         ]}
-        stj = load_state_file()
-        stj['checkin']['lastOnlineAt'] = iso_ago(days=10)
-        stj['grace'] = {'offlineDays': 10, 'startedAt': iso_ago(hours=1), 'durationDays': 7, 'resumedAt': None}
-        save_state_file(stj)
-        check('17 grace: app restarted with an active grace', restart())
         s, r = add_tx('17 OR grace', or_g, 116108, trigger_confirmed=True)
         check('17 grace: OR set accepted with confirm (201)', s == 201, (s, r))
         org17 = r['tx']['id'] if s == 201 else None
         s, r = add_tx('17 AND grace', and_g, 116110, trigger_confirmed=True)
         check('17 grace: AND set accepted with confirm (201)', s == 201, (s, r))
         andg17 = r['tx']['id'] if s == 201 else None
+        def seed_grace_17():
+            stj = load_state_file()
+            stj['checkin']['lastOnlineAt'] = iso_ago()
+            stj['checkin']['lastCheckinAt'] = iso_ago(days=3)
+            stj['checkin']['heldUntil'] = None
+            stj['grace'] = {'graceUntil': iso_in(days=7), 'triggeredAt': iso_ago(), 'offlineGapDays': 10}
+            save_state_file(stj)
+        check('17 grace: app restarted with an active grace', restart(before_start=seed_grace_17))
         s, st = req('GET', '/api/state')
         check('17 grace: the grace is active', st.get('grace', {}).get('active') is True, st.get('grace'))
+        org_tx = state_tx(org17)
+        check('17 grace: OR broadcast on its non-held check-in rule during the grace (startup tick)',
+              org_tx and (org_tx.get('release') or {}).get('status') == 'broadcast' and (org_tx.get('release') or {}).get('trigger') == 'checkin',
+              org_tx and org_tx.get('release'))
+        and_tx = state_tx(andg17)
+        check('17 grace: AND still staged after the restart (its rules are held)',
+              and_tx and and_tx.get('release') is None and not and_tx.get('broadcasted'),
+              and_tx and {'release': and_tx.get('release'), 'broadcasted': and_tx.get('broadcasted')})
         s, r, res = release_results()
-        check('17 grace: OR fires on its non-held rule during a grace',
-              s == 200 and res.get(org17, {}).get('action') == 'broadcast', res.get(org17))
-        check('17 grace: AND does NOT fire while its price rule is held',
+        check('17 grace: AND does NOT fire while its price and set-date rules are held',
               s == 200 and res.get(andg17, {}).get('action') == 'skipped' and res.get(andg17, {}).get('triggerStatus') == 'grace', res.get(andg17))
         s, r, res = release_results()
         check('17 grace: a second release check still does not fire the AND set',
@@ -1676,6 +1706,15 @@ def main():
         check('17 grace: AND broadcasts once the grace is resumed',
               s == 200 and res.get(andg17, {}).get('action') == 'broadcast', res.get(andg17))
         delete_all_txs()
+        # Restore a fresh check-in clock for the remaining
+        # sections (the OR set's past-due check-in rule above
+        # needed lastCheckinAt 3 days back).
+        stj = load_state_file()
+        stj['checkin']['lastOnlineAt'] = iso_ago()
+        stj['checkin']['lastCheckinAt'] = iso_ago()
+        stj['checkin']['heldUntil'] = None
+        save_state_file(stj)
+        check('17 grace: check-in clock restored (restart)', restart())
 
         # 17.5 An already-satisfied set blocks the add with the
         # combined semantics: OR on any satisfied rule, AND only
@@ -4105,345 +4144,12 @@ def main():
         check('30 cleanup: settings and cadence restored', s == 200, (s, r))
         delete_all_txs()
 
-        # --- 31. per-node Bitcoin Core JSON-RPC mode (0.8.8) --------
-        # Either node can be a Core RPC endpoint instead of a
-        # mempool API endpoint. The RPC stubs (18237/18238) answer
-        # the same chain as the mempool stubs (tip 900000, FINNEY
-        # vout 0 spent / vout 1 unspent, fee 5 sat/vB via
-        # estimatesmartfee) so the two transports can be compared
-        # head to head. Cadence stays parked at 3600 s so no fast
-        # tick fires mid-section; the hourly tick is an hour away.
-        def rpc_counts(base):
-            _, r = req('GET', '/__test__/rpc-count', base=base)
-            return r
-        def rpc_n(base, method):
-            return rpc_counts(base).get(method, -1)
-        def rpc_both_on():
-            return {'primaryRpcEnabled': True, 'primaryRpcUrl': RPC_BASE_P,
-                    'primaryRpcUser': 'standby', 'primaryRpcPass': 'testpass',
-                    'secondaryRpcEnabled': True, 'secondaryRpcUrl': RPC_BASE_S,
-                    'secondaryRpcUser': 'standby', 'secondaryRpcPass': 'testpass'}
-        def settings_now():
-            _, st = req('GET', '/api/state')
-            return (st.get('settings') or {})
-        def backdate_checked(tx_id, hours=2):
-            # Force the confirmations endpoint to re-query: the
-            # stored checkedAt moves hours back (same pattern as
-            # §29's frozen snapshot).
-            stj = load_state_file()
-            for t in stj.get('bitcoin', {}).get('txs', []):
-                if t.get('id') == tx_id and t.get('broadcasted'):
-                    t['broadcasted']['checkedAt'] = iso_ago(hours=hours)
-            save_state_file(stj)
-        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 3600})
-        check('31 setup: cadence parked at 3600 s', s == 200, (s, r))
-        check('31 setup: caches cleared for a cold cache', clear_caches())
-        # (a) Defaults + validation.
-        st = settings_now()
-        check('31 defaults: RPC is off by default, URLs blank',
-              st.get('primaryRpcEnabled') is False and st.get('primaryRpcUrl') == ''
-              and st.get('secondaryRpcEnabled') is False and st.get('secondaryRpcUrl') == '', st)
-        s, r = req('PUT', '/api/settings', {'primaryRpcEnabled': 'yes'})
-        check('31 validation: a non-boolean RpcEnabled is a 400', s == 400, (s, r))
-        s, r = req('PUT', '/api/settings', {'primaryRpcUrl': 'ftp://127.0.0.1:8332'})
-        check('31 validation: a non-http(s) RPC URL is a 400', s == 400, (s, r))
-        s, r = req('PUT', '/api/settings', {'primaryRpcUrl': 'http://user:pass@127.0.0.1:8332'})
-        check('31 validation: a RPC URL carrying userinfo is a 400', s == 400, (s, r))
-        s, r = req('PUT', '/api/settings', {'primaryRpcUser': 123})
-        check('31 validation: a non-string RPC user is a 400', s == 400, (s, r))
-        s, r = req('PUT', '/api/settings', {'primaryRpcUrl': '127.0.0.1:18237'})
-        check('31 validation: a bare host gets http://', s == 200 and r.get('primaryRpcUrl') == 'http://127.0.0.1:18237', r)
-        # (b) Mode-toggle persistence: both URLs round-trip, and
-        # the mempool URL survives the toggle in both directions.
-        s, r = req('PUT', '/api/settings', {'primaryApiUrl': STUB_BASE_P, 'secondaryApiUrl': STUB_BASE_S})
-        check('31 toggle: mempool URLs set (primary + secondary stubs)', s == 200, (s, r))
-        s, r = req('PUT', '/api/settings', rpc_both_on())
-        check('31 toggle: RPC on for both nodes',
-              s == 200 and r.get('primaryRpcEnabled') is True and r.get('primaryRpcUrl') == RPC_BASE_P
-              and r.get('secondaryRpcEnabled') is True and r.get('secondaryRpcUrl') == RPC_BASE_S, r)
-        st = settings_now()
-        check('31 toggle: the mempool URLs survive the toggle on (GET /api/state)',
-              st.get('primaryApiUrl') == STUB_BASE_P and st.get('secondaryApiUrl') == STUB_BASE_S, st)
-        check('31 toggle: RPC user + password round-trip through GET /api/state',
-              st.get('primaryRpcUser') == 'standby' and st.get('primaryRpcPass') == 'testpass'
-              and st.get('secondaryRpcUser') == 'standby' and st.get('secondaryRpcPass') == 'testpass', st)
-        # Toggle off with flags only (the UI keeps the inactive
-        # URL in its own memory; the API keeps whatever it was
-        # last sent — so a flags-only toggle must not wipe it).
-        s, r = req('PUT', '/api/settings', {'primaryRpcEnabled': False, 'secondaryRpcEnabled': False})
-        check('31 toggle: RPC off for both nodes (flags only)',
-              s == 200 and r.get('primaryRpcEnabled') is False and r.get('secondaryRpcEnabled') is False, r)
-        st = settings_now()
-        check('31 toggle: both URLs survive the toggle off (mempool + RPC)',
-              st.get('primaryApiUrl') == STUB_BASE_P and st.get('secondaryApiUrl') == STUB_BASE_S
-              and st.get('primaryRpcUrl') == RPC_BASE_P and st.get('secondaryRpcUrl') == RPC_BASE_S, st)
-        s, r = req('PUT', '/api/settings', rpc_both_on())
-        check('31 toggle: RPC on again for the restart check', s == 200, (s, r))
-        check('31 toggle: app restarted with RPC on', restart())
-        st = settings_now()
-        check('31 toggle: the RPC settings survive a restart',
-              st.get('primaryRpcEnabled') is True and st.get('primaryRpcUrl') == RPC_BASE_P
-              and st.get('secondaryRpcEnabled') is True and st.get('secondaryRpcUrl') == RPC_BASE_S
-              and st.get('primaryApiUrl') == STUB_BASE_P and st.get('secondaryApiUrl') == STUB_BASE_S, st)
-        # (c) RPC tip: getblockcount answers the block-height rule.
-        s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'blockheight', 'params': {'targetHeight': 900001}}})
-        check('31 tip: RPC getblockcount 900000 leaves a 900001 target watching',
-              s == 200 and r.get('fire') is False and r.get('status') == 'watching', r)
-        s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'blockheight', 'params': {'targetHeight': 900000}}})
-        check('31 tip: a 900000 target is already reached over RPC',
-              s == 200 and r.get('fire') is True and r.get('status') == 'due', r)
-        # (d) UTXO over RPC: unspent / spent / conflict-as-spent /
-        # parent-unknown, and the cache rules (spent cached, unknown
-        # never cached).
-        s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft_prev(FINNEY, 1, 113100), 'label': 'RPC unspent', 'notes': '', 'trigger': {'type': 'manual', 'params': {}}})
-        check('31 utxo: the FINNEY:1 tx adds', s == 201, (s, r))
-        rpc_live = r['tx']['id'] if s == 201 else None
-        s, r = req('POST', '/api/broadcast/test', {'id': rpc_live})
-        one = (r.get('results') or [{}])[0]
-        check('31 utxo: RPC dry-run of an unspent input reads ready via the primary RPC node',
-              s == 200 and one.get('verdict') == 'ready' and one.get('checkedVia') == 'primary'
-              and len(one.get('unspent', [])) == 1, one)
-        s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft_prev(FINNEY, 0, 113101), 'label': 'RPC spent', 'notes': '', 'trigger': {'type': 'manual', 'params': {}}})
-        check('31 utxo: the FINNEY:0 tx adds', s == 201, (s, r))
-        rpc_spent = r['tx']['id'] if s == 201 else None
-        s, r = req('POST', '/api/broadcast/test', {'id': rpc_spent})
-        one = (r.get('results') or [{}])[0]
-        check('31 utxo: RPC dry-run of a spent input reads blocked (an RPC spend reads as a confirmed spend)',
-              s == 200 and one.get('verdict') == 'blocked' and len(one.get('spent', [])) == 1, one)
-        t = state_tx(rpc_spent)
-        check('31 utxo: the blocked dry-run records the tx stale (kind dryrun)',
-              t is not None and (t.get('release') or {}).get('status') == 'stale'
-              and (t.get('release') or {}).get('kind') == 'dryrun', (t or {}).get('release'))
-        c0 = rpc_n(RPC_BASE_P, 'gettxout')
-        s, r = req('POST', '/api/broadcast/test', {'id': rpc_spent})
-        c1 = rpc_n(RPC_BASE_P, 'gettxout')
-        check('31 utxo: the cached spent answer costs zero new gettxout calls', (c1 - c0) == 0, (c0, c1))
-        # CONFLICT ('cc'*32) spends unconfirmed on the mempool path;
-        # plain RPC cannot tell, so it reads as a confirmed spend
-        # (the documented RPC limitation) — blocked, not conflict.
-        s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft_prev(CONFLICT, 0, 113102), 'label': 'RPC conflict', 'notes': '', 'trigger': {'type': 'manual', 'params': {}}})
-        check('31 utxo: the CONFLICT:0 tx adds', s == 201, (s, r))
-        rpc_conf = r['tx']['id'] if s == 201 else None
-        s, r = req('POST', '/api/broadcast/test', {'id': rpc_conf})
-        one = (r.get('results') or [{}])[0]
-        check('31 utxo: an unconfirmed spend reads as a confirmed spend over RPC (blocked, no conflict)',
-              s == 200 and one.get('verdict') == 'blocked' and len(one.get('conflict', [])) == 0, one)
-        # Parent-unknown: 'bb'*32 is known to neither RPC stub —
-        # gettxout null + getrawtransaction -5 — so the input is
-        # unknown, never unspent, and the answer is never cached.
-        UNKNOWN_PARENT = 'bb' * 32
-        s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft_prev(UNKNOWN_PARENT, 0, 113103), 'label': 'RPC unknown', 'notes': '', 'trigger': {'type': 'manual', 'params': {}}})
-        check('31 utxo: the unknown-parent tx adds', s == 201, (s, r))
-        rpc_unk = r['tx']['id'] if s == 201 else None
-        c0 = rpc_n(RPC_BASE_P, 'gettxout')
-        s, r = req('POST', '/api/broadcast/test', {'id': rpc_unk})
-        one = (r.get('results') or [{}])[0]
-        c1 = rpc_n(RPC_BASE_P, 'gettxout')
-        check('31 utxo: RPC dry-run of an unknown parent reads unknown (would still broadcast)',
-              s == 200 and one.get('verdict') == 'unknown' and one.get('wouldBroadcast') is True
-              and len(one.get('unknown', [])) == 1, one)
-        check('31 utxo: the unknown dry-run costs a gettxout call', (c1 - c0) >= 1, (c0, c1))
-        s, r = req('POST', '/api/broadcast/test', {'id': rpc_unk})
-        c2 = rpc_n(RPC_BASE_P, 'gettxout')
-        check('31 utxo: the parent-unknown answer is never cached — the second dry-run re-asks',
-              (c2 - c1) >= 1, (c1, c2))
-        # (e) Broadcast + confirmations over RPC, incl. the
-        # 6-confirmation gate and the derived display count.
-        s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft_prev(FINNEY, 1, 113110), 'label': 'RPC broadcast', 'notes': '', 'trigger': {'type': 'manual', 'params': {}}})
-        check('31 broadcast: the FINNEY:1 tx adds', s == 201, (s, r))
-        rpc_bc = r['tx']['id'] if s == 201 else None
-        sc0 = rpc_n(RPC_BASE_P, 'sendrawtransaction')
-        s, r = req('POST', '/api/bitcoin/txs/' + rpc_bc + '/broadcast', {})
-        check('31 broadcast: sendrawtransaction broadcasts via the primary RPC node',
-              s == 200 and r.get('action') == 'broadcast' and r.get('method') == 'primary', r)
-        check('31 broadcast: exactly one sendrawtransaction call reached the RPC stub',
-              (rpc_n(RPC_BASE_P, 'sendrawtransaction') - sc0) == 1, (sc0, rpc_n(RPC_BASE_P, 'sendrawtransaction')))
-        bc_txid = (r.get('tx') or {}).get('txid')
-        s, r = req('POST', '/__test__/rpc-tx', {'txid': bc_txid, 'confirmations': 2, 'blockheight': 899999}, base=RPC_BASE_P)
-        check('31 confs: stub set to 2 confirmations at block 899999', s == 200, (s, r))
-        s, r = req('GET', '/api/bitcoin/confirmations')
-        conf_by_id = {c.get('id'): c for c in r.get('confirmations', [])}
-        check('31 confs: the endpoint reports 2 confirmations from the RPC node',
-              s == 200 and conf_by_id.get(rpc_bc, {}).get('confirmations') == 2
-              and conf_by_id.get(rpc_bc, {}).get('blockHeight') == 899999, conf_by_id.get(rpc_bc))
-        t = state_tx(rpc_bc)
-        check('31 confs: the stored snapshot is 2',
-              t is not None and (t.get('broadcasted') or {}).get('confirmations') == 2, (t or {}).get('broadcasted'))
-        backdate_checked(rpc_bc)
-        g0 = rpc_n(RPC_BASE_P, 'getrawtransaction')
-        s, r = req('GET', '/api/bitcoin/confirmations')
-        conf_by_id = {c.get('id'): c for c in r.get('confirmations', [])}
-        check('31 confs: below 6 the endpoint re-asks the node (getrawtransaction moves)',
-              s == 200 and (rpc_n(RPC_BASE_P, 'getrawtransaction') - g0) >= 1
-              and conf_by_id.get(rpc_bc, {}).get('confirmations') == 2, conf_by_id.get(rpc_bc))
-        s, r = req('POST', '/__test__/rpc-tx', {'txid': bc_txid, 'confirmations': 7, 'blockheight': 899994}, base=RPC_BASE_P)
-        check('31 confs: stub set to 7 confirmations at block 899994', s == 200, (s, r))
-        backdate_checked(rpc_bc)
-        s, r = req('GET', '/api/bitcoin/confirmations')
-        conf_by_id = {c.get('id'): c for c in r.get('confirmations', [])}
-        check('31 confs: the stored snapshot reaches 7 (the 6-gate)',
-              s == 200 and conf_by_id.get(rpc_bc, {}).get('confirmations') == 7, conf_by_id.get(rpc_bc))
-        t = state_tx(rpc_bc)
-        check('31 confs: the stored snapshot is 7 after the gate',
-              t is not None and (t.get('broadcasted') or {}).get('confirmations') == 7, (t or {}).get('broadcasted'))
-        s, r = req('POST', '/__test__/rpc-tip', {'height': 900010}, base=RPC_BASE_P)
-        check('31 confs: stub tip moved to 900010', s == 200, (s, r))
-        check('31 confs: caches cleared for a cold tip cache', clear_caches())
-        backdate_checked(rpc_bc)
-        g0 = rpc_n(RPC_BASE_P, 'getrawtransaction')
-        b0 = rpc_n(RPC_BASE_P, 'getblockcount')
-        s, r = req('GET', '/api/bitcoin/confirmations')
-        conf_by_id = {c.get('id'): c for c in r.get('confirmations', [])}
-        check('31 confs: past 6 the endpoint derives tip - block + 1 (900010 - 899994 + 1 = 17)',
-              s == 200 and conf_by_id.get(rpc_bc, {}).get('confirmations') == 17
-              and conf_by_id.get(rpc_bc, {}).get('blockHeight') == 899994, conf_by_id.get(rpc_bc))
-        check('31 confs: past 6 the tx itself is never re-queried (getrawtransaction still)',
-              (rpc_n(RPC_BASE_P, 'getrawtransaction') - g0) == 0, (g0, rpc_n(RPC_BASE_P, 'getrawtransaction')))
-        check('31 confs: the derivation still fetches the tip (getblockcount moves)',
-              (rpc_n(RPC_BASE_P, 'getblockcount') - b0) >= 1, (b0, rpc_n(RPC_BASE_P, 'getblockcount')))
-        t = state_tx(rpc_bc)
-        check('31 confs: the stored snapshot stays 7 after the derivation',
-              t is not None and (t.get('broadcasted') or {}).get('confirmations') == 7, (t or {}).get('broadcasted'))
-        s, r = req('POST', '/__test__/rpc-tip', {'height': STUB_TIP}, base=RPC_BASE_P)
-        check('31 confs: stub tip back to 900000', s == 200, (s, r))
-        # (f) Fee from estimatesmartfee: 0.00005 BTC/kB = 5 sat/vB.
-        check('31 fee: caches cleared for a cold node-fee cache', clear_caches())
-        f0 = rpc_n(RPC_BASE_P, 'estimatesmartfee')
-        s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'feemarket', 'params': {'maxFeeRate': 5, 'direction': 'below'}}})
-        check('31 fee: the RPC economy fee is 5 sat/vB (max 5, below — fires)',
-              s == 200 and r.get('fire') is True and r.get('status') == 'due'
-              and (r.get('detail') or {}).get('economyFee') == 5, r)
-        check('31 fee: the check cost one estimatesmartfee call', (rpc_n(RPC_BASE_P, 'estimatesmartfee') - f0) == 1, (f0, rpc_n(RPC_BASE_P, 'estimatesmartfee')))
-        s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'feemarket', 'params': {'maxFeeRate': 4, 'direction': 'below'}}})
-        check('31 fee: max 4, below — the 5 sat/vB fee watches',
-              s == 200 and r.get('fire') is False and r.get('status') == 'watching'
-              and (r.get('detail') or {}).get('economyFee') == 5, r)
-        check('31 fee: the second check inside the 5-minute window costs no new fetch',
-              (rpc_n(RPC_BASE_P, 'estimatesmartfee') - f0) == 1, (f0, rpc_n(RPC_BASE_P, 'estimatesmartfee')))
-        # (g) Already-out: the sentinel hex spends FINNEY:1, but the
-        # RPC stub does not know its txid via getrawtransaction —
-        # it lands between the freshness gate and the send, and
-        # Core answers -27. The app must record it broadcast,
-        # never re-send it. (A tx the node DOES know is caught by
-        # the own-tx check first — see (j) below.)
-        s, r = req('POST', '/api/bitcoin/txs', {'txHex': v.SENTINEL_HEX, 'label': 'RPC already out', 'notes': '', 'trigger': {'type': 'manual', 'params': {}}})
-        check('31 already-out: the sentinel tx adds', s == 201, (s, r))
-        rpc_ao = r['tx']['id'] if s == 201 else None
-        sc0 = rpc_n(RPC_BASE_P, 'sendrawtransaction')
-        s, r = req('POST', '/api/bitcoin/txs/' + rpc_ao + '/broadcast', {})
-        check('31 already-out: Core -27 maps to broadcast (already out, nothing re-sent)',
-              s == 200 and r.get('action') == 'broadcast' and r.get('method') == 'primary', r)
-        check('31 already-out: exactly one sendrawtransaction call (the -27 answer)',
-              (rpc_n(RPC_BASE_P, 'sendrawtransaction') - sc0) == 1, (sc0, rpc_n(RPC_BASE_P, 'sendrawtransaction')))
-        t = state_tx(rpc_ao)
-        check('31 already-out: the tx is recorded broadcast',
-              t is not None and t.get('broadcasted') is not None, (t or {}).get('broadcasted'))
-        # (h) Node capability test in RPC mode: height + fees +
-        # broadcast, on both nodes.
-        s, r = req('POST', '/api/bitcoin/connection/test', {})
-        check('31 conn: the RPC connection test runs', s == 200 and r.get('ok') is True, r)
-        res_by_ep = {(x.get('endpoint')): x for x in r.get('results', [])}
-        rp = res_by_ep.get('primary', {})
-        check('31 conn: the primary RPC node is OK (height + fees + broadcast)',
-              rp.get('ok') is True and rp.get('status') == 'ok', rp)
-        checks = rp.get('checks') or {}
-        check('31 conn: the RPC height check reads the stub tip',
-              (checks.get('height') or {}).get('value') == 'Height 900,000', checks)
-        check('31 conn: the RPC fee check reads estimatesmartfee (5 sat/vB)',
-              (checks.get('fees') or {}).get('value') == '5 sat/vB', checks)
-        check('31 conn: the RPC broadcast check reads Reachable',
-              (checks.get('broadcast') or {}).get('value') == 'Reachable', checks)
-        rs = res_by_ep.get('secondary', {})
-        check('31 conn: the secondary RPC node is OK too',
-              rs.get('ok') is True and rs.get('status') == 'ok', rs)
-        _, st = req('GET', '/api/state')
-        conn = (st.get('bitcoin') or {}).get('connection') or {}
-        res_by_base = {(x.get('base')): x for x in conn.get('results', [])}
-        check('31 conn: the stored results are keyed by the RPC URLs',
-              res_by_base.get(RPC_BASE_P, {}).get('ok') is True
-              and res_by_base.get(RPC_BASE_S, {}).get('ok') is True, conn.get('results'))
-        # (i) Mempool-mode regression: RPC off is exactly the old
-        # behavior — same dry-run verdicts, same connection test,
-        # via the mempool stubs.
-        s, r = req('PUT', '/api/settings', {'primaryRpcEnabled': False, 'secondaryRpcEnabled': False})
-        check('31 regress: RPC off for both nodes', s == 200, (s, r))
-        s, r = req('POST', '/api/broadcast/test', {'id': rpc_live})
-        one = (r.get('results') or [{}])[0]
-        check('31 regress: mempool dry-run of an unspent input still reads ready via the primary mempool node',
-              s == 200 and one.get('verdict') == 'ready' and one.get('checkedVia') == 'primary'
-              and one.get('checkedBase') == STUB_BASE_P, one)
-        s, r = req('POST', '/api/bitcoin/connection/test', {})
-        res_by_ep = {(x.get('endpoint')): x for x in r.get('results', [])}
-        check('31 regress: the mempool connection test still reads the stub fee + tip',
-              s == 200 and r.get('ok') is True
-              and ((res_by_ep.get('primary', {}).get('checks') or {}).get('fees') or {}).get('value') == '1 sat/vB'
-              and ((res_by_ep.get('primary', {}).get('checks') or {}).get('height') or {}).get('value') == 'Height 900,000', r)
-        # (j) The own-tx fix: in RPC mode the freshness path asks
-        # the node about the tx ITSELF first — a dry run of a tx
-        # the node already knows reads broadcast ('own'), not
-        # stale. Without the fix the per-input gettxout would
-        # answer unspent and the run would read ready.
-        s, r = req('PUT', '/api/settings', {'primaryRpcEnabled': True, 'primaryRpcUrl': RPC_BASE_P,
-                                            'primaryRpcUser': 'standby', 'primaryRpcPass': 'testpass'})
-        check('31 own: RPC on for the primary again', s == 200, (s, r))
-        own_hex = craft_prev(FINNEY, 1, 113120)
-        own_txid = txid_of(own_hex)
-        s, r = req('POST', '/__test__/rpc-known', {'txid': own_txid, 'confirmations': 3, 'blockheight': 899998}, base=RPC_BASE_P)
-        check('31 own: the stub knows the tx (3 confirmations at block 899998)', s == 200, (s, r))
-        s, r = req('POST', '/api/bitcoin/txs', {'txHex': own_hex, 'label': 'RPC own', 'notes': '', 'trigger': {'type': 'manual', 'params': {}}})
-        check('31 own: the already-broadcast tx adds', s == 201, (s, r))
-        rpc_own = r['tx']['id'] if s == 201 else None
-        g0 = rpc_n(RPC_BASE_P, 'gettxout')
-        s, r = req('POST', '/api/broadcast/test', {'id': rpc_own})
-        one = (r.get('results') or [{}])[0]
-        check('31 own: the dry-run reads broadcast with one own input (not stale, not ready)',
-              s == 200 and one.get('verdict') == 'broadcast' and len(one.get('own', [])) == 1
-              and one.get('wouldBroadcast') is False, one)
-        check('31 own: the own check short-circuits the per-input gettxout calls',
-              (rpc_n(RPC_BASE_P, 'gettxout') - g0) == 0, (g0, rpc_n(RPC_BASE_P, 'gettxout')))
-        t = state_tx(rpc_own)
-        check('31 own: the tx is recorded broadcast with the confirming block height',
-              t is not None and (t.get('broadcasted') or {}).get('blockHeight') == 899998, (t or {}).get('broadcasted'))
-        # (k) estimatesmartfee with no data: the fee rule reads
-        # unknown — never zero, never a cached fee — and recovers
-        # when the node has data again. Both nodes must be RPC
-        # here: the secondary is the fee fallback, and a mempool
-        # secondary would answer the fee (1 sat/vB) instead of
-        # the rule reading unknown.
-        s, r = req('PUT', '/api/settings', rpc_both_on())
-        check('31 nodata: RPC on for both nodes (the secondary is the fee fallback)', s == 200, (s, r))
-        s, r = req('POST', '/__test__/rpc-fee', {'insufficient': True}, base=RPC_BASE_P)
-        check('31 nodata: the primary stub fee is insufficient', s == 200, (s, r))
-        s, r = req('POST', '/__test__/rpc-fee', {'insufficient': True}, base=RPC_BASE_S)
-        check('31 nodata: the secondary stub fee is insufficient', s == 200, (s, r))
-        check('31 nodata: caches cleared for a cold node-fee cache', clear_caches())
-        f0 = rpc_n(RPC_BASE_P, 'estimatesmartfee')
-        s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'feemarket', 'params': {'maxFeeRate': 5, 'direction': 'below'}}})
-        check('31 nodata: the fee rule reads unknown (never zero, never a fee)',
-              s == 200 and r.get('fire') is False and r.get('status') == 'unknown'
-              and (r.get('detail') or {}).get('economyFee') is None, r)
-        check('31 nodata: the failed fetch was attempted fresh (no cached fee served)',
-              (rpc_n(RPC_BASE_P, 'estimatesmartfee') - f0) >= 1, (f0, rpc_n(RPC_BASE_P, 'estimatesmartfee')))
-        s, r = req('POST', '/__test__/rpc-fee', {'feerate': 0.00005}, base=RPC_BASE_P)
-        check('31 nodata: the primary stub fee is back', s == 200, (s, r))
-        s, r = req('POST', '/__test__/rpc-fee', {'feerate': 0.00005}, base=RPC_BASE_S)
-        check('31 nodata: the secondary stub fee is back', s == 200, (s, r))
-        check('31 nodata: caches cleared after the recovery', clear_caches())
-        s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'feemarket', 'params': {'maxFeeRate': 5, 'direction': 'below'}}})
-        check('31 nodata: the fee rule recovers (5 sat/vB, fires)',
-              s == 200 and r.get('fire') is True and (r.get('detail') or {}).get('economyFee') == 5, r)
-        # Cleanup: RPC off, mempool endpoints back, cadence to 60.
-        s, r = req('PUT', '/api/settings', {'primaryRpcEnabled': False, 'secondaryRpcEnabled': False,
-                                            'primaryApiUrl': STUB_BASE_P, 'secondaryApiUrl': STUB_BASE_S,
-                                            'checkCadenceSeconds': 60})
-        check('31 cleanup: RPC off, mempool endpoints + cadence restored', s == 200, (s, r))
-        delete_all_txs()
     finally:
         for p in list(v.procs):
             stop(p)
 
     # --- 11. no server left running -------------------------------------
-    for port in (PORT, RECEIVER_PORT, STUB_P, STUB_S, RPC_P, RPC_S, 18190, 18191):
+    for port in (PORT, RECEIVER_PORT, STUB_P, STUB_S, 18190, 18191):
         check('11 no server left running on port %d' % port, port_closed(port))
 
     print()

@@ -253,26 +253,6 @@ async function checkUtxoRule(state, rule, now, ctx) {
       warning: 'This UTXO is already spent — it would fire on the next evaluation.',
     };
   }
-  // (0.8.8) RPC mode: the node confirmed the outpoint is spent,
-  // but plain RPC cannot say whether the spending transaction is
-  // confirmed — there is no outspend lookup and the spender's
-  // txid is not returned. A confirmations>=1 rule cannot verify
-  // the confirmations, so it is 'unknown' and NEVER fires: firing
-  // would claim N confirmations nobody measured. (A confs=0 rule
-  // already fired above — any spend is enough for it.) The rule
-  // retries on the next evaluation; if the spend confirms, the
-  // node still cannot count it, so an RPC-mode rule at confs>=1
-  // stays unknown until the owner switches the node back to the
-  // mempool API or drops the rule to 0. The single-trigger check
-  // endpoint answers the same way, so the add-time guard never
-  // reports such a rule as already met.
-  if (res.confirmationsUnknown) {
-    return {
-      fire: false, status: 'unknown', reason: 'spent, but the RPC node cannot say whether the spend is confirmed — will retry',
-      slice: { ...freshTriggerState(now, 'unknown', 'spent, but the RPC node cannot say whether the spend is confirmed — will retry'), lastOutspend, lastError: 'spend confirmations unverifiable via RPC' },
-      detail: { spent: true, confirmed: false, txid: res.txid, confirmationsUnknown: true }, warning: null,
-    };
-  }
   // N-confirmation mode: an unconfirmed spend only watches.
   if (!res.confirmed) {
     lastOutspend.confirmations = 0;
@@ -337,10 +317,11 @@ async function checkUtxoRule(state, rule, now, ctx) {
 // an AND set waits on another rule can be missed). A broadcast
 // that already happened is one-shot and never retracted.
 // Fail-safe: if neither node answers, the trigger is 'unknown' —
-// it never fires on data it cannot read. No grace period: the tip
-// height is the chain's own state, not a feed that can go stale —
-// an offline gap that ends past the height means the height was
-// genuinely reached.
+// it never fires on data it cannot read. The grace hold is
+// applied one level up, in evaluateRule — this check still
+// answers the raw condition (a height reached while the app was
+// offline genuinely was reached; the grace only delays firing on
+// it until the pause ends).
 async function checkBlockHeightRule(state, rule, now, ctx) {
   const target = rule.params.targetHeight;
   let comb;
@@ -385,9 +366,11 @@ async function checkBlockHeightRule(state, rule, now, ctx) {
 // The set-date trigger (0.8.1). Fires when the wall clock
 // reaches params.fireAt — a pure deadline, regardless of
 // check-ins. No network call, so it cannot be 'unknown' except
-// on a malformed date (which validation prevents). No grace
-// period: the clock is the clock — an offline gap that ends
-// past the date means the date genuinely passed. The
+// on a malformed date (which validation prevents). The grace
+// hold is applied one level up, in evaluateRule — this check
+// still answers the raw condition (a date passed while the app
+// was offline genuinely passed; the grace only delays firing
+// on it until the pause ends). The
 // "fire unless I check in" snooze variant is a later addition,
 // not this rule.
 function checkSetDateRule(state, rule, now, ctx) {
@@ -431,10 +414,11 @@ function checkSetDateRule(state, rule, now, ctx) {
 // The fee comes from the cached fetch (TTL = 5 minutes),
 // so the trigger may see a move up to 5 minutes late. Fail-safe: if no
 // usable fee can be read, the trigger is 'unknown' — it never
-// fires on data it cannot read. No grace period: the fee is a
-// live market reading, not a feed that can go stale in the
-// price-trigger sense — an offline gap that ends in a low-fee
-// market means fees genuinely are low.
+// fires on data it cannot read. The grace hold is applied one
+// level up, in evaluateRule — this check still answers the raw
+// condition (a fee move while the app was offline genuinely
+// happened; the grace only delays firing on it until the pause
+// ends).
 async function checkFeeMarketRule(state, rule, now, ctx) {
   const maxRate = rule.params.maxFeeRate;
   const dir = rule.params.direction === 'above' ? 'above' : 'below';
@@ -509,7 +493,8 @@ function checkManualRule(state, rule, now, ctx) {
 // and write the rule's triggerState slice when the check produces
 // one. Returns { rule, fire, status, reason, held, slice } — held
 // is null | 'grace' | 'vacation'.
-//   Grace (0.8.0): while it is active, a price or UTXO rule is not
+//   Grace (0.8.0, extended 0.8.8): while it is active, a price,
+//     UTXO, block-height, set-date, or fee-market rule is not
 //     evaluated at all — it cannot fire, and its stored slice keeps
 //     the last real evaluation (so the subcard's current-state line
 //     still shows the live condition; only the pill says Grace).
@@ -517,7 +502,9 @@ function checkManualRule(state, rule, now, ctx) {
 //     release-check result carries status 'grace' so the hold is
 //     named there. Grace is PER RULE: in an OR set a non-held rule
 //     can still fire during a grace; in an AND set a held rule is
-//     not satisfied, so the set cannot fire.
+//     not satisfied, so the set cannot fire. Check-in rules are
+//     never held by the grace (their own offline-gap hold is
+//     separate); manual rules never fire anyway.
 //   Vacation (0.8.0): while it is on, a check-in rule does not
 //     fire — its slice records 'vacation', and the release holds
 //     it. Vacation touches check-in rules only; price, UTXO and
@@ -527,7 +514,7 @@ async function evaluateRule(state, tx, ruleIndex, now, utxoBatch) {
   const set = store.triggerOf(tx);
   const rule = set.rules[ruleIndex];
   const prevSlice = ruleTriggerState(tx, ruleIndex);
-  if ((rule.type === 'price' || rule.type === 'utxo') && isGraceActive(state, now)) {
+  if ((rule.type === 'price' || rule.type === 'utxo' || rule.type === 'blockheight' || rule.type === 'setdate' || rule.type === 'feemarket') && isGraceActive(state, now)) {
     return { rule, fire: false, status: 'grace', reason: 'grace period active — will evaluate when it ends', held: 'grace', slice: null };
   }
   if (rule.type === 'checkin' && state.settings.vacationMode) {

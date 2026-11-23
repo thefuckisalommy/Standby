@@ -141,7 +141,7 @@ async function handleApi(req, res, pathname) {
     // orphaned in the receiver, or keys found in a backup. Empty
     // on a healthy run.
     served.warnings = startupWarnings.concat(store.getStateWarnings());
-    served.grace = graceStatus(state, now); // the price/UTXO grace (0.8.0): null when none is active, else { active, indefinite, graceUntil, triggeredAt, offlineGapDays }
+    served.grace = graceStatus(state, now); // the grace (0.8.0, extended 0.8.8): null when none is active, else { active, indefinite, graceUntil, triggeredAt, offlineGapDays }
     served.bitcoin.overlaps = bitcoin.findSharedInputs(state.bitcoin.txs || []);
     // The fee verdict's 90-day peak (0.7.20): the cached number (or
     // null when there is no usable fee data), with the fetched-at
@@ -368,7 +368,7 @@ async function handleApi(req, res, pathname) {
     return sendJson(res, 200, { ok: true, status: checkinStatus(fresh, now) });
   }
 
-  // POST /api/grace/resume — end the price/UTXO grace period
+  // POST /api/grace/resume — end the grace period
   // immediately (0.8.0). The dashboard's Grace period card
   // offers this while a grace is active; an indefinite grace
   // can only end this way (saving new grace settings never
@@ -529,36 +529,12 @@ async function handleApi(req, res, pathname) {
       try { s.secondaryApiUrl = v ? bitcoin.normalizePublicApiUrl(v) : ''; }
       catch (e) { return sendError(res, 400, e.message); }
     }
-    // Per-node Bitcoin Core JSON-RPC mode (0.8.8): each node can
-    // be switched from its mempool API endpoint above to its own
-    // Core RPC. *RpcEnabled is a boolean; *RpcUrl is an http(s)
-    // URL when non-empty (same validation as the node URLs, via
-    // normalizeRpcUrl — a bare host gets http://, and a URL
-    // carrying a username or password is rejected: the user and
-    // password belong in the fields below, never in the URL);
-    // *RpcUser / *RpcPass are plain strings, empty when unset.
-    // The password is stored in state.json unencrypted, like
-    // every other setting, and flows back to the UI with the rest
-    // of the settings so a re-save does not wipe it.
-    for (const slot of ['primary', 'secondary']) {
-      const enKey = slot + 'RpcEnabled', urlKey = slot + 'RpcUrl', userKey = slot + 'RpcUser', passKey = slot + 'RpcPass';
-      if (body[enKey] !== undefined) {
-        if (typeof body[enKey] !== 'boolean') return sendError(res, 400, enKey + ' must be true or false');
-        s[enKey] = body[enKey];
-      }
-      if (body[urlKey] !== undefined) {
-        const v = typeof body[urlKey] === 'string' ? body[urlKey].trim() : '';
-        try { s[urlKey] = v ? bitcoin.normalizeRpcUrl(v) : ''; }
-        catch (e) { return sendError(res, 400, e.message); }
-      }
-      if (body[userKey] !== undefined) {
-        if (typeof body[userKey] !== 'string') return sendError(res, 400, userKey + ' must be a string');
-        s[userKey] = body[userKey];
-      }
-      if (body[passKey] !== undefined) {
-        if (typeof body[passKey] !== 'string') return sendError(res, 400, passKey + ' must be a string');
-        s[passKey] = body[passKey];
-      }
+    // (0.8.8) Secondary node on/off (Settings: Secondary node
+    // toggle): a boolean; off means primary only, no fallback
+    // anywhere. Missing in old state means enabled (the default).
+    if (body.secondaryEnabled !== undefined) {
+      if (typeof body.secondaryEnabled !== 'boolean') return sendError(res, 400, 'secondaryEnabled must be true or false');
+      s.secondaryEnabled = body.secondaryEnabled;
     }
     if (body.priceSources !== undefined) {
       const ps = body.priceSources;
@@ -570,9 +546,9 @@ async function handleApi(req, res, pathname) {
       if (bitcoin.priceSourceKey(s1) === bitcoin.priceSourceKey(s2)) return sendError(res, 400, 'price sources must be different');
       s.priceSources = { source1: s1, source2: s2 };
     }
-    // Grace period (0.8.0): the offline gap that triggers a
+    // Grace period (0.8.0, extended 0.8.8): the offline gap that triggers a
     // grace and how long it lasts (null = indefinite, until the
-    // owner resumes). Only the values the Settings dropdowns
+    // owner resumes; 0 = no grace period at all). Only the values the Settings dropdowns
     // offer are accepted — anything else is a 400. Saving new
     // values does NOT change an already-active grace (it keeps
     // the duration it was created with).
@@ -584,7 +560,7 @@ async function handleApi(req, res, pathname) {
     }
     if (body.graceDurationDays !== undefined) {
       if (body.graceDurationDays !== null && (typeof body.graceDurationDays !== 'number' || !GRACE_DURATION_DAYS.includes(body.graceDurationDays))) {
-        return sendError(res, 400, 'graceDurationDays must be one of ' + GRACE_DURATION_DAYS.join(', ') + ' days, or null for indefinite');
+        return sendError(res, 400, 'graceDurationDays must be one of ' + GRACE_DURATION_DAYS.join(', ') + ' days (0 = no grace period), or null for indefinite');
       }
       s.graceDurationDays = body.graceDurationDays;
     }
@@ -1669,40 +1645,15 @@ async function handleApi(req, res, pathname) {
       try { settings.secondaryApiUrl = bitcoin.normalizePublicApiUrl(bsSettings.secondaryApiUrl); }
       catch (e) { return sendError(res, 400, 'backup secondary node URL: ' + e.message); }
     }
-    // (0.8.8) The per-node RPC settings ride along the same way:
-    // a backup from before 0.8.8 carries none, which restores as
-    // disabled/blank; a present but invalid value rejects the
-    // whole restore, like a bad node URL. The RPC password rides
-    // along in the backup like every other setting (state.json
-    // stores it unencrypted, and so does the backup file).
-    for (const slot of ['primary', 'secondary']) {
-      const enKey = slot + 'RpcEnabled', urlKey = slot + 'RpcUrl', userKey = slot + 'RpcUser', passKey = slot + 'RpcPass';
-      if (bsSettings[enKey] !== undefined && bsSettings[enKey] !== null) {
-        if (typeof bsSettings[enKey] !== 'boolean') return sendError(res, 400, 'backup ' + enKey + ' must be true or false');
-        settings[enKey] = bsSettings[enKey];
-      } else {
-        settings[enKey] = false;
-      }
-      if (typeof bsSettings[urlKey] === 'string' && bsSettings[urlKey].trim()) {
-        try { settings[urlKey] = bitcoin.normalizeRpcUrl(bsSettings[urlKey]); }
-        catch (e) { return sendError(res, 400, 'backup ' + slot + ' RPC URL: ' + e.message); }
-      } else if (bsSettings[urlKey] !== undefined && bsSettings[urlKey] !== null && typeof bsSettings[urlKey] !== 'string') {
-        return sendError(res, 400, 'backup ' + urlKey + ' must be a string');
-      } else {
-        settings[urlKey] = '';
-      }
-      if (bsSettings[userKey] !== undefined && bsSettings[userKey] !== null) {
-        if (typeof bsSettings[userKey] !== 'string') return sendError(res, 400, 'backup ' + userKey + ' must be a string');
-        settings[userKey] = bsSettings[userKey];
-      } else {
-        settings[userKey] = '';
-      }
-      if (bsSettings[passKey] !== undefined && bsSettings[passKey] !== null) {
-        if (typeof bsSettings[passKey] !== 'string') return sendError(res, 400, 'backup ' + passKey + ' must be a string');
-        settings[passKey] = bsSettings[passKey];
-      } else {
-        settings[passKey] = '';
-      }
+    // (0.8.8) The secondary-enabled toggle rides along: a backup
+    // from before 0.8.8 carries none, which restores as enabled
+    // (the default); a present but non-boolean value rejects the
+    // whole restore, like a bad node URL.
+    if (bsSettings.secondaryEnabled !== undefined && bsSettings.secondaryEnabled !== null) {
+      if (typeof bsSettings.secondaryEnabled !== 'boolean') return sendError(res, 400, 'backup secondaryEnabled must be true or false');
+      settings.secondaryEnabled = bsSettings.secondaryEnabled;
+    } else {
+      settings.secondaryEnabled = true;
     }
     // (0.8.0) The price sources ride along: a backup from before
     // 0.8.0 carries none, which restores as the defaults; a present
@@ -1736,7 +1687,7 @@ async function handleApi(req, res, pathname) {
     }
     if (bsSettings.graceDurationDays !== undefined) {
       if (bsSettings.graceDurationDays !== null && (typeof bsSettings.graceDurationDays !== 'number' || !GRACE_DURATION_DAYS.includes(bsSettings.graceDurationDays))) {
-        return sendError(res, 400, 'backup graceDurationDays must be one of ' + GRACE_DURATION_DAYS.join(', ') + ' days, or null for indefinite');
+        return sendError(res, 400, 'backup graceDurationDays must be one of ' + GRACE_DURATION_DAYS.join(', ') + ' days (0 = no grace period), or null for indefinite');
       }
       settings.graceDurationDays = bsSettings.graceDurationDays;
     } else {

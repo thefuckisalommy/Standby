@@ -1,5 +1,5 @@
 // Standby 0.8.2 DOM checks — block-height, set-date, and fee-market triggers.
-// Runs public/app.js from branch-0.8.8 in Node with the
+// Runs public/app.js from branch-0.8.8-nonrpc in Node with the
 // minimal DOM shim from dom_check094.js (same El class, same
 // document/window/fetch/setInterval stubs) and verifies the 0.8.0
 // trigger UI only — the 094 suite still owns everything else.
@@ -1771,155 +1771,99 @@ function check(name, cond, detail) {
     els['btc-primary-status'] && els['btc-primary-status'].textContent);
   toggleDetails(detP, false);
 
-  // --- 10c. Per-node RPC mode (0.8.8) ---
-  // Each node has an RPC checkbox: the label swaps between
-  // "(mempool endpoint)" and "(RPC endpoint)", the RPC
-  // username/password fields appear only in RPC mode, the URL box
-  // swaps between the two saved URLs (the inactive one is parked,
-  // never lost), and Save round-trips both URLs per mode. The
-  // launcher started Core RPC stubs on 18277 (primary) and 18278
-  // (secondary): same tip (900,000) and a 5 sat/vB
-  // estimatesmartfee, so the connection test proves the RPC path
-  // end to end. Cleanup at the end restores the seeded mempool
-  // nodes and re-tests them, so later sections see the seeded
-  // state.
-  const RPC_P = 'http://127.0.0.1:18277';
-  const RPC_S = 'http://127.0.0.1:18278';
-  for (const lbl of ['primary', 'secondary']) {
-    check('rpc static: the ' + lbl + ' node has an RPC checkbox (static HTML)',
-      idx.indexOf('id="btc-' + lbl + '-rpc"') !== -1, '');
-    check('rpc static: the ' + lbl + ' RPC fields hold a username + password input (static HTML)',
-      idx.indexOf('id="btc-' + lbl + '-rpc-fields"') !== -1
-      && idx.indexOf('id="btc-' + lbl + '-rpc-user"') !== -1
-      && idx.indexOf('id="btc-' + lbl + '-rpc-pass"') !== -1, '');
-    check('rpc static: the ' + lbl + ' RPC fields are hidden by default (static HTML)',
-      idx.indexOf('id="btc-' + lbl + '-rpc-fields" style="display:none"') !== -1, '');
-    check('rpc static: the ' + lbl + ' label reads "(mempool endpoint)" by default (static HTML)',
-      idx.indexOf('>' + (lbl === 'primary' ? 'Primary' : 'Secondary') + ' node (mempool endpoint)<') !== -1, '');
-  }
+  // --- 10d. Secondary-node toggle (0.8.8) ---
+  // The toggle sits inline with the Secondary node heading,
+  // right-aligned — the same switch as the arm/disarm toggle on
+  // a transaction card — and never hides with the settings it
+  // controls. Off hides the secondary URL box without clearing
+  // its saved value, and the secondary pill reads Disabled —
+  // never Offline, Failed, or a stale timestamp. The Dashboard
+  // readiness row names the slot ("Secondary Node"), not the
+  // provider host; Settings still shows the host. Save
+  // round-trips it.
+  check('secondary toggle static: the toggle exists in the HTML',
+    idx.indexOf('id="btc-secondary-enabled"') !== -1, '');
+  check('secondary toggle static: the toggle is the same switch as the arm/disarm toggle (class "switch green")',
+    idx.indexOf('class="switch green" id="btc-secondary-enabled-wrap"') !== -1, '');
+  check('secondary toggle static: the toggle sits inline with the Secondary node heading (label, then switch, in the heading row)',
+    idx.indexOf('class="node-subhead"') !== -1
+    && idx.indexOf('class="node-subhead"') < idx.indexOf('<label for="btc-secondary-url">Secondary node</label>')
+    && idx.indexOf('<label for="btc-secondary-url">Secondary node</label>') < idx.indexOf('id="btc-secondary-enabled"'), '');
+  check('secondary toggle static: the heading row spreads label and switch apart (space-between, so the switch sits right-aligned)',
+    /\.node-subhead\s*\{[^}]*justify-content:\s*space-between/.test(css), '');
+  check('secondary toggle static: the toggle sits before the secondary URL box',
+    idx.indexOf('id="btc-secondary-enabled"') !== -1 && idx.indexOf('id="btc-secondary-enabled"') < idx.indexOf('id="btc-secondary-url"'), '');
+  check('secondary toggle static: the toggle sits outside the secondary fields wrapper (it never hides with them)',
+    idx.indexOf('id="btc-secondary-enabled"') !== -1 && idx.indexOf('id="btc-secondary-enabled"') < idx.indexOf('id="btc-secondary-fields"'), '');
+  check('secondary toggle static: the secondary fields wrapper exists in the HTML',
+    idx.indexOf('id="btc-secondary-fields"') !== -1, '');
   await rerender(appJs);
-  check('rpc initial: both RPC checkboxes start unchecked',
-    els['btc-primary-rpc'] && els['btc-primary-rpc'].checked === false
-    && els['btc-secondary-rpc'] && els['btc-secondary-rpc'].checked === false, '');
-  check('rpc initial: the primary label reads "(mempool endpoint)"',
-    els['btc-primary-label'] && els['btc-primary-label'].textContent === 'Primary node (mempool endpoint)',
-    els['btc-primary-label'] && els['btc-primary-label'].textContent);
-  check('rpc initial: the primary RPC fields are hidden',
-    els['btc-primary-rpc-fields'] && els['btc-primary-rpc-fields'].style.display === 'none',
-    els['btc-primary-rpc-fields'] && els['btc-primary-rpc-fields'].style.display);
-  check('rpc initial: the primary URL box holds the mempool stub',
-    els['btc-primary-url'] && els['btc-primary-url'].value === 'http://127.0.0.1:18275',
-    els['btc-primary-url'] && els['btc-primary-url'].value);
-  // Toggle the primary on: the label swaps, the fields appear,
-  // and the box swaps to the (empty) RPC URL — the mempool URL is
-  // parked, not lost.
-  els['btc-primary-rpc'].checked = true;
-  fireChange(els['btc-primary-rpc']);
-  check('rpc toggle: the primary label swaps to "(RPC endpoint)"',
-    els['btc-primary-label'] && els['btc-primary-label'].textContent === 'Primary node (RPC endpoint)',
-    els['btc-primary-label'] && els['btc-primary-label'].textContent);
-  check('rpc toggle: the primary RPC fields appear on toggle',
-    els['btc-primary-rpc-fields'] && els['btc-primary-rpc-fields'].style.display !== 'none',
-    els['btc-primary-rpc-fields'] && els['btc-primary-rpc-fields'].style.display);
-  check('rpc toggle: the primary URL box swaps to the (empty) RPC URL',
-    els['btc-primary-url'] && els['btc-primary-url'].value === '',
-    els['btc-primary-url'] && els['btc-primary-url'].value);
-  els['btc-primary-url'].value = RPC_P;
-  els['btc-primary-rpc-user'].value = 'standby';
-  els['btc-primary-rpc-pass'].value = 'testpass';
+  check('secondary toggle: the toggle starts checked (secondary on by default)',
+    els['btc-secondary-enabled'] && els['btc-secondary-enabled'].checked === true, '');
+  check('secondary toggle: the secondary fields show while enabled',
+    els['btc-secondary-fields'] && els['btc-secondary-fields'].style.display !== 'none', '');
+  check('secondary toggle: the Dashboard readiness row names the slot "Secondary Node", not the provider host',
+    els['readiness-secondary'] && els['readiness-secondary'].textContent === 'Secondary Node',
+    els['readiness-secondary'] && els['readiness-secondary'].textContent);
+  check('secondary toggle: the readiness row never shows the provider hostname as its name',
+    els['readiness-secondary'] && els['readiness-secondary'].textContent.indexOf('127.0.0.1') === -1,
+    els['readiness-secondary'] && els['readiness-secondary'].textContent);
+  check('secondary toggle: the Settings row still shows the configured host',
+    els['btc-secondary'] && els['btc-secondary'].textContent === '127.0.0.1:18276',
+    els['btc-secondary'] && els['btc-secondary'].textContent);
+  // Uncheck: the fields hide immediately (values untouched).
+  els['btc-secondary-enabled'].checked = false;
+  fireChange(els['btc-secondary-enabled']);
+  check('secondary toggle: unchecking hides the secondary fields',
+    els['btc-secondary-fields'] && els['btc-secondary-fields'].style.display === 'none', '');
+  check('secondary toggle: the toggle itself stays visible while disabled (it lives in the heading row, not the fields)',
+    els['btc-secondary-enabled-wrap'] && els['btc-secondary-enabled-wrap'].style.display !== 'none', '');
+  check('secondary toggle: the switch title names the off state while disabled',
+    els['btc-secondary-enabled-wrap'] && els['btc-secondary-enabled-wrap'].title === 'Secondary node off — primary only',
+    els['btc-secondary-enabled-wrap'] && els['btc-secondary-enabled-wrap'].title);
+  check('secondary toggle: hiding keeps the saved URL in the box',
+    els['btc-secondary-url'] && els['btc-secondary-url'].value === 'http://127.0.0.1:18276',
+    els['btc-secondary-url'] && els['btc-secondary-url'].value);
   els['btn-btc-save-nodes'].click();
   await new Promise((r) => setTimeout(r, 1500));
   await waitForRender();
-  const stRpc = await (await fetch('/api/state')).json();
-  check('rpc save: the primary RPC settings round-trip (enabled, URL, user, password)',
-    stRpc.settings.primaryRpcEnabled === true && stRpc.settings.primaryRpcUrl === RPC_P
-    && stRpc.settings.primaryRpcUser === 'standby' && stRpc.settings.primaryRpcPass === 'testpass',
-    JSON.stringify({ e: stRpc.settings.primaryRpcEnabled, u: stRpc.settings.primaryRpcUrl }));
-  check('rpc save: the primary mempool URL survives the toggle to RPC',
-    stRpc.settings.primaryApiUrl === 'http://127.0.0.1:18275', stRpc.settings.primaryApiUrl);
-  check('rpc save: the UI still shows RPC after the save + reload',
-    els['btc-primary-rpc'] && els['btc-primary-rpc'].checked === true
-    && els['btc-primary-label'] && els['btc-primary-label'].textContent === 'Primary node (RPC endpoint)'
-    && els['btc-primary-url'] && els['btc-primary-url'].value === RPC_P, '');
-  // Test connection over RPC: the primary answers getblockcount +
-  // estimatesmartfee + sendrawtransaction, so the pill reads OK
-  // with the RPC fee (5 sat/vB); the secondary is still the
-  // mempool stub at 1 sat/vB.
+  const stSecOff = await (await fetch('/api/state')).json();
+  check('secondary toggle: the toggle saves off (state secondaryEnabled false)',
+    stSecOff.settings.secondaryEnabled === false, JSON.stringify(stSecOff.settings));
+  check('secondary toggle: the secondary setting survives the disable (URL kept)',
+    stSecOff.settings.secondaryApiUrl === 'http://127.0.0.1:18276', JSON.stringify(stSecOff.settings));
+  check('secondary toggle: the Settings secondary pill reads Disabled',
+    els['btc-secondary-status'] && els['btc-secondary-status'].textContent === 'Disabled',
+    els['btc-secondary-status'] && els['btc-secondary-status'].textContent);
+  check('secondary toggle: the Dashboard readiness secondary pill reads Disabled',
+    els['readiness-secondary-status'] && els['readiness-secondary-status'].textContent === 'Disabled',
+    els['readiness-secondary-status'] && els['readiness-secondary-status'].textContent);
+  check('secondary toggle: the disabled readiness row still reads "Secondary Node"',
+    els['readiness-secondary'] && els['readiness-secondary'].textContent === 'Secondary Node',
+    els['readiness-secondary'] && els['readiness-secondary'].textContent);
+  // Re-enable: the fields return with their saved values intact.
+  els['btc-secondary-enabled'].checked = true;
+  fireChange(els['btc-secondary-enabled']);
+  check('secondary toggle: re-checking shows the secondary fields again',
+    els['btc-secondary-fields'] && els['btc-secondary-fields'].style.display !== 'none',
+    els['btc-secondary-fields'] && els['btc-secondary-fields'].style.display);
+  check('secondary toggle: the switch title names the on state again after re-enabling',
+    els['btc-secondary-enabled-wrap'] && els['btc-secondary-enabled-wrap'].title === 'Secondary node on — used if the primary fails',
+    els['btc-secondary-enabled-wrap'] && els['btc-secondary-enabled-wrap'].title);
+  check('secondary toggle: the URL box still holds the saved secondary URL after re-enabling',
+    els['btc-secondary-url'] && els['btc-secondary-url'].value === 'http://127.0.0.1:18276',
+    els['btc-secondary-url'] && els['btc-secondary-url'].value);
+  els['btn-btc-save-nodes'].click();
+  await new Promise((r) => setTimeout(r, 1500));
+  await waitForRender();
+  const stSecOn = await (await fetch('/api/state')).json();
+  check('secondary toggle: the toggle saves back on',
+    stSecOn.settings.secondaryEnabled === true, JSON.stringify(stSecOn.settings));
+  // Re-test so the pills read OK again for the later sections.
   els['btn-btc-test-conn'].click();
   await new Promise((r) => setTimeout(r, 1500));
   await waitForRender();
-  check('rpc test: the primary pill reads OK after the RPC connection test',
-    els['btc-primary-status'] && els['btc-primary-status'].textContent === 'OK',
-    els['btc-primary-status'] && els['btc-primary-status'].textContent);
-  check('rpc test: the primary Fee estimates value reads 5 sat/vB (estimatesmartfee)',
-    els['btc-primary-fees-value'] && els['btc-primary-fees-value'].textContent === '5 sat/vB',
-    els['btc-primary-fees-value'] && els['btc-primary-fees-value'].textContent);
-  check('rpc test: the primary Block height value reads Height 900,000 (getblockcount)',
-    els['btc-primary-height-value'] && els['btc-primary-height-value'].textContent === 'Height 900,000',
-    els['btc-primary-height-value'] && els['btc-primary-height-value'].textContent);
-  check('rpc test: the secondary still reads its mempool fee (1 sat/vB)',
-    els['btc-secondary-fees-value'] && els['btc-secondary-fees-value'].textContent === '1 sat/vB',
-    els['btc-secondary-fees-value'] && els['btc-secondary-fees-value'].textContent);
-  // Toggle the primary back off: the label swaps back, the fields
-  // hide, and the parked mempool URL returns to the box.
-  els['btc-primary-rpc'].checked = false;
-  fireChange(els['btc-primary-rpc']);
-  check('rpc toggle off: the primary label swaps back to "(mempool endpoint)"',
-    els['btc-primary-label'] && els['btc-primary-label'].textContent === 'Primary node (mempool endpoint)',
-    els['btc-primary-label'] && els['btc-primary-label'].textContent);
-  check('rpc toggle off: the primary RPC fields hide again',
-    els['btc-primary-rpc-fields'] && els['btc-primary-rpc-fields'].style.display === 'none',
-    els['btc-primary-rpc-fields'] && els['btc-primary-rpc-fields'].style.display);
-  check('rpc toggle off: the parked mempool URL returns to the primary box',
-    els['btc-primary-url'] && els['btc-primary-url'].value === 'http://127.0.0.1:18275',
-    els['btc-primary-url'] && els['btc-primary-url'].value);
-  els['btn-btc-save-nodes'].click();
-  await new Promise((r) => setTimeout(r, 1500));
-  await waitForRender();
-  const stRpcOff = await (await fetch('/api/state')).json();
-  check('rpc save off: the primary is mempool again, the RPC URL kept for re-enable',
-    stRpcOff.settings.primaryRpcEnabled === false && stRpcOff.settings.primaryApiUrl === 'http://127.0.0.1:18275'
-    && stRpcOff.settings.primaryRpcUrl === RPC_P, JSON.stringify(stRpcOff.settings));
-  // The secondary, same round-trip in miniature: toggle on, save,
-  // test, toggle off, save.
-  els['btc-secondary-rpc'].checked = true;
-  fireChange(els['btc-secondary-rpc']);
-  check('rpc secondary: the label swaps and the fields appear',
-    els['btc-secondary-label'] && els['btc-secondary-label'].textContent === 'Secondary node (RPC endpoint)'
-    && els['btc-secondary-rpc-fields'] && els['btc-secondary-rpc-fields'].style.display !== 'none', '');
-  els['btc-secondary-url'].value = RPC_S;
-  els['btc-secondary-rpc-user'].value = 'standby';
-  els['btc-secondary-rpc-pass'].value = 'testpass';
-  els['btn-btc-save-nodes'].click();
-  await new Promise((r) => setTimeout(r, 1500));
-  await waitForRender();
-  const stRpcS = await (await fetch('/api/state')).json();
-  check('rpc secondary: the secondary RPC settings round-trip, mempool URL preserved',
-    stRpcS.settings.secondaryRpcEnabled === true && stRpcS.settings.secondaryRpcUrl === RPC_S
-    && stRpcS.settings.secondaryApiUrl === 'http://127.0.0.1:18276', JSON.stringify(stRpcS.settings));
-  els['btn-btc-test-conn'].click();
-  await new Promise((r) => setTimeout(r, 1500));
-  await waitForRender();
-  check('rpc secondary: the secondary pill reads OK over RPC with the 5 sat/vB fee',
-    els['btc-secondary-status'] && els['btc-secondary-status'].textContent === 'OK'
-    && els['btc-secondary-fees-value'] && els['btc-secondary-fees-value'].textContent === '5 sat/vB',
-    els['btc-secondary-fees-value'] && els['btc-secondary-fees-value'].textContent);
-  els['btc-secondary-rpc'].checked = false;
-  fireChange(els['btc-secondary-rpc']);
-  els['btn-btc-save-nodes'].click();
-  await new Promise((r) => setTimeout(r, 1500));
-  await waitForRender();
-  const stRpcSOff = await (await fetch('/api/state')).json();
-  check('rpc secondary: the secondary is mempool again after toggle off + save',
-    stRpcSOff.settings.secondaryRpcEnabled === false && stRpcSOff.settings.secondaryApiUrl === 'http://127.0.0.1:18276'
-    && stRpcSOff.settings.secondaryRpcUrl === RPC_S, JSON.stringify(stRpcSOff.settings));
-  // Cleanup: re-test the mempool nodes so the pills read OK again
-  // for the later sections (the stored RPC results no longer match
-  // the mempool URLs, so the render would otherwise say Not tested).
-  els['btn-btc-test-conn'].click();
-  await new Promise((r) => setTimeout(r, 1500));
-  await waitForRender();
-  check('rpc cleanup: both pills read OK again on the mempool stubs',
+  check('secondary toggle: both pills read OK again after re-enabling + re-test',
     els['btc-primary-status'] && els['btc-primary-status'].textContent === 'OK'
     && els['btc-secondary-status'] && els['btc-secondary-status'].textContent === 'OK', '');
 
@@ -2214,15 +2158,16 @@ function check(name, cond, detail) {
     (checkinBars() || []).length === 2 && els['checkin-card'] && els['checkin-card'].style.display !== 'none',
     JSON.stringify(checkinBars()) + ' display=' + (els['checkin-card'] && els['checkin-card'].style.display));
 
-  // --- 18. grace period for price/UTXO triggers (0.8.0) ---
+  // --- 18. grace period for non-check-in triggers (0.8.0, extended 0.8.8) ---
   // When the app comes back after being offline longer than
-  // settings.graceOfflineDays (default 7), price and UTXO
-  // triggers are paused for settings.graceDurationDays (default
-  // 7, null = indefinite until resumed). The dashboard shows a
+  // settings.graceOfflineDays (default 7), price, UTXO,
+  // block-height, set-date, and fee-market triggers are paused
+  // for settings.graceDurationDays (default 7, null = indefinite
+  // until resumed, 0 = no grace period at all). The dashboard shows a
   // "Grace period active" card at the top (only while a grace
-  // is active for an armed price or UTXO tx) with the offline
+  // is active for an armed held tx) with the offline
   // days and the end date bolded, a Resume now button, and the
-  // muted note; armed price/UTXO tx cards read "Grace" on an
+  // muted note; armed held tx cards read "Grace" on an
   // amber pill instead of "armed"; the Settings grace card has
   // the two dropdowns (offline days to trigger, how long it
   // lasts) with Save. (Direct state.json edits for the grace,
@@ -2257,15 +2202,15 @@ function check(name, cond, detail) {
   check('grace settings static: the Settings grace card exists (title, two dropdowns, Save; the explainer lives in the "?" pop-out)',
     idx.indexOf('Grace period</h2>') !== -1 && idx.indexOf('id="set-grace-offline"') !== -1
     && idx.indexOf('id="set-grace-duration"') !== -1 && idx.indexOf('id="btn-save-grace"') !== -1
-    && appJs.indexOf('A pause for price and UTXO triggers after the app has been offline') !== -1, '');
+    && appJs.indexOf('A pause for price, UTXO, block-height, set-date, and fee-market triggers after the app has been offline') !== -1, '');
   check('grace settings static: the grace card sits after the Bitcoin price source card',
     idx.indexOf('id="btn-save-grace"') !== -1 && idx.indexOf('id="btn-save-price-sources"') !== -1
     && idx.indexOf('id="btn-save-grace"') > idx.indexOf('id="btn-save-price-sources"'), '');
   check('grace settings static: the offline dropdown offers 1/3/7/14/30 days',
     JSON.stringify(selectValues(idx, 'set-grace-offline')) === JSON.stringify(['1', '3', '7', '14', '30']),
     JSON.stringify(selectValues(idx, 'set-grace-offline')));
-  check('grace settings static: the duration dropdown offers 1/3/7/14/30 days + indefinite',
-    JSON.stringify(selectValues(idx, 'set-grace-duration')) === JSON.stringify(['1', '3', '7', '14', '30', 'indefinite']),
+  check('grace settings static: the duration dropdown offers 0 (no grace period) + 1/3/7/14/30 days + indefinite',
+    JSON.stringify(selectValues(idx, 'set-grace-duration')) === JSON.stringify(['0', '1', '3', '7', '14', '30', 'indefinite']),
     JSON.stringify(selectValues(idx, 'set-grace-duration')));
   check('grace settings static: the Save button reads "Save grace period" and is orange (primary)',
     idx.indexOf('id="btn-save-grace" class="primary"') !== -1, '');
@@ -2289,6 +2234,9 @@ function check(name, cond, detail) {
   // still accurate — only the pill says Grace).
   const priceLineBefore = (readinessBlock('Dom Price') || {}).state || '';
   const utxoLineBefore = (readinessBlock('Dom UTXO') || {}).state || '';
+  const bhLineBefore = (readinessBlock('Dom Blockheight') || {}).state || '';
+  const sdLineBefore = (readinessBlock('Dom Setdate') || {}).state || '';
+  const fmLineBefore = (readinessBlock('Dom Feemarket') || {}).state || '';
   // Seed a finite grace (offline 8 days, 7-day duration) and
   // re-render: the card shows with the offline days and the end
   // date (both bolded) and the duration.
@@ -2308,9 +2256,9 @@ function check(name, cond, detail) {
       const bolds = (gt.children || []).filter((c) => c.tagName === 'B').map((c) => c.textContent);
       return bolds.length === 2 && bolds[0] === '8 days' && bolds[1].indexOf(fmtDateShortDom(graceUntil)) !== -1;
     })(), JSON.stringify((els['grace-text'].children || []).map((c) => c.tagName + ':' + c.textContent)));
-  // The Grace pill: armed price/UTXO cards read "Grace" on
+  // The Grace pill: armed held cards read "Grace" on
   // amber; check-in and manual cards are untouched.
-  for (const label of ['Dom Price', 'Dom UTXO']) {
+  for (const label of ['Dom Price', 'Dom UTXO', 'Dom Blockheight', 'Dom Setdate', 'Dom Feemarket']) {
     const pill = cardByTitle(label) && cardStatus(cardByTitle(label));
     check('grace pill: "' + label + '" card pill reads "Grace" on amber during the grace',
       !!pill && pill.textContent === 'Grace' && pill.className === 'pill warn',
@@ -2326,6 +2274,11 @@ function check(name, cond, detail) {
   check('grace pill: the Dom UTXO readiness line is unchanged',
     (readinessBlock('Dom UTXO') || {}).state === utxoLineBefore,
     (readinessBlock('Dom UTXO') || {}).state + ' (was: ' + utxoLineBefore + ')');
+  for (const [label, before] of [['Dom Blockheight', bhLineBefore], ['Dom Setdate', sdLineBefore], ['Dom Feemarket', fmLineBefore]]) {
+    check('grace pill: the ' + label + ' readiness line is unchanged',
+      (readinessBlock(label) || {}).state === before,
+      (readinessBlock(label) || {}).state + ' (was: ' + before + ')');
+  }
   for (const label of ['Dom Check-in', 'Dom Manual', 'Dom Pill healthy']) {
     const pill = cardByTitle(label) && cardStatus(cardByTitle(label));
     check('grace pill: "' + label + '" keeps its normal pill during the grace (check-in/manual not held)',
@@ -2359,7 +2312,7 @@ function check(name, cond, detail) {
   const afterResume = await (await fetch('/api/state')).json();
   check('grace card: the grace is gone from /api/state after Resume',
     afterResume.grace === null, JSON.stringify(afterResume.grace));
-  for (const label of ['Dom Price', 'Dom UTXO']) {
+  for (const label of ['Dom Price', 'Dom UTXO', 'Dom Blockheight', 'Dom Setdate', 'Dom Feemarket']) {
     const pill = cardByTitle(label) && cardStatus(cardByTitle(label));
     check('grace pill: "' + label + '" reads "armed" again after Resume',
       !!pill && pill.textContent === 'armed',
@@ -2403,6 +2356,17 @@ function check(name, cond, detail) {
   check('grace settings: the Save confirmation shows',
     els['grace-settings-msg'] && els['grace-settings-msg'].textContent === 'Grace period saved.',
     els['grace-settings-msg'] && els['grace-settings-msg'].textContent);
+  els['set-grace-offline'].value = '7';
+  els['set-grace-duration'].value = '0';
+  els['btn-save-grace'].click();
+  await waitForRender();
+  const gZero = await (await fetch('/api/state')).json();
+  check('grace settings: saving duration 0 (no grace period) persists in /api/state',
+    gZero.settings && gZero.settings.graceDurationDays === 0,
+    JSON.stringify(gZero.settings && { graceDurationDays: gZero.settings.graceDurationDays }));
+  check('grace settings: after saving 0, the duration dropdown re-renders as 0',
+    els['set-grace-duration'] && els['set-grace-duration'].value === '0',
+    'duration=' + (els['set-grace-duration'] && els['set-grace-duration'].value));
   els['set-grace-offline'].value = '7';
   els['set-grace-duration'].value = '7';
   els['btn-save-grace'].click();
@@ -2934,7 +2898,7 @@ function check(name, cond, detail) {
     { key: 'arm', title: 'Global Arm/Disarm', bodyPhrase: 'Arms or disarms every staged transaction', appliesPhrase: 'General' },
     { key: 'nodes', title: 'Bitcoin nodes', bodyPhrase: 'The Bitcoin nodes Standby talks to', appliesPhrase: 'General' },
     { key: 'price-sources', title: 'Bitcoin price source', bodyPhrase: 'The two price sources Standby reads', appliesPhrase: 'BTC price triggers only' },
-    { key: 'grace', title: 'Grace period', bodyPhrase: 'A pause for price and UTXO triggers', appliesPhrase: 'BTC price and UTXO triggers' },
+    { key: 'grace', title: 'Grace period', bodyPhrase: 'A pause for price, UTXO, block-height, set-date, and fee-market triggers', appliesPhrase: 'BTC price, UTXO, Block height, Set date, and Fee market triggers' },
     { key: 'agreement', title: 'Price agreement', bodyPhrase: 'How closely the two price sources must agree', appliesPhrase: 'BTC price triggers only' },
     { key: 'cadence', title: 'Check cadence', bodyPhrase: 'How often every trigger is checked', bodyPhrase2: 'refreshes once every 5 minutes regardless of this setting', bodyPhrase3: 'Public nodes rate-limit heavy use', appliesPhrase: 'BTC price, UTXO, Block height, Set date, and Fee market triggers' },
     { key: 'fee', title: 'Broadcast Fee Risk', bodyPhrase: 'Where the Low / Medium / High fee pill flips', appliesPhrase: 'General' },
@@ -3057,17 +3021,11 @@ function check(name, cond, detail) {
     check('trim static: the long paragraph is gone from the page — "' + phrase.slice(0, 40) + '"',
       idx.indexOf(phrase) === -1, phrase);
   }
-  // (0.8.8) The nodes hint is gone by design: "not ... Bitcoin Core
-  // RPC" is false now that each node can BE a Core RPC endpoint —
-  // the guidance moved into the nodes "?" pop-out (the pop-out
-  // check below covers the RPC wording). The other three kept
-  // hints still read on the page.
   check('trim static: the kept short hints are still in the page',
-    idx.indexOf('The backup is not encrypted') !== -1
+    idx.indexOf('A mempool API endpoint — not an Electrum server or Bitcoin Core RPC') !== -1
+    && idx.indexOf('The backup is not encrypted') !== -1
     && idx.indexOf('POST /checkin to check in, GET /health to test') !== -1
     && idx.indexOf('A reading is only trusted when the two agree within <span id="price-sources-agreement">5%</span>.') !== -1, '');
-  check('trim static: the removed nodes hint is gone (RPC is a mode now, not a mistake)',
-    idx.indexOf('not an Electrum server or Bitcoin Core RPC') === -1, '');
   // The trimmed facts still live in the "?" pop-outs (app.js).
   // The trimmed facts still live in the "?" pop-outs (app.js).
   // ASCII-safe substrings only: the source holds \u2019
@@ -3102,9 +3060,9 @@ function check(name, cond, detail) {
   checkFilter('checkin', ['vacation', 'keys']);
   checkFilter('price', ['price-sources', 'grace', 'agreement', 'cadence']);
   checkFilter('utxo', ['grace', 'cadence']);
-  checkFilter('blockheight', ['cadence']);
-  checkFilter('setdate', ['cadence']);
-  checkFilter('feemarket', ['cadence']);
+  checkFilter('blockheight', ['grace', 'cadence']);
+  checkFilter('setdate', ['grace', 'cadence']);
+  checkFilter('feemarket', ['grace', 'cadence']);
   checkFilter('all', CARD_KEYS);
   // A hidden card is display:none, so its inputs are not
   // reachable.
@@ -3126,7 +3084,7 @@ function check(name, cond, detail) {
   }
   const TRUTH = [
     { key: 'vacation', label: 'Check-in triggers only', visible: ['all', 'checkin'] },
-    { key: 'grace', label: 'BTC price and UTXO triggers', visible: ['all', 'price', 'utxo'] },
+    { key: 'grace', label: 'BTC price, UTXO, Block height, Set date, and Fee market triggers', visible: ['all', 'price', 'utxo', 'blockheight', 'setdate', 'feemarket'] },
     { key: 'cadence', label: 'BTC price, UTXO, Block height, Set date, and Fee market triggers', visible: ['all', 'price', 'utxo', 'blockheight', 'setdate', 'feemarket'] },
     { key: 'fee', label: 'General — not tied to a specific trigger', visible: ['all', 'general'] },
     { key: 'keys', label: 'Check-in triggers only', visible: ['all', 'checkin'] },
@@ -3282,10 +3240,16 @@ function check(name, cond, detail) {
   // readings (healed by the release check after the restore in
   // the exchange-status section above), and the served price is
   // derived live from that cache — clearing it would drop the
-  // live values, and the release check below cannot re-fetch
-  // them because §16 left an offline-gap grace active for the
-  // width check, which skips price evaluation. The release check
-  // still runs so the blockheight / check-in rule slices land.
+  // live values. (0.8.8) The grace is resumed first: the
+  // extended grace holds block-height now, so a held release
+  // check could not land the blockheight slice (the OR subcard
+  // would read "Not evaluated yet", and the set-date sets in
+  // §28 would read Grace instead of armed). Resumed, the
+  // blockheight / check-in rule slices land as before. The
+  // finite grace is re-seeded at the end of the script, for the
+  // width check.
+  const resGrace25 = await fetch('/api/grace/resume', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+  check('rule sets 0.8.2: the grace is resumed so the rules evaluate', resGrace25.status === 200, 'status=' + resGrace25.status);
   const rel25 = await fetch('/api/release/check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
   check('rule sets 0.8.2: a release check runs so the rule state lines are fresh', rel25.status === 200, 'status=' + rel25.status);
   await rerender(appJs);
@@ -4799,6 +4763,14 @@ function check(name, cond, detail) {
     check('live view: the Dom Live New tx is removed', delLive.status === 200, 'status=' + delLive.status);
   }
   await rerender(appJs);
+
+  // (0.8.8) Re-seed the finite grace §25 resumed: the width check
+  // measures the grace card at 390px, so it must be visible.
+  setDomGrace({ graceUntil: new Date(Date.now() + 7 * 86400000).toISOString(), triggeredAt: new Date().toISOString(), offlineGapDays: 8 });
+  await rerender(appJs);
+  check('live view: a finite grace is left active for the width check',
+    els['grace-card'] && els['grace-card'].style.display !== 'none',
+    els['grace-card'] && els['grace-card'].style.display);
 
   console.log();
   console.log('FAILURES: ' + failures.length + (failures.length ? ' ' + JSON.stringify(failures) : ' (none)'));

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Launch Standby 0.8.8 (branch-0.8.8) + mempool stubs with
+"""Launch Standby 0.8.8 (branch-0.8.8-nonrpc) + mempool stubs with
 seeded trigger data, run dom_check099.js against it, then stop
 everything. Reuses the verify script's helpers (importing it does
 not run its main()).
@@ -7,8 +7,7 @@ not run its main()).
 Ports (must not collide with 095, which uses app 3388, receiver
 3389 and stubs 18175/18176, or 096, which uses app 3398, receiver
 3399 and stubs 18185/18186): app 3478, receiver 3479, stubs
-18275 (primary) and 18276 (secondary), RPC stubs 18277 (primary)
-and 18278 (secondary) for the 0.8.8 RPC UI checks. The stub's default BTC price
+18275 (primary) and 18276 (secondary). The stub's default BTC price
 is $98,200 (STUB_PRICE_USD unset), so the seeded price rule
 (BTC >= $150,000) does not hold and its state line reads
 "currently $98,200". The stub's tip height is 900,000 and its
@@ -38,7 +37,7 @@ spec.loader.exec_module(v)
 
 # Portability (0.8.3, tests-in-repo): resolve paths from this file.
 # _ROOT is the goal dir locally and the repo root in a checkout; the
-# app is branch-0.8.8/ locally and standby/ in a checkout.
+# app is branch-0.8.8-nonrpc/ locally and standby/ in a checkout.
 _TESTDIR = os.path.dirname(os.path.abspath(__file__))
 GOAL = os.path.dirname(_TESTDIR)
 BRANCH = v.app_dir(GOAL)
@@ -71,11 +70,6 @@ shutil.rmtree(CHECKIN_DIR, ignore_errors=True)
 # the real slipstream.mara.com, mempool.space or CoinGecko.
 p1 = v.start(['node', v.STUB, '18275'], log=LOG)
 p2 = v.start(['node', v.STUB, '18276'], log=LOG)
-# (0.8.8) The Core JSON-RPC stubs for the RPC UI checks: same tip
-# (900000) and fee (5 sat/vB) as the mempool stubs.
-RPC_STUB = os.path.join(TESTDIR, 'rpc_stubs.js')
-r1 = v.start(['node', RPC_STUB, '18277'], log=LOG)
-r2 = v.start(['node', RPC_STUB, '18278'], log=LOG)
 recv = v.start(['node', 'checkin-receiver/server.js'],
                env={'PORT': '3479', 'CHECKIN_DIR': CHECKIN_DIR}, cwd=BRANCH, log=LOG)
 app = v.start(['node', 'server.js'],
@@ -88,8 +82,6 @@ rc = 1
 try:
     assert v.wait_up(BASE), 'app did not come up'
     assert v.wait_up(RBASE, path='/health'), 'receiver did not come up'
-    assert v.wait_up('http://127.0.0.1:18277', path='/__test__/rpc-count'), 'primary RPC stub did not come up'
-    assert v.wait_up('http://127.0.0.1:18278', path='/__test__/rpc-count'), 'secondary RPC stub did not come up'
     s, h = v.req('GET', '/api/health', base=BASE)
     assert h.get('version') == '0.8.8', h
     s, r = v.req('PUT', '/api/settings', {'primaryApiUrl': 'http://127.0.0.1:18275',
@@ -203,13 +195,13 @@ try:
         else:
             print('all 099 error-phase ports closed (3468, 3469, 18265, 18266)')
 finally:
-    for p in (app, recv, p1, p2, r1, r2):
+    for p in (app, recv, p1, p2):
         v.stop(p)
     # Coverage 8: no server left running on any 09x port.
-    open_ports = [port for port in (3478, 3479, 18275, 18276, 18277, 18278) if not port_closed(port)]
+    open_ports = [port for port in (3478, 3479, 18275, 18276) if not port_closed(port)]
     if open_ports:
         print('STILL LISTENING after stop:', open_ports)
         rc = 1
     else:
-        print('all 099 ports closed (3478, 3479, 18275, 18276, 18277, 18278)')
+        print('all 099 ports closed (3478, 3479, 18275, 18276)')
 sys.exit(rc)

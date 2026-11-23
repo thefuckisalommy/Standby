@@ -592,13 +592,14 @@
     return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + 'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
   }
 
-  // Grace period (0.8.0): the card at the top of the dashboard,
-  // shown only while a grace is active for an armed price or
-  // UTXO tx. The text names how long the app was offline and
+  // Grace period (0.8.0, extended 0.8.8): the card at the top of the dashboard,
+  // shown only while a grace is active for an armed tx with a
+  // price, UTXO, block-height, set-date, or fee-market rule.
+  // The text names how long the app was offline and
   // when the pause ends (or "until you resume" for an
   // indefinite grace); Resume now ends it immediately. The
   // wording and bolding follow the approved mockup exactly:
-  // "Standby was offline for 12 days. Price and UTXO triggers
+  // "Standby was offline for 12 days. Triggers
   // are paused until Dec 22, 2026 (7 days) so they don't fire
   // on conditions that changed while the app was away.
   // Check-in triggers are not affected."
@@ -630,7 +631,7 @@
         var ts = function (t) { var s = document.createElement('span'); s.textContent = t; return s; };
         gt.appendChild(ts('Standby was offline for '));
         var b1 = document.createElement('b'); b1.textContent = gapText; gt.appendChild(b1);
-        gt.appendChild(ts('. Price and UTXO triggers are paused '));
+        gt.appendChild(ts('. Triggers are paused '));
         var b2 = document.createElement('b'); b2.textContent = endsText; gt.appendChild(b2);
         gt.appendChild(ts(' so they don\u2019t fire on conditions that changed while the app was away. Check-in triggers are not affected.'));
       }
@@ -890,7 +891,7 @@
     // owner with only archived txs still gets the prompt to add
     // one. The first thing a fresh install sees; it disappears
     // as soon as the first transaction is staged. Independent of
-    // the grace card (which needs armed price/UTXO txs to show).
+    // the grace card (which needs armed held txs to show).
     var anyStaged = (S.bitcoin.txs || []).some(function (t) { return !txStatus(t).settled && !txStatus(t).pending; });
     var gsCard = $('getting-started-card');
     if (gsCard) gsCard.style.display = anyStaged ? 'none' : '';
@@ -1079,8 +1080,8 @@
     // endpoint it was measured against: if the settings changed since
     // the test ran, the pill goes back to Not tested.
     var conn = S.bitcoin.connection || {};
-    renderNodeStatus('readiness-', 'primary', settingsActiveNodeUrl('primary', status.primaryApiUrl), conn);
-    renderNodeStatus('readiness-', 'secondary', settingsActiveNodeUrl('secondary', status.secondaryApiUrl), conn);
+    renderNodeStatus('readiness-', 'primary', status.primaryApiUrl, conn);
+    renderNodeStatus('readiness-', 'secondary', status.secondaryApiUrl, conn);
     renderExchangeRows(status);
   }
 
@@ -1457,7 +1458,10 @@
   // One node's row — the host, plus a pill for the last test of that
   // endpoint (OK / Failed / Not tested). `prefix` is 'readiness-' on the
   // Dashboard and 'btc-' on the Settings tab; both render the same
-  // data. A blank URL means no secondary node is set.
+  // data. A blank URL means no secondary node is set. One exception
+  // (0.8.8): the Dashboard secondary row names the slot, not the
+  // provider — it reads "Secondary Node" whatever URL is configured
+  // (see slotName below); Settings still shows the host.
   // One node's status line (0.8.1): the host plus an overall pill —
   // OK (all three capabilities ready), CAUTION (the height probe
   // works but broadcast and/or fees are not ready), FAIL (the
@@ -1481,15 +1485,38 @@
     // an invented one. Only the readiness rows have this
     // element; the Settings rows have none, so they are untouched.
     var checkedEl = $(prefix + label + '-checked');
+    // (0.8.8) The Dashboard readiness rows name the slot, not the
+    // provider: the secondary row reads "Secondary Node" whatever
+    // URL is configured — what is off (or failing) is the whole
+    // secondary-node slot, not blockstream.info or whichever host
+    // is behind it. Settings still shows the host where it is
+    // configured (the btc- rows and the URL box).
+    var slotName = (prefix === 'readiness-' && label === 'secondary') ? 'Secondary Node' : null;
     if (!url) {
-      host.textContent = 'Not set';
+      host.textContent = slotName || 'Not set';
       pill.textContent = 'Not set';
       pill.className = 'pill muted';
       if (checksEl) checksEl.style.display = 'none';
       if (checkedEl) checkedEl.textContent = '';
       return;
     }
-    host.textContent = hostOf(url);
+    // (0.8.8) Secondary disabled: the pill says Disabled — never
+    // Offline, Failed, or a stale timestamp — and no checks or
+    // checked time are shown. The saved secondary URL is still
+    // named in Settings (it comes back when the node is
+    // re-enabled), but nothing about it reads as failing. The
+    // "Secondary Node" naming lives in the readiness row label
+    // (slotName above), not in the pill.
+    if (label === 'secondary' && S && S.settings && S.settings.secondaryEnabled === false) {
+      host.textContent = slotName || hostOf(url);
+      pill.textContent = 'Disabled';
+      pill.className = 'pill muted';
+      pill.title = 'Secondary node is off — Standby talks to the primary node only.';
+      if (checksEl) checksEl.style.display = 'none';
+      if (checkedEl) checkedEl.textContent = '';
+      return;
+    }
+    host.textContent = slotName || hostOf(url);
     var res = (conn.results || []).find(function (r) { return r.endpoint === label && r.base === url; });
     var stamp = conn.nodeCheckedAt && conn.nodeCheckedAt[label];
     if (checkedEl) checkedEl.textContent = (res && stamp) ? 'checked ' + fmtCheckedAt(stamp) : '';
@@ -1695,7 +1722,7 @@
   // redundant: if it were not ready, the pill would already name
   // the problem, e.g. "Timelocked + armed"), and a problem state
   // reads "Label + armed". An unarmed card's pill reads just
-  // Grace period (0.8.0): whether the price/UTXO grace is
+  // Grace period (0.8.0, extended 0.8.8): whether the grace is
   // active right now. S.grace is the computed view the server
   // serves on /api/state and /api/status ({ active, indefinite,
   // graceUntil, triggeredAt, offlineGapDays }) — null when no
@@ -1705,13 +1732,14 @@
   function graceActive() {
     return !!(S && S.grace && S.grace.active);
   }
-  // Whether THIS tx is held by the grace: armed, price or UTXO,
+  // Whether THIS tx is held by the grace: armed, with a
+  // price, UTXO, block-height, set-date, or fee-market rule,
   // and still active (not settled or pending). The dashboard
   // card only shows when at least one tx is held — a grace with
   // nothing to pause is not worth a card.
   function graceHoldsTx(tx) {
     if (!graceActive() || !tx || !tx.enabled) return false;
-    if (!hasRuleType(tx, 'price') && !hasRuleType(tx, 'utxo')) return false;
+    if (!hasRuleType(tx, 'price') && !hasRuleType(tx, 'utxo') && !hasRuleType(tx, 'blockheight') && !hasRuleType(tx, 'setdate') && !hasRuleType(tx, 'feemarket')) return false;
     var st = txStatus(tx);
     return !st.settled && !st.pending;
   }
@@ -1723,7 +1751,7 @@
   function txPillText(tx, st) {
     if (st.settled || st.pending) return st.label;
     if (!tx.enabled) return 'unarmed';
-    // Grace (0.8.0): an armed price/UTXO tx held by the grace
+    // Grace (0.8.0, extended 0.8.8): an armed tx held by the grace
     // reads just "Grace" — the pill's text is the status, and
     // the arm state is already in the amber colour.
     if (st.label === 'Grace') return 'Grace';
@@ -1865,8 +1893,9 @@
     // here is the pill's text, and txPillText returns it plainly
     // for an unarmed tx instead of appending " + unarmed" to it.
     if (!tx.enabled) return { label: 'unarmed', cls: 'muted', settled: false, pending: false };
-    // Grace (0.8.0): while the price/UTXO grace is active, an
-    // armed price or UTXO tx reads "Grace" on an amber pill —
+    // Grace (0.8.0, extended 0.8.8): while the grace is active, an
+    // armed tx with a price, UTXO, block-height, set-date, or
+    // fee-market rule reads "Grace" on an amber pill —
     // the rule is paused, not ready. Settled/pending txs return
     // above, so only an active tx can show this; check-in and
     // manual txs are not held by the grace and fall through to
@@ -1875,7 +1904,7 @@
     // state line, the trigger condition + current value, is
     // unchanged, because the grace does not change the rule.)
     if (graceActive()) {
-      if (hasRuleType(tx, 'price') || hasRuleType(tx, 'utxo')) return { label: 'Grace', cls: 'warn', settled: false, pending: false };
+      if (hasRuleType(tx, 'price') || hasRuleType(tx, 'utxo') || hasRuleType(tx, 'blockheight') || hasRuleType(tx, 'setdate') || hasRuleType(tx, 'feemarket')) return { label: 'Grace', cls: 'warn', settled: false, pending: false };
     }
     return { label: 'Ready', cls: 'ok', settled: false, pending: false };
   }
@@ -2254,7 +2283,7 @@
     if (sts.every(function (s) { return s.settled; })) return { label: 'Broadcasted', cls: 'ok', settled: true, pending: false };
     if (sts.some(function (s) { return s.pending; })) return { label: 'Broadcast', cls: 'warn', settled: false, pending: true };
     if (!set.enabled) return { label: 'unarmed', cls: 'muted', settled: false, pending: false };
-    if (graceActive() && (hasRuleType(set, 'price') || hasRuleType(set, 'utxo'))) return { label: 'Grace', cls: 'warn', settled: false, pending: false };
+    if (graceActive() && (hasRuleType(set, 'price') || hasRuleType(set, 'utxo') || hasRuleType(set, 'blockheight') || hasRuleType(set, 'setdate') || hasRuleType(set, 'feemarket'))) return { label: 'Grace', cls: 'warn', settled: false, pending: false };
     return { label: 'Ready', cls: 'ok', settled: false, pending: false };
   }
   // The set card's pill text — the txPillText rule, at set level.
@@ -2467,76 +2496,29 @@
     return row;
   }
 
-  // (0.8.8) Per-node RPC mode: each node has a mempool URL and an
-  // RPC URL, and the URL box shows the active mode's one. The
-  // checkbox swaps between them; nodeRpcOther holds the inactive
-  // mode's URL while editing, seeded from settings by
-  // renderBitcoin and swapped by the toggle. Both URLs persist
-  // on Save — saveBitcoinSettings reads the box for the active
-  // mode and nodeRpcOther for the other.
-  var nodeRpcOther = { primary: '', secondary: '' };
-  function nodeRpcLabel(which, rpc) {
-    return (which === 'primary' ? 'Primary node ' : 'Secondary node ') + (rpc ? '(RPC endpoint)' : '(mempool endpoint)');
+  // (0.8.8) Secondary on/off: when the secondary is disabled,
+  // only the heading-row toggle shows — the URL box hides, but
+  // its value is never cleared, so re-enabling brings it back as
+  // saved. The toggle lives in the Secondary node heading row
+  // (right-aligned, like the arm/disarm switch on a card), so it
+  // never hides with the settings it controls.
+  function syncSecondaryEnabled() {
+    var on = $('btc-secondary-enabled').checked;
+    $('btc-secondary-fields').style.display = on ? '' : 'none';
+    $('btc-secondary-enabled-wrap').title = on ? 'Secondary node on — used if the primary fails' : 'Secondary node off — primary only';
   }
-  function syncNodeRpcRow(which) {
-    var rpc = $('btc-' + which + '-rpc').checked;
-    $('btc-' + which + '-label').textContent = nodeRpcLabel(which, rpc);
-    $('btc-' + which + '-rpc-fields').style.display = rpc ? '' : 'none';
-    // The placeholder is the example for the active mode: the
-    // mempool URL in mempool mode, Core's default RPC endpoint
-    // (localhost — the same on every machine, no one's address)
-    // in RPC mode.
-    $('btc-' + which + '-url').placeholder = rpc ? 'http://127.0.0.1:8332'
-      : (which === 'primary' ? 'https://mempool.space' : 'https://blockstream.info/api');
-  }
-  function toggleNodeRpc(which) {
-    var input = $('btc-' + which + '-url');
-    var other = nodeRpcOther[which];
-    nodeRpcOther[which] = input.value;
-    input.value = other;
-    syncNodeRpcRow(which);
-    // The status row shows the currently-active endpoint, so it
-    // follows the toggle at once (the pill falls back to Not
-    // tested — the last test was against the other endpoint).
-    renderNodeStatus('btc-', which, activeNodeUrl(which), (S.bitcoin && S.bitcoin.connection) || {});
-  }
-  // (0.8.8) The endpoint a node is actually using. The Settings
-  // rows read it from the URL box, which always holds the active
-  // mode's URL — including an unsaved toggle. The Dashboard
-  // readiness rows read it from saved settings instead, falling
-  // back to the status payload's URL when the settings do not
-  // carry the new keys yet.
-  function activeNodeUrl(which) {
-    return $('btc-' + which + '-url').value;
-  }
-  function settingsActiveNodeUrl(which, fallback) {
-    var st = S.settings || {};
-    var rpc = which === 'primary' ? st.primaryRpcEnabled : st.secondaryRpcEnabled;
-    if (rpc) return (which === 'primary' ? st.primaryRpcUrl : st.secondaryRpcUrl) || '';
-    var api = which === 'primary' ? st.primaryApiUrl : st.secondaryApiUrl;
-    return (typeof api === 'string' && api !== '') ? api : (fallback || '');
-  }
-
   function renderBitcoin() {
-    var st = S.settings;
-    var pRpc = !!st.primaryRpcEnabled, sRpc = !!st.secondaryRpcEnabled;
-    $('btc-primary-rpc').checked = pRpc;
-    $('btc-secondary-rpc').checked = sRpc;
-    $('btc-primary-rpc-user').value = st.primaryRpcUser || '';
-    $('btc-primary-rpc-pass').value = st.primaryRpcPass || '';
-    $('btc-secondary-rpc-user').value = st.secondaryRpcUser || '';
-    $('btc-secondary-rpc-pass').value = st.secondaryRpcPass || '';
-    // The inactive mode's URL lives in nodeRpcOther while
-    // editing; the box shows the active mode's URL.
-    nodeRpcOther.primary = pRpc ? (st.primaryApiUrl || 'https://mempool.space') : (st.primaryRpcUrl || '');
-    nodeRpcOther.secondary = sRpc ? (st.secondaryApiUrl || '') : (st.secondaryRpcUrl || '');
-    $('btc-primary-url').value = pRpc ? (st.primaryRpcUrl || '') : (st.primaryApiUrl || 'https://mempool.space');
-    $('btc-secondary-url').value = sRpc ? (st.secondaryRpcUrl || '') : (st.secondaryApiUrl || '');
-    syncNodeRpcRow('primary');
-    syncNodeRpcRow('secondary');
+    $('btc-primary-url').value = S.settings.primaryApiUrl || 'https://mempool.space';
+    $('btc-secondary-url').value = S.settings.secondaryApiUrl || '';
+    // (0.8.8) Secondary on/off — missing in old state means
+    // enabled. The toggle sits in the secondary heading row and
+    // hides the rest of the secondary settings while off,
+    // without clearing them (see syncSecondaryEnabled).
+    $('btc-secondary-enabled').checked = S.settings.secondaryEnabled !== false;
+    syncSecondaryEnabled();
     var conn = S.bitcoin.connection || {};
-    renderNodeStatus('btc-', 'primary', activeNodeUrl('primary'), conn);
-    renderNodeStatus('btc-', 'secondary', activeNodeUrl('secondary'), conn);
+    renderNodeStatus('btc-', 'primary', S.settings.primaryApiUrl, conn);
+    renderNodeStatus('btc-', 'secondary', S.settings.secondaryApiUrl, conn);
 
     var txs = S.bitcoin.txs || [];
     var overlapsByTx = computeOverlaps();
@@ -4109,20 +4091,14 @@
   }
 
   async function saveBitcoinSettings() {
-    // (0.8.8) Both URLs persist: the box holds the active mode's
-    // URL, nodeRpcOther the other mode's.
-    var pRpc = $('btc-primary-rpc').checked, sRpc = $('btc-secondary-rpc').checked;
     var s = await api('PUT', '/api/settings', {
-      primaryApiUrl: pRpc ? nodeRpcOther.primary : $('btc-primary-url').value,
-      secondaryApiUrl: sRpc ? nodeRpcOther.secondary : $('btc-secondary-url').value,
-      primaryRpcEnabled: pRpc,
-      primaryRpcUrl: pRpc ? $('btc-primary-url').value : nodeRpcOther.primary,
-      primaryRpcUser: $('btc-primary-rpc-user').value,
-      primaryRpcPass: $('btc-primary-rpc-pass').value,
-      secondaryRpcEnabled: sRpc,
-      secondaryRpcUrl: sRpc ? $('btc-secondary-url').value : nodeRpcOther.secondary,
-      secondaryRpcUser: $('btc-secondary-rpc-user').value,
-      secondaryRpcPass: $('btc-secondary-rpc-pass').value,
+      primaryApiUrl: $('btc-primary-url').value,
+      secondaryApiUrl: $('btc-secondary-url').value,
+      // (0.8.8) Secondary on/off: the toggle's value rides with
+      // the rest of the node settings. The secondary URL is sent
+      // as it stands, so turning the node off never clears its
+      // saved settings — re-enabling brings it back as saved.
+      secondaryEnabled: $('btc-secondary-enabled').checked,
     });
     S.settings = s;
   }
@@ -4145,11 +4121,11 @@
     } catch (e) { setMsg($('btc-nodes-msg'), e.message, false); }
   });
 
-  // (0.8.8) RPC mode toggle: the URL box swaps between the
-  // mempool URL and the RPC URL, each mode keeping its own
-  // value; the username/password fields show only in RPC mode.
-  $('btc-primary-rpc').addEventListener('change', function () { toggleNodeRpc('primary'); });
-  $('btc-secondary-rpc').addEventListener('change', function () { toggleNodeRpc('secondary'); });
+
+  // (0.8.8) Secondary on/off: hiding/showing the secondary
+  // settings is immediate; the value itself is saved with the
+  // rest of the node settings (Save nodes).
+  $('btc-secondary-enabled').addEventListener('change', syncSecondaryEnabled);
 
   // The Add form's fallback row (0.7.17): shown only while the route
   // is Slipstream — when the route is public the setting is stored
@@ -5069,8 +5045,8 @@
     patchCheckinBars(status);
     patchReadinessRows();
     var conn = (S.bitcoin && S.bitcoin.connection) || {};
-    renderNodeStatus('readiness-', 'primary', settingsActiveNodeUrl('primary', status.primaryApiUrl), conn);
-    renderNodeStatus('readiness-', 'secondary', settingsActiveNodeUrl('secondary', status.secondaryApiUrl), conn);
+    renderNodeStatus('readiness-', 'primary', status.primaryApiUrl, conn);
+    renderNodeStatus('readiness-', 'secondary', status.secondaryApiUrl, conn);
     renderExchangeRows(status);
     // The Logs tab has no inputs in it — rebuilding its rows is
     // safe any time, even with a pop-out open over it.
@@ -5082,8 +5058,8 @@
     // node rows, price-source rows (they read the dropdowns,
     // never write them), the agreement span, and the fee zone
     // bar (it reads the two number inputs and moves the ranges).
-    renderNodeStatus('btc-', 'primary', activeNodeUrl('primary'), conn);
-    renderNodeStatus('btc-', 'secondary', activeNodeUrl('secondary'), conn);
+    renderNodeStatus('btc-', 'primary', S.settings.primaryApiUrl, conn);
+    renderNodeStatus('btc-', 'secondary', S.settings.secondaryApiUrl, conn);
     refreshPriceSourceRow(1);
     refreshPriceSourceRow(2);
     var agreeSpan = $('price-sources-agreement');
@@ -5658,7 +5634,7 @@
     },
     nodes: {
       title: 'Bitcoin nodes',
-      body: 'The Bitcoin nodes Standby talks to. Standby reads the chain through these nodes \u2014 it checks whether a UTXO is spent, confirms a broadcast landed, and submits your transactions. The primary is tried first; if it fails, the secondary is used. Leave the secondary blank to use the primary alone. Each node is either a mempool API endpoint \u2014 mempool.space by default, another public instance, or your own mempool on the LAN \u2014 or, with the RPC box ticked, your own Bitcoin Core node over JSON-RPC, with the username and password it asks for. An RPC node needs txindex=1 in its bitcoin.conf: without it Core cannot look up historical transactions, so parent lookups read unknown and Standby cannot verify spends. UTXO triggers ask the node whether the watched UTXO is spent, and every transaction\u2019s broadcast goes through a node. Check-in, set-date, and manual triggers do not read the node to decide whether to fire; price triggers read the exchanges instead. Block-height and fee-market triggers read the node (the tip height and the fee estimate).',
+      body: 'The Bitcoin nodes Standby talks to. Standby reads the chain through these nodes \u2014 it checks whether a UTXO is spent, confirms a broadcast landed, and submits your transactions. The primary is tried first; if it fails, the secondary is used. Leave the secondary blank to use the primary alone, or turn it off with the toggle in the Secondary node heading: off means the primary node only, with no fallback if it is down or unreachable. The address is a mempool instance \u2014 mempool.space by default, another public instance, or your own mempool on the LAN. UTXO triggers ask the node whether the watched UTXO is spent, and every transaction\u2019s broadcast goes through a node. Check-in, set-date, and manual triggers do not read the node to decide whether to fire; price triggers read the exchanges instead. Block-height and fee-market triggers read the node (the tip height and the fee estimate).',
       triggers: ['general'],
     },
     'price-sources': {
@@ -5668,8 +5644,8 @@
     },
     grace: {
       title: 'Grace period',
-      body: 'A pause for price and UTXO triggers after the app has been offline. If Standby was offline longer than the \u2018offline\u2019 days, price and UTXO triggers are paused for the \u2018lasts\u2019 days (or until you resume) so they don\u2019t fire on conditions that changed while the app was away. Checking in does not clear a grace. Check-in triggers are not affected \u2014 they have their own offline-gap hold.',
-      triggers: ['price', 'utxo'],
+      body: 'A pause for price, UTXO, block-height, set-date, and fee-market triggers after the app has been offline. If Standby was offline longer than the \u2018offline\u2019 days, those triggers are paused for the \u2018lasts\u2019 days (or until you resume) so they don\u2019t fire on conditions that changed while the app was away. Set \u2018lasts\u2019 to \u201cNo grace period\u201d to turn the grace off entirely. Checking in does not clear a grace. Check-in triggers are not affected \u2014 they have their own offline-gap hold.',
+      triggers: ['price', 'utxo', 'blockheight', 'setdate', 'feemarket'],
     },
     agreement: {
       title: 'Price agreement',

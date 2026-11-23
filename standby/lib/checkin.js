@@ -312,7 +312,7 @@ function applyOfflineHold(state, now) {
   return true;
 }
 
-// --- Grace period for price/UTXO triggers (0.8.0) ---
+// --- Grace period for non-check-in triggers (0.8.0, extended 0.8.8) ---
 // state.grace = { graceUntil, triggeredAt, offlineGapDays }.
 // graceUntil is an ISO timestamp, or null for an indefinite
 // grace (until the owner resumes). triggeredAt is when the
@@ -327,6 +327,9 @@ function applyOfflineHold(state, now) {
 // POST /api/grace/resume. Check-in triggers are not affected
 // by it at all: they keep their own heldUntil hold above,
 // which is a separate mechanism with its own thresholds.
+// (0.8.8) The grace holds price, UTXO, block-height, set-date,
+// and fee-market rules; a grace duration of 0 disables it
+// entirely (applyGrace never sets one).
 function graceStatus(state, now) {
   const g = (state && state.grace && typeof state.grace === 'object') ? state.grace : null;
   if (!g || !g.triggeredAt) return null;
@@ -343,15 +346,16 @@ function isGraceActive(state, now) {
   return graceStatus(state, now) !== null;
 }
 // Notice an offline gap and start a grace period for the
-// price/UTXO triggers, if the gap is longer than the
+// non-check-in triggers, if the gap is longer than the
 // configured threshold. Runs next to applyOfflineHold in
 // evaluateRelease and on the GET /api/state and /api/status
 // reads, and on the hourly tick — so a returning app notices
-// the gap promptly, before any price/UTXO rule can fire.
+// the gap promptly, before any held rule can fire.
 // Returns true when it set a grace. (The hourly tick refreshes
 // lastOnlineAt right after this runs, so an expired grace is
 // not re-set on the same stale stamp — a fresh gap after the
-// app returns is what sets the next one.)
+// app returns is what sets the next one.) A grace duration of
+// 0 disables the grace entirely: no grace is ever set.
 function applyGrace(state, now) {
   if (isGraceActive(state, now)) return false;
   const online = state.checkin && state.checkin.lastOnlineAt ? new Date(state.checkin.lastOnlineAt) : null;
@@ -362,6 +366,7 @@ function applyGrace(state, now) {
   if (gapMs <= offlineDays * 86400000) return false;
   const durationDays = (s.graceDurationDays === null) ? null
     : ((typeof s.graceDurationDays === 'number' && GRACE_DURATION_DAYS.includes(s.graceDurationDays)) ? s.graceDurationDays : 7);
+  if (durationDays === 0) return false; // grace disabled: never set one
   state.grace = {
     graceUntil: durationDays === null ? null : new Date(now.getTime() + durationDays * 86400000).toISOString(),
     triggeredAt: now.toISOString(),

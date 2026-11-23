@@ -61,7 +61,7 @@
       <p>
         <button id="btn-resume-grace" class="primary">Resume now</button>
       </p>
-      <p class="muted">Ends the grace period immediately — price and UTXO triggers will evaluate on the next check.</p>
+      <p class="muted">Ends the grace period immediately — held triggers will evaluate on the next check.</p>
       <p id="grace-msg" class="muted"></p>
     </div>
 
@@ -205,27 +205,18 @@
         <h2>Bitcoin nodes</h2>
         <button class="help-btn" id="help-nodes" data-help="nodes" aria-label="About this setting" title="About this setting">?</button>
       </div>
-      <label for="btc-primary-url" id="btc-primary-label">Primary node (mempool endpoint)</label>
-      <div class="node-row">
-        <input id="btc-primary-url" type="text" placeholder="https://mempool.space">
-        <label class="rpc-check"><input type="checkbox" id="btc-primary-rpc"> RPC</label>
+      <p class="muted">A mempool API endpoint — not an Electrum server or Bitcoin Core RPC.</p>
+      <label for="btc-primary-url">Primary node</label>
+      <input id="btc-primary-url" type="text" placeholder="https://mempool.space">
+      <div class="node-subhead">
+        <label for="btc-secondary-url">Secondary node</label>
+        <label class="switch green" id="btc-secondary-enabled-wrap" title="Secondary node on — used if the primary fails">
+          <input type="checkbox" id="btc-secondary-enabled" checked>
+          <span class="slider"></span>
+        </label>
       </div>
-      <div class="rpc-fields" id="btc-primary-rpc-fields" style="display:none">
-        <label for="btc-primary-rpc-user">RPC username</label>
-        <input id="btc-primary-rpc-user" type="text" placeholder="standby">
-        <label for="btc-primary-rpc-pass">RPC password</label>
-        <input id="btc-primary-rpc-pass" type="password" placeholder="••••••••">
-      </div>
-      <label for="btc-secondary-url" id="btc-secondary-label">Secondary node (mempool endpoint)</label>
-      <div class="node-row">
-        <input id="btc-secondary-url" type="text" placeholder="https://blockstream.info/api">
-        <label class="rpc-check"><input type="checkbox" id="btc-secondary-rpc"> RPC</label>
-      </div>
-      <div class="rpc-fields" id="btc-secondary-rpc-fields" style="display:none">
-        <label for="btc-secondary-rpc-user">RPC username</label>
-        <input id="btc-secondary-rpc-user" type="text" placeholder="standby">
-        <label for="btc-secondary-rpc-pass">RPC password</label>
-        <input id="btc-secondary-rpc-pass" type="password" placeholder="••••••••">
+      <div id="btc-secondary-fields">
+      <input id="btc-secondary-url" type="text" placeholder="https://blockstream.info/api">
       </div>
       <p>
         <button id="btn-btc-save-nodes" class="primary">Save nodes</button>
@@ -306,6 +297,7 @@
       </select>
       <label for="set-grace-duration">Grace period lasts</label>
       <select id="set-grace-duration">
+        <option value="0">No grace period</option>
         <option value="1">1 day</option>
         <option value="3">3 days</option>
         <option value="7" selected>7 days</option>
