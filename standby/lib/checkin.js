@@ -264,7 +264,9 @@ function mergeExternalCheckin(state, now) {
 // been offline when it was set (the dashboard card explains
 // the pause with that number). The grace is app-level state:
 // it is set when the app notices an offline gap longer than
-// settings.graceOfflineDays, whatever txs exist at the time.
+// settings.graceOfflineDays, or the check-in outage condition
+// in applyGrace below (a short armed check-in threshold can
+// trigger it at a shorter gap) — whatever txs exist at the time.
 // It is NOT set while one is already active (an active grace
 // never re-extends itself), and it is NOT cleared by a
 // check-in — only by expiry (now past graceUntil) or by
@@ -310,9 +312,48 @@ function graceStatus(state, now) {
 function isGraceActive(state, now) {
   return graceStatus(state, now) !== null;
 }
+// (0.8.8, audit finding 1) The smallest thresholdDays among the
+// ARMED check-in rules that can actually fire — standalone txs'
+// triggers plus sets' triggers. A set member's own trigger is
+// parked while it is attached (it resumes when the tx leaves the
+// set), so it never sets the threshold: the old heldUntil code
+// scanned every tx, parked triggers included, and could grant a
+// hold for a rule that cannot fire. Returns null when no
+// check-in rule is armed — the check-in leg below needs a rule
+// to protect (unlike the old code's 35-day fallback, which was
+// harmless there because a heldUntil with no check-in rule was
+// inert; a unified grace is not inert — it would pause the
+// other rules too).
+function smallestArmedCheckinThresholdDays(state) {
+  const txs = state.bitcoin.txs || [];
+  const memberIds = new Set();
+  for (const s of (state.bitcoin.sets || [])) for (const id of (s.txIds || [])) memberIds.add(id);
+  const thresholds = [];
+  for (const t of txs) {
+    if (!t.enabled || memberIds.has(t.id) || !store.hasTriggerType(t, 'checkin')) continue;
+    for (const r of store.triggerOf(t).rules) if (r.type === 'checkin') thresholds.push(r.params.thresholdDays);
+  }
+  for (const s of (state.bitcoin.sets || [])) {
+    if (!s.enabled || !store.hasTriggerType(s, 'checkin')) continue;
+    for (const r of store.triggerOf(s).rules) if (r.type === 'checkin') thresholds.push(r.params.thresholdDays);
+  }
+  return thresholds.length ? Math.min.apply(null, thresholds) : null;
+}
+
 // Notice an offline gap and start a grace period for all
-// triggers, if the gap is longer than the
-// configured threshold. Runs next to applyGrace in
+// triggers. Activation is an OR of two conditions (0.8.8,
+// audit finding 1): the flat offline threshold — the gap is
+// longer than settings.graceOfflineDays — OR the old
+// check-in outage condition, restored from the pre-unification
+// heldUntil logic (0.7.22): the gap is more than a quarter of
+// the shortest ARMED check-in threshold AND more than half
+// that threshold has passed since the last check-in. The
+// second leg matters for short thresholds: a 1-day check-in
+// rule used to earn protection after a 6-hour outage, and the
+// flat 7-day threshold alone leaves it unprotected. The GRANT
+// is unchanged either way — the configured graceDurationDays,
+// never the old heldUntil pushout (now + half the threshold),
+// which the unification deliberately removed. Runs in
 // evaluateRelease and on the GET /api/state and /api/status
 // reads, and on the hourly tick — so a returning app notices
 // the gap promptly, before any held rule can fire.
@@ -330,7 +371,21 @@ function applyGrace(state, now) {
   if (!graceIsEnabled(s)) return false; // grace disabled: never set one
   const offlineDays = (typeof s.graceOfflineDays === 'number' && GRACE_OFFLINE_DAYS.includes(s.graceOfflineDays)) ? s.graceOfflineDays : 7;
   const gapMs = now.getTime() - online.getTime();
-  if (gapMs <= offlineDays * 86400000) return false;
+  let activates = gapMs > offlineDays * 86400000;
+  if (!activates) {
+    // Check-in leg (see above): only when a check-in rule is
+    // armed — with none armed there is no check-in rule to
+    // protect, and the flat leg already covers long gaps.
+    const thresholdDays = smallestArmedCheckinThresholdDays(state);
+    if (thresholdDays !== null) {
+      const thresholdMs = thresholdDays * 86400000;
+      const last = state.checkin.lastCheckinAt ? new Date(state.checkin.lastCheckinAt) : null;
+      if (last && !Number.isNaN(last.getTime())
+        && gapMs > thresholdMs / 4
+        && now.getTime() - last.getTime() > thresholdMs / 2) activates = true;
+    }
+  }
+  if (!activates) return false;
   const durationDays = (s.graceDurationDays === null) ? null
     : ((typeof s.graceDurationDays === 'number' && GRACE_DURATION_DAYS.includes(s.graceDurationDays)) ? s.graceDurationDays : 7);
   if (durationDays === 0) return false; // grace disabled: never set one

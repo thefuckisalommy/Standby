@@ -126,7 +126,8 @@ function defaultState() {
     // off, not that the owner stopped checking in. (0.8.8) The
     // offline-gap hold (heldUntil) is gone — the grace is the only
     // outage protection now, and it holds check-in rules like any
-    // other. A stored heldUntil is pruned on load (see loadState);
+    // other. A stored heldUntil is translated into a grace on load
+    // when unexpired, else pruned (see loadState);
     // both fields are null until first used.
     checkin: { lastCheckinAt: null, totalCheckins: 0, lastOnlineAt: null },
     // Grace period state (0.8.0): nulls = no grace was ever set
@@ -768,11 +769,30 @@ function loadState(dataDir) {
   // (0.8.8) The check-in offline-gap hold (heldUntil) is gone —
   // the grace holds check-in rules like any other. A stored
   // heldUntil (from state written before the unification) is
-  // dropped on load: mergeDefaults already excludes it (it is
-  // no longer in the default shape), and this delete makes the
-  // migration explicit — the hold is gone, the grace mechanism
-  // takes over from the next offline-gap detection.
+  // translated, not just dropped: an UNEXPIRED hold becomes an
+  // active grace ending at the heldUntil (audit finding 1 —
+  // dropping it let an already-due check-in broadcast on the
+  // next tick after an upgrade). An expired hold is dropped as
+  // before, and an already-active grace is never clobbered.
+  // mergeDefaults already excludes heldUntil (it is no longer
+  // in the default shape), and this delete makes the migration
+  // explicit.
   if (state.checkin && typeof state.checkin === 'object' && 'heldUntil' in state.checkin) {
+    const heldRaw = state.checkin.heldUntil;
+    const heldMs = (typeof heldRaw === 'string' && heldRaw) ? new Date(heldRaw).getTime() : NaN;
+    const nowMs = Date.now();
+    const g = state.grace;
+    const graceActive = g && typeof g === 'object' && g.triggeredAt
+      && (!g.graceUntil || new Date(g.graceUntil).getTime() > nowMs);
+    if (Number.isFinite(heldMs) && heldMs > nowMs && !graceActive) {
+      const onlineRaw = state.checkin.lastOnlineAt;
+      const onlineMs = (typeof onlineRaw === 'string' && onlineRaw) ? new Date(onlineRaw).getTime() : NaN;
+      state.grace = {
+        graceUntil: new Date(heldMs).toISOString(),
+        triggeredAt: new Date(nowMs).toISOString(),
+        offlineGapDays: Number.isFinite(onlineMs) ? Math.max(0, Math.floor((nowMs - onlineMs) / 86400000)) : null,
+      };
+    }
     delete state.checkin.heldUntil;
   }
   // 0.3.0 migration: the message release is gone. Prune everything it

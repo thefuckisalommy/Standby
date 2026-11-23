@@ -1952,9 +1952,13 @@ async function handleApi(req, res, pathname) {
     // a real date (or null), never in the future beyond the same
     // 5-minute skew — a future stamp would hide a real offline gap
     // and defeat the grace. (0.8.8) A backup's check-in hold
-    // (heldUntil) is accepted and dropped, never a 400: the hold
-    // no longer exists, and the grace takes over from the next
-    // offline-gap detection.
+    // (heldUntil) is accepted and dropped, never a 400 — and NOT
+    // translated into a grace the way loadState does (audit
+    // finding 1): a restore counts as a check-in (the clock
+    // resets to now below) and the grace is cleared by design,
+    // so there is no due check-in for a translated hold to
+    // protect and no offline gap for it to describe. Dropping
+    // it here cannot cause a broadcast.
     let lastOnlineAt = null;
     if (bsCheckin.lastOnlineAt !== undefined && bsCheckin.lastOnlineAt !== null) {
       if (typeof bsCheckin.lastOnlineAt !== 'string') {

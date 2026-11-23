@@ -2602,6 +2602,82 @@ function check(name, cond, detail) {
   check('grace card: a finite grace is left active for the width check',
     els['grace-card'] && els['grace-card'].style.display !== 'none',
     els['grace-card'] && els['grace-card'].style.display);
+  // (0.8.8, audit finding 3) Grace counts must ignore a set
+  // member's parked trigger: a member whose own trigger is
+  // check-in, inside a set whose trigger is manual, is NOT
+  // held by the grace — the set's trigger is the one that
+  // fires. The reverse (manual member, check-in set) IS held,
+  // counted through the set. (A live member's subcard carries
+  // no pill at all — only a stale member gets one — so there
+  // is no member "Grace" pill to fix; the count is the bug,
+  // plus the set card's own pill, which must read the set's
+  // trigger, not any member's parked one.)
+  const addF3M1 = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ txHex: craftHex(1, 210001), label: 'Dom F3 member ck', trigger: { type: 'checkin', params: { thresholdDays: 35 } } }) });
+  check('grace counts: the check-in member tx adds', addF3M1.status === 201, 'status=' + addF3M1.status);
+  const addF3M1Json = addF3M1.status === 201 ? await addF3M1.json() : {};
+  const f3m1Id = (addF3M1Json.tx || {}).id || null;
+  // Standalone first: the check-in member counts on its own
+  // (held 9 -> 10), so the set step below proves the drop.
+  await rerender(appJs);
+  check('grace counts: the standalone check-in member counts as held (10 held)',
+    elText(els['grace-held']) === '10 transactions are held by grace, 0 of them would fire now.',
+    elText(els['grace-held']));
+  const addF3S1 = await fetch('/api/bitcoin/sets', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ label: 'Dom F3 manual set', txIds: [f3m1Id], trigger: { type: 'manual', params: {} } }) });
+  check('grace counts: the manual set creates with the check-in member', addF3S1.status === 201, 'status=' + addF3S1.status);
+  const addF3S1Json = addF3S1.status === 201 ? await addF3S1.json() : {};
+  const f3s1Id = (addF3S1Json.set || {}).id || null;
+  await rerender(appJs);
+  check('grace counts: attaching the member to a manual set drops the held count back to 9 (parked trigger ignored)',
+    elText(els['grace-held']) === '9 transactions are held by grace, 0 of them would fire now.',
+    elText(els['grace-held']));
+  const f3s1Card = cardByTitle('Dom F3 manual set');
+  const f3s1Pill = f3s1Card && cardStatus(f3s1Card);
+  check('grace counts: the manual set card pill reads "armed", not "Grace"',
+    !!f3s1Pill && f3s1Pill.textContent === 'armed',
+    f3s1Pill ? f3s1Pill.textContent + ' / ' + f3s1Pill.className : 'no pill');
+  check('grace counts: no "Grace" anywhere on the manual set card (member subcard reads the set, not its parked trigger)',
+    !!f3s1Card && cardFaceText(f3s1Card).indexOf('Grace') === -1,
+    f3s1Card ? cardFaceText(f3s1Card) : 'no card');
+  check('grace counts: the member has no standalone card while attached',
+    !cardByTitle('Dom F3 member ck'), '');
+  // Reverse: a manual member in a check-in set IS held, counted
+  // through the set (held 9 -> 10), and the set pill reads Grace.
+  const addF3M2 = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ txHex: craftHex(2, 210002), label: 'Dom F3 member manual', trigger: { type: 'manual', params: {} } }) });
+  check('grace counts: the manual member tx adds', addF3M2.status === 201, 'status=' + addF3M2.status);
+  const addF3M2Json = addF3M2.status === 201 ? await addF3M2.json() : {};
+  const f3m2Id = (addF3M2Json.tx || {}).id || null;
+  const addF3S2 = await fetch('/api/bitcoin/sets', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ label: 'Dom F3 checkin set', txIds: [f3m2Id], trigger: { type: 'checkin', params: { thresholdDays: 35 } } }) });
+  check('grace counts: the check-in set creates with the manual member', addF3S2.status === 201, 'status=' + addF3S2.status);
+  const addF3S2Json = addF3S2.status === 201 ? await addF3S2.json() : {};
+  const f3s2Id = (addF3S2Json.set || {}).id || null;
+  await rerender(appJs);
+  check('grace counts: the manual member in a check-in set counts through the set (10 held)',
+    elText(els['grace-held']) === '10 transactions are held by grace, 0 of them would fire now.',
+    elText(els['grace-held']));
+  const f3s2Card = cardByTitle('Dom F3 checkin set');
+  const f3s2Pill = f3s2Card && cardStatus(f3s2Card);
+  check('grace counts: the check-in set card pill reads "Grace"',
+    !!f3s2Pill && f3s2Pill.textContent === 'Grace' && f3s2Pill.className === 'pill warn',
+    f3s2Pill ? f3s2Pill.textContent + ' / ' + f3s2Pill.className : 'no pill');
+  // Clean up: delete both sets (members return to standalone),
+  // then the member txs, so the fixture is back to 9 held for
+  // the sections below. The seeded grace stays active.
+  const delF3S1 = await fetch('/api/bitcoin/sets/' + f3s1Id, { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
+  check('grace counts: the manual set deletes', delF3S1.status === 200, 'status=' + delF3S1.status);
+  const delF3S2 = await fetch('/api/bitcoin/sets/' + f3s2Id, { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
+  check('grace counts: the check-in set deletes', delF3S2.status === 200, 'status=' + delF3S2.status);
+  const delF3M1 = await fetch('/api/bitcoin/txs/' + f3m1Id, { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
+  check('grace counts: the check-in member tx deletes', delF3M1.status === 200, 'status=' + delF3M1.status);
+  const delF3M2 = await fetch('/api/bitcoin/txs/' + f3m2Id, { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
+  check('grace counts: the manual member tx deletes', delF3M2.status === 200, 'status=' + delF3M2.status);
+  await rerender(appJs);
+  check('grace counts: the held count is back to 9 after cleanup',
+    elText(els['grace-held']) === '9 transactions are held by grace, 0 of them would fire now.',
+    elText(els['grace-held']));
 
   // --- 19. Getting Started empty-state card (0.8.0) ---
   // When no transactions are STAGED (active), a "Getting

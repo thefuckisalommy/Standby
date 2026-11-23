@@ -1811,7 +1811,13 @@
   // whose condition is met).
   function graceHeldTxCount() {
     var ids = {};
-    (S.bitcoin.txs || []).forEach(function (t) { if (graceHoldsTx(t)) ids[t.id] = true; });
+    // (0.8.8, audit finding 3) A set member's own trigger is
+    // parked while attached — the set's trigger is the one that
+    // fires — so members are skipped here and counted through
+    // their set below. Judging a member by its parked trigger
+    // counted it as held even when the set's trigger is manual
+    // (never held).
+    (S.bitcoin.txs || []).forEach(function (t) { if (!setOfTxId(t.id) && graceHoldsTx(t)) ids[t.id] = true; });
     (S.bitcoin.sets || []).forEach(function (s) {
       if (!graceHoldsSet(s)) return;
       (s.txIds || []).forEach(function (id) { ids[id] = true; });
@@ -1831,7 +1837,9 @@
   function graceWouldFireTxCount() {
     var ids = {};
     (S.bitcoin.txs || []).forEach(function (t) {
-      if (graceHoldsTx(t) && t.triggerStatus && t.triggerStatus.wouldFire) ids[t.id] = true;
+      // Members are skipped here, like graceHeldTxCount above —
+      // their parked trigger must not count them either.
+      if (!setOfTxId(t.id) && graceHoldsTx(t) && t.triggerStatus && t.triggerStatus.wouldFire) ids[t.id] = true;
     });
     (S.bitcoin.sets || []).forEach(function (s) {
       if (!graceHoldsSet(s) || !s.triggerStatus || !s.triggerStatus.wouldFire) return;
@@ -5768,7 +5776,7 @@
     },
     grace: {
       title: 'Grace period',
-      body: 'A pause for ALL triggers — price, UTXO, block-height, set-date, fee-market, and check-in — after the app has been offline. If Standby was offline longer than the \u2018offline\u2019 days, those triggers are paused for the \u2018lasts\u2019 days (or until you resume) so they don\u2019t fire on conditions that changed while the app was away. A check-in rule is held by the same grace as everything else: its due date is not pushed out, and while the grace is active a past-due check-in reads as held, not due. Turn the grace off with the toggle in the card heading: off means triggers fire immediately, with no pause after an offline gap — and no outage protection for check-in either. Checking in does not clear a grace.',
+      body: 'A pause for ALL triggers — price, UTXO, block-height, set-date, fee-market, and check-in — after the app has been offline. If Standby was offline longer than the \u2018offline\u2019 days, those triggers are paused for the \u2018lasts\u2019 days (or until you resume) so they don\u2019t fire on conditions that changed while the app was away. A check-in rule is held by the same grace as everything else: its due date is not pushed out, and while the grace is active a past-due check-in reads as held, not due. Turn the grace off with the toggle in the card heading: off means triggers fire immediately, with no pause after an offline gap — and no outage protection for check-in either. Checking in does not clear a grace. A short check-in threshold can also start the grace sooner: if the device was offline for more than a quarter of that threshold and the check-in clock is more than half spent.',
       triggers: ['checkin', 'price', 'utxo', 'blockheight', 'setdate', 'feemarket'],
     },
     agreement: {
