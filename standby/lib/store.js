@@ -41,18 +41,21 @@ function defaultState() {
       // Risk; below Medium is High Risk. The Critical check (fee
       // below the current economy fee) is separate and unchanged.
       feeLowMultiplier: 2, feeMediumMultiplier: 1,
-      // Grace period (0.8.0, extended 0.8.8): when the app comes back after being
-      // offline longer than graceOfflineDays, price, UTXO,
-      // block-height, set-date, and fee-market triggers are paused
-      // for graceDurationDays (null = indefinite, until the owner
-      // resumes) so they do not fire on conditions that changed
-      // while the app was away. graceEnabled is the on/off toggle
-      // (Settings grace card, first option): off means no grace
-      // at all, triggers fire immediately. A stored duration of 0
+      // Grace period (0.8.0, extended 0.8.8, unified 0.8.8): when
+      // the app comes back after being offline longer than
+      // graceOfflineDays, ALL triggers — price, UTXO,
+      // block-height, set-date, fee-market, and check-in — are
+      // paused for graceDurationDays (null = indefinite, until
+      // the owner resumes) so they do not fire on conditions
+      // that changed while the app was away. There is no
+      // separate check-in hold any more: a check-in rule is
+      // held by the same grace, for the same duration, and its
+      // due date is NOT pushed out. graceEnabled is the on/off
+      // toggle (Settings grace card, first option): off means no
+      // grace at all, triggers fire immediately — and no outage
+      // protection for check-in either. A stored duration of 0
       // (the old off switch, pre-toggle) still reads as off —
-      // see the loadState migration below. Check-in triggers are
-      // not affected (they keep their own heldUntil hold). See
-      // server.js applyGrace.
+      // see the loadState migration below.
       graceEnabled: true,
       graceOfflineDays: 7, graceDurationDays: 7,
       // Vacation mode (0.8.0): while it is on, the check-in
@@ -120,12 +123,12 @@ function defaultState() {
     // check-in, totalCheckins counts them. lastOnlineAt (0.7.22)
     // is the last time the app itself was alive — written on every
     // hourly release tick, so a long gap in it means the device was
-    // off, not that the owner stopped checking in. heldUntil
-    // (0.7.22) is the offline-gap grace: a persisted "broadcast no
-    // earlier than" instant, set when the app comes back after a
-    // long offline gap with the clock far along, cleared by a
-    // check-in. Both are null until first used.
-    checkin: { lastCheckinAt: null, totalCheckins: 0, lastOnlineAt: null, heldUntil: null },
+    // off, not that the owner stopped checking in. (0.8.8) The
+    // offline-gap hold (heldUntil) is gone — the grace is the only
+    // outage protection now, and it holds check-in rules like any
+    // other. A stored heldUntil is pruned on load (see loadState);
+    // both fields are null until first used.
+    checkin: { lastCheckinAt: null, totalCheckins: 0, lastOnlineAt: null },
     // Grace period state (0.8.0): nulls = no grace was ever set
     // (or it was resumed / expired). graceUntil null = an
     // indefinite grace, active until resumed. See server.js
@@ -761,6 +764,16 @@ function loadState(dataDir) {
     && saved && saved.settings && typeof saved.settings === 'object'
     && !('graceEnabled' in saved.settings) && saved.settings.graceDurationDays === 0) {
     state.settings.graceEnabled = false;
+  }
+  // (0.8.8) The check-in offline-gap hold (heldUntil) is gone —
+  // the grace holds check-in rules like any other. A stored
+  // heldUntil (from state written before the unification) is
+  // dropped on load: mergeDefaults already excludes it (it is
+  // no longer in the default shape), and this delete makes the
+  // migration explicit — the hold is gone, the grace mechanism
+  // takes over from the next offline-gap detection.
+  if (state.checkin && typeof state.checkin === 'object' && 'heldUntil' in state.checkin) {
+    delete state.checkin.heldUntil;
   }
   // 0.3.0 migration: the message release is gone. Prune everything it
   // left behind — including any stored Part 2 ciphertext — so no message

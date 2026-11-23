@@ -58,10 +58,17 @@
     <div class="card grace-card" id="grace-card" style="display:none">
       <h2>Grace period active</h2>
       <p id="grace-text" class="muted"></p>
-      <p>
+      <p id="grace-held" class="muted"></p>
+      <div id="grace-bar-wrap" style="margin:12px 0 4px;">
+        <div class="grace-bar-labels">
+          <span id="grace-bar-day"></span><span id="grace-bar-left"></span>
+        </div>
+        <div class="progress" id="grace-bar"><div id="grace-bar-fill"></div></div>
+      </div>
+      <div class="grace-resume-row">
         <button id="btn-resume-grace" class="primary">Resume now</button>
-      </p>
-      <p class="muted">Ends the grace period immediately — held triggers will evaluate on the next check.</p>
+        <p class="muted" id="grace-resume-note">Resuming will end the grace period immediately.</p>
+      </div>
       <p id="grace-msg" class="muted"></p>
     </div>
 

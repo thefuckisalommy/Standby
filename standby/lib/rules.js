@@ -49,19 +49,15 @@ function setRuleTriggerState(tx, i, slice) {
 // vacation handling here (the evaluator holds it; the gate ignores
 // it — see evaluateRule / checkTriggerNow). The clock is measured
 // with the tx's live freeze offset, so a frozen clock is never
-// release-due while inactive.
+// release-due while inactive. The grace gate sits in
+// evaluateRule, above this: during a grace this function is not
+// called for a release evaluation at all, so a past-due clock
+// here means the rule really is due.
 function checkCheckinRule(state, rule, now, ctx) {
   const clock = checkinClock(state, now, rule.params.thresholdDays, ctx && ctx.liveOffsetMs);
   const detail = { daysSince: clock.daysSince, nextDue: clock.nextDue };
   if (clock.state === 'not-started') {
     return { fire: false, status: 'not-started', reason: 'No check-in recorded yet', slice: freshTriggerState(now, 'not-started', 'No check-in recorded yet'), detail, warning: null };
-  }
-  if (clock.state === 'held') {
-    // No special grace display: the bar just shows the longer
-    // held window ("40 of 52 days elapsed"), and the reason
-    // reads the same — the hold still gates the release (no fire
-    // while held), it just is not named on the card.
-    return { fire: false, status: 'held', reason: clock.daysSince + ' of ' + clock.windowDays + ' days elapsed', slice: freshTriggerState(now, 'held', clock.daysSince + ' of ' + clock.windowDays + ' days elapsed'), detail, warning: null };
   }
   if (clock.state === 'release-due') {
     return { fire: true, status: 'release-due', reason: 'Release due', slice: freshTriggerState(now, 'release-due', 'Release due'), detail, warning: 'This condition is already satisfied — it would fire on the next evaluation.' };
@@ -493,18 +489,23 @@ function checkManualRule(state, rule, now, ctx) {
 // and write the rule's triggerState slice when the check produces
 // one. Returns { rule, fire, status, reason, held, slice } — held
 // is null | 'grace' | 'vacation'.
-//   Grace (0.8.0, extended 0.8.8): while it is active, a price,
-//     UTXO, block-height, set-date, or fee-market rule is not
-//     evaluated at all — it cannot fire, and its stored slice keeps
-//     the last real evaluation (so the subcard's current-state line
-//     still shows the live condition; only the pill says Grace).
-//     No network calls happen for it during the grace. The
-//     release-check result carries status 'grace' so the hold is
-//     named there. Grace is PER RULE: in an OR set a non-held rule
-//     can still fire during a grace; in an AND set a held rule is
-//     not satisfied, so the set cannot fire. Check-in rules are
-//     never held by the grace (their own offline-gap hold is
-//     separate); manual rules never fire anyway.
+//   Grace (0.8.0, extended 0.8.8, unified 0.8.8): while it is
+//     active, a price, UTXO, block-height, set-date, fee-market,
+//     or check-in rule is not evaluated at all — it cannot fire,
+//     and its stored slice keeps the last real evaluation (so
+//     the subcard's current-state line still shows the live
+//     condition; only the pill says Grace). No network calls
+//     happen for it during the grace. The release-check result
+//     carries status 'grace' so the hold is named there. Grace
+//     is PER RULE: in an OR set a non-held rule can still fire
+//     during a grace; in an AND set a held rule is not
+//     satisfied, so the set cannot fire. Check-in rules are
+//     held by the same grace as everything else now — the old
+//     separate offline-gap hold is gone, and the due date is
+//     NOT pushed out (the bar reads the plain clock; the
+//     grace state, not a past-due reading, is what the bar
+//     shows while held — see checkinStatus). Manual rules
+//     never fire anyway.
 //   Vacation (0.8.0): while it is on, a check-in rule does not
 //     fire — its slice records 'vacation', and the release holds
 //     it. Vacation touches check-in rules only; price, UTXO and
@@ -514,7 +515,7 @@ async function evaluateRule(state, tx, ruleIndex, now, utxoBatch) {
   const set = store.triggerOf(tx);
   const rule = set.rules[ruleIndex];
   const prevSlice = ruleTriggerState(tx, ruleIndex);
-  if ((rule.type === 'price' || rule.type === 'utxo' || rule.type === 'blockheight' || rule.type === 'setdate' || rule.type === 'feemarket') && isGraceActive(state, now)) {
+  if ((rule.type === 'checkin' || rule.type === 'price' || rule.type === 'utxo' || rule.type === 'blockheight' || rule.type === 'setdate' || rule.type === 'feemarket') && isGraceActive(state, now)) {
     return { rule, fire: false, status: 'grace', reason: 'grace period active — will evaluate when it ends', held: 'grace', slice: null };
   }
   if (rule.type === 'checkin' && state.settings.vacationMode) {
@@ -644,7 +645,11 @@ function ruleStatusFor(state, tx, rule, slice, now) {
     // Vacation is check-in-only (0.8.0): it freezes this tx's
     // clock and holds its release, and nothing else's.
     if (state.settings.vacationMode) return { ...base, status: 'vacation', reason: 'Vacation mode is on — the countdown is frozen' };
-    if (clock.state === 'held') return { ...base, status: 'held', reason: clock.daysSince + ' of ' + clock.windowDays + ' days elapsed', daysSince: clock.daysSince, windowDays: clock.windowDays, nextDue: clock.nextDue };
+    // (0.8.8) A past-due clock while a grace is active reads
+    // 'grace', not 'release-due' — the rule is held, it cannot
+    // fire; an on-track clock keeps its countdown (the grace
+    // card explains the hold). Mirrors checkinStatus.
+    if (isGraceActive(state, now) && clock.state === 'release-due') return { ...base, status: 'grace', reason: 'Grace period active — will evaluate when it ends', daysSince: clock.daysSince, windowDays: clock.windowDays, nextDue: clock.nextDue };
     if (clock.state === 'release-due') return { ...base, status: 'release-due', reason: 'Release due', daysSince: clock.daysSince, windowDays: clock.windowDays, nextDue: clock.nextDue };
     return { ...base, status: 'on-track', reason: clock.daysSince + ' of ' + clock.windowDays + ' days elapsed', daysSince: clock.daysSince, windowDays: clock.windowDays, nextDue: clock.nextDue };
   }

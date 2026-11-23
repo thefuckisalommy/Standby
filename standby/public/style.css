@@ -202,10 +202,17 @@ button:disabled { opacity: 0.5; cursor: default; }
   font-size: 14px;
 }
 .notice.bad { border-left-color: var(--bad); background: #2a1215; }
-/* Grace period card (0.8.0, extended 0.8.8): the dashboard card that appears
-   while a grace is active — the amber left border
-   marks it as a warning, like the Grace pill. */
+/* Grace period card (0.8.0, extended 0.8.8, unified 0.8.8): the dashboard card that appears
+   whenever a grace is active — the amber left border
+   marks it as a warning, like the Grace pill. The countdown bar
+   fills as the grace elapses (same convention as the check-in
+   bars); the Resume row puts the button first with its note to
+   the right, so the card stays short. */
 .grace-card { border-left: 4px solid var(--warn); }
+.grace-bar-labels { display: flex; justify-content: space-between; color: var(--muted); font-size: 13px; margin-bottom: 6px; }
+.grace-resume-row { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
+.grace-resume-row p { flex: 1; margin: 0; }
+.grace-resume-row button { white-space: nowrap; }
 /* Getting Started card (0.8.0): the empty-state card at the top
    of the Dashboard, shown only when no transactions are staged —
    the first thing a fresh install sees. Centered welcome layout:

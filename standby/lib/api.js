@@ -6,7 +6,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const path = require('path');
 const { caches, clearCaches } = require('./caches');
-const { applyGrace, applyOfflineHold, checkinLiveOffsetMs, checkinStatus, graceStatus, hashCheckinKey, inDangerZone, mergeExternalCheckin, newCheckinKeyId, publicCheckinKey, resetCheckin, sanitizeState, startupWarnings, syncCheckinFreeze, writeReceiverKeys } = require('./checkin');
+const { applyGrace, checkinLiveOffsetMs, checkinStatus, graceStatus, hashCheckinKey, inDangerZone, mergeExternalCheckin, newCheckinKeyId, publicCheckinKey, resetCheckin, sanitizeState, startupWarnings, syncCheckinFreeze, writeReceiverKeys } = require('./checkin');
 const { CHECKIN_DIR, DATA_DIR, VERSION } = require('./config');
 const { HISTORY_MAX, forwardMemberHistory, noteSetMemberStale, pushHistory, shortTxid } = require('./history');
 const { csrfAllowed, saveMutation } = require('./http');
@@ -123,17 +123,16 @@ async function handleApi(req, res, pathname) {
     // A receiver check-in that landed since the last read is merged
     // first, so the state served is current.
     mergeExternalCheckin(state, now);
-    // Offline-gap grace (0.7.22): the hold is judged here too, so
-    // a page load reflects it even if no release tick has run since
-    // the device came back — the bars measure the held window, not
-    // the stale original due. The stamp is NOT refreshed on a read
+    // The grace (0.8.0, unified 0.8.8): judged here too, so a
+    // page load reflects it even if no release tick has run since
+    // the device came back — held rules cannot fire before the
+    // grace is noticed. The stamp is NOT refreshed on a read
     // (only the tick does that), so the gap stays honest.
     try {
       let changed = false;
-      if (applyOfflineHold(state, now)) changed = true;
       if (applyGrace(state, now)) changed = true;
       if (changed) store.saveState(DATA_DIR, state);
-    } catch (e) { console.error('offline-hold apply failed:', e); }
+    } catch (e) { console.error('grace apply failed:', e); }
     const served = sanitizeState(state);
     // (0.8.3) Persistence / startup warnings for the UI (a later
     // increment renders them): a state recovery that happened in
@@ -217,14 +216,13 @@ async function handleApi(req, res, pathname) {
   // GET /api/status
   if (req.method === 'GET' && pathname === '/api/status') {
     const merged = mergeExternalCheckin(state, now);
-    // Offline-gap grace (0.7.22): see GET /api/state — the card
-    // reads this endpoint, so the hold must be judged here too.
+    // The grace (0.8.0, unified 0.8.8): see GET /api/state — the
+    // card reads this endpoint, so the grace must be judged here too.
     try {
       let changed = false;
-      if (applyOfflineHold(state, now)) changed = true;
       if (applyGrace(state, now)) changed = true;
       if (changed) store.saveState(DATA_DIR, state);
-    } catch (e) { console.error('offline-hold apply failed:', e); }
+    } catch (e) { console.error('grace apply failed:', e); }
     const txs = state.bitcoin.txs || [];
     return sendJson(res, 200, {
       ...checkinStatus(state, now),
@@ -346,9 +344,6 @@ async function handleApi(req, res, pathname) {
     const fresh = saveMutation((f) => {
       f.checkin.lastCheckinAt = now.toISOString();
       f.checkin.totalCheckins += 1;
-      // A check-in clears an offline-gap hold (0.7.22): the owner is
-      // alive, the clock resets, and there is nothing to hold back.
-      f.checkin.heldUntil = null;
       for (const t of (f.bitcoin.txs || [])) {
         if (!store.hasTriggerType(t, 'checkin')) continue;
         if (t.release && t.release.status === 'stale') continue;
@@ -380,10 +375,7 @@ async function handleApi(req, res, pathname) {
   // just used the live app, so it is online now, and the next
   // read / tick must not re-set a grace on the same stale gap
   // (without this, resuming while the stamp is still stale
-  // re-sets the grace on the very next read). This does not
-  // touch an already-set check-in hold — heldUntil is only
-  // cleared by a check-in — it only stops a NEW hold or grace
-  // being set on a gap the owner has already resumed from.
+  // re-sets the grace on the very next read).
   if (req.method === 'POST' && pathname === '/api/grace/resume') {
     const fresh = saveMutation((f) => {
       f.grace = { graceUntil: null, triggeredAt: null, offlineGapDays: null };
@@ -1685,8 +1677,8 @@ async function handleApi(req, res, pathname) {
     // (7 days offline to trigger, 7-day grace); a present but invalid
     // value rejects the whole restore, like a bad node URL. The active
     // grace itself does NOT ride along — a restore counts as a check-in
-    // (the owner is present), so the grace is cleared, just like the
-    // check-in hold (heldUntil). (0.8.8) The toggle rides along too:
+    // (the owner is present), so the grace is cleared. (0.8.8) The
+    // toggle rides along too:
     // a backup from before the toggle carries no flag, which restores
     // as on — except a stored duration of 0, which meant off, so it
     // restores as off.
@@ -1959,10 +1951,10 @@ async function handleApi(req, res, pathname) {
     // (0.7.22) The "I was online" stamp rides along the same way:
     // a real date (or null), never in the future beyond the same
     // 5-minute skew — a future stamp would hide a real offline gap
-    // and defeat the hold. The hold itself (heldUntil) is a date
-    // or null; it is legitimately in the future (that is the point
-    // of a hold), so it is only checked for being a real date —
-    // a backup the app itself wrote always carries a valid one.
+    // and defeat the grace. (0.8.8) A backup's check-in hold
+    // (heldUntil) is accepted and dropped, never a 400: the hold
+    // no longer exists, and the grace takes over from the next
+    // offline-gap detection.
     let lastOnlineAt = null;
     if (bsCheckin.lastOnlineAt !== undefined && bsCheckin.lastOnlineAt !== null) {
       if (typeof bsCheckin.lastOnlineAt !== 'string') {
@@ -1976,13 +1968,6 @@ async function handleApi(req, res, pathname) {
         return sendError(res, 400, 'backup last-online time is in the future');
       }
       lastOnlineAt = bsCheckin.lastOnlineAt;
-    }
-    let heldUntil = null;
-    if (bsCheckin.heldUntil !== undefined && bsCheckin.heldUntil !== null) {
-      if (typeof bsCheckin.heldUntil !== 'string' || Number.isNaN(new Date(bsCheckin.heldUntil).getTime())) {
-        return sendError(res, 400, 'backup hold time is invalid');
-      }
-      heldUntil = bsCheckin.heldUntil;
     }
     // Check-in API keys ride along in the backup (hashes only — the
     // plaintext keys were never stored, so a backup cannot leak them).
@@ -2021,12 +2006,11 @@ async function handleApi(req, res, pathname) {
         // restore moment. The backup's clock is still VALIDATED
         // above (a corrupt or future-dated clock rejects the whole
         // restore) — it is just not carried forward: lastCheckinAt
-        // and lastOnlineAt are now, heldUntil is cleared, and the
-        // count keeps the backup's total plus this restore.
+        // and lastOnlineAt are now, and the count keeps the
+        // backup's total plus this restore.
         lastCheckinAt: now.toISOString(),
         totalCheckins: clampInt(bsCheckin.totalCheckins, 0, 0, 1000000) + 1,
         lastOnlineAt: now.toISOString(),
-        heldUntil: null,
       },
       checkinKeys: restoredKeys,
     };

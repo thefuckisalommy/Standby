@@ -65,6 +65,13 @@
     return fmtDateShort(iso);
   }
 
+  // The grace card's end date: short, e.g. "Nov 30" (the
+  // full fmtDateShort string is too long for the bar label).
+  function fmtGraceDate(iso) {
+    if (!iso) return '—';
+    return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  }
+
   // The per-tx History (0.8.2): the event titles, the dot colour
   // per type (green = confirmed, amber = fired / conflict, red =
   // failed / stale, grey = the rest), and the short timestamp
@@ -388,7 +395,7 @@
 
   var PILL_CLASS = {
     'on-track': 'ok', 'release-due': 'bad', 'broadcasted': 'bad',
-    'vacation': 'warn', 'not-started': 'muted',
+    'vacation': 'warn', 'not-started': 'muted', 'grace': 'warn',
   };
 
   // Triggers (0.8.0): the rule that fires a transaction. The tx's
@@ -592,49 +599,72 @@
     return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + 'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
   }
 
-  // Grace period (0.8.0, extended 0.8.8): the card at the top of the dashboard,
-  // shown only while a grace is active for an armed tx with a
-  // price, UTXO, block-height, set-date, or fee-market rule.
-  // The text names how long the app was offline and
-  // when the pause ends (or "until you resume" for an
-  // indefinite grace); Resume now ends it immediately. The
-  // wording and bolding follow the approved mockup exactly:
-  // "Standby was offline for 12 days. Triggers
-  // are paused until Dec 22, 2026 (7 days) so they don't fire
-  // on conditions that changed while the app was away.
-  // Check-in triggers are not affected."
-  // (0.8.5) Shared with the live tick: patchLive calls this
+  // Grace period (0.8.0, extended 0.8.8, unified 0.8.8): the card at the top of the dashboard,
+  // shown whenever a grace is active — even with nothing held.
+  // The copy follows the approved mockup exactly:
+  // "Grace period has been activated because the device was offline
+  // for 3 days." / "2 transactions are ready to fire but held up
+  // by grace." — the held count is the same line for 0 or more.
+  // The countdown bar fills as the grace elapses (same convention
+  // as the check-in bar): "Day N of M" left, "N days left · until
+  // Nov 30" right; under a day left it reads "less than a day
+  // left"; an indefinite grace has no bar, just "until you resume".
+  // The Resume row puts the button first with its note to the
+  // right. (0.8.5) Shared with the live tick: patchLive calls this
   // instead of rebuilding the dashboard, so the card's text
   // stays fresh without touching anything else.
   function renderGraceCard() {
     var graceCard = $('grace-card');
-    var graceApplies = graceActive() && (S.bitcoin.txs || []).some(function (t) { return graceHoldsTx(t); });
-    if (graceCard) {
-      graceCard.style.display = graceApplies ? '' : 'none';
-      if (graceApplies) {
-        var g = S.grace;
-        var gapDays = (typeof g.offlineGapDays === 'number') ? g.offlineGapDays : 0;
-        var gapText = gapDays === 1 ? '1 day' : gapDays + ' days';
-        var endsText;
-        if (g.indefinite) {
-          endsText = 'until you resume';
-        } else {
-          var durDays = (g.graceUntil && g.triggeredAt)
-            ? Math.max(1, Math.round((new Date(g.graceUntil).getTime() - new Date(g.triggeredAt).getTime()) / 86400000))
-            : 0;
-          endsText = 'until ' + fmtDateShort(g.graceUntil) + ' (' + (durDays === 1 ? '1 day' : durDays + ' days') + ')';
-        }
-        // Built from spans and <b> elements (not innerHTML) so
-        // the dynamic values are text, never markup.
-        var gt = $('grace-text');
-        gt.innerHTML = '';
-        var ts = function (t) { var s = document.createElement('span'); s.textContent = t; return s; };
-        gt.appendChild(ts('Standby was offline for '));
-        var b1 = document.createElement('b'); b1.textContent = gapText; gt.appendChild(b1);
-        gt.appendChild(ts('. Triggers are paused '));
-        var b2 = document.createElement('b'); b2.textContent = endsText; gt.appendChild(b2);
-        gt.appendChild(ts(' so they don\u2019t fire on conditions that changed while the app was away. Check-in triggers are not affected.'));
-      }
+    if (!graceCard) return;
+    graceCard.style.display = graceActive() ? '' : 'none';
+    if (!graceActive()) return;
+    var g = S.grace;
+    var gapDays = (typeof g.offlineGapDays === 'number') ? g.offlineGapDays : 0;
+    var gapText = gapDays === 1 ? '1 day' : gapDays + ' days';
+    var held = graceHeldTxCount();
+    // Built from spans and <b> elements (not innerHTML) so
+    // the dynamic values are text, never markup.
+    var ts = function (t) { var s = document.createElement('span'); s.textContent = t; return s; };
+    var gt = $('grace-text');
+    gt.innerHTML = '';
+    gt.appendChild(ts('Grace period has been activated because the device was offline for '));
+    var b1 = document.createElement('b'); b1.textContent = gapText; gt.appendChild(b1);
+    gt.appendChild(ts('.'));
+    var gh = $('grace-held');
+    gh.innerHTML = '';
+    var b2 = document.createElement('b');
+    b2.textContent = held === 1 ? '1 transaction' : held + ' transactions';
+    gh.appendChild(b2);
+    gh.appendChild(ts(held === 1 ? ' is ready to fire but held up by grace.' : ' are ready to fire but held up by grace.'));
+    // Countdown bar (finite grace only): Day N of M, N days left.
+    // N is whole days elapsed since the grace was set (the bar
+    // fills as the grace elapses, like the check-in bar); the
+    // days-left count is the same whole-day math, so N + left
+    // is always the duration — except under a day left, when
+    // the label says so plainly instead of "0 days left".
+    var wrap = $('grace-bar-wrap');
+    if (g.indefinite) {
+      // No bar for an indefinite grace — just the labels row
+      // saying when it ends.
+      $('grace-bar').style.display = 'none';
+      $('grace-bar-day').textContent = '';
+      $('grace-bar-left').textContent = 'until you resume';
+    } else {
+      wrap.style.display = '';
+      $('grace-bar').style.display = '';
+      var triggeredMs = g.triggeredAt ? new Date(g.triggeredAt).getTime() : NaN;
+      var untilMs = g.graceUntil ? new Date(g.graceUntil).getTime() : NaN;
+      var durDays = Math.max(1, Math.round(((isFinite(triggeredMs) && isFinite(untilMs)) ? untilMs - triggeredMs : 7 * 86400000) / 86400000));
+      var elapsedDays = isFinite(triggeredMs) ? Math.max(0, Math.floor((Date.now() - triggeredMs) / 86400000)) : 0;
+      var leftMs = isFinite(untilMs) ? untilMs - Date.now() : 0;
+      var leftDays = durDays - elapsedDays;
+      var leftText = leftMs < 86400000 ? 'less than a day left'
+        : (leftDays === 1 ? '1 day left' : leftDays + ' days left');
+      $('grace-bar-day').textContent = 'Day ' + elapsedDays + ' of ' + durDays;
+      $('grace-bar-left').textContent = leftText + ' · until ' + fmtGraceDate(g.graceUntil);
+      var fillEl = $('grace-bar-fill');
+      fillEl.style.width = (Math.min(1, Math.max(0, elapsedDays / durDays)) * 100) + '%';
+      fillEl.style.background = 'var(--warn)';
     }
   }
 
@@ -654,6 +684,7 @@
       status.checkinReadError ? 'Warning: the check-in receiver state could not be read — releases are held until it can be read again.'
       : status.state === 'not-started' ? 'No check-in recorded yet. Tap “Check in” to start the clock.'
       : status.state === 'vacation' ? 'Vacation mode is on' + (status.vacationUntil ? ' until ' + status.vacationUntil : ' until you say you\u2019re back') + '. The check-in countdown is frozen — the days away never count.'
+      : status.state === 'grace' ? 'Grace period is active — the release is held until it ends.'
       : status.state === 'broadcasted' ? 'A broadcast went out. Check in to start a new cycle.'
       : status.state === 'release-due' ? 'Release is due — the stored transaction will be broadcast unless you check in.'
       : '';
@@ -700,12 +731,16 @@
           if (rule.type !== 'checkin') return;
           var ts = bstates[i] || {};
           var th = rule.params.thresholdDays;
+          // (0.8.8) A past-due slice while a grace is active reads
+          // 'grace', not 'release-due' — the rule is held.
+          var bst = ts.status || 'not-started';
+          if (graceActive() && bst === 'release-due') bst = 'grace';
           bars.push({
             id: t.id, label: t.label || '', ruleIndex: i,
             thresholdDays: th,
             daysSince: (typeof ts.daysSince === 'number') ? ts.daysSince : 0,
             windowDays: (typeof ts.windowDays === 'number' && ts.windowDays > 0) ? ts.windowDays : th,
-            nextDue: ts.nextDue || null, state: ts.status || 'not-started',
+            nextDue: ts.nextDue || null, state: bst,
             enabled: !!t.enabled,
           });
         });
@@ -718,12 +753,14 @@
           if (rule.type !== 'checkin') return;
           var sts = sstates[i] || {};
           var sth = rule.params.thresholdDays;
+          var sst = sts.status || 'not-started';
+          if (graceActive() && sst === 'release-due') sst = 'grace';
           bars.push({
             id: s.id, label: s.label || '', ruleIndex: i,
             thresholdDays: sth,
             daysSince: (typeof sts.daysSince === 'number') ? sts.daysSince : 0,
             windowDays: (typeof sts.windowDays === 'number' && sts.windowDays > 0) ? sts.windowDays : sth,
-            nextDue: sts.nextDue || null, state: sts.status || 'not-started',
+            nextDue: sts.nextDue || null, state: sst,
             enabled: !!s.enabled,
           });
         });
@@ -891,7 +928,8 @@
     // owner with only archived txs still gets the prompt to add
     // one. The first thing a fresh install sees; it disappears
     // as soon as the first transaction is staged. Independent of
-    // the grace card (which needs armed held txs to show).
+    // the grace card (which shows whenever a grace is active,
+    // held txs or not).
     var anyStaged = (S.bitcoin.txs || []).some(function (t) { return !txStatus(t).settled && !txStatus(t).pending; });
     var gsCard = $('getting-started-card');
     if (gsCard) gsCard.style.display = anyStaged ? 'none' : '';
@@ -915,10 +953,7 @@
     // check-in tx — the label above, the bar, and "X of N
     // days elapsed" below. Each bar measures its OWN window: the
     // server sends it per tx as status.checkinTxs[].windowDays —
-    // the tx's own threshold on-track, the longer held window
-    // while an offline-gap grace is active — so a held bar just
-    // counts to the held date, with no special grace display.
-    // A DISARMED check-in tx keeps its bar, frozen at the day
+    // the tx's own threshold. A DISARMED check-in tx keeps its bar, frozen at the day
     // count it was left at: muted grey, marked disarmed, its
     // count never advancing while it is disarmed or on vacation.
     // Settled (archived) and pending check-in txs get no bar.
@@ -927,6 +962,10 @@
     // while more than 3/4 of the window remains, amber past
     // that, red in the last quarter. Overdue is a full red bar.
     // A frozen bar is grey instead — it is held, not live.
+    // (0.8.8) A bar past due while a grace is active reads
+    // 'grace', not 'release-due': amber, captioned "— held by
+    // grace" — the due date is not pushed out by the grace, so
+    // the bar must not read as due while the rule is held.
     var barsEl = $('checkin-tx-bars');
     barsEl.innerHTML = '';
     var bars = checkinBarsData(status);
@@ -956,12 +995,12 @@
       var fill = document.createElement('div');
       fill.style.width = (Math.min(1, Math.max(0, daysSince / windowDays)) * 100) + '%';
       var remaining = (windowDays - daysSince) / windowDays;
-      fill.style.background = frozen ? 'var(--muted)' : remaining > 0.75 ? 'var(--ok)' : remaining > 0.25 ? 'var(--warn)' : 'var(--bad)';
+      fill.style.background = frozen ? 'var(--muted)' : b.state === 'grace' ? 'var(--warn)' : remaining > 0.75 ? 'var(--ok)' : remaining > 0.25 ? 'var(--warn)' : 'var(--bad)';
       bar.appendChild(fill);
       block.appendChild(bar);
       var cap = document.createElement('p');
       cap.className = 'progress-label';
-      cap.textContent = daysSince + ' of ' + windowDays + ' days elapsed' + (frozen ? ' — disarmed, frozen' : '');
+      cap.textContent = daysSince + ' of ' + windowDays + ' days elapsed' + (frozen ? ' — disarmed, frozen' : b.state === 'grace' ? ' — held by grace' : '');
       block.appendChild(cap);
       barsEl.appendChild(block);
     });
@@ -1737,15 +1776,38 @@
     return !!(S && S.grace && S.grace.active);
   }
   // Whether THIS tx is held by the grace: armed, with a
-  // price, UTXO, block-height, set-date, or fee-market rule,
-  // and still active (not settled or pending). The dashboard
-  // card only shows when at least one tx is held — a grace with
-  // nothing to pause is not worth a card.
+  // price, UTXO, block-height, set-date, fee-market, or
+  // check-in rule (0.8.8: check-in rules are held by the same
+  // grace as everything else), and still active (not settled
+  // or pending).
   function graceHoldsTx(tx) {
     if (!graceActive() || !tx || !tx.enabled) return false;
-    if (!hasRuleType(tx, 'price') && !hasRuleType(tx, 'utxo') && !hasRuleType(tx, 'blockheight') && !hasRuleType(tx, 'setdate') && !hasRuleType(tx, 'feemarket')) return false;
+    if (!hasRuleType(tx, 'price') && !hasRuleType(tx, 'utxo') && !hasRuleType(tx, 'blockheight') && !hasRuleType(tx, 'setdate') && !hasRuleType(tx, 'feemarket') && !hasRuleType(tx, 'checkin')) return false;
     var st = txStatus(tx);
     return !st.settled && !st.pending;
+  }
+  // Whether THIS set is held by the grace: the same rule as
+  // graceHoldsTx, at set level (see setStatus).
+  function graceHoldsSet(set) {
+    if (!graceActive() || !set || !set.enabled) return false;
+    if (!hasRuleType(set, 'price') && !hasRuleType(set, 'utxo') && !hasRuleType(set, 'blockheight') && !hasRuleType(set, 'setdate') && !hasRuleType(set, 'feemarket') && !hasRuleType(set, 'checkin')) return false;
+    var st = setStatus(set);
+    return !st.settled && !st.pending;
+  }
+  // How many transactions the grace is holding, for the card's
+  // held-count line: every armed active tx with a held rule
+  // type, plus every member of a held set — each tx counted
+  // once. This is the held count, NOT a fresh evaluation:
+  // held rules are not evaluated during a grace, so "ready to
+  // fire" means held, not freshly proven due.
+  function graceHeldTxCount() {
+    var ids = {};
+    (S.bitcoin.txs || []).forEach(function (t) { if (graceHoldsTx(t)) ids[t.id] = true; });
+    (S.bitcoin.sets || []).forEach(function (s) {
+      if (!graceHoldsSet(s)) return;
+      (s.txIds || []).forEach(function (id) { ids[id] = true; });
+    });
+    return Object.keys(ids).length;
   }
 
   // "unarmed" (0.7.20 — "Disabled + unarmed" was silly: the arm
@@ -1897,18 +1959,18 @@
     // here is the pill's text, and txPillText returns it plainly
     // for an unarmed tx instead of appending " + unarmed" to it.
     if (!tx.enabled) return { label: 'unarmed', cls: 'muted', settled: false, pending: false };
-    // Grace (0.8.0, extended 0.8.8): while the grace is active, an
-    // armed tx with a price, UTXO, block-height, set-date, or
-    // fee-market rule reads "Grace" on an amber pill —
+    // Grace (0.8.0, extended 0.8.8, unified 0.8.8): while the grace is active, an
+    // armed tx with a price, UTXO, block-height, set-date,
+    // fee-market, or check-in rule reads "Grace" on an amber pill —
     // the rule is paused, not ready. Settled/pending txs return
-    // above, so only an active tx can show this; check-in and
-    // manual txs are not held by the grace and fall through to
+    // above, so only an active tx can show this; manual txs
+    // are not held by the grace and fall through to
     // Ready. (The readiness rows use the same txStatus /
     // txPillText, so their pill reads "Grace" too — the row's
     // state line, the trigger condition + current value, is
     // unchanged, because the grace does not change the rule.)
     if (graceActive()) {
-      if (hasRuleType(tx, 'price') || hasRuleType(tx, 'utxo') || hasRuleType(tx, 'blockheight') || hasRuleType(tx, 'setdate') || hasRuleType(tx, 'feemarket')) return { label: 'Grace', cls: 'warn', settled: false, pending: false };
+      if (hasRuleType(tx, 'price') || hasRuleType(tx, 'utxo') || hasRuleType(tx, 'blockheight') || hasRuleType(tx, 'setdate') || hasRuleType(tx, 'feemarket') || hasRuleType(tx, 'checkin')) return { label: 'Grace', cls: 'warn', settled: false, pending: false };
     }
     return { label: 'Ready', cls: 'ok', settled: false, pending: false };
   }
@@ -2287,7 +2349,7 @@
     if (sts.every(function (s) { return s.settled; })) return { label: 'Broadcasted', cls: 'ok', settled: true, pending: false };
     if (sts.some(function (s) { return s.pending; })) return { label: 'Broadcast', cls: 'warn', settled: false, pending: true };
     if (!set.enabled) return { label: 'unarmed', cls: 'muted', settled: false, pending: false };
-    if (graceActive() && (hasRuleType(set, 'price') || hasRuleType(set, 'utxo') || hasRuleType(set, 'blockheight') || hasRuleType(set, 'setdate') || hasRuleType(set, 'feemarket'))) return { label: 'Grace', cls: 'warn', settled: false, pending: false };
+    if (graceActive() && (hasRuleType(set, 'price') || hasRuleType(set, 'utxo') || hasRuleType(set, 'blockheight') || hasRuleType(set, 'setdate') || hasRuleType(set, 'feemarket') || hasRuleType(set, 'checkin'))) return { label: 'Grace', cls: 'warn', settled: false, pending: false };
     return { label: 'Ready', cls: 'ok', settled: false, pending: false };
   }
   // The set card's pill text — the txPillText rule, at set level.
@@ -4893,10 +4955,10 @@
       if (fill) {
         fill.style.width = (Math.min(1, Math.max(0, daysSince / windowDays)) * 100) + '%';
         var remaining = (windowDays - daysSince) / windowDays;
-        fill.style.background = frozen ? 'var(--muted)' : remaining > 0.75 ? 'var(--ok)' : remaining > 0.25 ? 'var(--warn)' : 'var(--bad)';
+        fill.style.background = frozen ? 'var(--muted)' : b.state === 'grace' ? 'var(--warn)' : remaining > 0.75 ? 'var(--ok)' : remaining > 0.25 ? 'var(--warn)' : 'var(--bad)';
       }
       var cap = block.children[2];
-      if (cap) cap.textContent = daysSince + ' of ' + windowDays + ' days elapsed' + (frozen ? ' — disarmed, frozen' : '');
+      if (cap) cap.textContent = daysSince + ' of ' + windowDays + ' days elapsed' + (frozen ? ' — disarmed, frozen' : b.state === 'grace' ? ' — held by grace' : '');
     });
   }
   // Patch the readiness rows in place (0.8.5): the status pill
@@ -5676,8 +5738,8 @@
     },
     grace: {
       title: 'Grace period',
-      body: 'A pause for price, UTXO, block-height, set-date, and fee-market triggers after the app has been offline. If Standby was offline longer than the \u2018offline\u2019 days, those triggers are paused for the \u2018lasts\u2019 days (or until you resume) so they don\u2019t fire on conditions that changed while the app was away. Turn the grace off with the toggle in the card heading: off means triggers fire immediately, with no pause after an offline gap. Checking in does not clear a grace. Check-in triggers are not affected \u2014 they have their own offline-gap hold.',
-      triggers: ['price', 'utxo', 'blockheight', 'setdate', 'feemarket'],
+      body: 'A pause for ALL triggers — price, UTXO, block-height, set-date, fee-market, and check-in — after the app has been offline. If Standby was offline longer than the \u2018offline\u2019 days, those triggers are paused for the \u2018lasts\u2019 days (or until you resume) so they don\u2019t fire on conditions that changed while the app was away. A check-in rule is held by the same grace as everything else: its due date is not pushed out, and while the grace is active a past-due check-in reads as held, not due. Turn the grace off with the toggle in the card heading: off means triggers fire immediately, with no pause after an offline gap — and no outage protection for check-in either. Checking in does not clear a grace.',
+      triggers: ['checkin', 'price', 'utxo', 'blockheight', 'setdate', 'feemarket'],
     },
     agreement: {
       title: 'Price agreement',
