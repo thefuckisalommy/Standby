@@ -84,7 +84,13 @@ function hostOf(h) {
     const close = h.indexOf(']');
     return (close === -1 ? h.slice(1) : h.slice(1, close)).toLowerCase();
   }
-  return h.split(':')[0].toLowerCase();
+  let name = h.split(':')[0].toLowerCase();
+  // (0.8.10, follow-up) A trailing dot marks a fully-qualified
+  // name in DNS — "localhost." IS localhost — so strip one after
+  // the port is split off. A bare "." becomes "" and is still
+  // rejected (hostAllowed requires a non-empty name).
+  if (name.endsWith('.')) name = name.slice(0, -1);
+  return name;
 }
 
 function isLoopback(h) {
@@ -105,7 +111,11 @@ function isLoopback(h) {
 //   Allowed with zero configuration: any IP literal (an IP Host
 //   cannot be rebound — rebinding sends the attacker's domain),
 //   'localhost', any '*.local' name, and the machine's own
-//   hostname (os.hostname() — covers a bare http://umbrel).
+//   hostname (os.hostname()). In Docker that last one is the
+//   container ID, not the host's name — it helps a bare-metal
+//   install and matches nothing in a container, so it does not
+//   cover a bare http://umbrel (which does not resolve on the
+//   LAN anyway — only umbrel.local does, via mDNS).
 //   Escape hatch: STANDBY_ALLOWED_HOSTS, a comma-separated list of
 //   extra hostnames (Tailscale MagicDNS *.ts.net, a custom domain,
 //   a .onion address, a reverse-proxy hostname). On Umbrel there

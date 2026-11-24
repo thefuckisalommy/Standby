@@ -210,6 +210,21 @@ Boots the branch-0.8.5 app (port 3438), the check-in receiver
       directly against lib/store.js — the running server rewrites
       the heartbeat on its first tick, so a live test could not
       observe the fallback).
+  35. 0.8.10 follow-ups: a future-dated heartbeat is ignored and
+      the merged lastOnlineAt is capped at now + 5 minutes, so a
+      grace still activates after a real outage (a live restart
+      plus direct node checks, including the documented residual
+      that both stamps future together still cap and activate no
+      grace); the heartbeat throttle treats a backward clock jump
+      as expired; hostnames with a trailing dot pass the
+      allowlist and a bare "." still gets a 421; the
+      check-in/broadcast JSONL logs round-trip durably with no
+      .tmp left behind; and the 1-hour 10x price-jump guard is
+      pinned at its current behaviour — a 10x reading on a fresh
+      baseline is vetoed, but the same reading on a baseline
+      backdated past the hour is accepted (the skip-save
+      exclusion leaves the persisted baseline stale; the 5%
+      two-source agreement remains the primary protection).
 Ports: app 3438, receiver 3439, stubs 18235/18236 — no collision
 with the 095 suite (app 3388, receiver 3389, stubs 18175/18176) or
 the 096 suite (app 3398, receiver 3399, stubs 18185/18186).
@@ -5689,6 +5704,183 @@ def main():
         out, err = node_out(node_oob)
         check('34 dedupe: an out-of-band edit invalidates the cache (Resume-after-seed writes)',
               out == 'SKIP WROTE-AFTER-OOB', out + err)
+
+        # --- 35. 0.8.10 follow-ups ------------------------------------
+        # (a) A future-dated heartbeat must not suppress a grace:
+        # seed an 8-day-stale state stamp with a heartbeat 2 days
+        # in the future, restart, and the grace must activate on
+        # the flat 7-day leg. Before the fix the merge took the
+        # future stamp (a negative gap reads as no gap at all) and
+        # the first tick could fire a due transaction.
+        s, r = add_tx('35 future heartbeat', {'type': 'checkin', 'params': {'thresholdDays': 35}}, 121004)
+        check('35 clamp: gap check-in tx adds (201)', s == 201, (s, r))
+        def seed_future_hb_35():
+            try:
+                os.remove(os.path.join(CHECKIN_DIR, 'last.json'))
+            except OSError:
+                pass
+            stj = load_state_file()
+            stj['checkin']['lastCheckinAt'] = iso_ago(days=20)
+            stj['checkin']['lastOnlineAt'] = iso_ago(days=8)
+            save_state_file(stj)  # also drops heartbeat.json
+            json.dump({'lastOnlineAt': iso_in(days=2)}, open(os.path.join(DATA, 'heartbeat.json'), 'w'))
+        check('35 clamp: app restarted with a future heartbeat over an 8-day gap', restart(before_start=seed_future_hb_35))
+        s, st = req('GET', '/api/state')
+        check('35 clamp: the grace is active despite the future heartbeat', st.get('grace', {}).get('active') is True, st.get('grace'))
+        check('35 clamp: served lastOnlineAt is not the future stamp',
+              isinstance(st.get('checkin', {}).get('lastOnlineAt'), str)
+              and st['checkin']['lastOnlineAt'] <= iso_in(minutes=6),
+              st.get('checkin', {}).get('lastOnlineAt'))
+        s, r = req('POST', '/api/grace/resume', {})
+        check('35 clamp: resumed after the checks', s == 200, (s, r))
+        delete_all_txs()
+        # (b) The clamp, pinned directly against lib/store.js in a
+        # scratch data dir (the §34(e) pattern): a future
+        # heartbeat is ignored, a future state stamp is capped,
+        # and both future together cap too — the documented
+        # residual, which activates no grace until the heartbeat
+        # rewrites correctly.
+        cl_dir = '/tmp/heirloom099-clamp'
+        shutil.rmtree(cl_dir, ignore_errors=True)
+        os.makedirs(cl_dir)
+        cl_seed = load_state_file()
+        cl_seed['checkin']['lastOnlineAt'] = iso_ago(days=8)
+        cl_seed['grace'] = {'graceUntil': None, 'triggeredAt': None, 'offlineGapDays': None}
+        json.dump(cl_seed, open(os.path.join(cl_dir, 'state.json'), 'w'), indent=2)
+        json.dump({'lastOnlineAt': iso_in(days=2)}, open(os.path.join(cl_dir, 'heartbeat.json'), 'w'))
+        node_load = ("const s=require('./lib/store');"
+                     "console.log(s.loadState(%s).checkin.lastOnlineAt);" % json.dumps(cl_dir))
+        out, err = node_out(node_load)
+        check('35 clamp: future heartbeat ignored, state stamp stands',
+              out == cl_seed['checkin']['lastOnlineAt'], out + err)
+        node_grace = ("const s=require('./lib/store');const c=require('./lib/checkin');"
+                      "const d=%s;const st=s.loadState(d);"
+                      "console.log(c.applyGrace(st, new Date()) ? 'GRACE' : 'NO-GRACE');"
+                      % json.dumps(cl_dir))
+        out, err = node_out(node_grace)
+        check('35 clamp: grace activates on the merged 8-day gap', out == 'GRACE', out + err)
+        cl_seed['checkin']['lastOnlineAt'] = iso_in(days=1)
+        json.dump(cl_seed, open(os.path.join(cl_dir, 'state.json'), 'w'), indent=2)
+        os.remove(os.path.join(cl_dir, 'heartbeat.json'))
+        out, err = node_out(node_load)
+        try:
+            _cap = datetime.fromisoformat(out.replace('Z', '+00:00'))
+        except Exception:
+            _cap = None
+        check('35 clamp: future state stamp capped at now + 5 minutes',
+              _cap is not None and datetime.now(timezone.utc) < _cap <= datetime.now(timezone.utc) + timedelta(minutes=6),
+              out + err)
+        json.dump({'lastOnlineAt': iso_in(days=2)}, open(os.path.join(cl_dir, 'heartbeat.json'), 'w'))
+        out, err = node_out(node_load)
+        try:
+            _cap2 = datetime.fromisoformat(out.replace('Z', '+00:00'))
+        except Exception:
+            _cap2 = None
+        check('35 clamp: both future together still cap at now + 5 minutes',
+              _cap2 is not None and datetime.now(timezone.utc) < _cap2 <= datetime.now(timezone.utc) + timedelta(minutes=6),
+              out + err)
+        out, err = node_out(node_grace)
+        check('35 clamp: both future together activate no grace (documented residual)', out == 'NO-GRACE', out + err)
+        # (c) The heartbeat throttle treats a backward clock jump
+        # as expired: write, confirm the immediate re-touch is
+        # throttled, jump the fake clock back 10 days, and the
+        # next touch writes.
+        node_throttle = ("const s=require('./lib/store');const fs=require('fs');"
+                         "const d=%s;fs.rmSync(d,{recursive:true,force:true});fs.mkdirSync(d,{recursive:true});"
+                         "let now=Date.now();const real=Date.now;Date.now=()=>now;"
+                         "const iso=(ms)=>new Date(ms).toISOString();"
+                         "const a=s.touchHeartbeat(d,iso(now))?'WROTE':'SKIP';"
+                         "const b=s.touchHeartbeat(d,iso(now))?'WROTE':'SKIP';"
+                         "now-=10*24*3600*1000;"
+                         "const c=s.touchHeartbeat(d,iso(now))?'WROTE':'SKIP';"
+                         "Date.now=real;console.log(a+' '+b+' '+c);"
+                         % json.dumps('/tmp/heirloom099-throttle'))
+        out, err = node_out(node_throttle)
+        check('35 throttle: write, throttled re-touch, backward jump writes again',
+              out == 'WROTE SKIP WROTE', out + err)
+        # (d) Trailing-dot hostnames: "localhost." IS localhost
+        # and "umbrel.local." IS umbrel.local (a trailing dot
+        # marks a fully-qualified name), so both pass; a bare "."
+        # is empty after the strip and still gets a 421.
+        s, body = raw_req('GET', '/api/health', BASE, host='localhost.')
+        check('35 hosts: localhost. passes', s == 200, (s, body))
+        s, body = raw_req('GET', '/api/health', BASE, host='umbrel.local.')
+        check('35 hosts: umbrel.local. passes', s == 200, (s, body))
+        s, body = raw_req('GET', '/api/health', BASE, host='localhost.:3438')
+        check('35 hosts: localhost. with a port passes', s == 200, (s, body))
+        s, body = raw_req('GET', '/api/health', BASE, host='.')
+        check('35 hosts: bare . is still rejected',
+              s == 421 and body == b'Unrecognised Host header', (s, body))
+        s, body = raw_req('GET', '/health', RBASE, host='localhost.')
+        check('35 hosts: localhost. passes on the receiver', s == 200, (s, body))
+        # (e) The JSONL logs are durable: a live app check-in
+        # lands in checkins.jsonl with no .tmp left behind, and
+        # the node round-trip (append + full rewrite) reads back
+        # what was written.
+        s, r = req('POST', '/api/checkin', {'method': 'app'}, headers={'Origin': 'http://127.0.0.1:3438'})
+        check('35 jsonl: app check-in succeeds (200)', s == 200, (s, r))
+        _log = os.path.join(DATA, 'checkins.jsonl')
+        try:
+            _rows = [json.loads(x) for x in open(_log).read().split('\n') if x.strip()]
+        except Exception:
+            _rows = []
+        check('35 jsonl: check-in lands in checkins.jsonl',
+              any(x.get('method') == 'app' for x in _rows), _rows[-3:] if _rows else None)
+        check('35 jsonl: no checkins.jsonl.tmp left behind',
+              not os.path.exists(_log + '.tmp'), os.listdir(DATA))
+        node_jsonl = ("const s=require('./lib/store');const fs=require('fs');"
+                      "const d=%s;fs.rmSync(d,{recursive:true,force:true});fs.mkdirSync(d,{recursive:true});"
+                      "s.appendCheckin(d,{ts:'2026-11-23T00:00:00.000Z',method:'t1'});"
+                      "s.appendCheckin(d,{ts:'2026-11-23T00:01:00.000Z',method:'t2'});"
+                      "const a=s.readCheckins(d,50);"
+                      "s.writeCheckins(d,[{ts:'2026-11-23T00:02:00.000Z',method:'w'}]);"
+                      "const b=s.readCheckins(d,50);"
+                      "const tmp=!fs.existsSync(d+'/checkins.jsonl.tmp');"
+                      "console.log(a.length===2&&a[1].method==='t2'&&b.length===1&&b[0].method==='w'&&tmp?'OK':'FAIL');"
+                      % json.dumps('/tmp/heirloom099-jsonl'))
+        out, err = node_out(node_jsonl)
+        check('35 jsonl: append + rewrite round-trip with no .tmp', out == 'OK', out + err)
+        # (f) The 10x price-jump guard is PINNED at its current
+        # behaviour: the skip-save dedupe excludes lastPriceAt,
+        # so after a flat-price period over an hour the persisted
+        # baseline looks old and a 10x reading is ACCEPTED, not
+        # vetoed. The control first proves the guard itself works
+        # (a 10x jump on a FRESH baseline is vetoed as unknown);
+        # then the baseline is backdated past the hour and the
+        # same reading is accepted. The 5% two-source agreement
+        # remains the primary protection; preserving the guard
+        # fully would need an in-memory baseline for the
+        # evaluator — a design decision, not taken here.
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 10})
+        check('35 price: cadence set to 10 s', s == 200, (s, r))
+        s, pr = req('POST', '/__test__/price', {'usd': 98200}, base=STUB_BASE_P)
+        check('35 price: stub price reset to $98,200', s == 200, pr)
+        delete_all_txs()
+        s, r = add_tx('35 price pin', {'type': 'price', 'params': {'op': '>=', 'value': 2000000}}, 121006, trigger_confirmed=True)
+        check('35 price: watching price tx adds (201)', s == 201, (s, r))
+        p35 = r['tx']['id'] if s == 201 else None
+        check('35 price: one tick evaluates it (slice watching at $98,200)',
+              wait_slice(p35, {'status': 'watching', 'lastPrice': 98200}), rule_slice(state_tx(p35)) if p35 else None)
+        s, pr = req('POST', '/__test__/price', {'usd': 1000000}, base=STUB_BASE_P)
+        check('35 price: stub price set to $1,000,000 (10.2x)', s == 200, pr)
+        check('35 price: caches cleared before the veto eval', clear_caches())
+        check('35 price: 10x on a fresh baseline is vetoed (unknown, $98,200 kept)',
+              wait_slice(p35, {'status': 'unknown', 'lastPrice': 98200}, deadline=30), rule_slice(state_tx(p35)) if p35 else None)
+        stj = load_state_file()
+        for _t in stj.get('bitcoin', {}).get('txs', []):
+            if _t.get('id') == p35:
+                _sl = (_t.get('triggerState') or [{}])[0]
+                _sl['lastPriceAt'] = iso_ago(hours=2)
+        save_state_file(stj)
+        check('35 price: caches cleared before the accept eval', clear_caches())
+        check('35 price: 10x on a 2-hour-old baseline is ACCEPTED (watching at $1,000,000)',
+              wait_slice(p35, {'status': 'watching', 'lastPrice': 1000000}, deadline=30), rule_slice(state_tx(p35)) if p35 else None)
+        s, pr = req('POST', '/__test__/price', {'usd': 98200}, base=STUB_BASE_P)
+        check('35 price: stub price restored to $98,200', s == 200, pr)
+        check('35 price: caches cleared after the restore', clear_caches())
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 60})
+        check('35 price: cadence restored to 60 s', s == 200, (s, r))
+        delete_all_txs()
 
     finally:
         for p in list(v.procs):

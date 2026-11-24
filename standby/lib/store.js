@@ -817,14 +817,19 @@ function loadState(dataDir) {
   // fallback, refreshed on real saves. On EVERY load — state is
   // re-read constantly and applyGrace runs on reads too — the
   // in-memory value is max(heartbeat, state): a missing or
-  // corrupt heartbeat falls back to the state's own stamp, and a
-  // future-dated heartbeat is safe (grace math treats a negative
-  // gap as no grace). The merge is READ-ONLY: it never writes
-  // the merged value back — a write-back would defeat the
-  // saveState dedupe below, since the merged stamp would differ
-  // from the last written one on every load. The merged value
-  // rides along on the next REAL save instead, keeping the
-  // fallback copy within ~1 hour (the hourly node-test save).
+  // corrupt heartbeat falls back to the state's own stamp. A
+  // future-dated stamp is never trusted: the merge ignores a
+  // heartbeat later than now plus the 5-minute interval and caps
+  // the merged value the same way (see mergeHeartbeat) — a
+  // stamp written under a wrong forward clock would otherwise
+  // suppress a legitimate grace after a real outage, because a
+  // negative gap reads as no gap at all. The merge is READ-ONLY:
+  // it never writes the merged value back — a write-back would
+  // defeat the saveState dedupe below, since the merged stamp
+  // would differ from the last written one on every load. The
+  // merged value rides along on the next REAL save instead,
+  // keeping the fallback copy within ~1 hour (the hourly
+  // node-test save).
   mergeHeartbeat(state, dataDir);
   // (0.8.0) The `paused` setting is gone — Global Arm/Disarm
   // replaces it. Prune it from older state files so a stale
@@ -1197,9 +1202,14 @@ function writeHeartbeat(dataDir, isoNow) {
 
 function touchHeartbeat(dataDir, isoNow) {
   // Throttled write: at most once per HEARTBEAT_INTERVAL_MS per
-  // data dir. Returns true when it wrote.
+  // data dir. Returns true when it wrote. A negative elapsed time
+  // means the clock went BACKWARD since the last write (an NTP
+  // correction after a forward jump) — the throttle is expired,
+  // not extended: write now instead of blocking writes until the
+  // clock catches up.
   const last = heartbeatLastWrite.get(dataDir) || 0;
-  if (Date.now() - last < HEARTBEAT_INTERVAL_MS) return false;
+  const elapsed = Date.now() - last;
+  if (elapsed >= 0 && elapsed < HEARTBEAT_INTERVAL_MS) return false;
   writeHeartbeat(dataDir, isoNow);
   return true;
 }
@@ -1208,17 +1218,42 @@ function mergeHeartbeat(state, dataDir) {
   // (0.8.10, skip-save) Read-only merge — see the call site in
   // loadState. The heartbeat wins when it is newer than the
   // state's own stamp; otherwise the state's stamp stands.
+  // (0.8.10, follow-up) A stamp later than now plus the
+  // heartbeat interval is a wrong-clock artefact, never a real
+  // "I was online" time: a heartbeat written under a forward
+  // clock would otherwise suppress a legitimate grace after a
+  // real outage (a negative gap reads as "no gap at all"). So a
+  // future-dated heartbeat is IGNORED — the state's own stamp
+  // stands — and the merged result is capped the same way, in
+  // case the state's stamp is future-dated too (a resume or
+  // check-in written under the same wrong clock). The cap treats
+  // the gap as ~0 rather than negative. Residual: if BOTH stored
+  // stamps are future-dated, the merged value is the cap and no
+  // grace activates until the heartbeat rewrites correctly —
+  // within 5 minutes of the clock being corrected, or on the
+  // next restart (a fresh process rewrites the heartbeat on its
+  // first tick).
   if (!state.checkin || typeof state.checkin !== 'object') return;
+  const capMs = Date.now() + HEARTBEAT_INTERVAL_MS;
   const hb = readHeartbeat(dataDir);
-  if (!hb) return;
-  const cur = state.checkin.lastOnlineAt;
-  if (typeof cur !== 'string' || !cur || hb > cur) state.checkin.lastOnlineAt = hb;
+  if (hb) {
+    const hbMs = Date.parse(hb);
+    if (!Number.isNaN(hbMs) && hbMs <= capMs) {
+      const cur = state.checkin.lastOnlineAt;
+      if (typeof cur !== 'string' || !cur || hb > cur) state.checkin.lastOnlineAt = hb;
+    }
+  }
+  const merged = state.checkin.lastOnlineAt;
+  if (typeof merged === 'string' && merged) {
+    const mergedMs = Date.parse(merged);
+    if (!Number.isNaN(mergedMs) && mergedMs > capMs) state.checkin.lastOnlineAt = new Date(capMs).toISOString();
+  }
 }
 
 // ---------------------------------------------------------------------------
 // Durable writes (0.8.10, fsync durability — the audit's durability
-// finding, fsync half only; the skip-save half is NOT done). A
-// tmp+rename is atomic, so a crash can never leave a torn state
+// finding; the skip-save half is done too, see the saveState dedupe
+// above). A tmp+rename is atomic, so a crash can never leave a torn state
 // file — but without an fsync the *latest* save can still be lost:
 // the rename may never reach the disk, and after a power cut the
 // directory can point at the previous version (or, on some
@@ -1257,8 +1292,20 @@ function writeFileDurable(file, content) {
 }
 
 function appendJsonl(dataDir, file, entry) {
+  // (0.8.10, follow-up) Durable like state.json: open, append,
+  // fsync, close. These are audit logs — a lost line costs
+  // history, not correctness (the authoritative check-in and
+  // broadcast state lives in the fsynced state.json, and the
+  // reader skips a torn line) — but check-ins and broadcasts
+  // are rare, so the fsync costs nothing.
   ensureDir(dataDir);
-  fs.appendFileSync(path.join(dataDir, file), JSON.stringify(entry) + '\n', 'utf8');
+  const fd = fs.openSync(path.join(dataDir, file), 'a');
+  try {
+    fs.writeFileSync(fd, JSON.stringify(entry) + '\n', 'utf8');
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 function readJsonl(dataDir, file, limit) {
@@ -1280,9 +1327,11 @@ function writeBroadcastLog(dataDir, entries) { writeJsonl(dataDir, BROADCAST_LOG
 // restore, which replaces the logs with the backup's copies). An empty
 // array clears the file.
 function writeJsonl(dataDir, file, entries) {
+  // (0.8.10, follow-up) Durable via the same tmp+rename+fsync as
+  // state.json — a full rewrite, so the durable helper fits.
   ensureDir(dataDir);
   const lines = (entries || []).map((e) => JSON.stringify(e)).join('\n');
-  fs.writeFileSync(path.join(dataDir, file), lines ? lines + '\n' : '', 'utf8');
+  writeFileDurable(path.join(dataDir, file), lines ? lines + '\n' : '');
 }
 
 module.exports = {
