@@ -648,7 +648,7 @@ def main():
 
         # --- 1. health + version ----------------------------------------
         s, h = req('GET', '/api/health')
-        check('1 health reports version 0.8.12', h.get('version') == '0.8.12', h)
+        check('1 health reports version 0.8.12.1', h.get('version') == '0.8.12.1', h)
 
         # --- 2. block-height trigger --------------------------------------
         # Validation at add: bad heights rejected, good ones accepted.
@@ -5441,7 +5441,7 @@ def main():
               s == 400 and body == b'Bad request URL', (s, body))
         s, r = req('GET', '/api/health')
         check('32 crash: app still answers after the malformed request',
-              s == 200 and r.get('version') == '0.8.12', (s, r))
+              s == 200 and r.get('version') == '0.8.12.1', (s, r))
         s, body = raw_get('//[', RBASE)
         check('32 crash: malformed request line to the receiver gets 400',
               s == 400 and body == b'Bad request URL', (s, body))
@@ -6188,7 +6188,7 @@ def main():
         _bind_checkin = '/tmp/standby-test099-bind-checkin'
         _expected_bind = APP_ENV.get('STANDBY_BIND', '127.0.0.1')
         check('39 bind: main instance listen line names the profile bind',
-              ('Standby 0.8.12 listening on %s:%d (data: ' % (_expected_bind, PORT)) in read_log(),
+              ('Standby 0.8.12.1 listening on %s:%d (data: ' % (_expected_bind, PORT)) in read_log(),
               read_log()[-500:])
 
         def _bind_log_text():
@@ -6301,7 +6301,7 @@ def main():
         _auth_app = _bind_instance({'STANDBY_PASSWORD': _pw})
         check('40 auth: instance comes up', wait_up(_ab))
         s, r = req('GET', '/api/health', base=_ab)
-        check('40 auth: health is public', s == 200 and r.get('version') == '0.8.12', (s, r))
+        check('40 auth: health is public', s == 200 and r.get('version') == '0.8.12.1', (s, r))
         s, r = req('GET', '/api/auth/status', base=_ab)
         check('40 auth: status says required, not authenticated',
               s == 200 and r == {'required': True, 'authenticated': False}, (s, r))
@@ -6468,6 +6468,40 @@ def main():
         s, after = req('GET', '/api/backup')
         check('41 restore: the restored transactions match the backup',
               sorted(t.get('id') for t in after['state']['bitcoin']['txs']) == _txids, '')
+
+        # --- 42. node test vs Test connection race --------------------
+        # The hourly tick's node test does not probe Output lookup; it
+        # carries the last probed result forward. If a Test connection
+        # saves a fresh result while the tick is on the network, the
+        # tick must not overwrite it with its older copy (which would
+        # drop the Output lookup value). The stub's fee delay holds the
+        # startup tick on the network while the button test finishes.
+        _rb = 'http://127.0.0.1:3440'
+        shutil.rmtree(_bind_data, ignore_errors=True)
+        shutil.rmtree(_bind_checkin, ignore_errors=True)
+        _e = dict(APP_ENV)
+        _e.update({'PORT': '3440', 'DATA_DIR': _bind_data, 'CHECKIN_DIR': _bind_checkin,
+                   'STANDBY_TEST_STARTUP_TICK_MS': '2000'})
+        _e.pop('STANDBY_PASSWORD', None)
+        _race_app = start(['node', 'server.js'], env=_e, cwd=APP, log=_bind_log)
+        check('42 race: instance comes up', wait_up(_rb))
+        s, r = req('PUT', '/api/settings', {'primaryApiUrl': STUB_BASE_P, 'secondaryEnabled': False}, base=_rb)
+        check('42 race: primary node set to the stub, secondary off', s == 200, (s, r))
+        req('POST', '/__test__/fee-delay', {'ms': 3000}, base=STUB_BASE_P)
+        time.sleep(2.5)  # the startup tick (at 2 s) is now waiting on a slow fee answer
+        req('POST', '/__test__/fee-delay', {'ms': 0}, base=STUB_BASE_P)
+        s, r = req('POST', '/api/bitcoin/connection/test', {}, base=_rb, timeout=30)
+        check('42 race: Test connection answers', s == 200, (s, r))
+
+        def _lookup_value():
+            s, st = req('GET', '/api/state', base=_rb)
+            res = ((st.get('bitcoin') or {}).get('connection') or {}).get('results') or [{}]
+            return ((res[0].get('checks') or {}).get('outputLookup') or {}).get('value')
+
+        check('42 race: the Test connection result carries an Output lookup value', _lookup_value() == 'Batch', _lookup_value())
+        time.sleep(4)  # the tick finishes its node test and saves
+        check('42 race: the tick that was on the network does not overwrite it', _lookup_value() == 'Batch', _lookup_value())
+        stop(_race_app)
 
     finally:
         for p in list(v.procs):

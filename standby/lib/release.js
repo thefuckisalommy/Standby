@@ -1217,6 +1217,13 @@ async function testNodes() {
   // configured, so a result measured against just-replaced endpoints
   // is ignored, not misattributed.
   const fresh = store.loadState(DATA_DIR);
+  // A Test connection that finished while this tick was on the
+  // network saved a newer result — with a fresh Output lookup
+  // probe this tick does not have. Keep it; this tick's result is
+  // the older one.
+  const startedFrom = state.bitcoin.connection ? state.bitcoin.connection.checkedAt : null;
+  const current = fresh.bitcoin.connection ? fresh.bitcoin.connection.checkedAt : null;
+  if (current !== startedFrom) return;
   // The connection object is rebuilt, so the per-endpoint
   // stamps ride over explicitly — a test that could not reach an
   // endpoint keeps that endpoint's last-answered time instead of
