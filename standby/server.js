@@ -131,8 +131,15 @@ const server = http.createServer((req, res) => {
   const pathname = url.pathname;
   if (pathname.startsWith('/api/')) {
     handleApi(req, res, pathname).catch((e) => {
+      // A client error (bad JSON, too large) is answered as itself;
+      // anything else is logged in full and answered generically, so
+      // internal details never reach the browser.
+      if (e && e.expose) {
+        if (!res.headersSent) sendError(res, e.statusCode, e.message);
+        return;
+      }
       console.error(e);
-      if (!res.headersSent) sendError(res, 500, e.message || 'internal error');
+      if (!res.headersSent) sendError(res, 500, 'internal error');
     });
     return;
   }

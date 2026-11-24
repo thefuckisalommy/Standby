@@ -1338,12 +1338,33 @@ function appendJsonl(dataDir, file, entry) {
   // reader skips a torn line) — but check-ins and broadcasts
   // are rare, so the fsync costs nothing.
   ensureDir(dataDir);
-  const fd = fs.openSync(path.join(dataDir, file), 'a', DATA_FILE_MODE);
+  const full = path.join(dataDir, file);
+  const fd = fs.openSync(full, 'a', DATA_FILE_MODE);
+  let size = 0;
   try {
     fs.writeFileSync(fd, JSON.stringify(entry) + '\n', 'utf8');
     fs.fsyncSync(fd);
+    size = fs.fstatSync(fd).size;
   } finally {
     fs.closeSync(fd);
+  }
+  if (size > LOG_COMPACT_BYTES) compactJsonl(dataDir, file);
+}
+
+// The audit logs are capped: once a file passes LOG_COMPACT_BYTES it
+// is rewritten (durably) with only its newest LOG_KEEP_ENTRIES
+// entries. Every reader wants at most the newest 200 (the Logs page
+// shows 50, a backup carries 200), so nothing the app uses is lost,
+// and a log can no longer grow without bound and be read in full on
+// every request. Compacting only past the size threshold keeps the
+// rewrite rare — roughly once per thousand appends.
+const LOG_KEEP_ENTRIES = 1000;
+const LOG_COMPACT_BYTES = 512 * 1024;
+function compactJsonl(dataDir, file) {
+  try {
+    writeJsonl(dataDir, file, readJsonl(dataDir, file, LOG_KEEP_ENTRIES));
+  } catch (e) {
+    console.error('Standby: could not compact ' + file + ': ' + e.message);
   }
 }
 
@@ -1374,7 +1395,7 @@ function writeJsonl(dataDir, file, entries) {
 }
 
 module.exports = {
-  loadState, saveState, writeFileDurable, secureDataDir, DATA_DIR_MODE, DATA_FILE_MODE, writeHeartbeat, touchHeartbeat, defaultState, newTxId, newSetId,
+  loadState, saveState, writeFileDurable, secureDataDir, LOG_KEEP_ENTRIES, LOG_COMPACT_BYTES, DATA_DIR_MODE, DATA_FILE_MODE, writeHeartbeat, touchHeartbeat, defaultState, newTxId, newSetId,
   appendCheckin, readCheckins, writeCheckins,
   appendBroadcastLog, readBroadcastLog, writeBroadcastLog,
   normalizeTrigger, normalizeRule, triggerOf, triggerRulesOf, triggerTypesOf, hasTriggerType,

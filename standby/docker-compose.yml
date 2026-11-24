@@ -53,6 +53,13 @@ services:
       # moves with the rest of the app data (umbrelOS 2.0 storage
       # relocation) — hooks/pre-start migrates the old location.
       - ${APP_DATA_DIR}/data/checkin:/checkin
+    # Healthy while the API answers and the state file loads.
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:3100/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   # Check-in receiver (0.6.6): the check-in-only front door, on the LAN
   # at port 3101 — NOT behind Umbrel's app-auth proxy, because a key
@@ -86,3 +93,9 @@ services:
       - ${APP_DATA_DIR}/data/checkin:/checkin
     ports:
       - "3101:3101"
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:3101/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

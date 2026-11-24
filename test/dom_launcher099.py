@@ -44,11 +44,11 @@ _TESTDIR = os.path.dirname(os.path.abspath(__file__))
 GOAL = os.path.dirname(_TESTDIR)
 BRANCH = v.app_dir(GOAL)
 TESTDIR = _TESTDIR
-DATA = '/tmp/heirloom099-dom'
-CHECKIN_DIR = '/tmp/heirloom099-dom-checkin'
+DATA = '/tmp/standby-test099-dom'
+CHECKIN_DIR = '/tmp/standby-test099-dom-checkin'
 BASE = 'http://127.0.0.1:3478'
 RBASE = 'http://127.0.0.1:3479'
-LOG = '/tmp/heirloom099-dom-proc.log'
+LOG = '/tmp/standby-test099-dom-proc.log'
 FINNEY_OUTPOINT = 'f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16:1'
 
 # (0.8.11, secure defaults) Profile dimension, same as the API and
@@ -175,11 +175,11 @@ try:
     # Error-screen phase (0.8.3): the main DOM run boots a healthy
     # app, so the broken-state error view and the restore /
     # start-fresh flows get their own instance on ports 3468/3469
-    # (stubs 18265/18266, data /tmp/heirloom099-dom-err). The
+    # (stubs 18265/18266, data /tmp/standby-test099-dom-err). The
     # script kills and respawns the app itself by exact PID; the
     # launcher stops the receiver + stubs here.
-    err_data = '/tmp/heirloom099-dom-err'
-    err_checkin = '/tmp/heirloom099-dom-err-checkin'
+    err_data = '/tmp/standby-test099-dom-err'
+    err_checkin = '/tmp/standby-test099-dom-err-checkin'
     shutil.rmtree(err_data, ignore_errors=True)
     shutil.rmtree(err_checkin, ignore_errors=True)
     e1 = v.start(['node', v.STUB, '18265'], log=LOG)

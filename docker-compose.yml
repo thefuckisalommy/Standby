@@ -64,6 +64,15 @@ services:
     ports:
       - "127.0.0.1:${STANDBY_WEB_PORT:-3100}:3100"
     networks: [web]
+    # Healthy while the API answers and the state file loads (a
+    # corrupt state makes /api/health fail). Shown by `docker ps`;
+    # Docker itself does not restart an unhealthy container.
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:3100/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   # Check-in receiver: the check-in-only front door. It runs the same image
   # with a different command and mounts ONLY the shared /checkin directory:
@@ -89,6 +98,12 @@ services:
     ports:
       - "${STANDBY_CHECKIN_PORT:-3101}:3101"
     networks: [checkin]
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:3101/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
 networks:
   web:

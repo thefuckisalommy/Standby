@@ -5,7 +5,7 @@
 // was never exercised from the client side: the gating regex, the
 // show/hide logic, and the two rescue buttons could all have
 // regressed silently. This script boots its OWN instance (ports
-// 3468/3469, stubs 18265/18266, data /tmp/heirloom099-dom-err) so
+// 3468/3469, stubs 18265/18266, data /tmp/standby-test099-dom-err) so
 // it can break the state and restart the app without disturbing
 // the main DOM run. dom_launcher099.py boots the instance and seeds
 // one tx, then runs this script after the width check; the script
@@ -28,7 +28,7 @@ global.location = { reload: () => { global.__reloaded = true; } };
 
 const fs = require('fs');
 const BASE = process.env.ERR_BASE || 'http://127.0.0.1:3468';
-const DATA_FILE = (process.env.ERR_DATA || '/tmp/heirloom099-dom-err') + '/state.json';
+const DATA_FILE = (process.env.ERR_DATA || '/tmp/standby-test099-dom-err') + '/state.json';
 const els = {};
 function elText(el) {
   // The shim stores textContent as a plain property — it does NOT
@@ -454,8 +454,8 @@ const APP_DIR = process.env.ERR_APP_DIR
         : fs.existsSync(path.join(__dirname, '..', 'branch-0.8.3', 'server.js'))
           ? path.join(__dirname, '..', 'branch-0.8.3')
           : path.join(__dirname, '..', 'app'));
-const DATA = process.env.ERR_DATA || '/tmp/heirloom099-dom-err';
-const CHECKIN_DIR = process.env.ERR_CHECKIN || '/tmp/heirloom099-dom-err-checkin';
+const DATA = process.env.ERR_DATA || '/tmp/standby-test099-dom-err';
+const CHECKIN_DIR = process.env.ERR_CHECKIN || '/tmp/standby-test099-dom-err-checkin';
 const STUB_P = process.env.ERR_STUB_P || '18265';
 const STUB_S = process.env.ERR_STUB_S || '18266';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

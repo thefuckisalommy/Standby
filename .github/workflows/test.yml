@@ -6,6 +6,14 @@
 #   - DOM suite:        python3 test/dom_launcher099.py      (~4 min, TZ set)
 #     (boots the app + stubs, runs dom_check099.js, the 390px
 #     width check, and the error-screen script dom_check099_error.js)
+#   Each of the three runs twice, in a matrix: the default profile
+#   (code defaults, loopback bind) and STANDBY_TEST_PROFILE=umbrel
+#   (STANDBY_BIND=0.0.0.0 and STANDBY_ALLOWED_HOSTS, as on Umbrel).
+#   Matrix jobs run on separate runners, so the hardcoded ports
+#   never collide.
+#   - Image job:        bash test/smoke_compose.sh            (~3 min)
+#     (builds the image and runs both install paths for real — see
+#     the script — after shellcheck on the shell scripts)
 #
 # Runner needs:
 #   - ubuntu-latest, Node 24 (the version the image ships and
@@ -56,6 +64,12 @@ jobs:
   api:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [default, umbrel]
+    env:
+      STANDBY_TEST_PROFILE: ${{ matrix.profile }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -70,6 +84,12 @@ jobs:
   regression:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [default, umbrel]
+    env:
+      STANDBY_TEST_PROFILE: ${{ matrix.profile }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -84,7 +104,12 @@ jobs:
   dom:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [default, umbrel]
     env:
+      STANDBY_TEST_PROFILE: ${{ matrix.profile }}
       # A fixed UTC-5 offset (no DST, no place name): the DOM suite's
       # expected date strings are written for it.
       TZ: Etc/GMT+5
@@ -102,3 +127,15 @@ jobs:
         run: npx playwright install chromium
       - name: Run DOM suite (DOM checks + width check + error-screen script)
         run: python3 test/dom_launcher099.py
+
+  # The real image and both install paths, end to end — see
+  # test/smoke_compose.sh. Also lints the shell scripts.
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Lint shell scripts (shellcheck is preinstalled on ubuntu-latest)
+        run: shellcheck standby/hooks/pre-start test/smoke_compose.sh
+      - name: Image + compose smoke test (generic Docker and simulated Umbrel)
+        run: bash test/smoke_compose.sh

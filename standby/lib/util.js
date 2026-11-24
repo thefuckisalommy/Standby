@@ -17,18 +17,29 @@ function sendError(res, status, message) {
   sendJson(res, status, { error: message });
 }
 
+// An error that is the CLIENT's fault, safe to show it: the request
+// dispatcher answers it with its own status and message. Any other
+// error is logged in full and answered with a bare 'internal error'
+// — internal details (paths, stack-derived text) stay in the log.
+function clientError(status, message) {
+  const e = new Error(message);
+  e.statusCode = status;
+  e.expose = true;
+  return e;
+}
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let size = 0;
     const chunks = [];
     req.on('data', (c) => {
       size += c.length;
-      if (size > MAX_BODY) { reject(new Error('body too large')); req.destroy(); return; }
+      if (size > MAX_BODY) { reject(clientError(413, 'body too large')); req.destroy(); return; }
       chunks.push(c);
     });
     req.on('end', () => {
       try { resolve(chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {}); }
-      catch { reject(new Error('invalid JSON')); }
+      catch { reject(clientError(400, 'invalid JSON')); }
     });
     req.on('error', reject);
   });
@@ -111,4 +122,4 @@ function days(from, to) {
   return Math.floor((to - from) / 86400000);
 }
 
-module.exports = { sendJson, sendError, readBody, clampInt, asStr, validBroadcastVia, PUBLIC_FALLBACK_DAYS, validPublicFallbackDays, GRACE_OFFLINE_DAYS, GRACE_DURATION_DAYS, PRICE_AGREEMENT_PCT_MIN, PRICE_AGREEMENT_PCT_MAX, PRICE_AGREEMENT_PCT_DEFAULT, CHECK_CADENCE_SECONDS_MIN, CHECK_CADENCE_SECONDS_MAX, CHECK_CADENCE_SECONDS_DEFAULT, FEE_LOW_MULT_MIN, FEE_LOW_MULT_MAX, FEE_LOW_MULT_DEFAULT, FEE_MED_MULT_MIN, FEE_MED_MULT_MAX, FEE_MED_MULT_DEFAULT, days };
+module.exports = { sendJson, sendError, clientError, readBody, clampInt, asStr, validBroadcastVia, PUBLIC_FALLBACK_DAYS, validPublicFallbackDays, GRACE_OFFLINE_DAYS, GRACE_DURATION_DAYS, PRICE_AGREEMENT_PCT_MIN, PRICE_AGREEMENT_PCT_MAX, PRICE_AGREEMENT_PCT_DEFAULT, CHECK_CADENCE_SECONDS_MIN, CHECK_CADENCE_SECONDS_MAX, CHECK_CADENCE_SECONDS_DEFAULT, FEE_LOW_MULT_MIN, FEE_LOW_MULT_MAX, FEE_LOW_MULT_DEFAULT, FEE_MED_MULT_MIN, FEE_MED_MULT_MAX, FEE_MED_MULT_DEFAULT, days };
