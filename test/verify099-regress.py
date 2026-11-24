@@ -8,8 +8,9 @@ to the check-in trigger, per-tx check-in thresholds, the check-in-only
 scoping of the 0.7.22 guards (danger-zone resets, check-in clearing
 release records, the check-in card), the per-tx check-in bars
 and the removed global threshold (section 16), the price trigger (immediate fire
-on two-source agreement, fail-safe unknown, sanity bounds,
-already-true warning, 10x jump guard with a 1-hour recency window), the UTXO trigger (confirmation modes:
+on two-source agreement, fail-safe unknown, already-true warning;
+a large jump both sources agree on is trusted and fires — no range
+check), the UTXO trigger (confirmation modes:
 unconfirmed (0) fires on any spend, N confirmations fires at N —
 default 1, confirmed-only; already-spent gate at add is mode-aware,
 fail-safe unknown, unconfirmed-spend warning; catch-up: a spend
@@ -177,16 +178,8 @@ def save_state_file(stj):
     # from the running app would silently override the seeded
     # clock. Drop it whenever state is seeded; the next tick
     # rewrites it. (Same fix as verify099.py's save_state_file.)
-    # The price-baseline file is dropped for the same reason
-    # (0.8.10 audit fix): a fresh baseline left over from the
-    # running app would silently override a seeded stale slice
-    # baseline in a guard test.
     try:
         os.remove(os.path.join(DATA, 'heartbeat.json'))
-    except OSError:
-        pass
-    try:
-        os.remove(os.path.join(DATA, 'price-baseline.json'))
     except OSError:
         pass
 
@@ -470,8 +463,6 @@ def main():
         bad_triggers = [
             ('bad type', {'type': 'bogus', 'params': {}}, 'unknown trigger type'),
             ("bad op '>'", {'type': 'price', 'params': {'op': '>', 'value': 90000}}, "op must be"),
-            ('value 0', {'type': 'price', 'params': {'op': '>=', 'value': 0}}, 'between $1'),
-            ('value 999999999', {'type': 'price', 'params': {'op': '>=', 'value': 999999999}}, 'between $1'),
             ("bad outpoint 'xyz:0'", {'type': 'utxo', 'params': {'outpoint': 'xyz:0'}}, 'txid:vout'),
             ('non-numeric thresholdDays', {'type': 'checkin', 'params': {'thresholdDays': '35'}}, 'must be a number'),
         ]
@@ -479,6 +470,20 @@ def main():
             s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft(1, 110000 + i * 2), 'label': 'bad ' + label, 'trigger': trig})
             check('2 invalid trigger at add -> 400 (%s)' % label,
                   s == 400 and frag in (r.get('error') or ''), (s, r))
+        # No range check on a price trigger value any more: 0 and
+        # $999,999,999 are both valid values. (0 with op '>=' is
+        # holding at $98,200, so it needs triggerConfirmed — the
+        # already-true gate, not validation — while $999,999,999
+        # is not holding and adds plain.)
+        s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft(1, 110100), 'label': 'P value 0',
+                                                'trigger': {'type': 'price', 'params': {'op': '>=', 'value': 0}}, 'triggerConfirmed': True})
+        check('2 price trigger value 0 adds (201, stored normalized)',
+              s == 201 and r.get('tx', {}).get('trigger') == {'type': 'price', 'params': {'asset': 'BTC', 'op': '>=', 'value': 0}}, r)
+        s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft(1, 110102), 'label': 'P value 999999999',
+                                                'trigger': {'type': 'price', 'params': {'op': '>=', 'value': 999999999}}})
+        check('2 price trigger value 999999999 adds (201, stored normalized, no triggerWarning)',
+              s == 201 and r.get('tx', {}).get('trigger') == {'type': 'price', 'params': {'asset': 'BTC', 'op': '>=', 'value': 999999999}}
+              and 'triggerWarning' not in r, r)
         s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft(1, 100003), 'label': 'P valid price',
                                                 'trigger': {'type': 'price', 'params': {'op': '>=', 'value': 90000}}, 'triggerConfirmed': True})
         check('2 valid price trigger stored normalized (asset BTC)',
@@ -696,28 +701,44 @@ def main():
         check('6b feed down -> the tx is not broadcast', not (p6b or {}).get('broadcasted'), (p6b or {}).get('broadcasted'))
         s, pr = set_price(fail=False)
         check('6b stub price feed restored', s == 200 and pr.get('coingecko', {}).get('fail') is False and pr.get('coinbase', {}).get('fail') is False, pr)
-        # (c) sanity bounds — zero / huge / empty each -> unknown, no fire
-        for bad in ('zero', 'huge', 'empty'):
+        # (c) malformed readings — zero / empty each -> unknown, no
+        # fire. A huge reading both sources agree on is NOT
+        # malformed: with no range check the agreement is the only
+        # protection, so $1,000,000,000,000 fires at once (below).
+        for bad in ('zero', 'empty'):
             s, pr = set_price(bad=bad)
             check('6c stub price set to bad=%s' % bad, s == 200 and pr.get('coingecko', {}).get('bad') == bad and pr.get('coinbase', {}).get('bad') == bad, pr)
             check('6c caches cleared before the bad=%s eval (empty cache)' % bad, clear_caches())
             s, r, res = release_results()
             p6b_res = res.get(txp6b, {})
             ok = p6b_res.get('action') == 'skipped' and p6b_res.get('triggerStatus') == 'unknown'
-            if bad == 'huge':
-                ok = ok and 'implausible' in (p6b_res.get('reason') or '')
             check('6c malformed reading %s -> unknown, no fire' % bad, ok, p6b_res)
             p6b = state_tx(txp6b)
             check('6c malformed reading %s -> triggerState.lastError is set' % bad,
                   bool((p6b or {}).get('triggerState', {}).get('lastError')), (p6b or {}).get('triggerState'))
-            if bad == 'huge':
-                check('6c huge reading -> lastError names the out-of-bounds price',
-                      'out of bounds' in ((p6b or {}).get('triggerState', {}).get('lastError') or ''), (p6b or {}).get('triggerState'))
             check('6c malformed reading %s -> the tx is not broadcast' % bad,
                   not (p6b or {}).get('broadcasted'), (p6b or {}).get('broadcasted'))
             s, pr = set_price(bad=None)
             check('6c bad reading cleared after %s' % bad, s == 200 and pr.get('coingecko', {}).get('bad') is None and pr.get('coinbase', {}).get('bad') is None, pr)
         check('6c caches cleared after clearing the bad readings (cache back to $98,200)', clear_caches())
+        # A huge reading ($1,000,000,000,000) both sources agree on
+        # is trusted — it fires at once, like any holding price.
+        s, pr = set_price(bad='huge')
+        check('6c stub price set to bad=huge', s == 200 and pr.get('coingecko', {}).get('bad') == 'huge' and pr.get('coinbase', {}).get('bad') == 'huge', pr)
+        check('6c caches cleared before the huge eval (empty cache)', clear_caches())
+        s, r, res = release_results()
+        p6b_res = res.get(txp6b, {})
+        check('6c huge reading both sources agree on -> fires at once (broadcast, primary)',
+              p6b_res.get('action') == 'broadcast' and p6b_res.get('method') == 'primary', p6b_res)
+        p6b = state_tx(txp6b)
+        check('6c huge reading -> the firing triggerState status is due',
+              (p6b or {}).get('triggerState', {}).get('status') == 'due', (p6b or {}).get('triggerState'))
+        check('6c huge reading -> the accepted reading becomes the last good reading ($1,000,000,000,000, no error)',
+              (p6b or {}).get('triggerState', {}).get('lastPrice') == 1000000000000
+              and (p6b or {}).get('triggerState', {}).get('lastError') is None, (p6b or {}).get('triggerState'))
+        s, pr = set_price(bad=None)
+        check('6c bad reading cleared after huge', s == 200 and pr.get('coingecko', {}).get('bad') is None and pr.get('coinbase', {}).get('bad') is None, pr)
+        check('6c caches cleared after clearing the huge reading (cache back to $98,200)', clear_caches())
         # (d) already-true — holding price -> status due, fire true
         s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'price', 'params': {'op': '>=', 'value': 90000}}})
         check('6d /api/triggers/check on a holding price trigger -> status due, fire true',
@@ -753,36 +774,40 @@ def main():
         txp6d = r['tx']['id']
         check('6d adding a holding price tx returns triggerWarning that it would fire on the next evaluation',
               s == 201 and isinstance(r.get('triggerWarning'), str) and 'would fire on the next evaluation' in r.get('triggerWarning'), r.get('triggerWarning'))
-        # (e) jump guard — 10x vs a recent last good reading -> unknown; old baseline -> accepted
-        p6b = state_tx(txp6b)
+        # (e) a large jump both sources agree on is trusted and
+        # fires — there is no range check: the
+        # two-source agreement is the only protection. A fresh
+        # below-threshold price tx watches at $98,200; a $1,000,000
+        # reading (10.2x) fires at once. (txp6b broadcast in 6c's
+        # huge case, so this section uses its own tx.)
+        s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft(1, 100609), 'label': 'P6e jump',
+                                                'trigger': {'type': 'price', 'params': {'op': '>=', 'value': 99000}}})
+        txp6e = r['tx']['id']
+        check('6e below-threshold price tx added (no triggerWarning — not holding)',
+              s == 201 and 'triggerWarning' not in r, r)
+        s, r, res = release_results()
+        p6e_res = res.get(txp6e, {})
+        check('6e below threshold -> no fire (skipped, watching, currently $98,200)',
+              p6e_res.get('action') == 'skipped' and p6e_res.get('triggerStatus') == 'watching'
+              and 'currently $98,200' in (p6e_res.get('reason') or ''), p6e_res)
+        p6e = state_tx(txp6e)
         check('6e setup: the last good reading is $98,200 and recent (within 1 hour)',
-              (p6b or {}).get('triggerState', {}).get('lastPrice') == 98200
-              and abs((datetime.now(timezone.utc) - datetime.fromisoformat(((p6b or {}).get('triggerState', {}).get('lastPriceAt') or iso_now()).replace('Z', '+00:00'))).total_seconds()) < 3600,
-              (p6b or {}).get('triggerState'))
+              (p6e or {}).get('triggerState', {}).get('lastPrice') == 98200
+              and abs((datetime.now(timezone.utc) - datetime.fromisoformat(((p6e or {}).get('triggerState', {}).get('lastPriceAt') or iso_now()).replace('Z', '+00:00'))).total_seconds()) < 3600,
+              (p6e or {}).get('triggerState'))
         s, pr = set_price(usd=1000000)
         check('6e stub price set to $1,000,000', s == 200 and pr.get('coingecko', {}).get('usd') == 1000000 and pr.get('coinbase', {}).get('usd') == 1000000, pr)
-        check('6e restart so the eval reads $1,000,000 (empty cache)', restart())
+        check('6e caches cleared so the eval reads $1,000,000 (empty cache)', clear_caches())
         s, r, res = release_results()
-        p6b_res = res.get(txp6b, {})
-        check('6e $1,000,000 vs a recent $98,200 baseline -> unknown, no fire',
-              p6b_res.get('action') == 'skipped' and p6b_res.get('triggerStatus') == 'unknown', p6b_res)
-        p6b = state_tx(txp6b)
-        check('6e the jump is named in triggerState.lastError (10x)',
-              'jump' in ((p6b or {}).get('triggerState', {}).get('lastError') or '').lower()
-              and '10x' in ((p6b or {}).get('triggerState', {}).get('lastError') or ''), (p6b or {}).get('triggerState'))
-        check('6e the jump did not become the new baseline (lastPrice still $98,200)',
-              (p6b or {}).get('triggerState', {}).get('lastPrice') == 98200, (p6b or {}).get('triggerState'))
-        patch_trigger_state(txp6b, lastPriceAt=iso_ago(hours=2))
-        s, r, res = release_results()
-        p6b_res = res.get(txp6b, {})
-        check('6e with the baseline 2 h old the $1,000,000 reading is ACCEPTED and fires at once (broadcast)',
-              p6b_res.get('action') == 'broadcast' and p6b_res.get('method') == 'primary', p6b_res)
-        p6b = state_tx(txp6b)
+        p6e_res = res.get(txp6e, {})
+        check('6e $1,000,000 vs a recent $98,200 last reading -> evaluated on its merits and fires at once (broadcast)',
+              p6e_res.get('action') == 'broadcast' and p6e_res.get('method') == 'primary', p6e_res)
+        p6e = state_tx(txp6e)
         check('6e the firing triggerState status is due',
-              (p6b or {}).get('triggerState', {}).get('status') == 'due', (p6b or {}).get('triggerState'))
-        check('6e the accepted reading becomes the new baseline ($1,000,000, no error)',
-              (p6b or {}).get('triggerState', {}).get('lastPrice') == 1000000
-              and (p6b or {}).get('triggerState', {}).get('lastError') is None, (p6b or {}).get('triggerState'))
+              (p6e or {}).get('triggerState', {}).get('status') == 'due', (p6e or {}).get('triggerState'))
+        check('6e the accepted reading becomes the last good reading ($1,000,000, no error)',
+              (p6e or {}).get('triggerState', {}).get('lastPrice') == 1000000
+              and (p6e or {}).get('triggerState', {}).get('lastError') is None, (p6e or {}).get('triggerState'))
         s, pr = set_price(usd=98200)
         check('6e stub price restored to $98,200', s == 200 and pr.get('coingecko', {}).get('usd') == 98200 and pr.get('coinbase', {}).get('usd') == 98200, pr)
 

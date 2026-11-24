@@ -21,8 +21,8 @@ const { CHECK_CADENCE_SECONDS_DEFAULT, CHECK_CADENCE_SECONDS_MAX, CHECK_CADENCE_
 // nothing); `detail` is the extra facts the gate answers with;
 // `warning` is the already-satisfied warning (the gate's text —
 // the evaluator ignores it). ctx is { prevSlice, liveOffsetMs }:
-// the rule's stored slice (the price jump guard's baseline) and
-// the tx's frozen time (check-in rules only).
+// the rule's stored slice (the last good reading, for the price
+// rule) and the tx's frozen time (check-in rules only).
 // evaluateTrigger(state, tx, now) evaluates each rule
 // and combines by the set's op (see combineOutcomes). triggerStatusFor
 // (state, tx, now) is the UI-facing status, computed from the STORED
@@ -30,7 +30,6 @@ const { CHECK_CADENCE_SECONDS_DEFAULT, CHECK_CADENCE_SECONDS_MAX, CHECK_CADENCE_
 // state is live clock math so the card's "3 of 35 days elapsed" line
 // is current on every page load.
 // ---------------------------------------------------------------------------
-const PRICE_JUMP_WINDOW_MS = 60 * 60 * 1000; // the 10x-jump guard (below) only applies when the last good reading is recent — over a longer gap a real 10x move is possible
 
 // The configured price sources (Settings: priceSources
 // {source1, source2}). Each slot is either a provider id string
@@ -86,10 +85,10 @@ function checkCadenceSecondsOf(settings) {
 // TTL (Settings: Check cadence): the cache is fresh for exactly
 // one tick, so a faster cadence fetches fresher prices and a
 // slower cadence does not refetch on every read. A fetched
-// reading is cached even when the evaluator later judges it
-// implausible (the evaluator keeps lastPrice separately — see
-// checkPriceRule — so a bad reading never becomes the
-// baseline for the next one).
+// reading is cached even when the evaluator later marks the rule
+// unknown — the evaluator keeps lastPrice separately (see
+// checkPriceRule), so a disagreeing reading never overwrites the
+// last good one.
 async function fetchPriceCached(sources, cadenceSeconds) {
   const src = (sources && sources.source1 && sources.source2) ? sources : { source1: 'coingecko', source2: 'coinbase' };
   const ttlMs = ((typeof cadenceSeconds === 'number' && Number.isFinite(cadenceSeconds) && cadenceSeconds > 0) ? cadenceSeconds : CHECK_CADENCE_SECONDS_DEFAULT) * 1000;
@@ -246,4 +245,4 @@ async function refreshPriceIfStale() {
   } catch (e) { console.error('price refresh failed:', e); }
 }
 
-module.exports = { PRICE_JUMP_WINDOW_MS, priceSourcesOf, priceSourceError, priceAgreementPctOf, checkCadenceSecondsOf, fetchPriceCached, NODE_FEE_CACHE_TTL_MS, fetchNodeFeesCached, fetchTipHeightsCached, priceCacheForState, exchangeStatusFor, refreshPriceIfStale };
+module.exports = { priceSourcesOf, priceSourceError, priceAgreementPctOf, checkCadenceSecondsOf, fetchPriceCached, NODE_FEE_CACHE_TTL_MS, fetchNodeFeesCached, fetchTipHeightsCached, priceCacheForState, exchangeStatusFor, refreshPriceIfStale };

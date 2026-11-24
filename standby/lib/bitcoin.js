@@ -46,7 +46,7 @@
 const crypto = require('crypto');
 const http = require('http');
 const https = require('https');
-const { appendBroadcastLog, PRICE_MIN_USD, PRICE_MAX_USD, sanitizeFeeHistory, FEE_HISTORY_WINDOW_DAYS, FEE_HISTORY_MIN_OBSERVATIONS, FEE_HISTORY_MAX_ENTRIES } = require('./store');
+const { appendBroadcastLog, sanitizeFeeHistory, FEE_HISTORY_WINDOW_DAYS, FEE_HISTORY_MIN_OBSERVATIONS, FEE_HISTORY_MAX_ENTRIES } = require('./store');
 
 const MAX_TX_BYTES = 1000000; // 1 MB, same ceiling as the API body limit
 const MAX_RESPONSE_BYTES = 1024 * 1024; // 1 MB — a mempool reply is a 64-char txid or small JSON; anything bigger is a faulty endpoint, not data
@@ -1178,7 +1178,6 @@ async function fetchPriceFromProvider(provider) {
   try { raw = provider.parse(data); } catch { throw new Error(provider.label + ' has no usable BTC price'); }
   const price = (typeof raw === 'number') ? raw : (typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : NaN);
   if (!Number.isFinite(price) || price <= 0) throw new Error(provider.label + ' has no usable BTC price');
-  if (price < PRICE_MIN_USD || price > PRICE_MAX_USD) throw new Error(provider.label + ' price out of bounds: $' + price.toLocaleString('en-US'));
   return price;
 }
 
@@ -1238,19 +1237,10 @@ function combinePriceReadings(readings, agreementPct) {
     }
   }
   if (valid.length === 0) {
-    // No source answered with a usable price. A feed returning a
-    // price outside the sanity bounds is bad data, not a market
-    // move — name it as implausible (the old single-source guard's
-    // wording), so the owner can tell garbage from an outage. A
-    // feed that did not answer at all is 'unavailable'.
-    const bad = ['source1', 'source2'].filter((slot) => {
-      const r = (readings || {})[slot];
-      return r && r.error && /out of bounds/.test(r.error);
-    });
-    if (bad.length) {
-      const names = bad.map((slot) => readings[slot].error).join('; ');
-      return { valid: false, price: null, mode: 'none', note: '', reason: 'implausible price reading (' + names + ') — ignored', readings };
-    }
+    // No source answered with a usable price — the feed is down
+    // (or returned garbage), not a market move. There is no range
+    // check: a reading both sources agree on is trusted, whatever
+    // its size — the agreement check is the only protection.
     return { valid: false, price: null, mode: 'none', note: '', reason: 'price unavailable — will retry', readings };
   }
   if (valid.length === 1) {
@@ -1262,7 +1252,7 @@ function combinePriceReadings(readings, agreementPct) {
     // The other source either did not answer (unreachable) or
     // answered with garbage (invalid data) — name which, so the
     // owner can tell an outage from a bad feed.
-    const otherWhy = /out of bounds|no usable BTC price/.test(otherErr) ? 'returned invalid data' : 'unreachable';
+    const otherWhy = /no usable BTC price/.test(otherErr) ? 'returned invalid data' : 'unreachable';
     return { valid: true, price: only.price, mode: 'single',
       note: only.label + ' only — ' + otherLabel + ' ' + otherWhy, reason: '', readings };
   }
@@ -2799,7 +2789,7 @@ async function fetchNodeFeeReadings(endpoints) {
 // highest economy fee ever observed is orders of magnitude below
 // it, and the fee-market trigger's own threshold caps at the
 // same value (store.js). An implausible reading is ignored, never
-// trusted — like the price trigger's out-of-bounds guard.
+// trusted — bad data, not a market move.
 const FEE_IMPLAUSIBLE_SATVB = 10000;
 
 // Combine two fetched fee readings into one effective fee —
@@ -2811,10 +2801,9 @@ const FEE_IMPLAUSIBLE_SATVB = 10000;
 // alone — mode 'single' (the other is unreachable). Neither
 // valid → invalid, mode 'none'. An implausible reading
 // (> FEE_IMPLAUSIBLE_SATVB) is never valid — it is bad data,
-// not a market move, so it is ignored rather than trusted. No
-// 10x-jump guard: fee spikes are real and are exactly what an
-// 'above' rule is for — the guard would block the trigger from
-// doing its job. Returns { valid, fee, mode, note, reason,
+// not a market move, so it is ignored rather than trusted. Fee
+// spikes are real and are exactly what an 'above' rule is for.
+// Returns { valid, fee, mode, note, reason,
 // readings }. Pure — no I/O, so the evaluator, the UI status,
 // and the already-true check all agree on one rule.
 function combineFeeReadings(readings) {
