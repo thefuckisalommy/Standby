@@ -54,6 +54,9 @@ on:
     paths:
       - 'standby/**'
       - 'test/**'
+      # Workflow-only PRs (e.g. Dependabot's action updates) must be
+      # tested too.
+      - '.github/workflows/**'
   workflow_dispatch:
   workflow_call:
 
