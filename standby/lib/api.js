@@ -107,6 +107,19 @@ async function handleApi(req, res, pathname) {
     return sendJson(res, 200, { ok: true, cleared: clearCaches(only) });
   }
 
+  // POST /api/__test__/throw-uncaught (test-only): throw an
+  // uncaught exception on the next tick, outside any handler, so
+  // the suite can prove the process terminates instead of serving
+  // through it (0.8.10 audit fix). Gated on STANDBY_TEST_MODE=1
+  // like clear-caches above. Answers 200 first — the throw lands
+  // after the response, so the caller observes the 200 and then
+  // the exit.
+  if (req.method === 'POST' && pathname === '/api/__test__/throw-uncaught') {
+    if (process.env.STANDBY_TEST_MODE !== '1') return sendError(res, 404, 'not found');
+    setTimeout(() => { throw new Error('test-only uncaught exception'); }, 0);
+    return sendJson(res, 200, { ok: true });
+  }
+
   // GET /api/health
   if (req.method === 'GET' && pathname === '/api/health') {
     return sendJson(res, 200, { ok: true, version: VERSION });

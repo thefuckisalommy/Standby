@@ -177,8 +177,16 @@ def save_state_file(stj):
     # from the running app would silently override the seeded
     # clock. Drop it whenever state is seeded; the next tick
     # rewrites it. (Same fix as verify099.py's save_state_file.)
+    # The price-baseline file is dropped for the same reason
+    # (0.8.10 audit fix): a fresh baseline left over from the
+    # running app would silently override a seeded stale slice
+    # baseline in a guard test.
     try:
         os.remove(os.path.join(DATA, 'heartbeat.json'))
+    except OSError:
+        pass
+    try:
+        os.remove(os.path.join(DATA, 'price-baseline.json'))
     except OSError:
         pass
 

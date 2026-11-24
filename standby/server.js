@@ -52,14 +52,21 @@ const { refreshPriceIfStale } = require('./lib/prices');
 const { handleApi } = require('./lib/api');
 const { serveStatic, sendError, setSecurityHeaders, hostAllowed, describeAllowedHosts } = require('./lib/http');
 
-// (0.8.10, audit fix 1) Backstop for anything that throws outside a
-// guarded handler (e.g. a timer callback): log it and keep serving
-// instead of exiting. The request handler below is guarded, so a bad
-// request can no longer reach this; the process survives an
-// unexpected throw rather than dying on it. State is re-read from
-// disk on every load, so a surviving process does not carry a torn
-// in-memory snapshot from the failed handler.
-process.on('uncaughtException', (e) => {
+// (0.8.10, audit fix) An uncaught exception is a crash, not a
+// condition to serve through: Node warns that continuing after one
+// risks undefined state, and for an app that broadcasts
+// transactions a silently-corrupted process is worse than a short
+// outage. So this is uncaughtExceptionMonitor — it only LOGS; the
+// process still terminates with Node's default behaviour, and
+// Docker restarts it (restart: on-failure on both services, and
+// the Umbrel containers run the same policy — verified live).
+// The request handler below is guarded, so a bad request still
+// gets a 400 instead of killing the process; only a throw OUTSIDE
+// a guarded handler reaches here. State is re-read from disk on
+// every load, so a restarted process does not carry a torn
+// in-memory snapshot from the failed handler — and a failed
+// check-in is visible (the POST fails), never silent.
+process.on('uncaughtExceptionMonitor', (e) => {
   console.error('uncaught exception:', e);
 });
 

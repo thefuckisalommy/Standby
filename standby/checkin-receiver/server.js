@@ -92,12 +92,18 @@ function writeLastCheckin(keyId, label, sourceIp) {
   return now;
 }
 
-// (0.8.10, audit fix 1) Backstop for anything that throws outside
-// a guarded handler: log it and keep serving instead of exiting —
-// the request handler below is guarded, so a bad request can no
-// longer reach this. A dead receiver would silently stop check-ins
-// while the dead-man's-switch countdown kept running.
-process.on('uncaughtException', (e) => {
+// (0.8.10, audit fix) An uncaught exception is a crash, not a
+// condition to serve through: Node warns that continuing after one
+// risks undefined state. So this is uncaughtExceptionMonitor — it
+// only LOGS; the process still terminates with Node's default
+// behaviour, and Docker restarts it (restart: on-failure, and the
+// Umbrel receiver container runs the same policy — verified
+// live). The request handler below is guarded, so a bad request
+// still gets a 400 instead of killing the process; only a throw
+// OUTSIDE a guarded handler reaches here. A failed check-in is
+// visible (the POST fails), and the check-in state is re-read
+// from disk, so a restarted receiver loses nothing durable.
+process.on('uncaughtExceptionMonitor', (e) => {
   console.error('uncaught exception:', e);
 });
 
@@ -129,6 +135,18 @@ const server = http.createServer((req, res) => {
   const pathname = url.pathname;
 
   if (req.method === 'GET' && pathname === '/health') {
+    return sendJson(res, 200, { ok: true });
+  }
+
+  // POST /__test__/throw-uncaught (test-only): same as the app
+  // server's hook — throw outside any handler so the suite can
+  // prove the receiver terminates instead of serving through it
+  // (0.8.10 audit fix). Gated on STANDBY_TEST_MODE=1, which only
+  // the test harness sets; without it this 404s like any unknown
+  // path. Answers 200 first — the throw lands after the response.
+  if (req.method === 'POST' && pathname === '/__test__/throw-uncaught') {
+    if (process.env.STANDBY_TEST_MODE !== '1') return sendJson(res, 404, { error: 'not found' });
+    setTimeout(() => { throw new Error('test-only uncaught exception'); }, 0);
     return sendJson(res, 200, { ok: true });
   }
 

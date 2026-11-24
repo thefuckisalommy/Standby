@@ -95,15 +95,34 @@ function checkCheckinRule(state, rule, now, ctx) {
 //       when the last reading is recent (within an hour). Over a
 //       longer gap a real 10x move is possible (the app was off
 //       for months), so an old baseline does not veto a new price.
+//       The baseline is the NEWER of the dedicated
+//       price-baseline file and this rule's stored slice (the
+//       file is refreshed by every good reading, throttled to 5
+//       minutes, so a flat price no longer leaves the persisted
+//       baseline stale — 0.8.10 audit fix; the skip-save dedupe
+//       still excludes lastPriceAt from state.json).
 async function checkPriceRule(state, rule, now, ctx) {
   const p = rule.params;
   const prev = (ctx && ctx.prevSlice && typeof ctx.prevSlice === 'object') ? ctx.prevSlice : {};
   // The last GOOD state, kept across unknown readings (fail-safe):
-  // a disagreement or outage never fires the rule.
+  // a disagreement or outage never fires the rule. The baseline
+  // is the newer of the price-baseline file and the stored slice:
+  // the file is refreshed by good readings independently of the
+  // state save, so it is the fresh one whenever the slice went
+  // stale; a missing file falls back to the slice.
   const keepGood = {
     lastPrice: (typeof prev.lastPrice === 'number' && Number.isFinite(prev.lastPrice)) ? prev.lastPrice : null,
     lastPriceAt: (typeof prev.lastPriceAt === 'string' && prev.lastPriceAt) ? prev.lastPriceAt : null,
   };
+  const fileBaseline = store.readPriceBaseline(DATA_DIR);
+  if (fileBaseline) {
+    const fileAt = new Date(fileBaseline.lastPriceAt).getTime();
+    const sliceAt = (typeof keepGood.lastPriceAt === 'string' && keepGood.lastPriceAt) ? new Date(keepGood.lastPriceAt).getTime() : NaN;
+    if (Number.isFinite(fileAt) && (!Number.isFinite(sliceAt) || fileAt >= sliceAt)) {
+      keepGood.lastPrice = fileBaseline.lastPrice;
+      keepGood.lastPriceAt = fileBaseline.lastPriceAt;
+    }
+  }
   let readings;
   try { readings = await fetchPriceCached(priceSourcesOf(state.settings), checkCadenceSecondsOf(state.settings)); }
   catch (e) {
@@ -151,7 +170,26 @@ async function checkPriceRule(state, rule, now, ctx) {
       detail: { price, mode: comb.mode }, warning: null,
     };
   }
-  // The reading is good: it becomes the new baseline.
+  // The reading is good: it becomes the new baseline — in the
+  // rule's slice (persisted with the trigger state) and in the
+  // dedicated price-baseline file (throttled to 5 minutes), which
+  // is what keeps the 10x guard fresh across flat-price hours.
+  // The file is only written when the reading was VERIFIED
+  // against a baseline: it must be within 10x of the merged
+  // baseline (slice or file). A reading accepted only because
+  // there was no baseline at all — a tx's first-ever
+  // evaluation — or only because the baseline was too old to
+  // judge it never becomes the GLOBAL baseline: either gap
+  // would let one tx's unguarded reading poison every other
+  // tx's guard (a $1,000,000 reading accepted on a 2-hour-old
+  // $98,200 baseline would veto the true $98,200 price for
+  // every tx afterwards). The slice still records it — that is
+  // per-tx and contained, the pre-existing behaviour — and the
+  // file is written on the next verified reading instead (a
+  // reading within 10x of an old baseline re-anchors it).
+  const baselineOk = lastPrice !== null && Number.isFinite(lastAt)
+    && !(price > lastPrice * 10 || price < lastPrice / 10);
+  if (baselineOk) store.touchPriceBaseline(DATA_DIR, price, now.toISOString());
   const holding = p.op === '>=' ? price >= p.value : price <= p.value;
   // The stored reason is trigger-only — the effective price, no
   // per-source note (that lives in priceNote as data, and in the

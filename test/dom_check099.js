@@ -2086,8 +2086,12 @@ function check(name, cond, detail) {
   // test-written state.json defines the world, and the fresh
   // heartbeat left over from the running app would silently
   // override the seeded 40-day gap on the rerender's read.
-  // (Same fix as the API and regression suites' seeders.)
+  // (Same fix as the API and regression suites' seeders.) The
+  // price-baseline file goes too (0.8.10 audit fix): a fresh
+  // baseline left over from the running app would silently
+  // override a seeded stale slice baseline in a guard test.
   try { fs.unlinkSync(DATA_FILE.replace('state.json', 'heartbeat.json')); } catch (e) { /* no heartbeat yet */ }
+  try { fs.unlinkSync(DATA_FILE.replace('state.json', 'price-baseline.json')); } catch (e) { /* no baseline yet */ }
   await rerender(appJs);
   const heldBar35 = checkinBar('Dom Check-in');
   const heldBar10 = checkinBar('Dom Check-in 10d');

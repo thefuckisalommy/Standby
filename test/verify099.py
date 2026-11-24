@@ -220,11 +220,19 @@ Boots the branch-0.8.5 app (port 3438), the check-in receiver
       allowlist and a bare "." still gets a 421; the
       check-in/broadcast JSONL logs round-trip durably with no
       .tmp left behind; and the 1-hour 10x price-jump guard is
-      pinned at its current behaviour — a 10x reading on a fresh
-      baseline is vetoed, but the same reading on a baseline
-      backdated past the hour is accepted (the skip-save
-      exclusion leaves the persisted baseline stale; the 5%
-      two-source agreement remains the primary protection).
+      kept fresh by a dedicated price-baseline file (0.8.10 audit
+      fix) — a 10x reading on a slice backdated past the hour is
+      still vetoed while the file is fresh, and accepted only
+      when the file is missing (slice fallback).
+  36. 0.8.10 audit fixes: (a) the price-baseline file keeps the
+      10x guard alive across a flat-price hour — driving the
+      real checkPriceRule with a faked clock for 75 minutes and
+      then injecting a 10x jump must stay unknown, never due;
+      (b) the baseline file survives a restart, so the guard
+      still vetoes after one; (c) an uncaught exception
+      terminates the process (uncaughtExceptionMonitor) on both
+      servers — a scratch server hit with the test-only throw
+      hook exits nonzero with the log line recorded.
 Ports: app 3438, receiver 3439, stubs 18235/18236 — no collision
 with the 095 suite (app 3388, receiver 3389, stubs 18175/18176) or
 the 096 suite (app 3398, receiver 3399, stubs 18185/18186).
@@ -385,9 +393,16 @@ def save_state_file(stj):
     # from the running app would silently override the seeded
     # clock (the same reason §22 removes the receiver's last.json
     # before simulating a clock). Drop it whenever state is
-    # seeded; the next tick rewrites it.
+    # seeded; the next tick rewrites it. The price-baseline file
+    # is dropped for the same reason (0.8.10 audit fix): a fresh
+    # baseline left over from the running app would silently
+    # override a seeded stale slice baseline in a guard test.
     try:
         os.remove(os.path.join(DATA, 'heartbeat.json'))
+    except OSError:
+        pass
+    try:
+        os.remove(os.path.join(DATA, 'price-baseline.json'))
     except OSError:
         pass
 
@@ -5840,40 +5855,81 @@ def main():
                       % json.dumps('/tmp/heirloom099-jsonl'))
         out, err = node_out(node_jsonl)
         check('35 jsonl: append + rewrite round-trip with no .tmp', out == 'OK', out + err)
-        # (f) The 10x price-jump guard is PINNED at its current
-        # behaviour: the skip-save dedupe excludes lastPriceAt,
-        # so after a flat-price period over an hour the persisted
-        # baseline looks old and a 10x reading is ACCEPTED, not
-        # vetoed. The control first proves the guard itself works
-        # (a 10x jump on a FRESH baseline is vetoed as unknown);
-        # then the baseline is backdated past the hour and the
-        # same reading is accepted. The 5% two-source agreement
-        # remains the primary protection; preserving the guard
-        # fully would need an in-memory baseline for the
-        # evaluator — a design decision, not taken here.
+        # (f) The 10x price-jump guard is kept FRESH by a
+        # dedicated price-baseline file (0.8.10 audit fix): the
+        # skip-save dedupe still excludes lastPriceAt from
+        # state.json, but the guard reads the NEWER of the
+        # baseline file and the rule's stored slice, and a good
+        # reading refreshes the file (throttled to 5 minutes).
+        # Two rules bound the file (both found by the regression
+        # suite's 6e while verifying this fix): a reading is only
+        # written to the file when it is within 10x of a baseline
+        # that existed to check it against — a tx's first-ever
+        # reading, and a reading accepted only because the
+        # baseline was too old to judge it, are unverified and
+        # must not become the GLOBAL baseline — and a missing
+        # file is recreated at once, throttle or not. The test
+        # proves both, then the guard itself: a 10x jump on a
+        # 2-hour-old slice is STILL vetoed while the file is
+        # fresh, and ACCEPTED once the file is gone (fallback to
+        # the slice value).
         s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 10})
         check('35 price: cadence set to 10 s', s == 200, (s, r))
         s, pr = req('POST', '/__test__/price', {'usd': 98200}, base=STUB_BASE_P)
         check('35 price: stub price reset to $98,200', s == 200, pr)
         delete_all_txs()
+        try:
+            os.remove(os.path.join(DATA, 'price-baseline.json'))
+        except OSError:
+            pass
         s, r = add_tx('35 price pin', {'type': 'price', 'params': {'op': '>=', 'value': 2000000}}, 121006, trigger_confirmed=True)
         check('35 price: watching price tx adds (201)', s == 201, (s, r))
         p35 = r['tx']['id'] if s == 201 else None
         check('35 price: one tick evaluates it (slice watching at $98,200)',
               wait_slice(p35, {'status': 'watching', 'lastPrice': 98200}), rule_slice(state_tx(p35)) if p35 else None)
+        check('35 price: the first (unverified) reading did NOT write the baseline file',
+              not os.path.exists(os.path.join(DATA, 'price-baseline.json')), os.path.exists(os.path.join(DATA, 'price-baseline.json')))
+        time.sleep(12)
+        _pb = None
+        try:
+            _pb = json.load(open(os.path.join(DATA, 'price-baseline.json')))
+        except Exception:
+            _pb = None
+        check('35 price: the next (verified) reading wrote the baseline file ($98,200)',
+              isinstance(_pb, dict) and _pb.get('lastPrice') == 98200, _pb)
         s, pr = req('POST', '/__test__/price', {'usd': 1000000}, base=STUB_BASE_P)
         check('35 price: stub price set to $1,000,000 (10.2x)', s == 200, pr)
-        check('35 price: caches cleared before the veto eval', clear_caches())
-        check('35 price: 10x on a fresh baseline is vetoed (unknown, $98,200 kept)',
-              wait_slice(p35, {'status': 'unknown', 'lastPrice': 98200}, deadline=30), rule_slice(state_tx(p35)) if p35 else None)
+        # The slice is backdated past the hour — the regression
+        # the audit found — while the app-written file stays
+        # fresh: the guard must read the file, not the stale
+        # slice. save_state_file drops the file, so its contents
+        # (exactly as the app wrote them) are restored after.
         stj = load_state_file()
         for _t in stj.get('bitcoin', {}).get('txs', []):
             if _t.get('id') == p35:
                 _sl = (_t.get('triggerState') or [{}])[0]
                 _sl['lastPriceAt'] = iso_ago(hours=2)
-        save_state_file(stj)
-        check('35 price: caches cleared before the accept eval', clear_caches())
-        check('35 price: 10x on a 2-hour-old baseline is ACCEPTED (watching at $1,000,000)',
+        save_state_file(stj)  # also drops heartbeat.json AND price-baseline.json
+        if _pb is not None:
+            json.dump(_pb, open(os.path.join(DATA, 'price-baseline.json'), 'w'))
+        check('35 price: caches cleared before the file-baseline eval', clear_caches())
+        check('35 price: 10x on a 2-hour-old SLICE is still vetoed (file is the baseline)',
+              wait_slice(p35, {'status': 'unknown', 'lastPrice': 98200}, deadline=30), rule_slice(state_tx(p35)) if p35 else None)
+        # And with the file gone, the guard falls back to the
+        # slice — the pre-fix behaviour — and the same reading
+        # is accepted.
+        try:
+            os.remove(os.path.join(DATA, 'price-baseline.json'))
+        except OSError:
+            pass
+        stj = load_state_file()
+        for _t in stj.get('bitcoin', {}).get('txs', []):
+            if _t.get('id') == p35:
+                _sl = (_t.get('triggerState') or [{}])[0]
+                _sl['lastPriceAt'] = iso_ago(hours=2)
+        save_state_file(stj)  # also drops heartbeat.json AND price-baseline.json
+        check('35 price: caches cleared before the fallback eval', clear_caches())
+        check('35 price: 10x with no baseline file is ACCEPTED (slice fallback, watching at $1,000,000)',
               wait_slice(p35, {'status': 'watching', 'lastPrice': 1000000}, deadline=30), rule_slice(state_tx(p35)) if p35 else None)
         s, pr = req('POST', '/__test__/price', {'usd': 98200}, base=STUB_BASE_P)
         check('35 price: stub price restored to $98,200', s == 200, pr)
@@ -5882,12 +5938,143 @@ def main():
         check('35 price: cadence restored to 60 s', s == 200, (s, r))
         delete_all_txs()
 
+        # --- 36. 0.8.10 audit fixes ----------------------------------
+        # (a) The price-baseline file keeps the 10x guard alive
+        # across a flat-price hour (the auditor's acceptance
+        # test): drive the real checkPriceRule with a faked clock
+        # for 75 minutes of flat $98,200 — a good reading every 5
+        # fake-minutes — then inject a 10x jump. The rule must
+        # stay unknown, never due. Two custom sources on a tiny
+        # local server stand in for the providers (two different
+        # URLs, or priceSourcesOf would fall back to the real
+        # defaults); the data dir is a scratch dir so nothing
+        # touches the running server's files.
+        node_36a = (
+            "process.env.DATA_DIR=%s;"
+            "const fs=require('fs');const http=require('http');"
+            "const store=require('./lib/store');const rules=require('./lib/rules');"
+            "const d=process.env.DATA_DIR;"
+            "fs.rmSync(d,{recursive:true,force:true});fs.mkdirSync(d,{recursive:true});"
+            "let price=98200;"
+            "const srv=http.createServer((req,res)=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({usd:price}));});"
+            "const realNow=Date.now;let fake=realNow();Date.now=()=>fake;"
+            "srv.listen(0,'127.0.0.1',async()=>{"
+            "try{"
+            "const port=srv.address().port;"
+            "const src1={id:'custom',url:'http://127.0.0.1:'+port+'/p1',path:'usd'};"
+            "const src2={id:'custom',url:'http://127.0.0.1:'+port+'/p2',path:'usd'};"
+            "const state={settings:{priceSources:{source1:src1,source2:src2},priceAgreementPct:5,checkCadenceSeconds:10},bitcoin:{txs:[]}};"
+            "const rule={type:'price',params:{op:'>=',value:2000000}};"
+            "let slice=null;"
+            "for(let i=0;i<15;i++){fake+=5*60*1000;"
+            "const r=await rules.checkPriceRule(state,rule,new Date(fake),{prevSlice:slice});"
+            "if(r.status!=='watching'){console.log('FAIL step '+i+' status '+r.status);srv.close();Date.now=realNow;return;}"
+            "slice=r.slice;}"
+            "const fb=store.readPriceBaseline(d);"
+            "const fbAge=fb?fake-new Date(fb.lastPriceAt).getTime():null;"
+            "if(!fb||fb.lastPrice!==98200||fbAge>6*60*1000){console.log('FAIL baseline '+JSON.stringify(fb)+' age '+fbAge);srv.close();Date.now=realNow;return;}"
+            "price=1000000;fake+=60*1000;"
+            "const r2=await rules.checkPriceRule(state,rule,new Date(fake),{prevSlice:slice});"
+            "if(r2.status!=='unknown'||!r2.slice||r2.slice.lastPrice!==98200){console.log('FAIL veto status '+r2.status+' lastPrice '+(r2.slice&&r2.slice.lastPrice));srv.close();Date.now=realNow;return;}"
+            "console.log('PASS');"
+            "}catch(e){console.log('FAIL error '+e.message);}"
+            "srv.close();Date.now=realNow;});"
+            % json.dumps('/tmp/heirloom099-pricebase'))
+        out, err = node_out(node_36a)
+        check('36 price: 75 fake-minutes flat, then a 10x jump stays unknown (never due)',
+              out == 'PASS', out + err)
+        # (b) The baseline file survives a restart: backdate the
+        # slice past the hour (which also drops the file via
+        # save_state_file), re-seed the file fresh, restart, and
+        # the 10x reading must still be vetoed — if the file had
+        # not survived, the guard would fall back to the stale
+        # slice and accept.
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 10})
+        check('36 restart: cadence set to 10 s', s == 200, (s, r))
+        s, pr = req('POST', '/__test__/price', {'usd': 98200}, base=STUB_BASE_P)
+        check('36 restart: stub price reset to $98,200', s == 200, pr)
+        delete_all_txs()
+        # Clean slate for the file too: a tick that fired while
+        # the stub was still $1,000,000 in 35(f)'s fallback part
+        # may have written $1,000,000 to it (consistent with the
+        # slice it had just accepted), and this section's first
+        # check needs no baseline file at all.
+        try:
+            os.remove(os.path.join(DATA, 'price-baseline.json'))
+        except OSError:
+            pass
+        s, r = add_tx('36 restart baseline', {'type': 'price', 'params': {'op': '>=', 'value': 2000000}}, 121007, trigger_confirmed=True)
+        check('36 restart: watching price tx adds (201)', s == 201, (s, r))
+        p36 = r['tx']['id'] if s == 201 else None
+        check('36 restart: one tick evaluates it (slice watching at $98,200)',
+              wait_slice(p36, {'status': 'watching', 'lastPrice': 98200}), rule_slice(state_tx(p36)) if p36 else None)
+        stj = load_state_file()
+        for _t in stj.get('bitcoin', {}).get('txs', []):
+            if _t.get('id') == p36:
+                _sl = (_t.get('triggerState') or [{}])[0]
+                _sl['lastPriceAt'] = iso_ago(hours=2)
+        save_state_file(stj)  # also drops heartbeat.json AND price-baseline.json
+        json.dump({'lastPrice': 98200, 'lastPriceAt': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')},
+                  open(os.path.join(DATA, 'price-baseline.json'), 'w'))
+        check('36 restart: app restarts with the fresh baseline file on disk', restart())
+        s, pr = req('POST', '/__test__/price', {'usd': 1000000}, base=STUB_BASE_P)
+        check('36 restart: stub price set to $1,000,000 (10.2x)', s == 200, pr)
+        check('36 restart: caches cleared before the veto eval', clear_caches())
+        check('36 restart: 10x after a restart is still vetoed (unknown, $98,200 kept)',
+              wait_slice(p36, {'status': 'unknown', 'lastPrice': 98200}, deadline=30), rule_slice(state_tx(p36)) if p36 else None)
+        s, pr = req('POST', '/__test__/price', {'usd': 98200}, base=STUB_BASE_P)
+        check('36 restart: stub price restored to $98,200', s == 200, pr)
+        check('36 restart: caches cleared after the restore', clear_caches())
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 60})
+        check('36 restart: cadence restored to 60 s', s == 200, (s, r))
+        delete_all_txs()
+        # (c) An uncaught exception terminates the process
+        # (uncaughtExceptionMonitor) instead of serving through
+        # it: a scratch app server and a scratch receiver, each
+        # hit with its test-only throw hook, must exit nonzero
+        # with the log line recorded, and their ports must close.
+        # (The request-level 400 handling for a malformed URL
+        # is untouched — §32 still covers it.)
+        uc_data = '/tmp/heirloom099-uncaught'
+        uc_checkin = '/tmp/heirloom099-uncaught-checkin'
+        uc_log = '/tmp/heirloom099-uncaught.log'
+        shutil.rmtree(uc_data, ignore_errors=True)
+        shutil.rmtree(uc_checkin, ignore_errors=True)
+        uc_env = dict(APP_ENV)
+        uc_env.update({'PORT': '3440', 'DATA_DIR': uc_data, 'CHECKIN_DIR': uc_checkin})
+        uc = start(['node', 'server.js'], env=uc_env, cwd=APP, log=uc_log)
+        check('36 uncaught: scratch app server starts', wait_up('http://127.0.0.1:3440'))
+        s, r = req('POST', '/api/__test__/throw-uncaught', {}, base='http://127.0.0.1:3440')
+        check('36 uncaught: app hook answers 200', s == 200, (s, r))
+        check('36 uncaught: app server exits on an uncaught exception',
+              wait_until(lambda: uc.poll() is not None, deadline=10), uc.poll())
+        check('36 uncaught: app exit code is nonzero',
+              uc.poll() not in (None, 0), uc.poll())
+        _uc_log = open(uc_log).read() if os.path.exists(uc_log) else ''
+        check('36 uncaught: app log records the exception',
+              'uncaught exception:' in _uc_log, _uc_log[-300:] if _uc_log else None)
+        check('36 uncaught: scratch app port is closed again', port_closed(3440))
+        rc_log = '/tmp/heirloom099-uncaught-recv.log'
+        rc = start(['node', 'server.js'], env={'PORT': '3441', 'CHECKIN_DIR': uc_checkin},
+                   cwd=os.path.join(APP, 'checkin-receiver'), log=rc_log)
+        check('36 uncaught: scratch receiver starts', wait_up('http://127.0.0.1:3441', path='/health'))
+        s, r = req('POST', '/__test__/throw-uncaught', {}, base='http://127.0.0.1:3441')
+        check('36 uncaught: receiver hook answers 200', s == 200, (s, r))
+        check('36 uncaught: receiver exits on an uncaught exception',
+              wait_until(lambda: rc.poll() is not None, deadline=10), rc.poll())
+        check('36 uncaught: receiver exit code is nonzero',
+              rc.poll() not in (None, 0), rc.poll())
+        _rc_log = open(rc_log).read() if os.path.exists(rc_log) else ''
+        check('36 uncaught: receiver log records the exception',
+              'uncaught exception:' in _rc_log, _rc_log[-300:] if _rc_log else None)
+        check('36 uncaught: scratch receiver port is closed again', port_closed(3441))
+
     finally:
         for p in list(v.procs):
             stop(p)
 
     # --- 11. no server left running -------------------------------------
-    for port in (PORT, RECEIVER_PORT, STUB_P, STUB_S, 18190, 18191, 3440):
+    for port in (PORT, RECEIVER_PORT, STUB_P, STUB_S, 18190, 18191, 3440, 3441):
         check('11 no server left running on port %d' % port, port_closed(port))
 
     print()

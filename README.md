@@ -59,7 +59,7 @@ docker compose up -d
 
 **Ports:** override with `STANDBY_WEB_PORT` (default 3100) and `STANDBY_CHECKIN_PORT` (default 3101).
 
-**Reaching the UI:** there is no login screen on this path, and the web UI is localhost-only by default. Reach it on the box itself, over SSH (`ssh -L 3100:localhost:3100 <box>`), over Tailscale, or behind your own reverse proxy with auth — a proxy serving it under its own hostname needs that hostname in STANDBY_ALLOWED_HOSTS, or the app answers 421. To open it to your LAN, change the web port line in `docker-compose.yml` to `"${STANDBY_WEB_PORT:-3100}:3100"` — only on a network you trust.
+**Reaching the UI:** there is no login screen on this path, and the web UI is localhost-only by default. Reach it on the box itself, over SSH (`ssh -L 3100:localhost:3100 <box>`), over Tailscale, or behind your own reverse proxy with auth — a proxy serving it under its own hostname needs that hostname in STANDBY_ALLOWED_HOSTS, or the app answers 421. A Tailscale MagicDNS name (like `name.ts.net`) counts as its own hostname too, so it needs to be listed the same way; a plain Tailscale IP needs nothing. To open it to your LAN, change the web port line in `docker-compose.yml` to `"${STANDBY_WEB_PORT:-3100}:3100"` — only on a network you trust.
 
 **Check-ins:** `curl -X POST http://<box>:3101/checkin -H "Authorization: Bearer <your key>"`. Plain HTTP, protected only by the key — keep it on your trusted LAN or Tailscale network, as in [SECURITY.md](SECURITY.md).
 

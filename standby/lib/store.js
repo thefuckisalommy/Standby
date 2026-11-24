@@ -1093,8 +1093,11 @@ function saveState(dataDir, state) {
   // on every load), and each triggerState slice's lastEvalAt /
   // lastPriceAt / lastOutspend.checkedAt (the evaluators stamp
   // them on every evaluation — and the UI reads none of the
-  // three). Excluding updatedAt alone would not be enough: the
-  // merged heartbeat value advances every tick, so a comparison
+  // three). lastPriceAt stays excluded even though the 10x-jump
+  // guard reads it: the guard's freshness now lives in the
+  // dedicated price-baseline file (see readPriceBaseline above),
+  // not in the persisted slice. Excluding updatedAt alone would
+  // not be enough: the merged heartbeat value advances every tick, so a comparison
   // that included lastOnlineAt would differ every tick and the
   // skip would never fire — and without the slice timestamps,
   // the tick's trigger-state save would rewrite the file every
@@ -1251,6 +1254,80 @@ function mergeHeartbeat(state, dataDir) {
 }
 
 // ---------------------------------------------------------------------------
+// Price baseline (0.8.10, audit fix): the last GOOD price reading,
+// kept in a tiny file of its own so the 10x-jump guard stays fresh
+// without the state save. The skip-save dedupe deliberately excludes
+// lastPriceAt from the state comparison (the evaluators stamp it on
+// every evaluation), so a flat price leaves the persisted slice
+// baseline stale — after an hour the guard reads the baseline as
+// old and a sudden 10x reading is accepted. The baseline file is
+// the fix, on the heartbeat pattern: a good price reading refreshes
+// it (throttled to 5 minutes — small against the guard's 1-hour
+// window), the guard reads the NEWER of the file and the rule's
+// stored slice (see checkPriceRule), and a missing or corrupt file
+// falls back to the slice, i.e. to the pre-fix behaviour. A
+// future-dated baseline needs no clamp (unlike the heartbeat): a
+// future stamp only makes the guard MORE willing to veto, never
+// less — the safe direction — and the next good reading rewrites
+// it with the current time anyway. The file only stays fresh while
+// good readings keep flowing: if fetches fail for over an hour the
+// baseline IS genuinely old and the guard correctly does not
+// veto — that is intended, not a bug.
+const PRICE_BASELINE_FILE = 'price-baseline.json';
+// Throttle: at most one baseline write per 5 minutes per data
+// dir. The guard's window is an hour, so 5 minutes of staleness
+// costs nothing.
+const PRICE_BASELINE_INTERVAL_MS = 5 * 60 * 1000;
+
+function readPriceBaseline(dataDir) {
+  // { lastPrice, lastPriceAt } of the last GOOD price reading, or
+  // null when the file is missing, unreadable, or malformed.
+  // Never throws — a bad baseline is a fallback, not an error.
+  try {
+    const doc = JSON.parse(fs.readFileSync(path.join(dataDir, PRICE_BASELINE_FILE), 'utf8'));
+    if (doc && typeof doc.lastPrice === 'number' && Number.isFinite(doc.lastPrice)
+        && typeof doc.lastPriceAt === 'string') {
+      const at = new Date(doc.lastPriceAt);
+      if (!Number.isNaN(at.getTime())) return { lastPrice: doc.lastPrice, lastPriceAt: doc.lastPriceAt };
+    }
+  } catch (e) { /* missing/corrupt: fall back to the slice */ }
+  return null;
+}
+
+// In-memory throttle record: last baseline write per data dir
+// (ms since epoch). A fresh process starts empty, so its first
+// touchPriceBaseline always writes.
+const priceBaselineLastWrite = new Map();
+
+function writePriceBaseline(dataDir, price, isoNow) {
+  // Unconditional write (tmp+rename via writeFileDurable, NO
+  // backup rotation — the file is a few bytes and is rewritten
+  // every few minutes). Records the write for the throttle.
+  ensureDir(dataDir);
+  writeFileDurable(path.join(dataDir, PRICE_BASELINE_FILE), JSON.stringify({ lastPrice: price, lastPriceAt: isoNow }) + '\n');
+  priceBaselineLastWrite.set(dataDir, Date.now());
+}
+
+function touchPriceBaseline(dataDir, price, isoNow) {
+  // Throttled write: at most once per PRICE_BASELINE_INTERVAL_MS
+  // per data dir — EXCEPT when the file is missing (deleted, or
+  // never written): a missing file is recreated at once, throttle
+  // or not. The throttle tracks time since the last write, so a
+  // state save that drops the file (seeders, clock edits) would
+  // otherwise leave the guard file-less until the throttle expired
+  // — exactly the freshness gap the file exists to close. Returns
+  // true when it wrote. A negative elapsed time means the clock
+  // went BACKWARD since the last write — the throttle is expired,
+  // not extended (same rule as touchHeartbeat): write now instead
+  // of blocking writes until the clock catches up.
+  const last = priceBaselineLastWrite.get(dataDir) || 0;
+  const elapsed = Date.now() - last;
+  if (elapsed >= 0 && elapsed < PRICE_BASELINE_INTERVAL_MS && readPriceBaseline(dataDir)) return false;
+  writePriceBaseline(dataDir, price, isoNow);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Durable writes (0.8.10, fsync durability — the audit's durability
 // finding; the skip-save half is done too, see the saveState dedupe
 // above). A tmp+rename is atomic, so a crash can never leave a torn state
@@ -1335,7 +1412,7 @@ function writeJsonl(dataDir, file, entries) {
 }
 
 module.exports = {
-  loadState, saveState, writeFileDurable, writeHeartbeat, touchHeartbeat, defaultState, newTxId, newSetId,
+  loadState, saveState, writeFileDurable, writeHeartbeat, touchHeartbeat, readPriceBaseline, writePriceBaseline, touchPriceBaseline, defaultState, newTxId, newSetId,
   appendCheckin, readCheckins, writeCheckins,
   appendBroadcastLog, readBroadcastLog, writeBroadcastLog,
   normalizeTrigger, normalizeRule, triggerOf, triggerRulesOf, triggerTypesOf, hasTriggerType,
