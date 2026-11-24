@@ -144,6 +144,18 @@ let outspendsRequests = 0;
 // one fail, and prove the app dedupes / retries correctly.
 let outspendDelayMs = parseInt(process.env.STUB_OUTSPEND_DELAY_MS || '0', 10) || 0;
 let outspendFail = false;
+// Test hook (0.8.10, generic outspend negotiation): outspendMode
+// is which outspend shapes this stub serves — 'both' (default:
+// batch + singular, like mempool.space and Esplora), 'batch'
+// (batch only, like a self-hosted mempool backend v3, whose
+// /api/v1/* has no singular route), 'singular' (singular only),
+// or 'neither' (neither route exists). A missing route 404s,
+// exactly like an unknown parent — the app cannot tell the two
+// apart from the status alone, which is the point: the suite can
+// prove the client negotiates the shape instead of assuming it.
+// Mutable per stub via POST /__test__/outspend-mode {mode};
+// restarting the stub resets it to 'both'.
+let outspendMode = 'both';
 // Test hook (0.8.0, UA fix): the User-Agent each price feed was
 // last fetched with, so a suite can prove the app identifies
 // itself (CoinGecko 403s a missing/non-descriptive UA).
@@ -485,6 +497,22 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
+  // Test control (0.8.10, generic outspend negotiation):
+  // POST /__test__/outspend-mode { mode: 'both'|'batch'|
+  // 'singular'|'neither' } — see the outspendMode declaration
+  // above. Answers the current mode.
+  if (req.method === 'POST' && p === '/__test__/outspend-mode') {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      let b = {};
+      try { b = JSON.parse(body); } catch { b = {}; }
+      if (b.mode === 'both' || b.mode === 'batch' || b.mode === 'singular' || b.mode === 'neither') outspendMode = b.mode;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ ok: true, mode: outspendMode }));
+    });
+    return;
+  }
   // BTC price (0.8.0, two-source 0.8.0): one route per provider,
   // each in the real provider's shape. state.fail answers 500
   // (a dead feed); state.bad answers a malformed reading. The
@@ -617,6 +645,7 @@ const server = http.createServer((req, res) => {
   if (req.method === 'GET' && outs) {
     outspendsRequests++;
     if (outspendFail) { res.writeHead(500, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: 'outspend down (stub)' })); }
+    if (outspendMode === 'singular' || outspendMode === 'neither') { res.writeHead(404); return res.end(); }
     const txid = outs[1].toLowerCase();
     const nouts = txid === FINNEY ? 2 : 1;
     const answer = () => {
@@ -633,6 +662,7 @@ const server = http.createServer((req, res) => {
   if (req.method === 'GET' && out) {
     outspendRequests++;
     if (outspendFail) { res.writeHead(500, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: 'outspend down (stub)' })); }
+    if (outspendMode === 'batch' || outspendMode === 'neither') { res.writeHead(404); return res.end(); }
     const txid = out[1].toLowerCase();
     const vout = out[2];
     const answer = () => {

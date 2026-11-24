@@ -1543,6 +1543,27 @@ async function getSlipstreamTxStatus(txid) {
 // unspent, never permission to fire.
 const outspendCache = new Map(); // key -> { fetchedAtMs, result }
 const OUTSPEND_CACHE_DEFAULT_TTL_MS = 60 * 1000;
+// (0.8.10, generic outspend negotiation) Learned outspend
+// shape, per node base: the bases whose batch route has been
+// proven missing — a batch 404 followed by a singular success.
+// Mempool-compatible APIs differ in which outspend endpoints they
+// serve: mempool.space and Esplora serve both the batch
+// /api/tx/:txid/outspends and the singular
+// /api/tx/:txid/outspend/:vout, while a self-hosted mempool
+// backend v3 serves only the batch (its /api/v1/* has no singular
+// route). The client must not hard-code any implementation's
+// inventory: it tries the batch first, falls back to the singular
+// on a route-missing signal, and remembers the bases that needed
+// the fallback, so the fallback costs one extra request once, not
+// every tick. The record is per base (primary and secondary may
+// differ) and in-memory only — a restart re-learns it, in case a
+// node is upgraded. A base leaves the set the moment its batch
+// answers again. It is capability state, not a cached answer, so
+// the test-only clear-caches hook does NOT reset it — only a
+// restart does. (A suite that flips a stub's shape resets the
+// record with restart(), and proves the learning with a second
+// lookup on the same base.)
+const singularOnlyBases = new Set();
 // Test-only (speedup): drop every outspend cache entry and every
 // in-flight dedup promise, so the next lookup fetches fresh —
 // the same cold-cache state a restart produces, without one.
@@ -1589,19 +1610,74 @@ function outspendCachePut(apiBase, prevTxid, prevVout, result) {
 
 // mempool API: GET /api/tx/:txid/outspend/:vout
 //   200 {spent} / {spent, txid, vin, status}  |  404 = tx unknown to mempool
-async function mempoolOutspend(prevTxid, prevVout, apiBase, ttlMs) {
+// (0.8.10, generic outspend negotiation) One outpoint's spend
+// status, from whichever outspend shape this node serves. The
+// batch is tried first: it answers every output of the funding tx
+// in one request (and caches the requested outpoint's entry), and
+// it is the shape the most implementations serve — a self-hosted
+// mempool backend v3 keeps the batch and drops the singular. When
+// the batch cannot answer (404: the parent is unknown to this node,
+// or the batch route does not exist here — the two are
+// indistinguishable from the status alone), the singular is tried
+// for that outpoint. If the singular then succeeds, this base is
+// recorded singular-only, so later lookups go straight to the
+// singular and the fallback costs one extra request once, not
+// every tick. A 404 from BOTH shapes is unknown — cannot prove
+// spent or unspent; NEVER cached. Any other failure (429/500/503,
+// ...) still throws exactly as before: a transient or server error
+// is never disguised as "route missing". `skipBatch` is for the
+// rule evaluation's batch path (checkOutspend below): the batch
+// was already attempted for this funding tx by the batch object,
+// so only the singular remains untried for this endpoint.
+// The shape record is trusted once learned — a singular 404 on a
+// recorded base means the parent is unknown, not that the route
+// vanished — and a restart re-learns it from scratch.
+async function mempoolOutspend(prevTxid, prevVout, apiBase, ttlMs, skipBatch) {
   const cached = outspendCacheGet(apiBase, prevTxid, prevVout, ttlMs);
   if (cached !== undefined) return cached;
   const key = outspendCacheKey(apiBase, prevTxid, prevVout);
   const inflight = outspendInflight.get(key);
   if (inflight) return inflight;
   const p = (async () => {
-    const res = await mempoolReq('/api/tx/' + prevTxid + '/outspend/' + prevVout, 'GET', undefined, apiBase);
-    if (res.status === 404) return null; // unknown — cannot prove spent or unspent; NEVER cached
-    if (res.status !== 200) throw new Error('mempool outspend check failed (HTTP ' + res.status + ')');
-    const parsed = JSON.parse(res.body);
-    outspendCachePut(apiBase, prevTxid, prevVout, parsed);
-    return parsed;
+    const shapes = skipBatch ? ['singular']
+      : (singularOnlyBases.has(apiBase) ? ['singular', 'batch'] : ['batch', 'singular']);
+    let batchAnswered = false;
+    for (const shape of shapes) {
+      if (shape === 'batch') {
+        // Only the requested outpoint's entry is cached (the
+        // cacheVout argument) — the batch answers every output of
+        // the funding tx, but caching its siblings would plant
+        // answers for outpoints nobody asked about.
+        const arr = await mempoolOutspends(prevTxid, apiBase, ttlMs, prevVout);
+        if (arr === null) continue; // batch cannot answer — try the singular
+        // The batch answered, so this base serves it — even when
+        // the array has no entry for this vout (the parent is known
+        // and the route works, so the outpoint does not exist in
+        // it); the singular is still tried for that outpoint,
+        // because a node may know an output the batch does not list.
+        batchAnswered = true;
+        singularOnlyBases.delete(apiBase);
+        const entry = Array.isArray(arr) ? arr[prevVout] : null;
+        // Cache this outpoint's entry explicitly: the batch fetch
+        // above is shared (in-flight dedup) with any concurrent
+        // lookup for a sibling vout of the same txid, and only the
+        // fetch's own cacheVout is cached there — this caller's
+        // entry must be cached by the caller.
+        if (entry && typeof entry === 'object') { outspendCachePut(apiBase, prevTxid, prevVout, entry); return entry; }
+        continue;
+      }
+      const res = await mempoolReq('/api/tx/' + prevTxid + '/outspend/' + prevVout, 'GET', undefined, apiBase);
+      if (res.status === 404) return null; // unknown — cannot prove spent or unspent; NEVER cached
+      if (res.status === 405 || res.status === 501) continue; // singular route missing here — try the batch
+      if (res.status !== 200) throw new Error('mempool outspend check failed (HTTP ' + res.status + ')');
+      const parsed = JSON.parse(res.body);
+      // The singular answered while the batch did not, so the
+      // batch route is missing on this base — remember it.
+      if (!batchAnswered) singularOnlyBases.add(apiBase);
+      outspendCachePut(apiBase, prevTxid, prevVout, parsed);
+      return parsed;
+    }
+    return null; // neither shape could answer — unknown, never cached
   })();
   outspendInflight.set(key, p);
   try { return await p; }
@@ -1614,18 +1690,32 @@ async function mempoolOutspend(prevTxid, prevVout, apiBase, ttlMs) {
 //   A batch answer populates the per-output cache above, so a later
 //   singular lookup of one of those outpoints hits the cache.
 //   A 404 is never cached (same rule as the singular call).
-async function mempoolOutspends(prevTxid, apiBase, ttlMs) {
+//   (0.8.10, generic outspend negotiation) A 405 or 501 is the
+//   same as a 404 here — the route does not exist on this node —
+//   so it also returns null (unknown, never cached) instead of
+//   throwing: the caller (mempoolOutspend) then tries the singular
+//   shape. Any other failure still throws.
+//   `cacheVout` scopes the cache population: when the batch is
+//   fetched for ONE outpoint (mempoolOutspend's batch-first path),
+//   only that outpoint's entry is cached — a batch fetched for
+//   FINNEY:1 must not plant an answer for FINNEY:0, which nobody
+//   asked about and which a later gate could then read as if it
+//   were a fresh observation. When it is undefined (the rule
+//   evaluation's batch path, where every fetched output is watched)
+//   all entries are cached, as before.
+async function mempoolOutspends(prevTxid, apiBase, ttlMs, cacheVout) {
   const key = apiBase + '|' + prevTxid;
   const inflight = outspendsInflight.get(key);
   if (inflight) return inflight;
   const p = (async () => {
     const res = await mempoolReq('/api/tx/' + prevTxid + '/outspends', 'GET', undefined, apiBase);
-    if (res.status === 404) return null; // unknown — NEVER cached
+    if (res.status === 404 || res.status === 405 || res.status === 501) return null; // unknown, or route missing — NEVER cached
     if (res.status !== 200) throw new Error('mempool outspends check failed (HTTP ' + res.status + ')');
     const arr = JSON.parse(res.body);
     if (Array.isArray(arr)) {
+      const only = (cacheVout === undefined || cacheVout === null) ? null : Number(cacheVout);
       arr.forEach((entry, i) => {
-        if (entry && typeof entry === 'object') outspendCachePut(apiBase, prevTxid, i, entry);
+        if (entry && typeof entry === 'object' && (only === null || i === only)) outspendCachePut(apiBase, prevTxid, i, entry);
       });
     }
     return arr;
@@ -1845,20 +1935,33 @@ async function checkOutspend(outpoint, endpoints, opts) {
   // answers them all. A batch answer that cannot say about this
   // output (unknown parent, or no entry for this vout) is unknown,
   // never unspent — the same fail-safe as the singular path.
+  // (0.8.10, generic outspend negotiation) A batch unknown is
+  // ambiguous: the parent may be unknown to these nodes, or the
+  // batch route may not exist on them. When every endpoint failed
+  // outright (b.error), that is a hard failure, not a route
+  // question — return unknown as before. Otherwise fall through
+  // to the singular loop below: the singular is the other shape,
+  // and it may answer where the batch could not. The batch was
+  // already attempted for this funding tx, so the loop skips a
+  // redundant batch attempt per endpoint (skipBatch).
+  let batchTried = false;
   if (batch && batch.hasBatch(prevTxid) && Number.isFinite(prevVout) && prevVout >= 0) {
     const b = await batch.fetch(prevTxid);
-    if (b.unknown) {
-      return { outpoint, spent: false, confirmed: false, txid: null, blockHeight: null, unknown: true,
-        checkedVia: b.checkedVia, checkedBase: b.checkedBase, error: b.error || undefined };
+    if (!b.unknown) {
+      const entry = Array.isArray(b.results) ? b.results[prevVout] : null;
+      return outspendEntryToResult(outpoint, entry, b.checkedVia, b.checkedBase);
     }
-    const entry = Array.isArray(b.results) ? b.results[prevVout] : null;
-    return outspendEntryToResult(outpoint, entry, b.checkedVia, b.checkedBase);
+    if (b.error) {
+      return { outpoint, spent: false, confirmed: false, txid: null, blockHeight: null, unknown: true,
+        checkedVia: b.checkedVia, checkedBase: b.checkedBase, error: b.error };
+    }
+    batchTried = true;
   }
   const errors = [];
   let first404 = null;
   for (const ep of endpoints) {
     try {
-      const out = await mempoolOutspend(prevTxid, prevVout, ep.base, ttlMs);
+      const out = await mempoolOutspend(prevTxid, prevVout, ep.base, ttlMs, batchTried);
       if (out === null) {
         if (!first404) first404 = ep;
         continue;

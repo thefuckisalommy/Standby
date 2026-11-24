@@ -144,11 +144,16 @@ Boots the branch-0.8.5 app (port 3438), the check-in receiver
       cost one batch request; a 404 is never cached — a spend
       that appears after the parent was unknown is detected on
       the next evaluation; a confirmed-spend UTXO rule reuses
-      the shared per-tick tip cache.
+      the shared per-tick tip cache. (0.8.10) Every lookup tries
+      the batch first now (generic outspend negotiation), so a
+      lone watched output costs one batch request, not one
+      singular one — the count per outpoint is unchanged, only
+      the route moved; §37 proves the negotiation itself.
   26. Batch cache consult + in-flight dedup (0.8.6 fold-in):
       a batch lookup whose watched outputs are all fresh in the
       per-outpoint cache costs zero requests; two simultaneous
-      singular lookups of one outpoint cost one request; two
+      lookups of one outpoint cost one request (0.8.10: one batch
+      request, since every lookup tries the batch first); two
       simultaneous batch lookups cost one request (module-level
       check — the app's single-flight lock means two batch
       fetches can never overlap through the HTTP API); a failed
@@ -233,6 +238,20 @@ Boots the branch-0.8.5 app (port 3438), the check-in receiver
       terminates the process (uncaughtExceptionMonitor) on both
       servers — a scratch server hit with the test-only throw
       hook exits nonzero with the log line recorded.
+  37. Generic outspend negotiation (0.8.10): the mempool client
+      tries the batch outspend shape first and falls back to the
+      singular shape when a node does not serve the batch, and
+      remembers per node which shape worked — so it works with
+      any implementation (batch-only, singular-only, both,
+      neither) without hard-coding any inventory. Proved with
+      the stub's outspend-mode hook: (a) a batch-only node
+      answers a lone-output lookup via the batch, zero singular;
+      (b) a singular-only node answers via the singular, and the
+      second lookup goes singular-first (no second batch call);
+      (c) a node serving neither reads unknown, never fires;
+      (d) the rule evaluation's batch path falls through to the
+      singular when both nodes are singular-only; (e) a 500 on
+      the batch still throws (no fallback for server errors).
 Ports: app 3438, receiver 3439, stubs 18235/18236 — no collision
 with the 095 suite (app 3388, receiver 3389, stubs 18175/18176) or
 the 096 suite (app 3398, receiver 3399, stubs 18185/18186).
@@ -3855,8 +3874,10 @@ def main():
         # checks of the same outpoint cost ONE stub request per
         # cadence window (shared outpoint cache, TTL = cadence).
         # (b) Several watched outputs of one funding tx cost ONE
-        # batch /outspends request; a single watched output keeps
-        # the singular endpoint. (c) A 404 is never cached — a
+        # batch /outspends request; (0.8.10) a single watched
+        # output now also tries the batch first (generic outspend
+        # negotiation) — the count per outpoint is unchanged, only
+        # the route moved. (c) A 404 is never cached — a
         # spend that appears after the parent was unknown is
         # detected on the next evaluation. (d) A confirmed-spend
         # UTXO rule reuses the shared per-tick tip cache — no extra
@@ -3878,7 +3899,9 @@ def main():
         s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 3600})
         check('25 setup: cadence parked at 3600 s', s == 200, (s, r))
         # (a) Two rules, one outpoint: the startup tick's evaluation
-        # costs ONE singular outspend request, primary only.
+        # costs ONE batch outspend request, primary only — (0.8.10)
+        # every lookup tries the batch first now, so the lone
+        # outpoint is answered by the batch, not the singular.
         s, r = add_tx('UTXO 25a', {'type': 'utxo', 'params': {'outpoint': FINNEY + ':1', 'confirmations': 1}}, 111500)
         check('25 dedup: first same-outpoint tx adds', s == 201, (s, r))
         utxo_a1 = r['tx']['id'] if s == 201 else None
@@ -3891,8 +3914,8 @@ def main():
         p0, s0, bp0, bs0 = outspend_counts()
         check('25 dedup: app restarted (cold caches, startup tick is the measured evaluation)', restart())
         p1, s1, bp1, bs1 = outspend_counts()
-        check('25 dedup: two rules on one outpoint cost ONE singular request, primary only, no batch',
-              (p1, s1, bp1, bs1) == (p0 + 1, s0, bp0, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        check('25 dedup: two rules on one outpoint cost ONE batch request, primary only, no singular',
+              (p1, s1, bp1, bs1) == (p0, s0, bp0 + 1, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
         for tid in (utxo_a1, utxo_a2):
             t = state_tx(tid)
             check('25 dedup: the disarmed tx IS evaluated (slice watching, still unspent)',
@@ -3936,8 +3959,8 @@ def main():
         check('25 batch: the batched outpoint is served from the cache (zero new requests)',
               (p1, s1, bp1, bs1) == (p0, s0, bp0, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
         delete_all_txs()
-        # (b2) One watched output of a funding tx: the singular
-        # endpoint, no batch.
+        # (b2) One watched output of a funding tx: (0.8.10) the
+        # batch first — one batch request, no singular.
         s, r = add_tx('UTXO 25e', {'type': 'utxo', 'params': {'outpoint': SECOND + ':0', 'confirmations': 1}}, 111504)
         check('25 single: lone-output tx adds', s == 201, (s, r))
         utxo_e = r['tx']['id'] if s == 201 else None
@@ -3946,8 +3969,8 @@ def main():
         p0, s0, bp0, bs0 = outspend_counts()
         check('25 single: app restarted', restart())
         p1, s1, bp1, bs1 = outspend_counts()
-        check('25 single: one watched output costs ONE singular request, primary only, zero batch',
-              (p1, s1, bp1, bs1) == (p0 + 1, s0, bp0, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        check('25 single: one watched output costs ONE batch request, primary only, zero singular',
+              (p1, s1, bp1, bs1) == (p0, s0, bp0 + 1, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
         t = state_tx(utxo_e)
         check('25 single: the lone output reads watching (SECOND:0 unspent)',
               rule_slice(t).get('status') == 'watching', rule_slice(t))
@@ -4080,12 +4103,12 @@ def main():
         check('26 batch-cache: the spent output still reads due from the cached batch',
               rule_slice(t).get('status') == 'due', rule_slice(t))
         delete_all_txs()
-        # (b) Two simultaneous singular lookups of one outpoint
-        # cost ONE request: the stub delays its answer 400 ms so
-        # the second lookup lands while the first is still in
-        # flight, and the in-flight map shares it. A restart
-        # first, for a cold cache — otherwise the cache alone
-        # would answer both for free and prove nothing.
+        # (b) Two simultaneous lookups of one outpoint cost ONE
+        # request: the stub delays its answer 400 ms so the second
+        # lookup lands while the first is still in flight, and the
+        # in-flight map shares it. (0.8.10) The shared request is
+        # a batch one now — every lookup tries the batch first.
+        # A restart first, for a cold cache — otherwise the cache
         check('26 inflight: caches cleared for a cold outpoint cache', clear_caches())
         s, r = req('POST', '/__test__/outspend-delay', {'ms': 400}, base=STUB_BASE_P)
         check('26 inflight: primary stub delays outspend answers 400 ms', s == 200 and r.get('delayMs') == 400, r)
@@ -4102,8 +4125,8 @@ def main():
         check('26 inflight: both read the same answer (watching, unspent)',
               all(x[1].get('status') == 'watching' and x[1].get('fire') is False for x in results_26), results_26)
         p1, s1, bp1, bs1 = outspend_counts()
-        check('26 inflight: two simultaneous singular lookups cost ONE request, primary only, zero batch',
-              (p1, s1, bp1, bs1) == (p0 + 1, s0, bp0, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        check('26 inflight: two simultaneous lookups cost ONE batch request, primary only, zero singular',
+              (p1, s1, bp1, bs1) == (p0, s0, bp0 + 1, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
         s, r = req('POST', '/__test__/outspend-delay', {'ms': 0}, base=STUB_BASE_P)
         s, r = req('POST', '/__test__/outspend-delay', {'ms': 0}, base=STUB_BASE_S)
         check('26 inflight: stub delays cleared', s == 200, (s, r))
@@ -4143,7 +4166,7 @@ def main():
         check('26 batch-inflight: two simultaneous batch lookups cost ONE batch request',
               bp1_26 == bp0_26 + 1, (bp0_26, bp1_26))
         # (d) A failed request does not poison the in-flight map:
-        # with both stubs answering 500, a singular lookup fails
+        # with both stubs answering 500, a lookup fails
         # (unknown, never cached); with the failure cleared, the
         # retry fetches fresh and reads the real answer. If the
         # rejected promise stayed in the map, the retry would
@@ -4158,8 +4181,8 @@ def main():
         check('26 fail: trigger check runs while both stubs fail', s == 200, (s, r))
         check('26 fail: the rule reads unknown while both nodes fail', r.get('status') == 'unknown', r)
         p1, s1, bp1, bs1 = outspend_counts()
-        check('26 fail: the failed lookup tried both endpoints (one request each)',
-              (p1, s1, bp1, bs1) == (p0 + 1, s0 + 1, bp0, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        check('26 fail: the failed lookup tried both endpoints (one batch request each)',
+              (p1, s1, bp1, bs1) == (p0, s0, bp0 + 1, bs0 + 1), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
         s, r = req('POST', '/__test__/outspend-fail', {'fail': False}, base=STUB_BASE_P)
         s, r = req('POST', '/__test__/outspend-fail', {'fail': False}, base=STUB_BASE_S)
         check('26 fail: stub failures cleared', s == 200, (s, r))
@@ -4170,7 +4193,7 @@ def main():
               r.get('status') == 'watching' and r.get('fire') is False, r)
         p1, s1, bp1, bs1 = outspend_counts()
         check('26 fail: the retry issues a FRESH request (the failure did not poison the map)',
-              (p1, s1, bp1, bs1) == (p0 + 1, s0, bp0, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+              (p1, s1, bp1, bs1) == (p0, s0, bp0 + 1, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
         # Cleanup: cadence back to 60.
         s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 60})
         check('26 cleanup: cadence restored to 60 s', s == 200, (s, r))
@@ -4259,14 +4282,19 @@ def main():
         p1, s1, bp1, bs1 = outspend_counts()
         # (0.8.7.4) The startup tick now does two things: the
         # hourly freshness refresh (§30) checks each live staged
-        # member input — FINNEY:1, FINNEY:2, SECOND:0 — three
-        # singular requests, primary only, no batch — and the
+        # member input — FINNEY:1, FINNEY:2, SECOND:0 — and the
         # set's UTXO rule on FINNEY:1 then reads the shared cache
-        # the refresh populated, costing zero extra requests. One
-        # request per outpoint still holds, through the cache
-        # rather than a second lookup; the tick total is three.
-        check('27 single: startup tick costs THREE singular requests (freshness refresh of the 3 member inputs), primary only, no batch',
-              (p1, s1, bp1, bs1) == (p0 + 3, s0, bp0, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        # the refresh populated, costing zero extra requests.
+        # (0.8.10) Every lookup tries the batch first: FINNEY:1
+        # costs one batch request (which also answers FINNEY:0
+        # into the cache); FINNEY:2 costs a second batch request
+        # for the same funding tx — the batch answer itself is
+        # not cached — plus a singular fallback, because the
+        # batch array has no vout 2 (the stub's FINNEY has only
+        # 2 outputs); SECOND:0 costs one batch request. The tick
+        # total is three batch + one singular, primary only.
+        check('27 single: startup tick costs THREE batch + ONE singular requests (freshness refresh of the 3 member inputs), primary only',
+              (p1, s1, bp1, bs1) == (p0 + 1, s0, bp0 + 3, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
         bc1 = broadcast_counts()
         check('27 single: the startup tick broadcast nothing', bc1 == bc0, (bc0, bc1))
         x = state_set(set27a)
@@ -4287,8 +4315,8 @@ def main():
         s, r, res = release_results()
         check('27 single: release check runs (cold cache)', s == 200, (s, r))
         p1, s1, bp1, bs1 = outspend_counts()
-        check('27 single: the set rule alone costs ONE singular request on a cold cache, primary only, no batch',
-              (p1, s1, bp1, bs1) == (p0 + 1, s0, bp0, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        check('27 single: the set rule alone costs ONE batch request on a cold cache, primary only, no singular',
+              (p1, s1, bp1, bs1) == (p0, s0, bp0 + 1, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
         # (b) Fire broadcasts ALL members: retarget the set to a
         # past setdate, then a manual release check sends all
         # three through the per-tx broadcast path.
@@ -6068,6 +6096,142 @@ def main():
         check('36 uncaught: receiver log records the exception',
               'uncaught exception:' in _rc_log, _rc_log[-300:] if _rc_log else None)
         check('36 uncaught: scratch receiver port is closed again', port_closed(3441))
+        # --- 37. Generic outspend negotiation (0.8.10) -----------------
+        # Mempool-compatible APIs differ in which outspend endpoints
+        # they serve: mempool.space and Esplora serve both the batch
+        # /outspends and the singular /outspend/:vout; a self-hosted
+        # mempool backend v3 serves only the batch; some other
+        # implementation may serve only the singular. The client
+        # must not assume any inventory: it tries the batch first,
+        # falls back to the singular on a route-missing signal, and
+        # remembers per node which shape worked. Proved with the
+        # stub's outspend-mode hook (POST /__test__/outspend-mode).
+        # Cadence is parked at 3600 s so the TTL window is wide and
+        # only this section's evaluations move the counters. The
+        # modes are restored to 'both' at the end so nothing leaks
+        # into later sections.
+        def set_outspend_mode(mode, base):
+            s, r = req('POST', '/__test__/outspend-mode', {'mode': mode}, base=base)
+            return s == 200 and r.get('mode') == mode
+        def trig_utxo(outpoint, confs=1):
+            return req('POST', '/api/triggers/check', {'trigger': {'type': 'utxo', 'params': {'outpoint': outpoint, 'confirmations': confs}}})
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 3600})
+        check('37 setup: cadence parked at 3600 s', s == 200, (s, r))
+        check('37 setup: caches cleared for a cold outpoint cache', clear_caches())
+        # (a) Batch-only node (the self-hosted v3 shape): a lone
+        # watched output is answered by the batch, zero singular.
+        check('37 batch-only: primary stub serves batch only', set_outspend_mode('batch', STUB_BASE_P))
+        check('37 batch-only: secondary stub serves both', set_outspend_mode('both', STUB_BASE_S))
+        p0, s0, bp0, bs0 = outspend_counts()
+        s, r = trig_utxo(FINNEY + ':1')
+        check('37 batch-only: trigger check runs', s == 200, (s, r))
+        check('37 batch-only: the unspent outpoint reads watching (not due, no fire)',
+              r.get('status') == 'watching' and r.get('fire') is False, r)
+        p1, s1, bp1, bs1 = outspend_counts()
+        check('37 batch-only: ONE batch request, primary only, zero singular',
+              (p1, s1, bp1, bs1) == (p0, s0, bp0 + 1, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        # (b) Singular-only node: the batch 404s, the singular
+        # answers — and the second lookup goes singular-first,
+        # proving the shape is learned per base (no second batch
+        # call). The caches are cleared between the lookups so the
+        # second one fetches fresh; the learned shape survives a
+        # cache clear (it is capability state, reset only by a
+        # restart).
+        check('37 singular-only: primary stub serves singular only', set_outspend_mode('singular', STUB_BASE_P))
+        check('37 singular-only: caches cleared for a cold outpoint cache', clear_caches())
+        p0, s0, bp0, bs0 = outspend_counts()
+        s, r = trig_utxo(FINNEY + ':1')
+        check('37 singular-only: first trigger check runs', s == 200, (s, r))
+        check('37 singular-only: the unspent outpoint reads watching',
+              r.get('status') == 'watching' and r.get('fire') is False, r)
+        p1, s1, bp1, bs1 = outspend_counts()
+        check('37 singular-only: first lookup costs ONE batch 404 + ONE singular request, primary only',
+              (p1, s1, bp1, bs1) == (p0 + 1, s0, bp0 + 1, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        check('37 singular-only: caches cleared again (shape record survives)', clear_caches())
+        p0, s0, bp0, bs0 = outspend_counts()
+        s, r = trig_utxo(FINNEY + ':1')
+        check('37 singular-only: second trigger check runs', s == 200, (s, r))
+        check('37 singular-only: the second lookup still reads watching',
+              r.get('status') == 'watching' and r.get('fire') is False, r)
+        p1, s1, bp1, bs1 = outspend_counts()
+        check('37 singular-only: second lookup goes singular-first — ONE singular request, ZERO batch',
+              (p1, s1, bp1, bs1) == (p0 + 1, s0, bp0, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        # (c) Neither shape: both routes 404 on both nodes — the
+        # rule reads unknown and never fires. The primary, whose
+        # shape was learned as singular-only in (b), tries its
+        # singular first (one singular, zero batch); the secondary
+        # tries the batch first, then the singular.
+        check('37 neither: primary stub serves neither shape', set_outspend_mode('neither', STUB_BASE_P))
+        check('37 neither: secondary stub serves neither shape', set_outspend_mode('neither', STUB_BASE_S))
+        check('37 neither: caches cleared for a cold outpoint cache', clear_caches())
+        p0, s0, bp0, bs0 = outspend_counts()
+        s, r = trig_utxo(FINNEY + ':1')
+        check('37 neither: trigger check runs', s == 200, (s, r))
+        check('37 neither: the unreadable outpoint reads unknown, never fires',
+              r.get('status') == 'unknown' and r.get('fire') is False, r)
+        p1, s1, bp1, bs1 = outspend_counts()
+        check('37 neither: primary one singular / zero batch, secondary one batch + one singular',
+              (p1, s1, bp1, bs1) == (p0 + 1, s0 + 1, bp0, bs0 + 1), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        # (d) The rule evaluation's batch path falls through to the
+        # singular when both nodes are singular-only: two txs watch
+        # FINNEY:0 (spent) and FINNEY:1 (unspent); the startup tick
+        # must read them due and watching. The batch is attempted on
+        # both nodes first (one 404 each), then the singular answers
+        # both outpoints on the primary. (The restart also resets
+        # the learned shape record, so this proves the fall-through
+        # itself, not the record.)
+        check('37 fallthrough: primary stub serves singular only', set_outspend_mode('singular', STUB_BASE_P))
+        check('37 fallthrough: secondary stub serves singular only', set_outspend_mode('singular', STUB_BASE_S))
+        s, r = add_tx('UTXO 37a', {'type': 'utxo', 'params': {'outpoint': FINNEY + ':0', 'confirmations': 1}}, 111700, True)
+        check('37 fallthrough: first same-funding-tx tx adds (trigger confirmed)', s == 201, (s, r))
+        utxo_37a = r['tx']['id'] if s == 201 else None
+        s, r = add_tx('UTXO 37b', {'type': 'utxo', 'params': {'outpoint': FINNEY + ':1', 'confirmations': 1}}, 111701)
+        check('37 fallthrough: second same-funding-tx tx adds', s == 201, (s, r))
+        utxo_37b = r['tx']['id'] if s == 201 else None
+        for tid in (utxo_37a, utxo_37b):
+            s, r = req('PUT', '/api/bitcoin/txs/' + tid, {'enabled': False})
+        check('37 fallthrough: both txs disarm', s == 200, (s, r))
+        p0, s0, bp0, bs0 = outspend_counts()
+        check('37 fallthrough: app restarted (cold shape record, startup tick is the measured evaluation)', restart())
+        p1, s1, bp1, bs1 = outspend_counts()
+        check('37 fallthrough: the tick costs ONE batch 404 per node + TWO singular requests on the primary',
+              (p1, s1, bp1, bs1) == (p0 + 2, s0, bp0 + 1, bs0 + 1), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        t = state_tx(utxo_37a)
+        check('37 fallthrough: the spent output reads due (11 confirmations)',
+              rule_slice(t).get('status') == 'due', rule_slice(t))
+        t = state_tx(utxo_37b)
+        check('37 fallthrough: the unspent output reads watching',
+              rule_slice(t).get('status') == 'watching' and rule_slice(t).get('reason') == 'still unspent', rule_slice(t))
+        delete_all_txs()
+        # (e) A 500 on the batch still throws — no fallback for a
+        # server error. The primary is batch-only and failing; the
+        # secondary is both and healthy, so the check still reads
+        # watching via the secondary — but the primary must show
+        # exactly one batch request and ZERO singular ones (the
+        # 500 never triggered the singular fallback).
+        check('37 no-fallback-on-500: app restarted (cold shape record)', restart())
+        check('37 no-fallback-on-500: primary stub serves batch only', set_outspend_mode('batch', STUB_BASE_P))
+        check('37 no-fallback-on-500: secondary stub serves both', set_outspend_mode('both', STUB_BASE_S))
+        s, r = req('POST', '/__test__/outspend-fail', {'fail': True}, base=STUB_BASE_P)
+        check('37 no-fallback-on-500: primary stub fails outspend requests', s == 200 and r.get('fail') is True, r)
+        check('37 no-fallback-on-500: caches cleared for a cold outpoint cache', clear_caches())
+        p0, s0, bp0, bs0 = outspend_counts()
+        s, r = trig_utxo(FINNEY + ':1')
+        check('37 no-fallback-on-500: trigger check runs', s == 200, (s, r))
+        check('37 no-fallback-on-500: the check still reads watching (secondary answers)',
+              r.get('status') == 'watching' and r.get('fire') is False, r)
+        p1, s1, bp1, bs1 = outspend_counts()
+        check('37 no-fallback-on-500: the primary shows ONE batch 500 and ZERO singular (no fallback on a server error)',
+              (p1, s1, bp1, bs1) == (p0, s0, bp0 + 1, bs0 + 1), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        s, r = req('POST', '/__test__/outspend-fail', {'fail': False}, base=STUB_BASE_P)
+        check('37 no-fallback-on-500: primary stub failure cleared', s == 200, (s, r))
+        # Cleanup: both stubs serve both shapes again, cadence back
+        # to 60.
+        check('37 cleanup: primary stub serves both shapes again', set_outspend_mode('both', STUB_BASE_P))
+        check('37 cleanup: secondary stub serves both shapes again', set_outspend_mode('both', STUB_BASE_S))
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 60})
+        check('37 cleanup: cadence restored to 60 s', s == 200, (s, r))
+        delete_all_txs()
 
     finally:
         for p in list(v.procs):
