@@ -1724,23 +1724,24 @@ function check(name, cond, detail) {
 
   // --- 10b. node capability details, variant C: summary row + details on tap (0.8.1) ---
   // Static HTML: each node is a <details> — the summary is just
-  // the node name + status pill, and the detail holds the three
+  // the node name + status pill, and the detail holds the four
   // checks as plain label — value lines (no pills).
   for (const lbl of ['primary', 'secondary']) {
     check('node checks static: the ' + lbl + ' node is a <details> with a capability block (static HTML)',
       idx.indexOf('<details id="btc-' + lbl + '-details" class="node-details">') !== -1
       && idx.indexOf('id="btc-' + lbl + '-checks"') !== -1, '');
-    check('node checks static: the ' + lbl + ' detail has Broadcast / Fee estimates / Block height value spans (static HTML)',
+    check('node checks static: the ' + lbl + ' detail has Broadcast / Fee estimates / Block height / Output lookup value spans (static HTML)',
       idx.indexOf('id="btc-' + lbl + '-broadcast-value"') !== -1
       && idx.indexOf('id="btc-' + lbl + '-fees-value"') !== -1
-      && idx.indexOf('id="btc-' + lbl + '-height-value"') !== -1, '');
+      && idx.indexOf('id="btc-' + lbl + '-height-value"') !== -1
+      && idx.indexOf('id="btc-' + lbl + '-outputLookup-value"') !== -1, '');
     check('node checks static: the ' + lbl + ' detail has no per-check pills (static HTML)',
       idx.indexOf('id="btc-' + lbl + '-broadcast"') === -1
       && idx.indexOf('id="btc-' + lbl + '-fees"') === -1
       && idx.indexOf('id="btc-' + lbl + '-height"') === -1, '');
   }
-  check('node checks static: the capability labels read Broadcast / Fee estimates / Block height (static HTML)',
-    (idx.match(/>Broadcast</g) || []).length >= 2 && (idx.match(/>Fee estimates</g) || []).length >= 2 && (idx.match(/>Block height</g) || []).length >= 2, '');
+  check('node checks static: the capability labels read Broadcast / Fee estimates / Block height / Output lookup (static HTML)',
+    (idx.match(/>Broadcast</g) || []).length >= 2 && (idx.match(/>Fee estimates</g) || []).length >= 2 && (idx.match(/>Block height</g) || []).length >= 2 && (idx.match(/>Output lookup</g) || []).length >= 2, '');
   // Dynamic: the launcher ran a connection test against both
   // stubs (full mempool-style nodes), so both nodes are OK and
   // the detail holds the measured values — in the Settings card
@@ -1764,6 +1765,9 @@ function check(name, cond, detail) {
     check('node checks: the ' + lbl + ' Block height value reads Height 900,000',
       els['btc-' + lbl + '-height-value'] && els['btc-' + lbl + '-height-value'].textContent === 'Height 900,000',
       els['btc-' + lbl + '-height-value'] && els['btc-' + lbl + '-height-value'].textContent);
+    check('node checks: the ' + lbl + ' Output lookup value reads Batch',
+      els['btc-' + lbl + '-outputLookup-value'] && els['btc-' + lbl + '-outputLookup-value'].textContent === 'Batch',
+      els['btc-' + lbl + '-outputLookup-value'] && els['btc-' + lbl + '-outputLookup-value'].textContent);
     check('node checks: the Dashboard Node Status ' + lbl + ' pill reads OK too',
       els['readiness-' + lbl + '-status'] && els['readiness-' + lbl + '-status'].textContent === 'OK',
       els['readiness-' + lbl + '-status'] && els['readiness-' + lbl + '-status'].textContent);

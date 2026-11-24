@@ -1208,7 +1208,14 @@ function mergeNodeStamps(state) {
 // against the endpoint as currently configured.
 async function testNodes() {
   const state = store.loadState(DATA_DIR);
-  const r = await bitcoin.testConnection(bitcoin.endpointsFor(state.settings));
+  // The hourly tick does NOT probe output lookup (see
+  // testConnection): it reuses the last probed check for each
+  // endpoint, from the stored connection results, so the tick
+  // costs no outspend request and never warms the negotiation's
+  // shape record. A fresh probe happens on the Test connection
+  // button instead.
+  const prevResults = (state.bitcoin.connection && Array.isArray(state.bitcoin.connection.results)) ? state.bitcoin.connection.results : [];
+  const r = await bitcoin.testConnection(bitcoin.endpointsFor(state.settings), { probeOutputLookup: false, prevResults });
   // Merge into FRESH state (see refreshConfirmations): an edit landing
   // while the node test was on the network would otherwise be
   // clobbered by the save of this stale copy. The Dashboard only

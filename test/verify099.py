@@ -1780,16 +1780,18 @@ def main():
         s, r = req('POST', '/api/bitcoin/connection/test', {})
         check('10 nodes: connection test returns 200', s == 200, (s, r))
         res = {x.get('endpoint'): x for x in r.get('results', [])}
-        check('10 nodes: primary is OK with all three checks ready',
+        check('10 nodes: primary is OK with all four checks ready',
               res.get('primary', {}).get('status') == 'ok'
               and res.get('primary', {}).get('checks', {}).get('height', {}).get('ok') is True
               and res.get('primary', {}).get('checks', {}).get('fees', {}).get('ok') is True
-              and res.get('primary', {}).get('checks', {}).get('broadcast', {}).get('ok') is True,
+              and res.get('primary', {}).get('checks', {}).get('broadcast', {}).get('ok') is True
+              and res.get('primary', {}).get('checks', {}).get('outputLookup', {}).get('ok') is True,
               res.get('primary'))
         check('10 nodes: primary shows the measured values next to each status',
               res.get('primary', {}).get('checks', {}).get('height', {}).get('value') == 'Height 900,000'
               and res.get('primary', {}).get('checks', {}).get('fees', {}).get('value') == '1 sat/vB'
-              and res.get('primary', {}).get('checks', {}).get('broadcast', {}).get('value') == 'Reachable',
+              and res.get('primary', {}).get('checks', {}).get('broadcast', {}).get('value') == 'Reachable'
+              and res.get('primary', {}).get('checks', {}).get('outputLookup', {}).get('value') == 'Batch',
               res.get('primary', {}).get('checks'))
         check('10 nodes: secondary is OK too', res.get('secondary', {}).get('status') == 'ok', res.get('secondary'))
         check('10 nodes: overall ok is true', r.get('ok') is True, r.get('ok'))
@@ -1819,13 +1821,18 @@ def main():
               res.get('secondary', {}).get('status') == 'caution'
               and res.get('secondary', {}).get('checks', {}).get('height', {}).get('ok') is True
               and res.get('secondary', {}).get('checks', {}).get('fees', {}).get('ok') is False
-              and res.get('secondary', {}).get('checks', {}).get('broadcast', {}).get('ok') is False,
+              and res.get('secondary', {}).get('checks', {}).get('broadcast', {}).get('ok') is False
+              and res.get('secondary', {}).get('checks', {}).get('outputLookup', {}).get('ok') is False,
               res.get('secondary'))
         check('10 nodes: height-only secondary shows the height value and the failure reasons',
               res.get('secondary', {}).get('checks', {}).get('height', {}).get('value') == 'Height 900,000'
               and res.get('secondary', {}).get('checks', {}).get('fees', {}).get('value') == 'no fee endpoint'
-              and res.get('secondary', {}).get('checks', {}).get('broadcast', {}).get('value') == 'answered HTTP 404',
+              and res.get('secondary', {}).get('checks', {}).get('broadcast', {}).get('value') == 'answered HTTP 404'
+              and res.get('secondary', {}).get('checks', {}).get('outputLookup', {}).get('value') == 'Unavailable — UTXO rules can\u2019t be evaluated',
               res.get('secondary', {}).get('checks'))
+        check('10 nodes: height-only secondary detail lists every failing check (multi-failure format)',
+              'output lookup:' in res.get('secondary', {}).get('detail', ''),
+              res.get('secondary', {}).get('detail'))
         check('10 nodes: primary stays OK while secondary is CAUTION', res.get('primary', {}).get('status') == 'ok', res.get('primary'))
         check('10 nodes: overall ok stays true with a CAUTION node', r.get('ok') is True, r.get('ok'))
         # An Esplora-style server (height + /api/fee-estimates,
@@ -1856,8 +1863,12 @@ def main():
               res.get('secondary', {}).get('status') == 'caution'
               and res.get('secondary', {}).get('checks', {}).get('height', {}).get('ok') is True
               and res.get('secondary', {}).get('checks', {}).get('fees', {}).get('ok') is True
-              and res.get('secondary', {}).get('checks', {}).get('broadcast', {}).get('ok') is False,
+              and res.get('secondary', {}).get('checks', {}).get('broadcast', {}).get('ok') is False
+              and res.get('secondary', {}).get('checks', {}).get('outputLookup', {}).get('ok') is False,
               res.get('secondary'))
+        check('10 nodes: Esplora-style output lookup is unavailable (both outspend routes 404)',
+              res.get('secondary', {}).get('checks', {}).get('outputLookup', {}).get('value') == 'Unavailable — UTXO rules can\u2019t be evaluated',
+              res.get('secondary', {}).get('checks', {}).get('outputLookup'))
         check('10 nodes: Esplora-style fee value is the 6-block rate',
               res.get('secondary', {}).get('checks', {}).get('fees', {}).get('value') == '1 sat/vB',
               res.get('secondary', {}).get('checks', {}).get('fees'))
@@ -1869,7 +1880,9 @@ def main():
         res = {x.get('endpoint'): x for x in r.get('results', [])}
         check('10 nodes: unreachable secondary is FAIL',
               res.get('secondary', {}).get('status') == 'fail'
-              and res.get('secondary', {}).get('ok') is False,
+              and res.get('secondary', {}).get('ok') is False
+              and res.get('secondary', {}).get('checks', {}).get('outputLookup', {}).get('detail') == 'not checked — height failed'
+              and res.get('secondary', {}).get('checks', {}).get('outputLookup', {}).get('value') == '—',
               res.get('secondary'))
         check('10 nodes: overall ok stays true with one good node', r.get('ok') is True, r.get('ok'))
         # Restore the stub secondary and stop the height-only server.
@@ -6232,6 +6245,98 @@ def main():
         s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 60})
         check('37 cleanup: cadence restored to 60 s', s == 200, (s, r))
         delete_all_txs()
+        # --- 38. Output lookup node status check (0.8.10) --------------
+        # The connection test gains a fourth capability, Output
+        # lookup: the probe asks the node for the spend status of
+        # the genesis coinbase output (a fixed, well-known outpoint
+        # every synced node knows), through the §37 negotiation —
+        # batch first, singular as fallback — and reports which
+        # shape answered. Cadence is parked at 3600 s so no tick
+        # fires mid-section and moves the outspend counters; the
+        # caches are cleared before each shape flip so the probe
+        # fetches fresh (the shape record survives a cache clear —
+        # it is capability state, reset only by a restart).
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 3600})
+        check('38 setup: cadence parked at 3600 s', s == 200, (s, r))
+        check('38 setup: caches cleared for a cold outpoint cache', clear_caches())
+        # Baseline (both shapes served): the probe answers via the
+        # batch on both nodes, and both nodes are OK with all four
+        # checks ready.
+        p0, s0, bp0, bs0 = outspend_counts()
+        s, r = req('POST', '/api/bitcoin/connection/test', {})
+        check('38 baseline: connection test returns 200', s == 200, (s, r))
+        res = {x.get('endpoint'): x for x in r.get('results', [])}
+        check('38 baseline: primary output lookup reads Batch and the node is OK',
+              res.get('primary', {}).get('status') == 'ok'
+              and res.get('primary', {}).get('checks', {}).get('outputLookup', {}).get('ok') is True
+              and res.get('primary', {}).get('checks', {}).get('outputLookup', {}).get('value') == 'Batch',
+              res.get('primary', {}).get('checks', {}).get('outputLookup'))
+        check('38 baseline: secondary output lookup reads Batch too',
+              res.get('secondary', {}).get('checks', {}).get('outputLookup', {}).get('value') == 'Batch',
+              res.get('secondary', {}).get('checks', {}).get('outputLookup'))
+        p1, s1, bp1, bs1 = outspend_counts()
+        check('38 baseline: the probe costs ONE batch request per node, zero singular',
+              (p1, s1, bp1, bs1) == (p0, s0, bp0 + 1, bs0 + 1), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        # Singular-only node (the shape a node serves when it has
+        # no batch route): the batch 404s, the singular answers,
+        # and the value names it — the node is still OK.
+        check('38 singular-only: primary stub serves singular only', set_outspend_mode('singular', STUB_BASE_P))
+        check('38 singular-only: caches cleared for a cold outpoint cache', clear_caches())
+        p0, s0, bp0, bs0 = outspend_counts()
+        s, r = req('POST', '/api/bitcoin/connection/test', {})
+        res = {x.get('endpoint'): x for x in r.get('results', [])}
+        check('38 singular-only: primary output lookup reads Singular and the node stays OK',
+              res.get('primary', {}).get('status') == 'ok'
+              and res.get('primary', {}).get('checks', {}).get('outputLookup', {}).get('ok') is True
+              and res.get('primary', {}).get('checks', {}).get('outputLookup', {}).get('value') == 'Singular',
+              res.get('primary', {}).get('checks', {}).get('outputLookup'))
+        p1, s1, bp1, bs1 = outspend_counts()
+        check('38 singular-only: the probe costs ONE batch 404 + ONE singular on the primary, ONE batch on the secondary',
+              (p1, s1, bp1, bs1) == (p0 + 1, s0, bp0 + 1, bs0 + 1), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        # The learned shape survives a cache clear: the second
+        # probe goes singular-first — ONE singular, ZERO batch on
+        # the primary — and still reads Singular.
+        check('38 singular-only: caches cleared again (shape record survives)', clear_caches())
+        p0, s0, bp0, bs0 = outspend_counts()
+        s, r = req('POST', '/api/bitcoin/connection/test', {})
+        res = {x.get('endpoint'): x for x in r.get('results', [])}
+        check('38 singular-only: the second probe still reads Singular',
+              res.get('primary', {}).get('checks', {}).get('outputLookup', {}).get('value') == 'Singular',
+              res.get('primary', {}).get('checks', {}).get('outputLookup'))
+        p1, s1, bp1, bs1 = outspend_counts()
+        check('38 singular-only: the second probe costs ONE singular, ZERO batch on the primary',
+              (p1, s1, bp1, bs1) == (p0 + 1, s0, bp0, bs0 + 1), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        # Neither shape: both routes 404 on the primary — the
+        # check reads Unavailable with the reason as its value,
+        # the node drops to CAUTION (height still works), and the
+        # tooltip names the missing capability plainly. Overall ok
+        # stays true: the height probe passed, so the node is usable.
+        check('38 neither: primary stub serves neither shape', set_outspend_mode('neither', STUB_BASE_P))
+        check('38 neither: caches cleared for a cold outpoint cache', clear_caches())
+        p0, s0, bp0, bs0 = outspend_counts()
+        s, r = req('POST', '/api/bitcoin/connection/test', {})
+        res = {x.get('endpoint'): x for x in r.get('results', [])}
+        check('38 neither: primary output lookup reads Unavailable and the node is CAUTION',
+              res.get('primary', {}).get('status') == 'caution'
+              and res.get('primary', {}).get('checks', {}).get('outputLookup', {}).get('ok') is False
+              and res.get('primary', {}).get('checks', {}).get('outputLookup', {}).get('value') == 'Unavailable — UTXO rules can\u2019t be evaluated',
+              res.get('primary', {}).get('checks', {}).get('outputLookup'))
+        check('38 neither: the CAUTION tooltip names the missing capability plainly',
+              res.get('primary', {}).get('detail') == 'Height OK, but output lookup is unavailable — UTXO rules cannot be evaluated against this node.',
+              res.get('primary', {}).get('detail'))
+        check('38 neither: overall ok stays true with a CAUTION node', r.get('ok') is True, r.get('ok'))
+        check('38 neither: secondary stays OK',
+              res.get('secondary', {}).get('status') == 'ok', res.get('secondary'))
+        p1, s1, bp1, bs1 = outspend_counts()
+        check('38 neither: the probe costs ONE singular, ZERO batch on the primary (recorded singular-only, 404 returns at once)',
+              (p1, s1, bp1, bs1) == (p0 + 1, s0, bp0, bs0 + 1), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        # Cleanup: the primary serves both shapes again, cadence
+        # back to 60, and the app restarts so the learned
+        # singular-only record does not leak past this section.
+        check('38 cleanup: primary stub serves both shapes again', set_outspend_mode('both', STUB_BASE_P))
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 60})
+        check('38 cleanup: cadence restored to 60 s', s == 200, (s, r))
+        check('38 cleanup: app restarted (cold shape record)', restart())
 
     finally:
         for p in list(v.procs):

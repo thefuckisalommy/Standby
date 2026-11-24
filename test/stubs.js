@@ -613,8 +613,13 @@ const server = http.createServer((req, res) => {
   // has never seen, or one flagged unknown via
   // /__test__/unknown-parent). Shared by the singular route below
   // and the batch route above it, so both answer identically.
+  // GENESIS is the genesis block's coinbase txid (0.8.10): the
+  // node-test output-lookup probe asks for its only output
+  // (vout 0), which is unspent in reality — the stub answers
+  // {spent: false}, exactly as a real node does.
+  const GENESIS = '4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b';
   function outspendEntry(txid, vout) {
-    if (txid !== FINNEY && txid !== SECOND && txid !== CONFLICT && txid !== OWN_SPEND) return null;
+    if (txid !== FINNEY && txid !== SECOND && txid !== CONFLICT && txid !== OWN_SPEND && txid !== GENESIS) return null;
     if (unknownParents.has(txid)) return null;
     const okey = txid + ':' + vout;
     if (outspendOverride[okey] !== undefined) {

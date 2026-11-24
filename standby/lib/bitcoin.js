@@ -2564,9 +2564,27 @@ function findSharedInputs(txs) {
 // { ok, detail, results: [{ endpoint, base, ok, detail }] }. The probe
 // is the tip height, which both mempool.space and Esplora answer.
 // ---------------------------------------------------------------------------
-async function testConnection(endpoints) {
+async function testConnection(endpoints, opts) {
+  // opts.probeOutputLookup (default true): the output-lookup
+  // capability is probed on demand — the Test connection
+  // button. The hourly tick passes false and the last probed
+  // check for each endpoint (opts.prevResults), so the tick
+  // costs no outspend request, never warms the negotiation's
+  // shape record (a tick that warmed it would change which
+  // route later lookups take), and keeps showing the last
+  // probed shape. Only a genuinely probed check carries
+  // forward: the 'not checked — height failed' placeholder
+  // (value '—') is not a probe result, so it never blocks OK
+  // on a later tick. A check that was never probed stays absent.
+  const probeOutputLookup = !opts || opts.probeOutputLookup !== false;
+  const prevResults = (opts && Array.isArray(opts.prevResults)) ? opts.prevResults : [];
   const results = [];
-  for (const ep of endpoints) results.push({ endpoint: ep.label, base: ep.base, ...(await testOnePath(ep.base)) });
+  for (const ep of endpoints) {
+    const prev = prevResults.find((x) => x && x.endpoint === ep.label && x.base === ep.base);
+    const prevCheck = prev && prev.checks ? prev.checks.outputLookup : null;
+    const prevOutputLookup = (prevCheck && typeof prevCheck === 'object' && prevCheck.value !== '—') ? prevCheck : null;
+    results.push({ endpoint: ep.label, base: ep.base, ...(await testOnePath(ep.base, probeOutputLookup, prevOutputLookup)) });
+  }
   const ok = results.some((r) => r.ok);
   const detail = results
     .map((r) => (r.endpoint === 'primary' ? 'Primary' : 'Secondary') + ' (' + mempoolHostLabel(r.base) + '): ' + r.status.toUpperCase() + ' — ' + r.detail)
@@ -2574,12 +2592,14 @@ async function testConnection(endpoints) {
   return { ok, detail, results };
 }
 
-// One endpoint, three capabilities (0.8.1): block height, fee
-// estimates, and broadcast. Each check returns {ok, detail}.
+// One endpoint, four capabilities (0.8.1, 0.8.10): block height, fee
+// estimates, broadcast, and output lookup. Each check returns {ok, detail}.
 // The overall status:
-//   OK — all three good.
+//   OK — all probed capabilities good (output lookup counts only
+//     once it has been probed — a check that was never probed
+//     neither blocks OK nor shows a value).
 //   CAUTION — the height probe works (the endpoint IS a node) but
-//     broadcast and/or fees are not ready.
+//     broadcast, fees, and/or output lookup are not ready.
 //   FAIL — the height probe fails (network error, timeout, or a
 //     non-200 answer): the endpoint is unreachable or is not a
 //     mempool/Esplora API at all. Height is the gate because it is
@@ -2587,22 +2607,48 @@ async function testConnection(endpoints) {
 // `ok` stays true for OK and CAUTION (the old meaning: the height
 // probe passed, so the node is usable) and false for FAIL, so the
 // stored connection.ok keeps its old semantics.
-async function testOnePath(apiBase) {
+// `probeOutputLookup` — whether to probe the output-lookup
+// capability now (the Test connection button does; the hourly
+// tick does not, and instead passes the last probed check for
+// this endpoint as `prevOutputLookup`, so the tick costs no
+// outspend request and never warms the negotiation's shape
+// record). The detail is the pill tooltip: when output lookup
+// is the ONLY failing check it names it plainly ("Height OK, but
+// output lookup is unavailable — UTXO rules cannot be evaluated
+// against this node."); otherwise it lists every probed check the
+// way the earlier format did, extended with the output-lookup
+// detail when one was probed.
+async function testOnePath(apiBase, probeOutputLookup, prevOutputLookup) {
   const height = await testNodeHeight(apiBase);
   if (!height.ok) {
     return {
       ok: false, status: 'fail',
       detail: 'height: ' + height.detail,
-      checks: { height, fees: { ok: false, detail: 'not checked — height failed', value: '—' }, broadcast: { ok: false, detail: 'not checked — height failed', value: '—' } },
+      checks: { height, fees: { ok: false, detail: 'not checked — height failed', value: '—' }, broadcast: { ok: false, detail: 'not checked — height failed', value: '—' }, outputLookup: { ok: false, detail: 'not checked — height failed', value: '—' } },
     };
   }
   const fees = await testNodeFees(apiBase);
   const broadcast = await testNodeBroadcast(apiBase);
-  const allOk = fees.ok && broadcast.ok;
-  const detail = 'height ' + height.detail + ' · fees: ' + fees.detail + ' · broadcast: ' + broadcast.detail;
+  // Output lookup is probed on demand (see testConnection): the
+  // button probes it fresh through the negotiation; the tick
+  // reuses the last probed check for this endpoint. A check that
+  // was never probed stays absent — it neither blocks OK nor
+  // shows a value — until the user tests the connection.
+  const outputLookup = probeOutputLookup ? await testNodeOutputLookup(apiBase) : (prevOutputLookup || null);
+  const checks = { height, fees, broadcast };
+  if (outputLookup) checks.outputLookup = outputLookup;
+  const allOk = fees.ok && broadcast.ok && (outputLookup ? outputLookup.ok : true);
+  let detail;
+  if (outputLookup && !outputLookup.ok && fees.ok && broadcast.ok) {
+    detail = 'Height OK, but output lookup is unavailable — UTXO rules cannot be evaluated against this node.';
+  } else {
+    const parts = ['height ' + height.detail, 'fees: ' + fees.detail, 'broadcast: ' + broadcast.detail];
+    if (outputLookup) parts.push('output lookup: ' + outputLookup.detail);
+    detail = parts.join(' · ');
+  }
   return {
     ok: true, status: allOk ? 'ok' : 'caution', detail,
-    checks: { height, fees, broadcast },
+    checks,
   };
 }
 
@@ -2825,6 +2871,38 @@ async function testNodeBroadcast(apiBase) {
     return { ok: false, detail: 'answered HTTP ' + res.status, value: 'answered HTTP ' + res.status };
   } catch (e) {
     return { ok: false, detail: e.message, value: e.message };
+  }
+}
+
+// Output lookup: the outspend status of the genesis coinbase
+// output — a fixed, well-known outpoint every synced node knows
+// (the genesis block's only output is unspent), so a node that
+// cannot answer it serves no outspend shape at all. Read-only:
+// a lookup, never a broadcast, and no funds move. The lookup
+// goes through the generic outspend negotiation (mempoolOutspend):
+// batch first, singular as fallback — and the value names the
+// shape that answered, from the per-base shape record the
+// negotiation keeps (singular-only, or batch by default). A null
+// answer (neither shape) is unavailable: UTXO rules cannot be
+// evaluated against this node. A server error throws and is
+// reported as the reason, never disguised as unavailable. The
+// shape record is trusted once learned (a node upgraded to serve
+// the batch still reads Singular until a restart re-learns it) —
+// the value names the learned capability, which is what the
+// status row reports. On failure the value IS the reason, like
+// the other checks.
+const GENESIS_COINBASE_TXID = '4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b';
+async function testNodeOutputLookup(apiBase) {
+  try {
+    const out = await mempoolOutspend(GENESIS_COINBASE_TXID, 0, apiBase);
+    if (out === null) {
+      return { ok: false, detail: 'unavailable — UTXO rules cannot be evaluated against this node', value: 'Unavailable — UTXO rules can\u2019t be evaluated' };
+    }
+    const shape = singularOnlyBases.has(apiBase) ? 'Singular' : 'Batch';
+    return { ok: true, detail: 'ready (' + shape.toLowerCase() + ')', value: shape };
+  } catch (e) {
+    const msg = e.message || String(e);
+    return { ok: false, detail: msg, value: msg };
   }
 }
 

@@ -266,14 +266,14 @@ button.btn-checkin-big { width: 100%; padding: 16px 20px; font-size: 19px; }
 }
 .readiness-item { margin: 12px 0; }
 .readiness-label { color: var(--muted); font-size: 13px; margin-bottom: 2px; }
-/* Node capability rows (0.8.1): the three per-node checks under a
+/* Node capability rows (0.8.1): the four per-node checks under a
    Primary/Secondary row in the Settings nodes card — indented,
    tighter, smaller labels. They appear only after a Test
    connection has run for that endpoint. */
 .node-checks { margin: 2px 0 4px 16px; }
 /* Node capability details, variant C (0.8.1): each node is a
    <details> — the summary row is the node name + status pill +
-   "N/3 · height", and the three checks open on tap as plain
+   "N/3 · height", and the four checks open on tap as plain
    label — value lines (no pills). A failed check's value is the
    reason, in red. */
 .node-details summary { list-style: none; cursor: pointer; display: flex; align-items: baseline; gap: 8px; }
