@@ -1768,10 +1768,13 @@
         ? b.confirmations + (b.confirmations === 1 ? ' confirmation' : ' confirmations')
         : 'confirmed in block ' + Number(b.blockHeight).toLocaleString('en-US');
     } else if (b.staleInput) {
-      conf = 'stale — input spent by ' + shortTxid16(b.staleInput.spentBy)
+      // A bitcoind-backed node proves the spend confirmed without
+      // naming the spender — say so instead of an empty name.
+      conf = 'stale — input spent by ' + (b.staleInput.spentBy ? shortTxid16(b.staleInput.spentBy) : 'a confirmed transaction (the node does not name it)')
         + ((b.staleInput.blockHeight != null) ? ' (block ' + Number(b.staleInput.blockHeight).toLocaleString('en-US') + ')' : '');
     } else if (b.conflictInput) {
-      conf = 'not found on the network — its input is spent by ' + shortTxid16(b.conflictInput.spentBy) + ', but that spend is not confirmed yet';
+      conf = 'not found on the network — its input is spent by ' + (b.conflictInput.spentBy ? shortTxid16(b.conflictInput.spentBy) : 'another transaction')
+        + (b.conflictInput.unverified ? ', and the node cannot say whether that spend is confirmed' : ', but that spend is not confirmed yet');
     } else if (b.found === false) {
       // `found` is the verdict — a stale confirmation
       // count (0, from before the tx dropped out) must not read
@@ -3091,10 +3094,10 @@
       : 'Moved to Archived Transactions';
     var parts = [];
     if (pend.length) parts.push(pend.length + ' transaction' + (pend.length === 1 ? '' : 's') + ' moved to Pending Transactions — ' + (broadcast
-      ? 'already out there (the network reports its own txid), so recorded as broadcast, waiting for its first confirmation.'
+      ? 'already out there (the node knows its txid), so recorded as broadcast, waiting for its first confirmation.'
       : (pend.length === 1 ? 'its' : 'their') + ' inputs are spent.'));
     if (arch.length) parts.push(arch.length + ' transaction' + (arch.length === 1 ? '' : 's') + ' moved to Archived Transactions — ' + (broadcast
-      ? 'already out there (the network reports its own txid), so recorded as broadcast.'
+      ? 'already out there (the node knows its txid), so recorded as broadcast.'
       : (arch.length === 1 ? 'its' : 'their') + ' inputs are spent.'));
     showDetails(title, parts.join(' '),
       '<ul class="plain-list">' + fresh.map(function (m) {
@@ -5861,7 +5864,7 @@
     },
     nodes: {
       title: 'Bitcoin nodes',
-      body: 'The Bitcoin nodes Standby talks to. The primary is tried first; if it fails, the secondary is used.\n\nToggle the secondary off to use the primary alone with no fallback if it is down or unreachable.\n\nThe address is a mempool instance \u2014 mempool.space by default, another public instance, or your own mempool on the LAN.\n\nUTXO, block-height, and fee-market triggers read the node, and broadcasts go through it.',
+      body: 'The Bitcoin nodes Standby talks to. The primary is tried first; if it fails, the secondary is used.\n\nToggle the secondary off to use the primary alone with no fallback if it is down or unreachable.\n\nThe address is a mempool instance \u2014 mempool.space by default, another public instance, or your own mempool on the LAN.\n\nUTXO, block-height, and fee-market triggers read the node, and broadcasts go through it.\n\nA mempool running directly on Bitcoin Core reports that an input is spent but not by whom. Standby asks it whether that spend is confirmed instead, and counts a UTXO trigger\u2019s confirmations from when it first sees the confirmed spend.',
       triggers: ['general'],
     },
     'price-sources': {

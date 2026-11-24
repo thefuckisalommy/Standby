@@ -648,7 +648,7 @@ def main():
 
         # --- 1. health + version ----------------------------------------
         s, h = req('GET', '/api/health')
-        check('1 health reports version 0.8.12.1', h.get('version') == '0.8.12.1', h)
+        check('1 health reports version 0.8.13', h.get('version') == '0.8.13', h)
 
         # --- 2. block-height trigger --------------------------------------
         # Validation at add: bad heights rejected, good ones accepted.
@@ -5441,7 +5441,7 @@ def main():
               s == 400 and body == b'Bad request URL', (s, body))
         s, r = req('GET', '/api/health')
         check('32 crash: app still answers after the malformed request',
-              s == 200 and r.get('version') == '0.8.12.1', (s, r))
+              s == 200 and r.get('version') == '0.8.13', (s, r))
         s, body = raw_get('//[', RBASE)
         check('32 crash: malformed request line to the receiver gets 400',
               s == 400 and body == b'Bad request URL', (s, body))
@@ -6188,7 +6188,7 @@ def main():
         _bind_checkin = '/tmp/standby-test099-bind-checkin'
         _expected_bind = APP_ENV.get('STANDBY_BIND', '127.0.0.1')
         check('39 bind: main instance listen line names the profile bind',
-              ('Standby 0.8.12.1 listening on %s:%d (data: ' % (_expected_bind, PORT)) in read_log(),
+              ('Standby 0.8.13 listening on %s:%d (data: ' % (_expected_bind, PORT)) in read_log(),
               read_log()[-500:])
 
         def _bind_log_text():
@@ -6301,7 +6301,7 @@ def main():
         _auth_app = _bind_instance({'STANDBY_PASSWORD': _pw})
         check('40 auth: instance comes up', wait_up(_ab))
         s, r = req('GET', '/api/health', base=_ab)
-        check('40 auth: health is public', s == 200 and r.get('version') == '0.8.12.1', (s, r))
+        check('40 auth: health is public', s == 200 and r.get('version') == '0.8.13', (s, r))
         s, r = req('GET', '/api/auth/status', base=_ab)
         check('40 auth: status says required, not authenticated',
               s == 200 and r == {'required': True, 'authenticated': False}, (s, r))
@@ -6503,12 +6503,138 @@ def main():
         check('42 race: the tick that was on the network does not overwrite it', _lookup_value() == 'Batch', _lookup_value())
         stop(_race_app)
 
+        # --- 43. bare spends from a bitcoind-backed mempool (0.8.13) ---
+        # A mempool backed directly by bitcoind answers outspends with
+        # a bare {spent: true}: no spender, no status. The app asks the
+        # same node's POST /api/prevouts (confirmed UTXO set only) to
+        # tell a confirmed spend (stale) from a mempool one (warning),
+        # asks about its own txid to recognise its own spend, and
+        # counts a UTXO rule's confirmations from first sighting.
+        # A dedicated stub (bitcoind style) and app instance, so the
+        # rest of the suite never sees bare answers.
+        _bs_port = 18197
+        _bs_base = 'http://127.0.0.1:%d' % _bs_port
+        _ab43 = 'http://127.0.0.1:3440'
+        _stub43 = start(['node', STUB, str(_bs_port)], env={'SENTINEL_TXID': SENTINEL_TXID}, log=_bind_log)
+        check('43 bare: stub comes up', wait_up(_bs_base, path='/api/blocks/tip/height'))
+        s, r = req('POST', '/__test__/outspend-style', {'style': 'bitcoind'}, base=_bs_base)
+        check('43 bare: stub answers like a bitcoind-backed mempool', s == 200 and r.get('style') == 'bitcoind', r)
+        shutil.rmtree(_bind_data, ignore_errors=True)
+        shutil.rmtree(_bind_checkin, ignore_errors=True)
+        _e43 = dict(APP_ENV)
+        _e43.update({'PORT': '3440', 'DATA_DIR': _bind_data, 'CHECKIN_DIR': _bind_checkin,
+                     'STANDBY_TEST_STARTUP_TICK_MS': '600000'})
+        _e43.pop('STANDBY_PASSWORD', None)
+        _app43 = start(['node', 'server.js'], env=_e43, cwd=APP, log=_bind_log)
+        check('43 bare: instance comes up', wait_up(_ab43))
+        s, r = req('PUT', '/api/settings', {'primaryApiUrl': _bs_base, 'secondaryEnabled': False}, base=_ab43)
+        check('43 bare: primary node is the bitcoind-style stub, secondary off', s == 200, (s, r))
+        # The raw answer really is bare.
+        s, r = req('GET', '/api/tx/' + v.FINNEY + '/outspends', base=_bs_base)
+        check('43 bare: the stub batch answer is bare (no txid, no status)',
+              s == 200 and r[0] == {'spent': True}, r)
+
+        def _dry43(tx_id):
+            s, r = req('POST', '/api/broadcast/test', {'id': tx_id}, base=_ab43)
+            return s, (r.get('results') or [{}])[0]
+
+        def _clear43():
+            return req('POST', '/api/__test__/clear-caches', {'only': ['outspend', 'nodeTip']}, base=_ab43)[0] == 200
+
+        # Confirmed foreign spend (FINNEY:0, confirmed in the stub) —
+        # first with no prevouts route: unverifiable, so the old
+        # reading stands (unconfirmed — a warning, never stale).
+        s, r = req('POST', '/api/bitcoin/txs', {'txHex': v.craft(0, 114001), 'label': 'Bare confirmed', 'trigger': {'type': 'manual', 'params': {}}}, base=_ab43)
+        check('43 bare: tx spending a confirmed-spent input added', s == 201, (s, r))
+        _conf43 = r['tx']['id'] if s == 201 else None
+        req('POST', '/__test__/prevouts-route', {'enabled': False}, base=_bs_base)
+        check('43 bare: caches cleared', _clear43())
+        s, one = _dry43(_conf43)
+        check('43 bare: without /api/prevouts a bare spend reads unconfirmed, as before (conflict, not stale)',
+              s == 200 and one.get('verdict') == 'conflict' and len(one.get('spent', [])) == 0, one)
+        check('43 notes: the unverified note says the node cannot tell, not that the spend is unconfirmed',
+              'cannot say whether that spend is confirmed' in (one.get('note') or '')
+              and 'not confirmed yet' not in (one.get('note') or ''), one.get('note'))
+        t = state_tx(_conf43, base=_ab43)
+        check('43 bare: ... and the transaction stays active (not stale)',
+              t and (t.get('release') or {}).get('status') != 'stale', t and t.get('release'))
+        # With the route: proven confirmed, so stale.
+        req('POST', '/__test__/prevouts-route', {'enabled': True}, base=_bs_base)
+        check('43 bare: caches cleared again', _clear43())
+        s, one = _dry43(_conf43)
+        check('43 bare: /api/prevouts proves the spend confirmed — the dry run says stale (blocked)',
+              s == 200 and one.get('verdict') == 'blocked' and len(one.get('spent', [])) == 1, one)
+        check('43 notes: the stale note says the spend is confirmed',
+              'spent by another transaction that is confirmed' in (one.get('note') or ''), one.get('note'))
+        check('43 bare: the spender is not named (the node cannot say)',
+              (one.get('spent') or [{}])[0].get('spentBy') is None, one.get('spent'))
+        t = state_tx(_conf43, base=_ab43)
+        check('43 bare: the transaction is recorded stale',
+              t and (t.get('release') or {}).get('status') == 'stale', t and t.get('release'))
+        # Mempool-only foreign spend (CONFLICT, unconfirmed in the stub).
+        s, r = req('POST', '/api/bitcoin/txs', {'txHex': v.craft_prev('cc' * 32, 0, 114002), 'label': 'Bare mempool', 'trigger': {'type': 'manual', 'params': {}}}, base=_ab43)
+        check('43 bare: tx spending a mempool-spent input added', s == 201, (s, r))
+        s, one = _dry43(r['tx']['id'] if s == 201 else None)
+        check('43 bare: a mempool-only bare spend stays a warning (conflict, not stale)',
+              s == 200 and one.get('verdict') == 'conflict' and len(one.get('conflict', [])) == 1, one)
+        check('43 notes: a verified mempool-only spend is called not confirmed yet',
+              'not confirmed yet' in (one.get('note') or '') and 'cannot say' not in (one.get('note') or ''), one.get('note'))
+        # Our own transaction already out: SECOND:0 spent (confirmed),
+        # and the node knows our txid.
+        req('POST', '/__test__/outspend', {'txid': 'aa' * 32, 'vout': 0, 'blockHeight': STUB_TIP}, base=_bs_base)
+        _own_hex = v.craft_prev('aa' * 32, 0, 114003)
+        s, r = req('POST', '/api/bitcoin/txs', {'txHex': _own_hex, 'label': 'Bare own', 'trigger': {'type': 'manual', 'params': {}}}, base=_ab43)
+        check('43 bare: own-spend tx added', s == 201, (s, r))
+        _own43 = r['tx']['id'] if s == 201 else None
+        s, body = raw_req('POST', '/api/tx', _bs_base, host='127.0.0.1:%d' % _bs_port,
+                          headers={'Content-Type': 'text/plain'}, body=_own_hex.encode())
+        check('43 bare: our transaction is known to the node', s == 200, (s, body))
+        check('43 bare: caches cleared for the own check', _clear43())
+        s, one = _dry43(_own43)
+        check('43 bare: a bare spend by our own txid is recognised as broadcast, not stale',
+              s == 200 and one.get('verdict') == 'broadcast'
+              and (one.get('own') or [{}])[0].get('spentBy') == v.txid_of(_own_hex), one)
+        check('43 notes: the own-spend note says the node knows our txid',
+              'the node knows its txid' in (one.get('note') or ''), one.get('note'))
+        # UTXO rule, N=1: a confirmed bare spend fires at once.
+        s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'utxo', 'params': {'outpoint': 'aa' * 32 + ':0', 'confirmations': 1}}}, base=_ab43)
+        check('43 utxo: N=1 fires on a confirmed bare spend', s == 200 and r.get('fire') is True, r)
+        # UTXO rule, N=3: counted from first sighting (tip 900,000),
+        # so it waits, then fires once the tip is two blocks higher.
+        s, r = req('POST', '/api/bitcoin/txs', {'txHex': v.craft(1, 114004), 'label': 'Bare N3',
+                   'trigger': {'type': 'utxo', 'params': {'outpoint': 'aa' * 32 + ':0', 'confirmations': 3}},
+                   'triggerConfirmed': True}, base=_ab43)
+        check('43 utxo: N=3 tx added', s == 201, (s, r))
+        _n3 = r['tx']['id'] if s == 201 else None
+        s, r = req('POST', '/api/release/check', {}, base=_ab43)
+        t = state_tx(_n3, base=_ab43)
+        sl = rule_slice(t) if t else {}
+        lo = (sl or {}).get('lastOutspend') or {}
+        check('43 utxo: N=3 first sighting stamps the tip height', lo.get('firstSeenConfirmedHeight') == STUB_TIP, lo)
+        check('43 utxo: N=3 waits at 1 of 3 confirmations', lo.get('confirmations') == 1 and not t.get('broadcasted'), (lo, t.get('broadcasted')))
+        check('43 notes: the count from first sighting reads as a minimum',
+              (sl.get('reason') or '').startswith('spent — at least 1 of 3 confirmations'), sl.get('reason'))
+        req('POST', '/__test__/tip', {'height': STUB_TIP + 1}, base=_bs_base)
+        check('43 utxo: caches cleared after one block', _clear43())
+        req('POST', '/api/release/check', {}, base=_ab43)
+        t = state_tx(_n3, base=_ab43)
+        lo = (rule_slice(t) or {}).get('lastOutspend') or {}
+        check('43 utxo: one block later it reads 2 of 3, first sighting unchanged',
+              lo.get('confirmations') == 2 and lo.get('firstSeenConfirmedHeight') == STUB_TIP and not t.get('broadcasted'), lo)
+        req('POST', '/__test__/tip', {'height': STUB_TIP + 2}, base=_bs_base)
+        check('43 utxo: caches cleared after two blocks', _clear43())
+        req('POST', '/api/release/check', {}, base=_ab43)
+        t = state_tx(_n3, base=_ab43)
+        check('43 utxo: at 3 confirmations from first sighting it fires and broadcasts', t and t.get('broadcasted'), t and t.get('release'))
+        stop(_app43)
+        stop(_stub43)
+
     finally:
         for p in list(v.procs):
             stop(p)
 
     # --- 11. no server left running -------------------------------------
-    for port in (PORT, RECEIVER_PORT, STUB_P, STUB_S, 18190, 18191, 3440, 3441):
+    for port in (PORT, RECEIVER_PORT, STUB_P, STUB_S, 18190, 18191, 18197, 3440, 3441):
         check('11 no server left running on port %d' % port, port_closed(port))
 
     print()

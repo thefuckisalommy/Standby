@@ -3457,8 +3457,8 @@ function check(name, cond, detail) {
     && idx.indexOf('Installed version:') !== -1 && idx.indexOf('id="app-version"') !== -1, '');
   check('app version static: the card has no "?" button and no details (just the version line)',
     idx.indexOf('id="help-version"') === -1, '');
-  check('app version: the installed version reads 0.8.12.1 (from /api/health)',
-    els['app-version'] && els['app-version'].textContent === '0.8.12.1',
+  check('app version: the installed version reads 0.8.13 (from /api/health)',
+    els['app-version'] && els['app-version'].textContent === '0.8.13',
     els['app-version'] && els['app-version'].textContent);
   setFilter('general');
   check('app version: the card is visible under General',

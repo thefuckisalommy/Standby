@@ -2294,7 +2294,7 @@ async function handleApi(req, res, pathname) {
       } else if (r.own && r.own.length) {
         a.own = { method: r.checkedVia, blockHeight: r.own[0].blockHeight != null ? r.own[0].blockHeight : null };
       } else if (r.conflict && r.conflict.length) {
-        a.conflict = { method: r.checkedVia, error: 'inputs spent by an unconfirmed transaction: ' + r.conflict.map((i) => String(i.prevTxid || '').slice(0, 12) + ':' + i.prevVout).join(', ') };
+        a.conflict = { method: r.checkedVia, error: (r.conflict.some((i) => i.unverified) ? 'inputs spent by another transaction (the node cannot say whether that spend is confirmed): ' : 'inputs spent by an unconfirmed transaction: ') + r.conflict.map((i) => String(i.prevTxid || '').slice(0, 12) + ':' + i.prevVout).join(', ') };
       } else if (r.verdict === 'ready') {
         // A clean verdict re-derives the warning away: the unconfirmed
         // spend was evicted, so the transaction is ready again. Only a
