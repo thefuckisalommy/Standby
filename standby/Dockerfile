@@ -13,10 +13,22 @@ COPY public ./public
 # command — `node checkin-receiver/server.js` — on LAN port 3101.
 COPY checkin-receiver ./checkin-receiver
 
-RUN mkdir -p /data
+# (0.8.11.1) Run as the image's unprivileged `node` user (UID/GID
+# 1000), not root — on every install path, Umbrel included. The
+# mount points are created owned by it, so an empty named volume
+# starts writable; a bind-mounted host directory must be owned by
+# UID 1000 (the Umbrel pre-start hook does that; the generic README
+# says how). The app checks at startup and exits with the fix if a
+# directory is not writable.
+RUN mkdir -p /data /checkin && chown node:node /data /checkin
 
 ENV PORT=3100
 ENV DATA_DIR=/data
+# The generic Docker install. The Umbrel compose overrides this to
+# `umbrel`; a `node server.js` run outside Docker is `bare`.
+ENV STANDBY_DEPLOYMENT=docker
+
+USER node
 
 EXPOSE 3100
 

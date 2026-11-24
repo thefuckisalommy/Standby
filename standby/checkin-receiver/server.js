@@ -30,13 +30,19 @@ const crypto = require('crypto');
 // receiver runs from the same image as the app, so the modules
 // are present; the receiver still mounts only /checkin and holds
 // no transaction data.
-const { hostAllowed, describeAllowedHosts, bindWarning } = require('../lib/http');
+const { hostAllowed, describeAllowedHosts } = require('../lib/http');
 const { writeFileDurable } = require('../lib/store');
-const { BIND } = require('../lib/config');
+const { BIND, DEPLOYMENT, TEST_MODE, PORT: CONFIG_PORT, CHECKIN_DIR } = require('../lib/config');
+const { requireWritable } = require('../lib/startup');
 
-const PORT = parseInt(process.env.PORT || '3101', 10);
-const CHECKIN_DIR = process.env.CHECKIN_DIR || '/checkin';
+// The receiver's own default port is 3101 (config's default, 3100,
+// is the app's); the compose files always set PORT explicitly.
+const PORT = process.env.PORT ? CONFIG_PORT : 3101;
 const MAX_KEY_LEN = 256;
+
+// (0.8.11.1) The check-in directory must be writable (last.json),
+// or the receiver exits with the fix — see lib/startup.js.
+requireWritable([{ dir: CHECKIN_DIR, create: true }], DEPLOYMENT, 'Standby receiver');
 
 function sendJson(res, status, obj) {
   // (0.8.10, audit fix 3) The receiver serves JSON only: no full
@@ -146,7 +152,7 @@ const server = http.createServer((req, res) => {
   // the test harness sets; without it this 404s like any unknown
   // path. Answers 200 first — the throw lands after the response.
   if (req.method === 'POST' && pathname === '/__test__/throw-uncaught') {
-    if (process.env.STANDBY_TEST_MODE !== '1') return sendJson(res, 404, { error: 'not found' });
+    if (!TEST_MODE) return sendJson(res, 404, { error: 'not found' });
     setTimeout(() => { throw new Error('test-only uncaught exception'); }, 0);
     return sendJson(res, 200, { ok: true });
   }
@@ -190,8 +196,6 @@ const server = http.createServer((req, res) => {
 server.listen(PORT, BIND, () => {
   console.log(`Standby check-in receiver listening on ${BIND}:${PORT} (checkin dir: ${CHECKIN_DIR})`);
   console.log('Standby receiver allowed Hosts: ' + describeAllowedHosts());
-  // (0.8.11, secure defaults) Same startup warning as the app —
-  // see bindWarning in lib/http.js.
-  const w = bindWarning(BIND);
-  if (w) console.warn(w);
+  // (0.8.11.1) No bind warning here: the receiver is meant to be
+  // reachable on the LAN, and every check-in needs a key.
 });

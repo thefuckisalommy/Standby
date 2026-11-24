@@ -1,35 +1,61 @@
 # Standby — generic Linux docker-compose
 # Run Standby on any Linux box with Docker, without Umbrel.
+#   mkdir -p data checkin && sudo chown -R 1000:1000 data checkin
 #   docker compose up -d
-# The web UI listens on 127.0.0.1:3100 by default (localhost only — there is
-# no login screen, so do not expose it to a network you do not trust; reach
+# The web UI listens on 127.0.0.1:3100 by default (localhost only — reach
 # it over SSH, Tailscale, or your own reverse proxy). The check-in receiver
 # listens on 3101 for API-key check-ins from your bot or gadget.
 # Data lives in ./data and ./checkin next to this file — plain files, so a
 # backup is just a copy of those two directories (or the in-app Backup
 # download). See README.md ("Run on any Linux box") and SECURITY.md.
 #
-# (0.8.11, secure defaults) The services run as UID 1000 (the `node` user
-# in the image), not root — so before the first start, make the data
-# directories writable by that user, or the app cannot write state.json:
-#   mkdir -p data checkin && sudo chown 1000:1000 data checkin
-# (Docker creates the directories root-owned if they do not exist.)
+# App login (0.8.11.1, optional): set STANDBY_PASSWORD — in a `.env` file
+# next to this one (`STANDBY_PASSWORD=...`, chmod 600) or in the shell —
+# and the UI and API require it. Recommended whenever anything other than
+# you can reach port 3100 on this machine (other users, a LAN mapping).
+#
+# Runs as UID 1000 (the image's `node` user), not root: the data
+# directories must be owned by UID 1000 — the chown above. Upgrading from
+# 0.8.10 or older (which ran as root)? Run the same chown, with -R, once:
+# the existing files inside are root-owned. The app checks at startup and
+# exits with this fix in its log if anything is not writable.
+#
 # STANDBY_BIND=0.0.0.0 is required inside the container: a loopback bind
 # would never receive traffic forwarded to the container's IP. The web UI
 # stays localhost-only through the host-side port mapping below
-# (127.0.0.1:...:3100); the receiver stays reachable on the LAN by design
-# (remote check-ins need it), key-protected, with the Host allowlist as
-# its rebinding defense.
+# (127.0.0.1:...:3100).
+#
+# (0.8.11.1) The two services are on SEPARATE networks. They share only
+# the ./checkin directory. The receiver is the LAN-facing one; on a
+# shared network it could call the web API directly, past everything
+# the receiver is meant to be unable to do.
+#
+# The image is pinned to a release tag. To upgrade, change the tag to the
+# new version (see the releases on GitHub) and `docker compose up -d`.
+
+x-hardening: &hardening
+  user: "1000:1000"
+  restart: on-failure
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
 
 services:
   web:
-    image: ghcr.io/thefuckisalommy/standby:latest
-    restart: on-failure
+    <<: *hardening
+    image: ghcr.io/thefuckisalommy/standby:0.8.11.1
     stop_grace_period: 1m30s
-    user: "1000"
     environment:
       PORT: 3100
       STANDBY_BIND: 0.0.0.0
+      STANDBY_DEPLOYMENT: docker
+      STANDBY_PASSWORD: ${STANDBY_PASSWORD:-}
       DATA_DIR: /data
       CHECKIN_DIR: /checkin
     volumes:
@@ -37,26 +63,33 @@ services:
       - ./checkin:/checkin
     ports:
       - "127.0.0.1:${STANDBY_WEB_PORT:-3100}:3100"
+    networks: [web]
 
   # Check-in receiver: the check-in-only front door. It runs the same image
   # with a different command and mounts ONLY the shared /checkin directory:
   # the key hashes the app publishes (keys.json) and the check-in timestamps
   # it writes (last.json). It never mounts /data, so it cannot see the
-  # transactions — even from inside its own container. A key presented here
-  # can only record a check-in; it cannot read, broadcast, or change
+  # transactions — even from inside its own container — and it is on its
+  # own network, so it cannot reach the web API either. A key presented
+  # here can only record a check-in; it cannot read, broadcast, or change
   # anything. Plain HTTP, protected only by the check-in key — keep it on
   # a trusted LAN or Tailscale network.
   checkin:
-    image: ghcr.io/thefuckisalommy/standby:latest
+    <<: *hardening
+    image: ghcr.io/thefuckisalommy/standby:0.8.11.1
     command: ["node", "checkin-receiver/server.js"]
-    restart: on-failure
     stop_grace_period: 1m
-    user: "1000"
     environment:
       PORT: 3101
       STANDBY_BIND: 0.0.0.0
+      STANDBY_DEPLOYMENT: docker
       CHECKIN_DIR: /checkin
     volumes:
       - ./checkin:/checkin
     ports:
       - "${STANDBY_CHECKIN_PORT:-3101}:3101"
+    networks: [checkin]
+
+networks:
+  web:
+  checkin:

@@ -8,7 +8,8 @@
 #     width check, and the error-screen script dom_check099_error.js)
 #
 # Runner needs:
-#   - ubuntu-latest, Node 20+, Python 3.11+
+#   - ubuntu-latest, Node 24 (the version the image ships and
+#     package.json's engines field requires), Python 3.11+
 #   - playwright + chromium: `npm install --prefix test playwright`
 #     installs the driver into test/node_modules (no package.json is
 #     committed); `npx playwright install chromium` fetches the
@@ -29,34 +30,38 @@
 #     regression run in parallel (distinct ports); DOM runs after
 #     API because it shares its ports.
 #
-# What it does NOT do: build or push the Docker image. The image
-# workflow (.github/workflows/build-standby-image.yml) stays
-# separate and unchanged; wiring test-gating into it (so a push to
-# main only builds when tests pass) is a follow-up.
+# What it does NOT do: build or push the Docker image. (0.8.11.1)
+# The image workflow (.github/workflows/build-standby-image.yml)
+# calls this one first (workflow_call) and builds only if it
+# passes — so a push to main that changes standby/** is tested
+# there, and the push trigger here covers test-only changes.
 name: test
 
 on:
   push:
     branches: [main]
     paths:
-      - 'standby/**'
       - 'test/**'
   pull_request:
     paths:
       - 'standby/**'
       - 'test/**'
   workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
 
 jobs:
   api:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '20'
-      - uses: actions/setup-python@v5
+          node-version: '24'
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.11'
       - name: Run API suite
@@ -66,11 +71,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '20'
-      - uses: actions/setup-python@v5
+          node-version: '24'
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.11'
       - name: Run regression suite
@@ -80,13 +85,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      TZ: America/New_York
+      # A fixed UTC-5 offset (no DST, no place name): the DOM suite's
+      # expected date strings are written for it.
+      TZ: Etc/GMT+5
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '20'
-      - uses: actions/setup-python@v5
+          node-version: '24'
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.11'
       - name: Install Playwright driver (test/node_modules, no package.json committed)

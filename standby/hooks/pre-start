@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Standby — Umbrel pre-start hook (0.8.11.1). Runs as root on the
+# Umbrel host before the containers start, on every start (install,
+# update, restart). Idempotent.
+#
+# 1. Moves the check-in directory under data/ (it used to live at
+#    ${APP_DATA_DIR}/checkin, outside data/, so it would not move with
+#    the app data). Only keys.json and last.json matter there; an
+#    existing file at the new location is never overwritten. Even if
+#    this step never ran, nothing is lost for good: the app rewrites
+#    keys.json from its own state at startup, and last.json only holds
+#    a check-in the app has usually merged already.
+# 2. Gives the app data to UID/GID 1000. Versions before 0.8.11.1 ran
+#    as root and wrote root-owned files; the containers now run as
+#    1000:1000 and would otherwise be unable to save (the app checks
+#    at startup and exits with a clear message if it cannot write).
+set -euo pipefail
+
+APP_DIR="${APP_DATA_DIR:-$(readlink -f "$(dirname "${BASH_SOURCE[0]}")/..")}"
+DATA_DIR="${APP_DATA_ROOT:-${APP_DIR}/data}"
+
+mkdir -p "${DATA_DIR}/checkin"
+
+OLD_CHECKIN="${APP_DIR}/checkin"
+if [ -d "${OLD_CHECKIN}" ]; then
+  for f in keys.json last.json; do
+    if [ -f "${OLD_CHECKIN}/${f}" ] && [ ! -e "${DATA_DIR}/checkin/${f}" ]; then
+      mv "${OLD_CHECKIN}/${f}" "${DATA_DIR}/checkin/${f}"
+    fi
+  done
+  rmdir "${OLD_CHECKIN}" 2>/dev/null || true
+fi
+
+chown -R 1000:1000 "${DATA_DIR}"

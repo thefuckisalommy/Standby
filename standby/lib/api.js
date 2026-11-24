@@ -7,9 +7,10 @@ const crypto = require('crypto');
 const path = require('path');
 const { caches, clearCaches } = require('./caches');
 const { applyGrace, checkinLiveOffsetMs, checkinStatus, graceStatus, hashCheckinKey, inDangerZone, mergeExternalCheckin, newCheckinKeyId, publicCheckinKey, resetCheckin, sanitizeState, startupWarnings, syncCheckinFreeze, writeReceiverKeys } = require('./checkin');
-const { CHECKIN_DIR, DATA_DIR, VERSION } = require('./config');
+const { CHECKIN_DIR, DATA_DIR, TEST_MODE, VERSION } = require('./config');
+const auth = require('./auth');
 const { HISTORY_MAX, forwardMemberHistory, noteSetMemberStale, pushHistory, shortTxid } = require('./history');
-const { csrfAllowed, saveMutation } = require('./http');
+const { csrfAllowed, fetchSiteAllowed, saveMutation } = require('./http');
 const { checkCadenceSecondsOf, exchangeStatusFor, fetchPriceCached, priceAgreementPctOf, priceCacheForState, priceSourceError, priceSourcesOf } = require('./prices');
 const { currentFeesForState, evaluateRelease, feePeakForState, mergeNodeStamps, rearmFullTick, refreshConfirmations, refreshMaraWaiting, refreshPublicFallbacks } = require('./release');
 const { broadcastOne, checkTriggerNow, triggerStatusFor } = require('./rules');
@@ -24,11 +25,54 @@ const RELEASE_KINDS = new Set(['release', 'broadcast', 'dryrun']);
 
 async function handleApi(req, res, pathname) {
   const now = new Date();
+  // (0.8.11.1) Fetch metadata: a browser request from another site
+  // — or another port on the same host, i.e. another Umbrel app —
+  // is refused before anything else, reads included. See
+  // fetchSiteAllowed in lib/http.js.
+  if (!fetchSiteAllowed(req)) {
+    return sendError(res, 403, 'cross-site request rejected');
+  }
   // CSRF gate (0.7.12): state-changing requests must come from the
   // app's own page — see csrfAllowed above. Checked before any state
   // is loaded, so a rejected request cannot touch anything.
   if (req.method !== 'GET' && !csrfAllowed(req)) {
     return sendError(res, 403, 'cross-origin or non-JSON request rejected');
+  }
+  // (0.8.11.1) App login — see lib/auth.js. Checked before any
+  // state is loaded. Off when STANDBY_PASSWORD is unset. The
+  // `login: true` flag tells the UI to show its login screen.
+  if (auth.enabled() && !auth.routeIsPublic(req.method, pathname) && !auth.requestAuthorized(req, now.getTime())) {
+    return sendJson(res, 401, { error: 'login required', login: true });
+  }
+
+  // GET /api/auth/status (0.8.11.1): is a login required, and does
+  // this request carry a valid one? The UI asks on startup.
+  if (req.method === 'GET' && pathname === '/api/auth/status') {
+    return sendJson(res, 200, { required: auth.enabled(), authenticated: auth.requestAuthorized(req, now.getTime()) });
+  }
+
+  // POST /api/login {password} (0.8.11.1) -> {ok, token}. With no
+  // password configured it answers {ok:true, token:null}. Wrong
+  // passwords are rate-limited (429) and logged without the value.
+  if (req.method === 'POST' && pathname === '/api/login') {
+    const body = await readBody(req).catch(() => ({}));
+    if (!auth.enabled()) return sendJson(res, 200, { ok: true, token: null });
+    if (auth.loginLimited(now.getTime())) {
+      return sendError(res, 429, 'too many wrong passwords — wait a minute and try again');
+    }
+    if (!auth.passwordMatches(body && body.password)) {
+      auth.recordLoginFailure(now.getTime());
+      console.warn('Standby: failed login attempt');
+      return sendError(res, 401, 'wrong password');
+    }
+    return sendJson(res, 200, { ok: true, token: auth.issueToken(now.getTime()) });
+  }
+
+  // POST /api/logout (0.8.11.1): rotates the session secret, which
+  // signs out every device. Requires a login (the gate above).
+  if (req.method === 'POST' && pathname === '/api/logout') {
+    if (auth.enabled()) auth.rotateSessionSecret();
+    return sendJson(res, 200, { ok: true });
   }
   // (0.8.3) A state file that cannot be loaded — corrupt or
   // missing with no usable backup — throws loudly by design, but
@@ -101,7 +145,7 @@ async function handleApi(req, res, pathname) {
   // With no `only` array the call clears everything, as before
   // (the API and regression suites rely on the full clear).
   if (req.method === 'POST' && pathname === '/api/__test__/clear-caches') {
-    if (process.env.STANDBY_TEST_MODE !== '1') return sendError(res, 404, 'not found');
+    if (!TEST_MODE) return sendError(res, 404, 'not found');
     const clearBody = await readBody(req).catch(() => ({}));
     const only = (clearBody && Array.isArray(clearBody.only)) ? clearBody.only : null;
     return sendJson(res, 200, { ok: true, cleared: clearCaches(only) });
@@ -115,7 +159,7 @@ async function handleApi(req, res, pathname) {
   // after the response, so the caller observes the 200 and then
   // the exit.
   if (req.method === 'POST' && pathname === '/api/__test__/throw-uncaught') {
-    if (process.env.STANDBY_TEST_MODE !== '1') return sendError(res, 404, 'not found');
+    if (!TEST_MODE) return sendError(res, 404, 'not found');
     setTimeout(() => { throw new Error('test-only uncaught exception'); }, 0);
     return sendJson(res, 200, { ok: true });
   }

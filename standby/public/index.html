@@ -411,6 +411,17 @@
       <p id="backup-msg" class="muted"></p>
     </div>
 
+    <!-- Session (0.8.11.1): only shown when the app login is on.
+         Logging out signs out every device. -->
+    <div class="card" id="card-session" style="display:none">
+      <div class="section-head">
+        <h2>Session</h2>
+      </div>
+      <p class="muted">Standby requires a password. Logging out signs out every browser that is logged in.</p>
+      <p class="inline-btns"><button id="btn-logout">Log out</button></p>
+      <p id="logout-msg" class="muted"></p>
+    </div>
+
     <!-- App version (0.8.0): a short card at the very bottom of
          General settings showing the installed version, from
          /api/health. It only changes on an update. No "?" button
@@ -642,6 +653,23 @@
       <input type="file" id="btc-file" accept=".txt,.hex,.psbt,text/plain" style="display:none">
     </p>
     <p id="btc-msg" class="muted"></p>
+  </div>
+</div>
+
+<!-- App login (0.8.11.1): shown only when the server requires a
+     password (STANDBY_PASSWORD; on Umbrel it is the password shown
+     on the app's page). It covers the page until a login succeeds;
+     the page then reloads with the session token in place. -->
+<div id="login-modal" class="modal-overlay">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="login-title">
+    <h3 id="login-title">Log in to Standby</h3>
+    <p class="muted" id="login-hint">Enter the Standby password. On Umbrel it is shown on the app's page in the Umbrel dashboard.</p>
+    <form id="login-form">
+      <label for="login-password">Password</label>
+      <input type="password" id="login-password" autocomplete="current-password" required>
+      <p class="inline-btns"><button type="submit" class="primary" id="btn-login">Log in</button></p>
+      <p id="login-msg" class="muted"></p>
+    </form>
   </div>
 </div>
 

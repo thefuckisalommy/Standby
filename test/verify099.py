@@ -647,7 +647,7 @@ def main():
 
         # --- 1. health + version ----------------------------------------
         s, h = req('GET', '/api/health')
-        check('1 health reports version 0.8.11', h.get('version') == '0.8.11', h)
+        check('1 health reports version 0.8.11.1', h.get('version') == '0.8.11.1', h)
 
         # --- 2. block-height trigger --------------------------------------
         # Validation at add: bad heights rejected, good ones accepted.
@@ -3640,7 +3640,7 @@ def main():
         delete_all_txs()
 
         # --- 23. archived txs make no network calls; primary-first tip fetch + per-tick tip cache (0.8.5) ---
-        # Ryan (Nov 20): "Once they are archived with 6 confirmations
+        # Owner (Nov 20): "Once they are archived with 6 confirmations
         # they shouldn't be pinging." A tx that can no longer
         # broadcast is never evaluated on the tick and is never
         # re-queried once it reaches 6 confirmations — and the
@@ -3824,7 +3824,7 @@ def main():
         check('23 cleanup: caches cleared', clear_caches())
 
         # --- 24. fee trigger: 5-minute node fee cache (0.8.5) --------
-        # Ryan (Nov 20): one fee fetch per 5 minutes for ALL fee
+        # Owner (Nov 20): one fee fetch per 5 minutes for ALL fee
         # txs combined. The node fee cache TTL is a fixed 5
         # minutes, not the check cadence — two fee-rule evaluations
         # inside one window cost ONE stub fee fetch, from the
@@ -3881,7 +3881,7 @@ def main():
         delete_all_txs()
 
         # --- 25. UTXO shared outpoint cache + /outspends batching (0.8.6) ---
-        # Ryan (Nov 20): UTXO triggers should stop being independent
+        # Owner (Nov 20): UTXO triggers should stop being independent
         # API requests — one shared monitoring workload. (a) Repeated
         # checks of the same outpoint cost ONE stub request per
         # cadence window (shared outpoint cache, TTL = cadence).
@@ -5440,7 +5440,7 @@ def main():
               s == 400 and body == b'Bad request URL', (s, body))
         s, r = req('GET', '/api/health')
         check('32 crash: app still answers after the malformed request',
-              s == 200 and r.get('version') == '0.8.11', (s, r))
+              s == 200 and r.get('version') == '0.8.11.1', (s, r))
         s, body = raw_get('//[', RBASE)
         check('32 crash: malformed request line to the receiver gets 400',
               s == 400 and body == b'Bad request URL', (s, body))
@@ -6167,24 +6167,27 @@ def main():
         check('38 cleanup: cadence restored to 60 s', s == 200, (s, r))
         check('38 cleanup: app restarted (cold shape record)', restart())
 
-        # --- 39. secure defaults: STANDBY_BIND + startup warning (0.8.11)
-        # The code default is loopback (127.0.0.1): a bare `node
-        # server.js` run is not exposed to the LAN. Both compose
-        # files set STANDBY_BIND=0.0.0.0 (a loopback bind inside a
-        # container would never receive forwarded traffic); the
-        # Umbrel profile runs the main instance that way (see
-        # APP_ENV above), so this section also proves the main
-        # instance's own listen line names the profile bind. The
-        # startup warning fires only when the bind is non-loopback
-        # AND STANDBY_ALLOWED_HOSTS is empty — with an allowlist
-        # set, or on loopback, there is nothing to warn about.
-        # The machine's own hostname no longer passes (see §33).
+        # --- 39. secure defaults: STANDBY_BIND + startup security notes
+        # (0.8.11, reworked 0.8.11.1). The code default bind is
+        # loopback (127.0.0.1): a bare `node server.js` run is not
+        # exposed to the LAN. Both compose files set
+        # STANDBY_BIND=0.0.0.0; the Umbrel profile runs the main
+        # instance that way (see APP_ENV above), so this section also
+        # proves the main instance's own listen line names the
+        # profile bind. (0.8.11.1) The startup warning is about the
+        # app LOGIN, not the Host allowlist: it fires when the API is
+        # reachable without one — a non-loopback bind outside Docker,
+        # or any Umbrel install — and never because of
+        # STANDBY_ALLOWED_HOSTS (which only widens access). The
+        # generic Docker install gets an info line instead (its port
+        # is host-loopback-mapped). The receiver logs no warning (it
+        # is meant for the LAN, and every check-in needs a key).
         _bind_log = '/tmp/heirloom099-bind.log'
         _bind_data = '/tmp/heirloom099-bind'
         _bind_checkin = '/tmp/heirloom099-bind-checkin'
         _expected_bind = APP_ENV.get('STANDBY_BIND', '127.0.0.1')
         check('39 bind: main instance listen line names the profile bind',
-              ('Standby 0.8.11 listening on %s:%d (data: ' % (_expected_bind, PORT)) in read_log(),
+              ('Standby 0.8.11.1 listening on %s:%d (data: ' % (_expected_bind, PORT)) in read_log(),
               read_log()[-500:])
 
         def _bind_log_text():
@@ -6199,62 +6202,187 @@ def main():
             # earlier instance's lines.
             open(_bind_log, 'wb').close()
 
-        # (a) 0.0.0.0 with no allowlist: warns, and still answers.
-        shutil.rmtree(_bind_data, ignore_errors=True)
-        shutil.rmtree(_bind_checkin, ignore_errors=True)
-        _fresh_bind_log()
-        _bind_env = dict(APP_ENV)
-        _bind_env.update({'PORT': '3440', 'DATA_DIR': _bind_data, 'CHECKIN_DIR': _bind_checkin,
-                          'STANDBY_BIND': '0.0.0.0'})
-        _bind_env.pop('STANDBY_ALLOWED_HOSTS', None)
-        _bind_app = start(['node', 'server.js'], env=_bind_env, cwd=APP, log=_bind_log)
+        def _bind_instance(extra, drop=()):
+            shutil.rmtree(_bind_data, ignore_errors=True)
+            shutil.rmtree(_bind_checkin, ignore_errors=True)
+            _fresh_bind_log()
+            e = dict(APP_ENV)
+            e.update({'PORT': '3440', 'DATA_DIR': _bind_data, 'CHECKIN_DIR': _bind_checkin})
+            for k in ('STANDBY_ALLOWED_HOSTS', 'STANDBY_PASSWORD', 'STANDBY_DEPLOYMENT') + tuple(drop):
+                e.pop(k, None)
+            e.update(extra)
+            return start(['node', 'server.js'], env=e, cwd=APP, log=_bind_log)
+
+        _NO_LOGIN_WARN = 'WARNING: listening on 0.0.0.0 with no app login'
+        # (a) 0.0.0.0, no password, bare: warns, and still answers.
+        _bind_app = _bind_instance({'STANDBY_BIND': '0.0.0.0'})
         check('39 warn: 0.0.0.0 instance comes up', wait_up('http://127.0.0.1:3440'))
         s, body = raw_req('GET', '/api/health', 'http://127.0.0.1:3440', host='127.0.0.1:3440')
         check('39 warn: 0.0.0.0 instance answers on 127.0.0.1', s == 200, (s, body))
-        check('39 warn: 0.0.0.0 with no allowlist logs the startup warning',
-              'WARNING: listening on 0.0.0.0 with STANDBY_ALLOWED_HOSTS unset' in _bind_log_text(),
-              _bind_log_text()[-500:])
+        check('39 warn: 0.0.0.0 with no password logs the no-login warning',
+              _NO_LOGIN_WARN in _bind_log_text(), _bind_log_text()[-500:])
+        check('39 warn: the listen line names the deployment (bare)',
+              'deployment: bare)' in _bind_log_text(), _bind_log_text()[-500:])
         stop(_bind_app)
-        # (b) 0.0.0.0 with an allowlist: no warning, and the listed name passes.
-        shutil.rmtree(_bind_data, ignore_errors=True)
-        shutil.rmtree(_bind_checkin, ignore_errors=True)
-        _fresh_bind_log()
-        _bind_env2 = dict(APP_ENV)
-        _bind_env2.update({'PORT': '3440', 'DATA_DIR': _bind_data, 'CHECKIN_DIR': _bind_checkin,
-                           'STANDBY_BIND': '0.0.0.0', 'STANDBY_ALLOWED_HOSTS': 'bind.example'})
-        _bind_app2 = start(['node', 'server.js'], env=_bind_env2, cwd=APP, log=_bind_log)
+        # (b) An allowlist does NOT silence it (it widens access).
+        _bind_app = _bind_instance({'STANDBY_BIND': '0.0.0.0', 'STANDBY_ALLOWED_HOSTS': 'bind.example'})
         check('39 warn: 0.0.0.0 + allowlist instance comes up', wait_up('http://127.0.0.1:3440'))
         s, body = raw_req('GET', '/api/health', 'http://127.0.0.1:3440', host='bind.example')
         check('39 warn: allowlisted name passes on the 0.0.0.0 instance', s == 200, (s, body))
-        check('39 warn: 0.0.0.0 with an allowlist logs no startup warning',
-              'WARNING: listening on 0.0.0.0 with STANDBY_ALLOWED_HOSTS unset' not in _bind_log_text(),
+        check('39 warn: an allowlist does not silence the no-login warning',
+              _NO_LOGIN_WARN in _bind_log_text(), _bind_log_text()[-500:])
+        stop(_bind_app)
+        # (c) 0.0.0.0 with a password: no warning.
+        _bind_app = _bind_instance({'STANDBY_BIND': '0.0.0.0', 'STANDBY_PASSWORD': 'a-long-enough-password'})
+        check('39 warn: 0.0.0.0 + password instance comes up', wait_up('http://127.0.0.1:3440'))
+        check('39 warn: 0.0.0.0 with a password logs no warning',
+              'WARNING' not in _bind_log_text() and 'app login: required' in _bind_log_text(),
               _bind_log_text()[-500:])
-        stop(_bind_app2)
-        # (c) Loopback bind with no allowlist: no warning.
-        shutil.rmtree(_bind_data, ignore_errors=True)
-        shutil.rmtree(_bind_checkin, ignore_errors=True)
-        _fresh_bind_log()
-        _bind_env3 = dict(APP_ENV)
-        _bind_env3.update({'PORT': '3440', 'DATA_DIR': _bind_data, 'CHECKIN_DIR': _bind_checkin,
-                           'STANDBY_BIND': '127.0.0.1'})
-        _bind_env3.pop('STANDBY_ALLOWED_HOSTS', None)
-        _bind_app3 = start(['node', 'server.js'], env=_bind_env3, cwd=APP, log=_bind_log)
+        stop(_bind_app)
+        # (d) A short password warns.
+        _bind_app = _bind_instance({'STANDBY_PASSWORD': 'short'})
+        check('39 warn: short-password instance comes up', wait_up('http://127.0.0.1:3440'))
+        check('39 warn: a password under 12 characters warns',
+              'WARNING: STANDBY_PASSWORD is shorter than 12 characters' in _bind_log_text(),
+              _bind_log_text()[-500:])
+        stop(_bind_app)
+        # (e) Loopback bind with no password: no warning.
+        _bind_app = _bind_instance({'STANDBY_BIND': '127.0.0.1'})
         check('39 warn: loopback instance comes up', wait_up('http://127.0.0.1:3440'))
-        check('39 warn: loopback bind with no allowlist logs no startup warning',
-              'WARNING: listening on 0.0.0.0 with STANDBY_ALLOWED_HOSTS unset' not in _bind_log_text()
-              and 'listening on 127.0.0.1:3440' in _bind_log_text(),
+        check('39 warn: loopback bind with no password logs no warning',
+              'WARNING' not in _bind_log_text() and 'listening on 127.0.0.1:3440' in _bind_log_text(),
               _bind_log_text()[-500:])
-        stop(_bind_app3)
-        # (d) The receiver warns the same way: 0.0.0.0, no allowlist.
+        stop(_bind_app)
+        # (f) Generic Docker, no password: an info line, no warning.
+        _bind_app = _bind_instance({'STANDBY_BIND': '0.0.0.0', 'STANDBY_DEPLOYMENT': 'docker'})
+        check('39 warn: docker instance comes up', wait_up('http://127.0.0.1:3440'))
+        check('39 warn: docker with no password logs the info line, not a warning',
+              'WARNING' not in _bind_log_text()
+              and 'no app login (STANDBY_PASSWORD unset) — access is limited only by the host-side port mapping' in _bind_log_text(),
+              _bind_log_text()[-500:])
+        stop(_bind_app)
+        # (g) Umbrel, no password: warns (other apps share the network).
+        _bind_app = _bind_instance({'STANDBY_BIND': '0.0.0.0', 'STANDBY_DEPLOYMENT': 'umbrel'})
+        check('39 warn: umbrel instance comes up', wait_up('http://127.0.0.1:3440'))
+        check('39 warn: umbrel with no password warns',
+              'WARNING: STANDBY_PASSWORD is unset — other apps on the Umbrel Docker network' in _bind_log_text(),
+              _bind_log_text()[-500:])
+        stop(_bind_app)
+        # (h) Test-only overrides are ignored, and say so, outside test mode.
+        _bind_app = _bind_instance({'STANDBY_TEST_MODE': '0', 'PRICE_API_URL': 'http://127.0.0.1:1',
+                                    'SLIPSTREAM_API_URL': 'http://127.0.0.1:1'})
+        check('39 overrides: non-test-mode instance comes up', wait_up('http://127.0.0.1:3440'))
+        check('39 overrides: PRICE_API_URL is ignored outside test mode, and logged',
+              'PRICE_API_URL is set but ignored' in _bind_log_text()
+              and 'SLIPSTREAM_API_URL is set but ignored' in _bind_log_text(),
+              _bind_log_text()[-500:])
+        stop(_bind_app)
+        # (i) The receiver logs no bind warning.
         _fresh_bind_log()
         _recv_env = {'PORT': '3441', 'CHECKIN_DIR': _bind_checkin,
                      'STANDBY_BIND': '0.0.0.0'}
         _recv = start(['node', 'checkin-receiver/server.js'], env=_recv_env, cwd=APP, log=_bind_log)
         check('39 warn: receiver 0.0.0.0 instance comes up', wait_up('http://127.0.0.1:3441', path='/health'))
-        check('39 warn: receiver 0.0.0.0 with no allowlist logs the startup warning',
-              'WARNING: listening on 0.0.0.0 with STANDBY_ALLOWED_HOSTS unset' in _bind_log_text(),
+        check('39 warn: receiver 0.0.0.0 logs no warning',
+              'WARNING' not in _bind_log_text() and 'listening on 0.0.0.0:3441' in _bind_log_text(),
               _bind_log_text()[-500:])
         stop(_recv)
+
+        # --- 40. app login (0.8.11.1) ---------------------------------
+        # STANDBY_PASSWORD on: every /api route except health, auth
+        # status and login needs a session token (X-Standby-Token) or
+        # the password as a Bearer token. Tokens survive a restart
+        # (DATA_DIR/session.key), and logging out rotates the key,
+        # signing every token out. Also here: Sec-Fetch-Site, the
+        # owner-only data files, and the startup writability exit.
+        _pw = 'correct horse battery staple'
+        _ab = 'http://127.0.0.1:3440'
+        _auth_app = _bind_instance({'STANDBY_PASSWORD': _pw})
+        check('40 auth: instance comes up', wait_up(_ab))
+        s, r = req('GET', '/api/health', base=_ab)
+        check('40 auth: health is public', s == 200 and r.get('version') == '0.8.11.1', (s, r))
+        s, r = req('GET', '/api/auth/status', base=_ab)
+        check('40 auth: status says required, not authenticated',
+              s == 200 and r == {'required': True, 'authenticated': False}, (s, r))
+        s, r = req('GET', '/api/state', base=_ab)
+        check('40 auth: state without a login is 401 login:true',
+              s == 401 and r.get('login') is True, (s, r))
+        s, r = req('POST', '/api/checkin', {}, base=_ab)
+        check('40 auth: a mutation without a login is 401', s == 401, (s, r))
+        s, r = req('POST', '/api/login', {'password': 'wrong'}, base=_ab)
+        check('40 auth: wrong password is 401', s == 401 and r.get('error') == 'wrong password', (s, r))
+        s, r = req('POST', '/api/login', {'password': _pw}, base=_ab)
+        _tok = r.get('token') if isinstance(r, dict) else None
+        check('40 auth: right password returns a v1 token',
+              s == 200 and isinstance(_tok, str) and _tok.startswith('v1.'), (s, r))
+        _th = {'X-Standby-Token': _tok or ''}
+        s, r = req('GET', '/api/state', base=_ab, headers=_th)
+        check('40 auth: state with the token is 200', s == 200, s)
+        s, r = req('GET', '/api/auth/status', base=_ab, headers=_th)
+        check('40 auth: status with the token says authenticated', s == 200 and r.get('authenticated') is True, (s, r))
+        s, r = req('GET', '/api/state', base=_ab, headers={'Authorization': 'Bearer ' + _pw})
+        check('40 auth: the password as a Bearer token works', s == 200, s)
+        s, r = req('GET', '/api/state', base=_ab, headers={'Authorization': 'Bearer nope'})
+        check('40 auth: a wrong Bearer password is 401', s == 401, s)
+        _bad = (_tok or 'v1.0.x')[:-1] + ('A' if (_tok or 'x')[-1] != 'A' else 'B')
+        s, r = req('GET', '/api/state', base=_ab, headers={'X-Standby-Token': _bad})
+        check('40 auth: a tampered token is 401', s == 401, s)
+        _old = 'v1.1000.' + (_tok or 'v1.0.' + 'x' * 43).split('.')[2]
+        s, r = req('GET', '/api/state', base=_ab, headers={'X-Standby-Token': _old})
+        check('40 auth: a token with a changed timestamp is 401', s == 401, s)
+        # Fetch metadata: another site or another port on the host is refused.
+        for _site, _want in (('same-origin', 200), ('none', 200), ('same-site', 403), ('cross-site', 403)):
+            s, r = req('GET', '/api/state', base=_ab, headers=dict(_th, **{'Sec-Fetch-Site': _site}))
+            check('40 fetch-site: Sec-Fetch-Site %s -> %d' % (_site, _want), s == _want, (s, r))
+        # Files are owner-only.
+        _mode = lambda p: os.stat(p).st_mode & 0o777
+        check('40 modes: data directory is 0700', _mode(_bind_data) == 0o700, oct(_mode(_bind_data)))
+        check('40 modes: state.json is 0600', _mode(os.path.join(_bind_data, 'state.json')) == 0o600,
+              oct(_mode(os.path.join(_bind_data, 'state.json'))))
+        check('40 modes: session.key is 0600', _mode(os.path.join(_bind_data, 'session.key')) == 0o600,
+              oct(_mode(os.path.join(_bind_data, 'session.key'))))
+        # A token survives a restart.
+        stop(_auth_app)
+        _e = dict(APP_ENV)
+        _e.update({'PORT': '3440', 'DATA_DIR': _bind_data, 'CHECKIN_DIR': _bind_checkin, 'STANDBY_PASSWORD': _pw})
+        _e.pop('STANDBY_ALLOWED_HOSTS', None)
+        _auth_app = start(['node', 'server.js'], env=_e, cwd=APP, log=_bind_log)
+        check('40 auth: instance restarts', wait_up(_ab))
+        s, r = req('GET', '/api/state', base=_ab, headers=_th)
+        check('40 auth: the token still works after a restart', s == 200, s)
+        # Logout signs every token out.
+        s, r = req('POST', '/api/logout', {}, base=_ab, headers=_th)
+        check('40 auth: logout is 200', s == 200, (s, r))
+        s, r = req('GET', '/api/state', base=_ab, headers=_th)
+        check('40 auth: the old token is 401 after logout', s == 401, s)
+        # Brute-force brake: 10 wrong passwords a minute, then 429.
+        for _ in range(10):
+            req('POST', '/api/login', {'password': 'wrong'}, base=_ab)
+        s, r = req('POST', '/api/login', {'password': _pw}, base=_ab)
+        check('40 auth: the 11th login in a minute is 429, even with the right password', s == 429, (s, r))
+        stop(_auth_app)
+        # Without a password, login is a no-op and nothing is gated.
+        _auth_app = _bind_instance({})
+        check('40 auth-off: instance comes up', wait_up(_ab))
+        s, r = req('GET', '/api/auth/status', base=_ab)
+        check('40 auth-off: status says not required', s == 200 and r.get('required') is False, (s, r))
+        s, r = req('POST', '/api/login', {'password': 'anything'}, base=_ab)
+        check('40 auth-off: login answers ok with no token', s == 200 and r.get('token') is None, (s, r))
+        stop(_auth_app)
+        # A data directory that cannot be created: the app refuses to
+        # start (exit 1) and names the problem and the fix.
+        _blocker = '/tmp/heirloom099-bind-blocker'
+        shutil.rmtree(_blocker, ignore_errors=True)
+        open(_blocker, 'w').close()
+        _e = dict(os.environ, **APP_ENV)
+        _e.update({'PORT': '3440', 'DATA_DIR': _blocker + '/data', 'CHECKIN_DIR': _bind_checkin,
+                   'STANDBY_DEPLOYMENT': 'docker'})
+        _cp = subprocess.run(['node', 'server.js'], env=_e, cwd=APP, capture_output=True, text=True, timeout=20)
+        check('40 writable: an unwritable data dir exits 1', _cp.returncode == 1, (_cp.returncode, _cp.stderr[-300:]))
+        check('40 writable: the log names the problem and the chown fix',
+              'FATAL: cannot write its files' in _cp.stderr and 'chown -R 1000:1000 data checkin' in _cp.stderr,
+              _cp.stderr[-500:])
+        os.remove(_blocker)
 
     finally:
         for p in list(v.procs):

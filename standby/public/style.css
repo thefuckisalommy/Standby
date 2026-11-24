@@ -595,7 +595,7 @@ details.archived > summary { cursor: pointer; font-size: 18px; font-weight: 700;
    so the removal is reversible without closing the modal. */
 .tx-entry-removed { opacity: 0.55; }
 .tx-rules-combo { color: var(--muted); font-size: 13px; margin: 3px 0 0; }
-/* (0.8.2, combo tightening — Ryan: "just tighten it") The
+/* (0.8.2, combo tightening — owner: "just tighten it") The
    first subcard after the combination line sits closer to it
    (5px, not its usual 10px) so the line reads as part of the
    rule list, not a separate block. */
@@ -711,6 +711,8 @@ p.inline-btns { display: flex; gap: 8px; flex-wrap: nowrap; align-items: center;
    would otherwise appear behind the edit card, invisible until
    the edit card is closed. The Edit modal keeps z-index 100. */
 #confirm-modal { z-index: 110; }
+/* The login screen (0.8.11.1) covers everything, the other modals included. */
+#login-modal { z-index: 120; background: var(--bg, #0f1115); }
 /* A modal must never scroll or widen horizontally. Its content
    (notably a <select>'s native dropdown popout on a phone) can
    otherwise push the modal — and the page behind it — wider than

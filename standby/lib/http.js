@@ -4,7 +4,7 @@ const store = require('./store');
 const fs = require('fs');
 const net = require('net');
 const path = require('path');
-const { DATA_DIR, PUBLIC_DIR } = require('./config');
+const { DATA_DIR, PUBLIC_DIR, ALLOWED_HOSTS_EXTRA } = require('./config');
 const { sendError } = require('./util');
 
 const MIME = {
@@ -19,9 +19,11 @@ const MIME = {
 
 function serveStatic(req, res, pathname) {
   let file = pathname === '/' ? 'index.html' : pathname.slice(1);
-  // Prevent path traversal.
+  // Prevent path traversal. (0.8.11.1) Compare against the
+  // directory WITH a trailing separator: a bare prefix check would
+  // also accept a sibling like ".../public-old/x".
   const resolved = path.resolve(PUBLIC_DIR, file);
-  if (!resolved.startsWith(PUBLIC_DIR)) { sendError(res, 403, 'forbidden'); return; }
+  if (!resolved.startsWith(PUBLIC_DIR + path.sep)) { sendError(res, 403, 'forbidden'); return; }
   if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) { sendError(res, 404, 'not found'); return; }
   const ext = path.extname(resolved);
   setSecurityHeaders(res);
@@ -118,13 +120,19 @@ function isLoopback(h) {
 //   STANDBY_ALLOWED_HOSTS instead; see the README ("Reaching the
 //   UI"). A bare http://umbrel does not resolve on the LAN
 //   anyway — only umbrel.local does, via mDNS.
+//   (0.8.11.1) Note what this check does and does not stop: it
+//   stops DNS rebinding (an attacker's domain in the Host header).
+//   It does NOT stop a client that connects by IP — on Umbrel that
+//   includes every other app on the shared Docker network. That is
+//   what the app login (STANDBY_PASSWORD, lib/auth.js) is for.
 //   Escape hatch: STANDBY_ALLOWED_HOSTS, a comma-separated list of
 //   extra hostnames (Tailscale MagicDNS *.ts.net, a custom domain,
 //   a .onion address, a reverse-proxy hostname). On Umbrel there
 //   is no UI for adding an env var, so that means editing a file
-//   on the Pi — the default rule covers every access path Ryan
-//   uses (LAN IP, umbrel.local, Tailscale IP, localhost) with
-//   nothing to configure. A missing Host header is rejected:
+//   on the Pi — the default rule covers the common access paths
+//   (LAN IP, umbrel.local, Tailscale IP, localhost) with nothing
+//   to configure, and the Umbrel compose file adds the app's Tor
+//   address (APP_HIDDEN_SERVICE). A missing Host header is rejected:
 //   HTTP/1.1 clients always send one, and accepting a request
 //   with no Host would defeat the check.
 function hostnameOf(hostHeader) {
@@ -132,9 +140,7 @@ function hostnameOf(hostHeader) {
 }
 
 function extraAllowedHosts() {
-  return (process.env.STANDBY_ALLOWED_HOSTS || '').split(',')
-    .map((s) => s.trim().toLowerCase())
-    .filter(Boolean);
+  return ALLOWED_HOSTS_EXTRA;
 }
 
 function hostAllowed(hostHeader) {
@@ -155,19 +161,55 @@ function describeAllowedHosts() {
   return parts.join(', ');
 }
 
-// (0.8.11, secure defaults) Startup warning: bound to a
-// non-loopback address with no extra Hosts configured. The
-// allowlist is then the only rebinding defense for a
-// network-reachable server, so say so loudly at startup.
-// (Known wart: in Docker both compose files bind 0.0.0.0 while
-// the generic web port is host-loopback-bound — the code cannot
-// see the host-side mapping, so the warning fires on every
-// generic Docker install. That is noise, not a misconfiguration;
-// the warning is kept as specified rather than scoped by
-// guessing the deployment.) Returns the warning line, or null.
-function bindWarning(bind) {
-  if (isLoopback(bind) || extraAllowedHosts().length) return null;
-  return 'Standby: WARNING: listening on ' + bind + ' with STANDBY_ALLOWED_HOSTS unset — the Host allowlist (IP literals, localhost, *.local) is the only rebinding defense. Set STANDBY_ALLOWED_HOSTS to the hostnames you reach it by.';
+// (0.8.11.1) Startup security notes — replaces the 0.8.11
+// bindWarning, which keyed off STANDBY_ALLOWED_HOSTS (a setting
+// that WIDENS access, so setting it should never silence a
+// warning) and fired on every Docker install. The real question
+// is: can something other than the owner reach this API without a
+// login? Returns { warnings: [...], info: [...] } — warnings are
+// logged with console.warn, info with console.log.
+//   - Umbrel with no password: other apps on the shared Docker
+//     network reach the container directly, past Umbrel's login.
+//   - A non-loopback bind with no password, outside Docker: the
+//     API is open to the network.
+//   - Generic Docker with no password: not a warning — the compose
+//     file maps the port to 127.0.0.1 on the host — but say that
+//     the host-side mapping is the only boundary.
+//   - A password shorter than 12 characters.
+const MIN_PASSWORD_LENGTH = 12;
+function startupSecurityNotes({ bind, deployment, password }) {
+  const warnings = [];
+  const info = [];
+  if (!password) {
+    if (deployment === 'umbrel') {
+      warnings.push('Standby: WARNING: STANDBY_PASSWORD is unset — other apps on the Umbrel Docker network can reach the API without Umbrel\'s login. The Umbrel compose file sets it from APP_PASSWORD; check that it is present.');
+    } else if (deployment === 'docker') {
+      info.push('Standby: no app login (STANDBY_PASSWORD unset) — access is limited only by the host-side port mapping. Set STANDBY_PASSWORD to require a login.');
+    } else if (!isLoopback(bind)) {
+      warnings.push('Standby: WARNING: listening on ' + bind + ' with no app login (STANDBY_PASSWORD unset) — anyone who can reach this port can read and broadcast your transactions. Set STANDBY_PASSWORD, or bind 127.0.0.1.');
+    }
+  } else if (password.length < MIN_PASSWORD_LENGTH) {
+    warnings.push('Standby: WARNING: STANDBY_PASSWORD is shorter than ' + MIN_PASSWORD_LENGTH + ' characters — use a longer one.');
+  }
+  return { warnings, info };
+}
+
+// (0.8.11.1) Fetch-metadata check, for EVERY /api request (reads
+// included): a browser marks each request with Sec-Fetch-Site.
+// 'same-origin' is the app's own page; 'none' is the owner typing
+// the URL or opening a bookmark. 'same-site' is another port on
+// the same host — on Umbrel, every other app at umbrel.local:<port>
+// — and 'cross-site' is any other website: neither is ever the
+// app's own page, so both are refused. A request without the
+// header (curl, scripts, older browsers) is judged by the other
+// checks alone. The Origin check below compares hostnames only,
+// so without this a page on another Umbrel app's port would pass
+// it (the JSON content-type rule still blocked it — this is
+// defence in depth).
+function fetchSiteAllowed(req) {
+  const site = req.headers['sec-fetch-site'];
+  if (site === undefined) return true;
+  return site === 'same-origin' || site === 'none';
 }
 
 function csrfAllowed(req) {
@@ -211,4 +253,4 @@ function saveMutation(mutator) {
   return fresh;
 }
 
-module.exports = { MIME, serveStatic, hostOf, hostnameOf, hostAllowed, describeAllowedHosts, bindWarning, isLoopback, csrfAllowed, saveMutation, setSecurityHeaders, CSP };
+module.exports = { MIME, serveStatic, hostOf, hostnameOf, hostAllowed, describeAllowedHosts, startupSecurityNotes, MIN_PASSWORD_LENGTH, isLoopback, fetchSiteAllowed, csrfAllowed, saveMutation, setSecurityHeaders, CSP };

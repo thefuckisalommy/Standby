@@ -44,13 +44,28 @@
 // on the hourly tick.
 
 const http = require('http');
-const { PORT, BIND, VERSION, DATA_DIR, STARTUP_TICK_MS } = require('./lib/config');
+const { PORT, BIND, VERSION, DATA_DIR, CHECKIN_DIR, STARTUP_TICK_MS, DEPLOYMENT, PASSWORD, MEMPOOL_OVERRIDE, IGNORED_TEST_OVERRIDES } = require('./lib/config');
+const { requireWritable } = require('./lib/startup');
 const store = require('./lib/store');
 const { verifyCheckinKeyStore } = require('./lib/checkin');
 const { runFullTick, runHourlyTick, refreshCurrentFeesIfStale, recomputeStoredFees, rearmFullTick } = require('./lib/release');
 const { refreshPriceIfStale } = require('./lib/prices');
 const { handleApi } = require('./lib/api');
-const { serveStatic, sendError, setSecurityHeaders, hostAllowed, describeAllowedHosts, bindWarning } = require('./lib/http');
+const { serveStatic, sendError, setSecurityHeaders, hostAllowed, describeAllowedHosts, startupSecurityNotes } = require('./lib/http');
+
+// (0.8.11.1) Before anything else touches the disk: the data
+// directory (and the check-in directory, when it exists) must be
+// writable, or the app exits with the fix — see lib/startup.js.
+// Then tighten an older install's permissions: the signed
+// transactions are bearer, so the data files are owner-only.
+requireWritable([
+  { dir: DATA_DIR, create: true, mode: store.DATA_DIR_MODE },
+  { dir: CHECKIN_DIR, create: false },
+], DEPLOYMENT, 'Standby');
+{
+  const tightened = store.secureDataDir(DATA_DIR);
+  if (tightened) console.log('Standby: made ' + tightened + ' data path(s) owner-only (0700 directory, 0600 files)');
+}
 
 // (0.8.10, audit fix) An uncaught exception is a crash, not a
 // condition to serve through: Node warns that continuing after one
@@ -126,12 +141,17 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(PORT, BIND, () => {
-  console.log(`Standby ${VERSION} listening on ${BIND}:${PORT} (data: ${DATA_DIR})`);
+  console.log(`Standby ${VERSION} listening on ${BIND}:${PORT} (data: ${DATA_DIR}, deployment: ${DEPLOYMENT})`);
   console.log('Standby allowed Hosts: ' + describeAllowedHosts());
-  // (0.8.11, secure defaults) Warn when bound to a non-loopback
-  // address with no extra Hosts configured — see bindWarning.
-  const w = bindWarning(BIND);
-  if (w) console.warn(w);
+  console.log('Standby app login: ' + (PASSWORD ? 'required (STANDBY_PASSWORD set)' : 'off (STANDBY_PASSWORD unset)'));
+  // (0.8.11.1) Who can reach the API without a login? See
+  // startupSecurityNotes in lib/http.js.
+  const notes = startupSecurityNotes({ bind: BIND, deployment: DEPLOYMENT, password: PASSWORD });
+  for (const line of notes.info) console.log(line);
+  for (const line of notes.warnings) console.warn(line);
+  // (0.8.11.1) Endpoint overrides are never silent.
+  if (MEMPOOL_OVERRIDE) console.log('Standby: MEMPOOL_HOST is set — the primary node is ' + MEMPOOL_OVERRIDE + ' (the Settings value is ignored)');
+  for (const k of IGNORED_TEST_OVERRIDES) console.warn('Standby: ' + k + ' is set but ignored — it is a test-only override (STANDBY_TEST_MODE=1)');
   // (0.8.3) Compare the check-in keys in state with the receiver's
   // key list once at startup — see verifyCheckinKeyStore above.
   verifyCheckinKeyStore();

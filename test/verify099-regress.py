@@ -70,7 +70,7 @@ evaluation).
 Section 19 covers the Getting
 Started empty-state card (0.8.0): the served markup and CSS only
 (the show/hide behaviour and the button navigation are in the DOM
-suite, §19) — the card at the top of the Dashboard with Ryan's
+suite, §19) — the card at the top of the Dashboard with the owner's
 exact copy, and the .empty-state rules in the served stylesheet.
 Section 20 covers the user controls (price agreement, check
 cadence, fee verdict). Section 21 covers the pause/vacation/
@@ -451,7 +451,7 @@ def main():
 
         # --- 1. health + endpoints -------------------------------------
         s, h = req('GET', '/api/health')
-        check('1 health reports version 0.8.11', h.get('version') == '0.8.11', h)
+        check('1 health reports version 0.8.11.1', h.get('version') == '0.8.11.1', h)
         s, st = req('GET', '/api/state')
         check('1 fresh state: no global threshold in settings, no txs',
               'thresholdDays' not in st.get('settings', {}) and st.get('bitcoin', {}).get('txs') == [], st.get('settings'))
@@ -2421,7 +2421,7 @@ def main():
         # The API suite cannot render the DOM, so this section
         # asserts the served markup and CSS the DOM suite renders:
         # the card exists at the top of the Dashboard (before the
-        # grace card) with Ryan's exact copy, and the .empty-state
+        # grace card) with the owner's exact copy, and the .empty-state
         # rules (centered welcome layout, full-width button) are
         # in the served stylesheet. The show/hide behaviour and
         # the button navigation are covered in the DOM suite (§19).
