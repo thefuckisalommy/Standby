@@ -31,7 +31,7 @@ on:
 
 concurrency:
   group: build-standby-image
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -77,11 +77,21 @@ jobs:
       - name: Refuse to overwrite an existing version tag
         id: exists
         run: |
-          if docker buildx imagetools inspect "$IMAGE:${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+          out="$(docker buildx imagetools inspect "$IMAGE:${{ steps.version.outputs.version }}" 2>&1)" && {
             echo "::warning::$IMAGE:${{ steps.version.outputs.version }} already exists — not rebuilding. Bump the version in standby/package.json to ship this change."
             echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
+            exit 0
+          }
+          # inspect failed: distinguish "tag does not exist" (safe to build)
+          # from any other failure (network, auth, registry) — the latter
+          # must fail the job, not proceed to a push that could overwrite
+          # an existing tag.
+          if printf '%s' "$out" | grep -qiE 'not found|no such manifest|manifest unknown|MANIFEST_UNKNOWN'; then
             echo "skip=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::could not verify whether $IMAGE:${{ steps.version.outputs.version }} exists — refusing to build rather than risk overwriting a tag."
+            printf '%s\n' "$out"
+            exit 1
           fi
 
       - name: Build and push (linux/amd64,linux/arm64)
