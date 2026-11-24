@@ -1,7 +1,7 @@
 {
   "description": "Dead man's switch app for Umbrel \u2014 scheduled check-ins; broadcasts a pre-signed Bitcoin transaction if you stop checking in.",
   "engines": {
-    "node": ">=24"
+    "node": ">=26"
   },
   "license": "UNLICENSED",
   "main": "server.js",

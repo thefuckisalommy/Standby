@@ -96,7 +96,7 @@ docker run --rm -p 127.0.0.1:3100:3100 -v "$PWD/data:/data" -v "$PWD/checkin:/ch
 # open http://localhost:3100
 ```
 
-Or plain Node 24+ (no Docker): `cd Standby/standby && node server.js` — same port, localhost only, data in `./data` next to the server. Set `STANDBY_PASSWORD` before binding it to anything else with `STANDBY_BIND`.
+Or plain Node 26+ (no Docker): `cd Standby/standby && node server.js` — same port, localhost only, data in `./data` next to the server. Set `STANDBY_PASSWORD` before binding it to anything else with `STANDBY_BIND`.
 
 **Configuration reference** (environment variables, all optional — see `standby/lib/config.js`):
 

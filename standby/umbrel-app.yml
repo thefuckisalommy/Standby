@@ -7,7 +7,7 @@ category: automation
 name: Standby
 version: "0.8.12.1"
 releaseNotes: |-
-  0.8.12.1 — Fix: pressing Test connection while the hourly node check was running could leave a node's Output lookup row blank — the hourly check finished second and saved its older result over the fresh one. It now keeps the newer result.
+  0.8.12.1 — Fix: pressing Test connection while the hourly node check was running could leave a node's Output lookup row blank — the hourly check finished second and saved its older result over the fresh one. It now keeps the newer result. Also in 0.8.12.1: Standby now runs on Node.js 26, the current long-term-support release (Node 24 is in maintenance), and the build pipeline's GitHub Actions are updated.
 
   0.8.12 — Encrypted backups. Download Backup now asks how to save it: encrypted with a password you choose (the default), or unencrypted after a warning. An encrypted backup is useless to anyone without the password, and Standby cannot recover a lost one, so write it down somewhere other than this device. Encryption happens on the device, so the unencrypted backup never crosses your network. Restoring an encrypted backup asks for its password. Older, unencrypted backups restore exactly as before. An encrypted backup can also be opened without Standby, using tools/decrypt-backup.js from the Standby repository. Also in 0.8.12: the check-in and broadcast logs are capped at their newest entries instead of growing forever; an unexpected server error no longer shows internal details in the browser (they go to the app log); a malformed request is now answered as a bad request rather than a server error; and both containers report their health to Docker and now run with a read-only filesystem and no extra privileges.
 

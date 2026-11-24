@@ -6,7 +6,7 @@ Code comments describe how the app works now; the history of why it changed live
 
 ## 0.8.12.1
 
-Fix: pressing Test connection while the hourly node check was running could leave a node's Output lookup row blank — the hourly check finished second and saved its older result over the fresh one. It now keeps the newer result.
+Fix: pressing Test connection while the hourly node check was running could leave a node's Output lookup row blank — the hourly check finished second and saved its older result over the fresh one. It now keeps the newer result. Also in 0.8.12.1: Standby now runs on Node.js 26, the current long-term-support release (Node 24 is in maintenance), and the build pipeline's GitHub Actions are updated.
 
 ## 0.8.12
 
