@@ -11,6 +11,8 @@ Standby has its own login (since 0.8.11.1), checked by the app itself on every A
 
 You log in once per browser. The session lasts 30 days, and Settings → Session → Log out signs out every browser at once. The session token is kept in the browser's storage for this one address (host and port), never in a cookie — a cookie on `umbrel.local` would be sent to every other app on `umbrel.local`. Ten wrong passwords in a minute lock the login for the rest of that minute. Scripts can send the password as `Authorization: Bearer <password>`.
 
+Standby does not encrypt its own connection. Over plain `http://`, the password and the session token travel unencrypted, so anyone who can watch that network traffic could capture them and take over the app. Use an encrypted path wherever the network is not fully yours: HTTPS (umbrelOS 2.0 serves apps over HTTPS too), SSH or Tailscale, or your own reverse proxy with HTTPS. The generic Docker install listens on localhost only by default.
+
 ## Requests from other sites are refused
 
 State-changing API requests must come from the app's own page: if the browser sends an Origin, it must match the address the app was reached on, and the request must use a JSON content type. Every API request a browser marks as coming from another site — or from another port on the same host, such as another Umbrel app — is refused too (the `Sec-Fetch-Site` header). So a website you visit, or another app's page, cannot use your browser to read your transactions or trigger a check-in, a pause, or a broadcast. Requests by an unrecognised hostname are refused (421), which stops DNS-rebinding attacks; see the README for adding your own hostnames.

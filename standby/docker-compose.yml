@@ -23,6 +23,12 @@ services:
     user: "1000:1000"
     restart: on-failure
     stop_grace_period: 1m30s
+    # Same hardening as the generic install: nothing in the container
+    # is writable except the mounted data, and no Linux capabilities.
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
     environment:
       PORT: 3100
       # STANDBY_BIND=0.0.0.0: the Umbrel proxy connects to the
@@ -80,6 +86,10 @@ services:
     user: "1000:1000"
     restart: on-failure
     stop_grace_period: 1m
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
     environment:
       PORT: 3101
       # Same bind and allowlist as the web service — a check-in by

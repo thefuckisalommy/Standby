@@ -67,7 +67,11 @@ async function main() {
   } catch (e) {
     fail('wrong password, or the file is damaged');
   }
-  process.stdout.write(zlib.gunzipSync(plain).toString('utf8') + '\n');
+  let out;
+  // Same 64 MB limit as the app's restore, so a crafted file cannot exhaust memory.
+  try { out = zlib.gunzipSync(plain, { maxOutputLength: 64 * 1024 * 1024 }); }
+  catch (e) { fail('the decrypted contents are not a backup (or are too large)'); }
+  process.stdout.write(out.toString('utf8') + '\n');
 }
 
 main();

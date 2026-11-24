@@ -26,7 +26,6 @@ on:
       - 'standby/**'
       - '.github/workflows/build-standby-image.yml'
       - '.github/workflows/test.yml'
-  workflow_dispatch:
 
 concurrency:
   group: build-standby-image
