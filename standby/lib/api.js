@@ -1,5 +1,5 @@
 'use strict';
-// Standby — JSON API router (split from server.js, 0.8.7.3).
+// Standby — JSON API router.
 const store = require('./store');
 const bitcoin = require('./bitcoin');
 const fs = require('fs');
@@ -21,38 +21,38 @@ const { CHECK_CADENCE_SECONDS_DEFAULT, CHECK_CADENCE_SECONDS_MAX, CHECK_CADENCE_
 const RELEASE_STATUSES = new Set(['stale', 'failed', 'broadcast', 'conflict', 'submitted-slipstream']);
 // The kinds a release record may carry — 'release' for the automatic
 // release, 'broadcast' for a manual broadcast, 'dryrun' for a
-// dry-run verdict. Used by the restore validation (0.7.13).
+// dry-run verdict. Used by the restore validation.
 const RELEASE_KINDS = new Set(['release', 'broadcast', 'dryrun']);
 
 async function handleApi(req, res, pathname) {
   const now = new Date();
-  // (0.8.11.1) Fetch metadata: a browser request from another site
+  // Fetch metadata: a browser request from another site
   // — or another port on the same host, i.e. another Umbrel app —
   // is refused before anything else, reads included. See
   // fetchSiteAllowed in lib/http.js.
   if (!fetchSiteAllowed(req)) {
     return sendError(res, 403, 'cross-site request rejected');
   }
-  // CSRF gate (0.7.12): state-changing requests must come from the
+  // CSRF gate: state-changing requests must come from the
   // app's own page — see csrfAllowed above. Checked before any state
   // is loaded, so a rejected request cannot touch anything.
   if (req.method !== 'GET' && !csrfAllowed(req)) {
     return sendError(res, 403, 'cross-origin or non-JSON request rejected');
   }
-  // (0.8.11.1) App login — see lib/auth.js. Checked before any
+  // App login — see lib/auth.js. Checked before any
   // state is loaded. Off when STANDBY_PASSWORD is unset. The
   // `login: true` flag tells the UI to show its login screen.
   if (auth.enabled() && !auth.routeIsPublic(req.method, pathname) && !auth.requestAuthorized(req, now.getTime())) {
     return sendJson(res, 401, { error: 'login required', login: true });
   }
 
-  // GET /api/auth/status (0.8.11.1): is a login required, and does
+  // GET /api/auth/status: is a login required, and does
   // this request carry a valid one? The UI asks on startup.
   if (req.method === 'GET' && pathname === '/api/auth/status') {
     return sendJson(res, 200, { required: auth.enabled(), authenticated: auth.requestAuthorized(req, now.getTime()) });
   }
 
-  // POST /api/login {password} (0.8.11.1) -> {ok, token}. With no
+  // POST /api/login {password} -> {ok, token}. With no
   // password configured it answers {ok:true, token:null}. Wrong
   // passwords are rate-limited (429) and logged without the value.
   if (req.method === 'POST' && pathname === '/api/login') {
@@ -69,13 +69,13 @@ async function handleApi(req, res, pathname) {
     return sendJson(res, 200, { ok: true, token: auth.issueToken(now.getTime()) });
   }
 
-  // POST /api/logout (0.8.11.1): rotates the session secret, which
+  // POST /api/logout: rotates the session secret, which
   // signs out every device. Requires a login (the gate above).
   if (req.method === 'POST' && pathname === '/api/logout') {
     if (auth.enabled()) auth.rotateSessionSecret();
     return sendJson(res, 200, { ok: true });
   }
-  // (0.8.3) A state file that cannot be loaded — corrupt or
+  // A state file that cannot be loaded — corrupt or
   // missing with no usable backup — throws loudly by design, but
   // it must not take the whole API down with it: the two rescue
   // endpoints do not need the current state (restore validates
@@ -97,7 +97,7 @@ async function handleApi(req, res, pathname) {
   }
 
   // POST /api/state/reset — start fresh after an unrecoverable
-  // state-load failure (0.8.3). This sits above the endpoints
+  // state-load failure. This sits above the endpoints
   // that need state because it must run while state fails to
   // load (see the rescue gate above): it deletes the state file
   // and every local backup, empties the audit logs, clears the
@@ -110,7 +110,7 @@ async function handleApi(req, res, pathname) {
       return sendError(res, 400, 'reset requires {confirm:true}');
     }
     store.resetStateFiles(DATA_DIR);
-    // (0.8.3) Also drop the receiver's last check-in record: on
+    // Also drop the receiver's last check-in record: on
     // the next /api/state read mergeExternalCheckin would otherwise
     // resurrect the pre-reset check-in time into the fresh state
     // (a fresh state's clock is null, so any last.json wins).
@@ -139,7 +139,7 @@ async function handleApi(req, res, pathname) {
   // unknown path, so it cannot run in production. The caches are
   // reset to their initial shapes, so the next read fetches fresh
   // from the (stub) sources.
-  // (Optimization O6, DOM) A body of { only: [...] } clears just
+  // A body of { only: [...] } clears just
   // the named caches — the DOM suite clears only 'price', so the
   // fee-peak cache (re-fetched only by the startup refresh and the
   // hourly tick) survives and the fee-verdict pill keeps working.
@@ -155,7 +155,7 @@ async function handleApi(req, res, pathname) {
   // POST /api/__test__/throw-uncaught (test-only): throw an
   // uncaught exception on the next tick, outside any handler, so
   // the suite can prove the process terminates instead of serving
-  // through it (0.8.10 audit fix). Gated on STANDBY_TEST_MODE=1
+  // through it. Gated on STANDBY_TEST_MODE=1
   // like clear-caches above. Answers 200 first — the throw lands
   // after the response, so the caller observes the 200 and then
   // the exit.
@@ -170,7 +170,7 @@ async function handleApi(req, res, pathname) {
     return sendJson(res, 200, { ok: true, version: VERSION });
   }
 
-  // GET /api/state — full state (no secrets live in state any more).
+  // GET /api/state — full state (no secrets live in state).
   // Also carries the shared inputs, derived from the stored
   // transactions on every read (findSharedInputs parses the hexes,
   // no network): the UI renders the shared-input warning from this,
@@ -181,7 +181,7 @@ async function handleApi(req, res, pathname) {
     // A receiver check-in that landed since the last read is merged
     // first, so the state served is current.
     mergeExternalCheckin(state, now);
-    // The grace (0.8.0, unified 0.8.8): judged here too, so a
+    // The grace: judged here too, so a
     // page load reflects it even if no release tick has run since
     // the device came back — held rules cannot fire before the
     // grace is noticed. The stamp is NOT refreshed on a read
@@ -192,21 +192,21 @@ async function handleApi(req, res, pathname) {
       if (changed) store.saveState(DATA_DIR, state);
     } catch (e) { console.error('grace apply failed:', e); }
     const served = sanitizeState(state);
-    // (0.8.9) The fee history is state-internal — the raw hourly
+    // The fee history is state-internal — the raw hourly
     // observations (~2,160 entries) are never served; the peak,
     // window, count, and basis below describe them. Serving the
     // series would bloat every state read for data the UI never
     // renders.
     delete served.feeHistory;
-    // (0.8.3) Persistence / startup warnings for the UI (a later
+    // Persistence / startup warnings for the UI (a later
     // increment renders them): a state recovery that happened in
     // this process, a receiver key list rewritten at startup, keys
     // orphaned in the receiver, or keys found in a backup. Empty
     // on a healthy run.
     served.warnings = startupWarnings.concat(store.getStateWarnings());
-    served.grace = graceStatus(state, now); // the grace (0.8.0, extended 0.8.8): null when none is active, else { active, indefinite, graceUntil, triggeredAt, offlineGapDays }
+    served.grace = graceStatus(state, now); // the grace: null when none is active, else { active, indefinite, graceUntil, triggeredAt, offlineGapDays }
     served.bitcoin.overlaps = bitcoin.findSharedInputs(state.bitcoin.txs || []);
-    // The fee verdict's peak (0.7.20; 0.8.9 accumulated): computed
+    // The fee verdict's peak: computed
     // from the recorded fee history in this state — the 90th
     // percentile of the hourly economy-fee observations, with the
     // window they span in days, how many there are, and the basis
@@ -223,7 +223,7 @@ async function handleApi(req, res, pathname) {
     served.bitcoin.feePeakObservations = fp.observations;
     served.bitcoin.feePeakBasis = fp.basis;
     served.bitcoin.feePeakAt = fp.fetchedAt;
-    // The current recommended fees (0.7.21): the cached object (or
+    // The current recommended fees: the cached object (or
     // null when there is no usable current-fee data), with the
     // fetched-at timestamp. The frontend compares each active tx's
     // own fee rate to the economy fee for the Critical Risk check;
@@ -232,7 +232,7 @@ async function handleApi(req, res, pathname) {
     const cf = currentFeesForState();
     served.bitcoin.currentFees = cf.fees;
     served.bitcoin.currentFeesAt = cf.fetchedAt;
-    // The BTC price (0.8.0): the cached price (or nulls when
+    // The BTC price: the cached price (or nulls when
     // nothing has been fetched yet), so a price rule's "currently
     // $X" line is live on the card. currentPrices is the
     // per-source readings map (for the Settings display); the
@@ -243,11 +243,11 @@ async function handleApi(req, res, pathname) {
     served.bitcoin.currentPriceAt = pc.fetchedAt;
     served.bitcoin.currentPrices = pc.prices;
     served.bitcoin.priceProviders = bitcoin.PRICE_PROVIDERS.map((p) => ({ id: p.id, label: p.label })).concat([{ id: 'custom', label: 'Custom' }]);
-    // The consolidated exchange status (0.8.0): one status for
+    // The consolidated exchange status: one status for
     // the configured price sources, shown once on the readiness
     // card (like Node Status) instead of repeated per price tx.
     served.bitcoin.exchangeStatus = exchangeStatusFor(pc, priceSourcesOf(state.settings), priceAgreementPctOf(state.settings));
-    // The inputs/outputs detail (0.7.18 refinement): derived from
+    // The inputs/outputs detail: derived from
     // the stored hexes on every read, like the overlaps — never
     // stored, so no migration and no restore change. An unparseable
     // hex (defensive only — adds and restores validate) gets no
@@ -255,11 +255,11 @@ async function handleApi(req, res, pathname) {
     for (const t of served.bitcoin.txs || []) {
       try { t.detail = bitcoin.txIoDetail(bitcoin.parseTx(t.hex)); }
       catch { t.detail = null; }
-      // The trigger (0.8.0): normalized (so the UI always sees a
+      // The trigger: normalized (so the UI always sees a
       // valid one — a legacy tx reads as the check-in trigger) and
       // its current status, computed from the stored evaluation
       // (no network on a read) — except the check-in trigger,
-      // whose state is live clock math. (0.8.2) The served trigger
+      // whose state is live clock math. The served trigger
       // is the legacy single-rule shape for a one-rule set and the
       // set for a multi-rule set (see serveTrigger); the served
       // triggerState matches — a flat slice for one rule, the
@@ -271,7 +271,7 @@ async function handleApi(req, res, pathname) {
       t.trigger = store.serveTrigger(servedSet);
       t.triggerState = store.serveTriggerState(servedSet, t.triggerState);
     }
-    // (0.8.7) Trigger sets are served the same way as txs: the
+    // Trigger sets are served the same way as txs: the
     // trigger in the dual shape, its current status computed from
     // the stored evaluation (no network on a read). The members
     // ride in served.bitcoin.txs as usual — the frontend joins
@@ -288,7 +288,7 @@ async function handleApi(req, res, pathname) {
   // GET /api/status
   if (req.method === 'GET' && pathname === '/api/status') {
     const merged = mergeExternalCheckin(state, now);
-    // The grace (0.8.0, unified 0.8.8): see GET /api/state — the
+    // The grace: see GET /api/state — the
     // card reads this endpoint, so the grace must be judged here too.
     try {
       let changed = false;
@@ -300,7 +300,7 @@ async function handleApi(req, res, pathname) {
       ...checkinStatus(state, now),
       lastCheckinAt: state.checkin.lastCheckinAt,
       totalCheckins: state.checkin.totalCheckins,
-      // (0.7.13, fourth-audit finding 7) Whether the receiver's
+      // Whether the receiver's
       // check-in file could not be read. A missing file is NOT an
       // error (no receiver installed); an unreadable one means the
       // release evaluation is withheld until it can be read again.
@@ -330,16 +330,16 @@ async function handleApi(req, res, pathname) {
   }
 
   // POST /api/release/check — run the release evaluation now (the full tick runs the same evaluation on the cadence).
-  // A receiver check-in is merged inside evaluateRelease first (0.7.12),
+  // A receiver check-in is merged inside evaluateRelease first,
   // so a check-in that arrived since the last read is honoured here too.
   if (req.method === 'POST' && pathname === '/api/release/check') {
     const r = await evaluateRelease();
-    // MARA-waiting transactions (0.7.16): refresh after the
+    // MARA-waiting transactions: refresh after the
     // evaluation, so a tx MARA just dropped is retried on the next
     // evaluation, not in this one. The response below is read from
     // fresh state, so it already reflects the refresh.
     try { await refreshMaraWaiting(store.loadState(DATA_DIR)); } catch (e) { console.error('MARA-waiting refresh failed:', e); }
-    // Public fallback (0.7.17): after the MARA refresh, so a tx
+    // Public fallback: after the MARA refresh, so a tx
     // MARA just confirmed as visible is not also fallback-broadcast.
     // Runs regardless of the check-in clock — a due fallback fires
     // even while the clock is on-track.
@@ -356,7 +356,7 @@ async function handleApi(req, res, pathname) {
   }
 
   // POST /api/triggers/check — evaluate a trigger ONCE, live, WITHOUT
-  // changing any state (0.8.0). The UI calls this when the owner picks
+  // changing any state. The UI calls this when the owner picks
   // a trigger in the Add/Edit form, so the already-true guard can warn
   // before the rule is added ("this condition is already satisfied —
   // it would fire on the next evaluation"). Body { trigger, txId? } — the
@@ -397,13 +397,13 @@ async function handleApi(req, res, pathname) {
   }
 
   // POST /api/checkin — clears the CHECK-IN rules' cycle-scoped release records:
-  // a new cycle starts for them. (0.8.0) A price or UTXO rule's record belongs
+  // a new cycle starts for them. A price or UTXO rule's record belongs
   // to its own trigger's cycle, not the check-in clock, so a check-in does
   // not clear it — and does not reset its trigger. A stale record is NOT
   // cleared: spent inputs are a fact about the transaction, not the cycle, so
   // a stale transaction stays stale (and archived) across check-ins — only
   // replacing the hex re-arms it. (If a broadcast already went out, the funds
-  // have already moved.) A 'submitted-slipstream' record (0.7.16) IS
+  // have already moved.) A 'submitted-slipstream' record IS
   // cleared, like any other non-stale cycle record: the check-in ends
   // the cycle, and the card goes back to Ready — but the transaction
   // is still sitting in MARA's private mempool, and a check-in cannot
@@ -425,7 +425,7 @@ async function handleApi(req, res, pathname) {
         // vacation) is re-marked inactive from now — it stays frozen
         // at 0 instead of counting while inactive. Checking in does
         // NOT re-arm anything: there is no global pause to
-        // auto-resume any more (0.8.0, Global Arm/Disarm).
+        // auto-resume.
         t.checkinOffsetMs = 0;
         t.checkinInactiveSince = null;
       }
@@ -436,7 +436,7 @@ async function handleApi(req, res, pathname) {
   }
 
   // POST /api/grace/resume — end the grace period
-  // immediately (0.8.0). The dashboard's Grace period card
+  // immediately. The dashboard's Grace period card
   // offers this while a grace is active; an indefinite grace
   // can only end this way (saving new grace settings never
   // changes an active one). Idempotent: resuming with no grace
@@ -456,7 +456,7 @@ async function handleApi(req, res, pathname) {
     return sendJson(res, 200, { ok: true, grace: graceStatus(fresh, now) });
   }
 
-  // Check-in API keys (0.6.6) — managed here, used by the check-in
+  // Check-in API keys — managed here, used by the check-in
   // receiver. A key is created with a label; the plaintext is returned
   // ONCE in the response and never stored — only its hash is kept, and
   // the hashes are published to the receiver (keys.json) on every
@@ -484,9 +484,9 @@ async function handleApi(req, res, pathname) {
       f.checkinKeys.push(key);
     });
     writeReceiverKeys(fresh);
-    // (0.8.3) Key creates are logged (id + label only — never the
-    // hash or plaintext). The Nov 19 key loss had no log line
-    // anywhere, so there was no way to tell when the key vanished.
+    // Key creates are logged (id + label only — never the
+    // hash or plaintext), so a lost key can be traced to when it
+    // was created or revoked.
     console.log('Standby: check-in key created: ' + key.id + ' (' + key.label + ')');
     return sendJson(res, 201, { key: publicCheckinKey(key), plain });
   }
@@ -500,12 +500,12 @@ async function handleApi(req, res, pathname) {
     });
     if (!fresh) return sendError(res, 404, 'no such key');
     writeReceiverKeys(fresh);
-    // (0.8.3) Key revokes are logged too — same reason as creates.
+    // Key revokes are logged too — same reason as creates.
     console.log('Standby: check-in key revoked: ' + keyMatch[1]);
     return sendJson(res, 200, { ok: true, removed: keyMatch[1] });
   }
 
-  // POST /api/settings/price-sources/test {provider} (0.8.0):
+  // POST /api/settings/price-sources/test {provider}:
   // tests one price provider with a FRESH fetch (bypasses the
   // price cache) and returns {provider, price, error}. Accepts
   // any of the five providers, not only the two configured
@@ -527,12 +527,12 @@ async function handleApi(req, res, pathname) {
     }
   }
 
-  // POST /api/settings/price-sources/test-all {providers: [...]} (0.8.0):
+  // POST /api/settings/price-sources/test-all {providers: [...]}:
   // tests several sources at once with FRESH fetches
   // (bypasses the price cache) and returns
   // {results: [{provider, label, price, error}, ...]} in the order
   // requested. Each entry is a provider id string or a custom
-  // { id: 'custom', url, path } object (0.8.1). A source that
+  // { id: 'custom', url, path } object. A source that
   // fails answers with price null and the error (the test itself
   // worked — the source is down); only a missing/empty providers
   // array is a 400, and an unknown id inside the list is reported
@@ -559,27 +559,24 @@ async function handleApi(req, res, pathname) {
     return sendJson(res, 200, { results });
   }
 
-  // PUT /api/settings
-  // PUT /api/settings (0.8.0): the global broadcast threshold is
-  // GONE — each check-in transaction carries its own threshold
-  // ("Days of silence", set when the tx is added/edited). A
-  // thresholdDays in the body is a 400, not a silent no-op: a
-  // stale client must not believe the setting saved. The
-  // danger-zone reset tied to the global threshold change is gone
-  // with it; the per-tx reset (PUT /api/bitcoin/txs/:id, add /
-  // import / arm) stays.
+  // PUT /api/settings. There is no global broadcast threshold —
+  // each check-in transaction carries its own threshold ("Days of
+  // silence", set when the tx is added/edited). A thresholdDays in
+  // the body is a 400, not a silent no-op: a stale client must not
+  // believe the setting saved. The danger-zone reset is per tx
+  // (PUT /api/bitcoin/txs/:id, add / import / arm).
   if (req.method === 'PUT' && pathname === '/api/settings') {
     const body = await readBody(req);
     const s = state.settings;
-    // (0.8.1, audit finding 4) Snapshot for the fresh-state merge
+    // Snapshot for the fresh-state merge
     // below: only the settings this request changed are copied
     // into fresh state at save time.
     const origSettings = { ...s };
     if (body.thresholdDays !== undefined) {
       return sendError(res, 400, 'thresholdDays is no longer a setting — set "Days of silence" on each check-in transaction instead');
     }
-    // (0.8.0) `paused` is gone — Global Arm/Disarm replaces it.
-    // A stale client must not believe the setting saved.
+    // `paused` is not a setting — Global Arm/Disarm is the
+    // control. A stale client must not believe the setting saved.
     if (body.paused !== undefined) {
       return sendError(res, 400, 'paused is no longer a setting — use Global Arm/Disarm instead');
     }
@@ -593,7 +590,7 @@ async function handleApi(req, res, pathname) {
       try { s.secondaryApiUrl = v ? bitcoin.normalizePublicApiUrl(v) : ''; }
       catch (e) { return sendError(res, 400, e.message); }
     }
-    // (0.8.8) Secondary node on/off (Settings: Secondary node
+    // Secondary node on/off (Settings: Secondary node
     // toggle): a boolean; off means primary only, no fallback
     // anywhere. Missing in old state means enabled (the default).
     if (body.secondaryEnabled !== undefined) {
@@ -610,11 +607,11 @@ async function handleApi(req, res, pathname) {
       if (bitcoin.priceSourceKey(s1) === bitcoin.priceSourceKey(s2)) return sendError(res, 400, 'price sources must be different');
       s.priceSources = { source1: s1, source2: s2 };
     }
-    // Grace period (0.8.0, extended 0.8.8): the on/off toggle plus
+    // Grace period: the on/off toggle plus
     // the offline gap that triggers a grace and how long it lasts
     // (null = indefinite, until the owner resumes; a stored 0
     // still means off, kept for back-compat — the UI never sends
-    // 0 anymore). Only the values the Settings card offers are
+    // 0). Only the values the Settings card offers are
     // accepted — anything else is a 400. Saving new values does
     // NOT change an already-active grace (it keeps the duration
     // it was created with) — but turning the toggle off makes the
@@ -638,7 +635,7 @@ async function handleApi(req, res, pathname) {
       }
       s.graceDurationDays = body.graceDurationDays;
     }
-    // User controls (0.8.0): each is a number input with a
+    // User controls: each is a number input with a
     // min/max bound — anything outside is a 400, never a silent
     // clamp. The fee pair is validated together (using the new
     // value where given, the saved value otherwise) so a partial
@@ -672,7 +669,7 @@ async function handleApi(req, res, pathname) {
       if (body.feeLowMultiplier !== undefined) s.feeLowMultiplier = body.feeLowMultiplier;
       if (body.feeMediumMultiplier !== undefined) s.feeMediumMultiplier = body.feeMediumMultiplier;
     }
-    // Vacation mode (0.8.0): check-in-only — while it is on, the
+    // Vacation mode: check-in-only — while it is on, the
     // check-in countdown freezes. vacationUntil is the last away
     // day ('YYYY-MM-DD'); null (or '' from an older client) means
     // indefinite, until the owner says they're back. A change to
@@ -681,7 +678,7 @@ async function handleApi(req, res, pathname) {
     if (body.vacationMode !== undefined) s.vacationMode = !!body.vacationMode;
     if (body.vacationUntil === null) s.vacationUntil = null;
     else if (body.vacationUntil !== undefined) s.vacationUntil = asStr(body.vacationUntil, 10) || null;
-    // (0.8.1, audit finding 4) The assignments above mutated the
+    // The assignments above mutated the
     // request's snapshot; only the CHANGED settings ride into fresh
     // state, so a concurrent save is not clobbered. The fee pair is
     // re-checked on the fresh values when this request touched it
@@ -703,9 +700,8 @@ async function handleApi(req, res, pathname) {
     return sendJson(res, 200, sanitizeState(fresh).settings);
   }
 
-  // (0.8.0) POST /api/pause and POST /api/resume are gone with
-  // the `paused` setting — Global Arm/Disarm (POST
-  // /api/bitcoin/txs/arm-all) replaces them. Those paths 404 now.
+  // There is no POST /api/pause or /api/resume: Global Arm/Disarm
+  // (POST /api/bitcoin/txs/arm-all) is the control. Those paths 404.
 
   // Transactions — the pre-signed list. Adding one arms it (the toggle
   // disarms it). The hex is validated (structure + txid) before
@@ -719,7 +715,7 @@ async function handleApi(req, res, pathname) {
   // PUT    /api/bitcoin/txs/:id  — update { txHex?, label?, notes?, enabled?, broadcastVia? }
   // DELETE /api/bitcoin/txs/:id  — remove
   const txsMatch = pathname.match(/^\/api\/bitcoin\/txs\/([^/]+)$/);
-  // The already-satisfied gate for a rule set (0.8.2): evaluates
+  // The already-satisfied gate for a rule set: evaluates
   // the WHOLE set with the combined semantics — an OR set is blocked
   // when any rule is satisfied now, an AND set when all are.
   // Unknown rules never block (satisfaction cannot be proven).
@@ -765,15 +761,15 @@ async function handleApi(req, res, pathname) {
   // shared by the paste path (POST /api/bitcoin/txs) and the file
   // import path (POST /api/bitcoin/txs/import), so the two cannot
   // drift apart. broadcastVia is the route the transaction goes out
-  // on ('public' or 'slipstream', 0.7.16) — default 'public'.
-  // publicFallbackDays (0.7.17) is the opt-in public-fallback
+  // on ('public' or 'slipstream') — default 'public'.
+  // publicFallbackDays is the opt-in public-fallback
   // duration in days, or null for Never (the default).
-  // slipstreamFirstAttemptAt (0.7.17) is the ISO timestamp of the
+  // slipstreamFirstAttemptAt is the ISO timestamp of the
   // first Slipstream broadcast attempt, success or fail — the
   // deadline anchor for a tx whose submit keeps failing. It is set
   // by broadcastOneInner, never by the client, and never overwritten
   // once set.
-  // feeSats / feeRateSatVb (0.7.18) are the transaction fee in
+  // feeSats / feeRateSatVb are the transaction fee in
   // satoshis and the fee rate in sat/vB, computed from the parent
   // txs on the node at add time (and refreshed by a dry-run, and
   // recomputed at startup — see recomputeStoredFees).
@@ -796,7 +792,7 @@ async function handleApi(req, res, pathname) {
       locktime: parsed.locktime,
       segwit: parsed.segwit,
       enabled: true, // new transactions are armed by default
-      // The check-in freeze (0.8.0): the accumulated inactive
+      // The check-in freeze: the accumulated inactive
       // time and the start of the current inactive period (see
       // syncCheckinFreeze). Only check-in logic reads them; a new
       // tx starts active, at 0 / null.
@@ -805,13 +801,13 @@ async function handleApi(req, res, pathname) {
       broadcastVia: validBroadcastVia(broadcastVia),
       publicFallbackDays: validPublicFallbackDays(publicFallbackDays),
       slipstreamFirstAttemptAt: null,
-      // The rule that fires this transaction (0.8.0) — already
+      // The rule that fires this transaction — already
       // normalized by the caller (see the add / import handlers).
       // triggerState is the trigger's last evaluation, null until
       // the release has evaluated it once.
       trigger,
       triggerState: null,
-      // The event trail (0.8.2): starts with the add itself —
+      // The event trail: starts with the add itself —
       // the rule that was set, in its own words.
       history: [{ ts: now.toISOString(), type: 'added', detail: triggerConditionText(trigger) }],
       release: null,
@@ -821,7 +817,7 @@ async function handleApi(req, res, pathname) {
       broadcasted: null,
     };
   }
-  // The fee for a parsed tx, best-effort (0.7.18): null when the
+  // The fee for a parsed tx, best-effort: null when the
   // node cannot answer (unknown parent, unreachable node). Never
   // throws — an add must never fail because the fee could not be
   // computed.
@@ -864,7 +860,7 @@ async function handleApi(req, res, pathname) {
     catch (e) { return sendError(res, 400, 'invalid transaction: ' + e.message); }
     const dupErr = duplicateTx(parsed.txid);
     if (dupErr) return sendError(res, 400, dupErr);
-    // (0.8.0) The trigger: validated server-side (an invalid one
+    // The trigger: validated server-side (an invalid one
     // is a 400 with the reason). Omitted → the check-in trigger at
     // the 35-day fallback, so the old add path is unchanged.
     const trig = (body.trigger === undefined)
@@ -874,7 +870,7 @@ async function handleApi(req, res, pathname) {
     const tx = newTxRecord(parsed, hex, body.label, body.notes, body.broadcastVia, body.publicFallbackDays, trig.trigger);
     const fee = await feeFor(parsed);
     if (fee) { tx.feeSats = fee.feeSats; tx.feeRateSatVb = fee.feeRateSatVb; }
-    // (0.8.0, extended 0.8.1) The already-satisfied check for a
+    // The already-satisfied check for a
     // price, UTXO, block-height, set-date, or fee-market rule: a
     // condition that is ALREADY met would fire on the next
     // evaluation, so adding it is a mistake unless the owner
@@ -903,7 +899,7 @@ async function handleApi(req, res, pathname) {
         return sendError(res, 400, gate.message);
       }
     } catch (e) { /* best-effort: the add proceeds without the warning */ }
-    // (0.7.22, scoped 0.8.0) A new tx is armed by default — adding
+    // A new tx is armed by default — adding
     // a CHECK-IN rule while the clock is in the danger zone (the
     // last 25% of ITS window, including already past due) would
     // let the release fire soon after, so the add resets the
@@ -912,7 +908,7 @@ async function handleApi(req, res, pathname) {
     // not touch the check-in clock. The zone is measured against
     // the new rule's own threshold, not the global one. Adding
     // with more than 25% of the window left does not reset.
-    // (0.8.1, audit finding 4) The push + the reset ride into
+    // The push + the reset ride into
     // FRESH state: the fee and trigger checks above awaited the
     // network, so a second request may have saved in between. The
     // duplicate-txid check is re-run on fresh state too — a
@@ -1001,7 +997,7 @@ async function handleApi(req, res, pathname) {
     catch (e) { return sendError(res, 400, 'invalid transaction: ' + e.message); }
     const dupErr = duplicateTx(parsed.txid);
     if (dupErr) return sendError(res, 400, dupErr);
-    // (0.8.0) The trigger — same validation and already-spent gate
+    // The trigger — same validation and already-spent gate
     // as the paste path (see POST /api/bitcoin/txs above).
     const trig = (body.trigger === undefined)
       ? { trigger: store.defaultTriggerSet() }
@@ -1018,9 +1014,9 @@ async function handleApi(req, res, pathname) {
         return sendError(res, 400, gate.message);
       }
     } catch (e) { /* best-effort: the import proceeds without the warning */ }
-    // (0.7.22, scoped 0.8.0) The import path arms by default too —
+    // The import path arms by default too —
     // same reset as the paste path when the clock is in the danger
-    // zone, and only for a check-in rule. (0.8.1, audit finding 4)
+    // zone, and only for a check-in rule.
     // The push + the reset ride into FRESH state (see the paste
     // path above): the fee and trigger checks awaited the network.
     let checkinReset = false;
@@ -1052,19 +1048,19 @@ async function handleApi(req, res, pathname) {
   if (txsMatch && (req.method === 'PUT' || req.method === 'DELETE')) {
     const tx = (state.bitcoin.txs || []).find((t) => t.id === txsMatch[1]);
     if (!tx) return sendError(res, 404, 'no such transaction');
-    // (0.8.1, audit finding 4) Snapshot for the fresh-state merge
+    // Snapshot for the fresh-state merge
     // below: only the fields this edit changes are copied into
     // fresh state at save time. (Shallow: the handler replaces
     // trigger/release/broadcasted, never mutates them in place.)
     const orig = { ...tx };
     if (req.method === 'DELETE') {
-      // (0.8.1, audit finding 4) The removal rides into FRESH
+      // The removal rides into FRESH
       // state: the request body was awaited above, so a second
       // request may have saved in between.
       const fresh = saveMutation((f) => {
         if (!(f.bitcoin.txs || []).some((t) => t.id === tx.id)) return false;
         f.bitcoin.txs = (f.bitcoin.txs || []).filter((t) => t.id !== tx.id);
-        // (0.8.7) The tx leaves any set it was in; a set left with
+        // The tx leaves any set it was in; a set left with
         // no members has nothing to drive and goes with it. The
         // other members stay put.
         for (const s of (f.bitcoin.sets || [])) {
@@ -1082,8 +1078,8 @@ async function handleApi(req, res, pathname) {
       let parsed;
       try { parsed = bitcoin.parseTx(hex); }
       catch (e) { return sendError(res, 400, 'invalid transaction: ' + e.message); }
-      // The hex is immutable once the transaction is out the door
-      // (0.7.16, Pending card): a broadcasted tx, one submitted to
+      // The hex is immutable once the transaction is out the door:
+      // a broadcasted tx, one submitted to
       // Slipstream and waiting on MARA, a stale tx, or a
       // restore-carried 'broadcast' record — all Pending or Archived
       // — cannot be replaced with a DIFFERENT transaction, because
@@ -1126,7 +1122,7 @@ async function handleApi(req, res, pathname) {
     }
     if (typeof body.label === 'string') tx.label = asStr(body.label, 80);
     if (typeof body.notes === 'string') tx.notes = asStr(body.notes, 500);
-    // (0.8.0) The trigger: changing it re-rules the transaction.
+    // The trigger: changing it re-rules the transaction.
     // Validated server-side (an invalid one is a 400). A changed
     // trigger starts fresh — the old triggerState (a price's
     // last price, a UTXO's last outspend) belongs to the old
@@ -1161,7 +1157,7 @@ async function handleApi(req, res, pathname) {
         tx.triggerState = null;
       }
     }
-    // (0.7.22, scoped 0.8.0) Arming a CHECK-IN transaction while
+    // Arming a CHECK-IN transaction while
     // the clock is in the danger zone (the last 25% of ITS window,
     // including already past due) would let the release fire soon
     // after — a present owner arming a tx should not get a surprise
@@ -1174,12 +1170,12 @@ async function handleApi(req, res, pathname) {
     // the clock untouched. The zone is measured against the tx's
     // own threshold (after a trigger change above, the new one).
     if (typeof body.enabled === 'boolean') tx.enabled = body.enabled;
-    // The route toggle on the card (0.7.16): switching the route
+    // The route toggle on the card: switching the route
     // applies to the NEXT broadcast attempt — a transaction already
     // submitted to Slipstream is not re-submitted by toggling it
     // (preBroadcastCheck blocks a re-submit while it waits on MARA).
     if (typeof body.broadcastVia === 'string') tx.broadcastVia = validBroadcastVia(body.broadcastVia);
-    // The public-fallback duration (0.7.17): changeable on the card
+    // The public-fallback duration: changeable on the card
     // and in the edit popup, for Active and Pending txs. It is
     // validated leniently (invalid → Never, never a 400), like the
     // route above. A change while the tx waits on MARA re-times the
@@ -1187,13 +1183,13 @@ async function handleApi(req, res, pathname) {
     // computed from submittedAt at evaluation time (see
     // fallbackDeadline), so no clock is restarted here.
     if (body.publicFallbackDays !== undefined) tx.publicFallbackDays = validPublicFallbackDays(body.publicFallbackDays);
-    // (0.8.2) The history events for this edit: an arm/disarm
+    // The history events for this edit: an arm/disarm
     // flip logs on its own; any other field change logs as one
     // 'edited' event naming what changed. The events are appended
     // to tx.history here and ride into fresh state through the
     // mutator's field list below ('history' is in it), so a
     // rejected edit (a 400 above) leaves no event behind.
-    // (0.8.7, round 9) Single history: a member's 'edited' is
+    // Single history: a member's 'edited' is
     // forwarded to its set's trail inside the save below, on
     // fresh state — the arm/disarm flip is NOT forwarded, the
     // set logs its own arm.
@@ -1213,7 +1209,7 @@ async function handleApi(req, res, pathname) {
       forwardedEditEvents.push({ type: 'edited', detail: editChanges.join('; ') });
     }
     let checkinReset = false;
-    // (0.8.1, audit finding 4) The edit's field changes were
+    // The edit's field changes were
     // computed on the request's snapshot while the fee and trigger
     // checks awaited the network — only the fields this edit
     // actually changed ride into FRESH state, so a concurrent save
@@ -1239,13 +1235,13 @@ async function handleApi(req, res, pathname) {
       for (const k of ['hex', 'txid', 'inputs', 'outputs', 'totalOutSats', 'locktime', 'segwit', 'feeSats', 'feeRateSatVb', 'release', 'broadcasted', 'label', 'notes', 'trigger', 'triggerState', 'enabled', 'broadcastVia', 'publicFallbackDays', 'history']) {
         if (JSON.stringify(tx[k]) !== JSON.stringify(orig[k])) ftx[k] = tx[k];
       }
-      // (0.8.7, round 9) Single history: the member's edit lands
+      // Single history: the member's edit lands
       // on its set's trail too (forwardMemberHistory no-ops for a
       // standalone tx). This runs only on the success path — the
       // early returns above leave a rejected edit with no event
       // anywhere.
       for (const fe of forwardedEditEvents) forwardMemberHistory(f, ftx, fe.type, fe.detail);
-      // The freeze (0.8.0): the danger zone is measured from the
+      // The freeze: the danger zone is measured from the
       // EFFECTIVE last check-in — the tx's live frozen time — so a
       // frozen clock is never in the danger zone for time that never
       // counted. The freeze is re-synced after the toggle: disarming
@@ -1277,7 +1273,7 @@ async function handleApi(req, res, pathname) {
     return sendJson(res, 200, out);
   }
 
-  // Trigger sets (0.8.7). A set is one label, one arm/disarm,
+  // Trigger sets. A set is one label, one arm/disarm,
   // and one rule set driving several transactions:
   //   POST   /api/bitcoin/sets      — create { label, txIds, trigger, enabled?, triggerConfirmed? }
   //   PUT    /api/bitcoin/sets/:id  — update { label?, txIds?, trigger?, enabled?, triggerConfirmed? }
@@ -1343,7 +1339,7 @@ async function handleApi(req, res, pathname) {
       saveErrs = setAttachErrors(f, body.txIds, null);
       if (saveErrs.length) return false;
       if ((f.bitcoin.sets || []).some((s) => s.id === set.id)) return false;
-      // (0.8.7, round 9) Single history: the set's trail opens
+      // Single history: the set's trail opens
       // with each member's existing history (tagged, oldest
       // first); the creation event closes it, so the trail never
       // starts from scratch.
@@ -1393,7 +1389,7 @@ async function handleApi(req, res, pathname) {
       const errs = setAttachErrors(state, freshIds, set.id);
       if (errs.length) return sendError(res, 400, errs[0]);
       set.txIds = [...new Set(body.txIds)];
-      // (0.8.7, round 9) Single history: a newly attached member
+      // Single history: a newly attached member
       // brings its existing history into the set's trail (tagged,
       // oldest first) — the 'Members changed' event below closes
       // the attach, so it stays the newest entry.
@@ -1460,7 +1456,7 @@ async function handleApi(req, res, pathname) {
   // the set's arm state, like a manual tx broadcast ignores its
   // own toggle. A stale member yields a 'stale' result and the
   // loop carries on to the next member — it does not archive
-  // the set (0.8.7, revised rule).
+  // the set.
   const setBroadcastMatch = pathname.match(/^\/api\/bitcoin\/sets\/([^/]+)\/broadcast$/);
   if (req.method === 'POST' && setBroadcastMatch) {
     const set = (state.bitcoin.sets || []).find((s) => s.id === setBroadcastMatch[1]);
@@ -1482,7 +1478,7 @@ async function handleApi(req, res, pathname) {
     return sendJson(res, 200, { ok: true, action, results });
   }
 
-  // POST /api/bitcoin/txs/arm-all — Global Arm/Disarm (0.8.0):
+  // POST /api/bitcoin/txs/arm-all — Global Arm/Disarm:
   // set `enabled` on EVERY staged transaction at once. Body
   // { enabled: true|false }. Applies to all triggers — check-in,
   // price, UTXO, manual. "Arm all" arms EVERYTHING, including
@@ -1491,13 +1487,13 @@ async function handleApi(req, res, pathname) {
   // is re-synced, so disarming freezes its countdown at the day
   // count it was left at and re-arming resumes from there.
   // Arming a check-in tx in its danger zone resets the check-in
-  // (the same 0.7.22 guard as arming one tx), once, and the
+  // (the same guard as arming one tx), once, and the
   // response names it. Manual broadcasts still work while a tx
   // is disarmed — they never went through the armed toggle.
   if (req.method === 'POST' && pathname === '/api/bitcoin/txs/arm-all') {
     const body = await readBody(req).catch(() => ({}));
     if (typeof body.enabled !== 'boolean') return sendError(res, 400, 'enabled must be true or false');
-    // (0.8.1, audit finding 4) The toggle + freeze sync + reset
+    // The toggle + freeze sync + reset
     // ride into FRESH state: the request body was awaited above.
     let checkinReset = false;
     const fresh = saveMutation((f) => {
@@ -1506,7 +1502,7 @@ async function handleApi(req, res, pathname) {
       for (const t of txs) {
         const wasEnabled = t.enabled;
         t.enabled = body.enabled;
-        // (0.8.2) An arm/disarm flip logs on the tx it flipped —
+        // An arm/disarm flip logs on the tx it flipped —
         // a no-op toggle (already in that state) logs nothing.
         if (wasEnabled !== body.enabled) pushHistory(t, body.enabled ? 'armed' : 'disarmed', '');
         syncCheckinFreeze(t, f, now);
@@ -1522,7 +1518,7 @@ async function handleApi(req, res, pathname) {
           break;
         }
       }
-      // (0.8.7) Arm/disarm every set too — a set's arm is the
+      // Arm/disarm every set too — a set's arm is the
       // only arm its members have, so leaving sets out would
       // leave half the release armed after "Disarm all".
       const newlyArmedSets = [];
@@ -1569,7 +1565,7 @@ async function handleApi(req, res, pathname) {
   }
 
   // POST /api/bitcoin/txs/:id/broadcast-public — the MANUAL escape
-  // hatch for a slow MARA tx (0.7.16, Pending card). A transaction
+  // hatch for a slow MARA tx. A transaction
   // submitted to Slipstream and waiting on MARA is private until
   // MARA mines it; if the owner does not want to wait, this
   // broadcasts it via the PUBLIC route instead (mempool.space, then
@@ -1608,7 +1604,7 @@ async function handleApi(req, res, pathname) {
   // Each is broadcast through the same path (freshness gate, then primary
   // with secondary fallback); a stale or failed tx does not stop the
   // others. The UI asks first (a confirmation dialog).
-  // Body { armedOnly: true } (round 12) sends only the armed
+  // Body { armedOnly: true } sends only the armed
   // (enabled) transactions — a disarmed id in the list is skipped,
   // not sent. The broadcast guards are the same either way.
   if (req.method === 'POST' && pathname === '/api/broadcast/all') {
@@ -1623,7 +1619,7 @@ async function handleApi(req, res, pathname) {
         const tx = txs.find((t) => t.id === id);
         if (!tx) return sendError(res, 400, 'unknown transaction id: ' + id);
         // A transaction already submitted to Slipstream is not
-        // re-submitted (0.7.16) — it is waiting on MARA, and the
+        // re-submitted — it is waiting on MARA, and the
         // MARA-waiting refresh is what moves it on.
         if (!tx.broadcasted && !(tx.release && tx.release.status === 'submitted-slipstream')) targets.push(tx);
       }
@@ -1662,12 +1658,12 @@ async function handleApi(req, res, pathname) {
   // It also carries the check-in key hashes (not the keys — those were
   // never stored), so a restored setup keeps its keys working.
   // GET /api/backup — the plain (unencrypted) backup document.
-  // POST /api/backup {password?} (0.8.12) — the same document, or,
+  // POST /api/backup {password?} — the same document, or,
   // with a password, encrypted with it (lib/backupcrypto.js). The
   // UI uses POST so a password never appears in a URL; GET stays
   // for scripts.
   const buildBackup = () => {
-    // (0.8.2) The backup carries the SERVED form of each tx (a
+    // The backup carries the SERVED form of each tx (a
     // one-rule set as its single rule) — restore accepts both
     // shapes, and the backup is compared against the served
     // triggers after a restore, so the backup must match what
@@ -1706,7 +1702,7 @@ async function handleApi(req, res, pathname) {
   // backup carries them. Returns the restored transaction count.
   if (req.method === 'POST' && pathname === '/api/restore') {
     let body = await readBody(req);
-    // (0.8.12) An encrypted backup is decrypted first — the UI sends
+    // An encrypted backup is decrypted first — the UI sends
     // the file's JSON with the password added as `password` — then
     // validated exactly like a plain one.
     if (backupcrypto.isEncryptedBackup(body)) {
@@ -1730,7 +1726,7 @@ async function handleApi(req, res, pathname) {
     const settings = {
       primaryApiUrl: bitcoin.DEFAULT_PUBLIC_API_URL,
       secondaryApiUrl: '',
-      // (0.8.0) `paused` is gone — a backup carrying it restores
+      // `paused` is not a setting — a backup carrying it restores
       // WITHOUT it (ignored, not an error). vacationUntil is null
       // for indefinite, a 'YYYY-MM-DD' date otherwise; anything
       // else (including a legacy '') restores as null.
@@ -1746,7 +1742,7 @@ async function handleApi(req, res, pathname) {
       try { settings.secondaryApiUrl = bitcoin.normalizePublicApiUrl(bsSettings.secondaryApiUrl); }
       catch (e) { return sendError(res, 400, 'backup secondary node URL: ' + e.message); }
     }
-    // (0.8.8) The secondary-enabled toggle rides along: a backup
+    // The secondary-enabled toggle rides along: a backup
     // from before 0.8.8 carries none, which restores as enabled
     // (the default); a present but non-boolean value rejects the
     // whole restore, like a bad node URL.
@@ -1756,7 +1752,7 @@ async function handleApi(req, res, pathname) {
     } else {
       settings.secondaryEnabled = true;
     }
-    // (0.8.0) The price sources ride along: a backup from before
+    // The price sources ride along: a backup from before
     // 0.8.0 carries none, which restores as the defaults; a present
     // but invalid pair rejects the whole restore, like a bad node URL.
     if (bsSettings.priceSources !== undefined && bsSettings.priceSources !== null) {
@@ -1771,12 +1767,12 @@ async function handleApi(req, res, pathname) {
     } else {
       settings.priceSources = { source1: 'coingecko', source2: 'coinbase' };
     }
-    // (0.8.0) The grace settings ride along the same way: a backup
+    // The grace settings ride along the same way: a backup
     // from before 0.8.0 carries none, which restores as the defaults
     // (7 days offline to trigger, 7-day grace); a present but invalid
     // value rejects the whole restore, like a bad node URL. The active
     // grace itself does NOT ride along — a restore counts as a check-in
-    // (the owner is present), so the grace is cleared. (0.8.8) The
+    // (the owner is present), so the grace is cleared. The
     // toggle rides along too:
     // a backup from before the toggle carries no flag, which restores
     // as on — except a stored duration of 0, which meant off, so it
@@ -1805,7 +1801,7 @@ async function handleApi(req, res, pathname) {
     } else {
       settings.graceDurationDays = 7;
     }
-    // (0.8.0) The price-agreement, check-cadence, and fee-verdict
+    // The price-agreement, check-cadence, and fee-verdict
     // settings ride along the same way: a backup from before
     // 0.8.0 carries none, which restores as the defaults; a
     // present but invalid value rejects the whole restore, like a
@@ -1856,26 +1852,22 @@ async function handleApi(req, res, pathname) {
       let parsed;
       try { parsed = bitcoin.parseTx(t.hex.trim()); }
       catch (e) { return sendError(res, 400, 'backup transaction hex is invalid: ' + e.message); }
-      // (0.7.12, third-audit finding 4; tightened in 0.7.13,
-      // fourth-audit finding 1) A release record is only believed
-      // when its status is one the app itself writes, its txid is a
-      // string equal to the txid of the hex in this same backup
-      // entry, and its kind (when present) is one the app writes.
-      // The txid is REQUIRED: the 0.7.12 check only rejected a txid
-      // when one was present and wrong, so {"release":{"status":
-      // "stale"}} passed and permanently disabled a transaction
-      // that was never broadcast. A broadcasted record is only
-      // believed when its txid is that txid. Anything else rejects
+      // A release record is only accepted when its status is one the
+      // app itself writes, its txid is a string equal to the txid of
+      // the hex in this same backup entry, and its kind (when
+      // present) is one the app writes. The txid is REQUIRED: without
+      // it, {"release":{"status":"stale"}} would permanently disable a
+      // transaction that was never broadcast. Anything else rejects
       // the WHOLE restore — a corrupt or hand-edited backup must not
       // silently mark a transaction stale, or resurrect a broadcast
-      // that never happened. (0.8.1, audit finding: even a
-      // txid-matching broadcast/stale claim is not believed — it is
-      // dropped when the restored tx is built below, and the network
-      // re-derives it. The check here still rejects a malformed or
-      // mismatched record outright.) A record the app wrote always passes:
-      // every writer carries txid = the tx's txid (broadcastOneInner
-      // paths, dry-run verdict writes) and kind in RELEASE_KINDS,
-      // and the 0.4.0 migration guarantees txid on older records.
+      // that never happened. Even a txid-matching broadcast/stale
+      // claim is not believed: it is dropped when the restored tx is
+      // built below, and the network re-derives it; the check here
+      // only rejects a malformed or mismatched record outright. A
+      // record the app wrote always passes: every writer carries
+      // txid = the tx's txid (broadcastOneInner paths, dry-run
+      // verdict writes) and kind in RELEASE_KINDS, and the state
+      // migration guarantees txid on older records.
       if (t.release !== undefined && t.release !== null) {
         if (typeof t.release !== 'object' || !RELEASE_STATUSES.has(t.release.status)
             || typeof t.release.txid !== 'string' || t.release.txid !== parsed.txid
@@ -1891,7 +1883,7 @@ async function handleApi(req, res, pathname) {
       let id = (typeof t.id === 'string' && t.id) ? asStr(t.id, 40) : '';
       if (!id || seenIds.has(id)) id = store.newTxId();
       seenIds.add(id);
-      // (0.8.2) The rule set rides through validation (the same
+      // The rule set rides through validation (the same
       // per-rule rules as a single trigger), and the triggerState
       // is normalized to the rule count — a flat object wraps to
       // one element, an array is sanitized / padded / truncated,
@@ -1908,7 +1900,7 @@ async function handleApi(req, res, pathname) {
         inputs: parsed.inputs.length,
         outputs: parsed.outputs.length,
         totalOutSats: parsed.totalOutSats,
-        // The fee (0.7.18): carried through when present (a number
+        // The fee: carried through when present (a number
         // or null); a backup from before 0.7.18 carries no fee,
         // which restores as null — the same as an older record
         // loaded from disk. A negative or non-finite value is not
@@ -1918,7 +1910,7 @@ async function handleApi(req, res, pathname) {
         locktime: parsed.locktime,
         segwit: parsed.segwit,
         enabled: typeof t.enabled === 'boolean' ? t.enabled : true,
-        // The check-in freeze (0.8.0): carried through when
+        // The check-in freeze: carried through when
         // valid; a backup from before the redesign carries none,
         // which restores as 0 / null — the same as an older record
         // loaded from disk. (The restore itself counts as a
@@ -1926,11 +1918,11 @@ async function handleApi(req, res, pathname) {
         // below — this carry-through is what validates them.)
         checkinOffsetMs: (typeof t.checkinOffsetMs === 'number' && Number.isFinite(t.checkinOffsetMs) && t.checkinOffsetMs >= 0) ? t.checkinOffsetMs : 0,
         checkinInactiveSince: (typeof t.checkinInactiveSince === 'string' && t.checkinInactiveSince && !Number.isNaN(new Date(t.checkinInactiveSince).getTime())) ? t.checkinInactiveSince : null,
-        // The broadcast route (0.7.16): a backup from before 0.7.16
+        // The broadcast route: a backup from before 0.7.16
         // carries no route, which restores as 'public' — the same
         // as an older record loaded from disk.
         broadcastVia: validBroadcastVia(t.broadcastVia),
-        // The public fallback (0.7.17): a backup from before 0.7.17
+        // The public fallback: a backup from before 0.7.17
         // carries no duration, which restores as Never (null) — the
         // same as an older record loaded from disk. The first-attempt
         // timestamp rides along too (an unparseable one is dropped);
@@ -1939,7 +1931,7 @@ async function handleApi(req, res, pathname) {
         publicFallbackDays: validPublicFallbackDays(t.publicFallbackDays),
         slipstreamFirstAttemptAt: (typeof t.slipstreamFirstAttemptAt === 'string'
           && !Number.isNaN(new Date(t.slipstreamFirstAttemptAt).getTime())) ? t.slipstreamFirstAttemptAt : null,
-        // The trigger (0.8.0, rule sets 0.8.2): carried through
+        // The trigger: carried through
         // when valid — a single trigger or a rule set; a backup
         // from before 0.8.0 carries none, which restores as the
         // check-in trigger at the 35-day fallback — the same as
@@ -1952,7 +1944,6 @@ async function handleApi(req, res, pathname) {
         // overwrites it on the next evaluation anyway).
         trigger: restoredTrigger,
         triggerState: store.normalizeTriggerState(t.triggerState, restoredTrigger.rules.length),
-        // (0.8.1, audit finding: restored `broadcasted` records)
         // A broadcasted fact — or a release record claiming the tx
         // already went out ('broadcast') or is spent ('stale') — is
         // NOT believed from a backup on txid match alone: a
@@ -1966,7 +1957,7 @@ async function handleApi(req, res, pathname) {
         // self-correcting, so they ride along.
         release: (t.release && (t.release.status === 'broadcast' || t.release.status === 'stale')) ? null : (t.release ? t.release : null),
         broadcasted: null,
-        // (0.8.2) The event trail rides along when it is well
+        // The event trail rides along when it is well
         // formed — display-only, so a hand-edited backup cannot
         // hurt anything by forging it. The same distrust as the
         // records above applies to its broadcast claims: a
@@ -1983,7 +1974,7 @@ async function handleApi(req, res, pathname) {
           : null,
       });
     }
-    // (0.8.7) Trigger sets ride along: each set's members must be
+    // Trigger sets ride along: each set's members must be
     // among the restored txs, its trigger normalized, its history
     // sanitized like a tx's (broadcast/confirmed/stale events are
     // dropped with the records they describe — the network
@@ -2024,7 +2015,7 @@ async function handleApi(req, res, pathname) {
       }
     }
     const bsCheckin = (bs.checkin && typeof bs.checkin === 'object') ? bs.checkin : {};
-    // (0.7.12, third-audit finding 4) The check-in time must be a
+    // The check-in time must be a
     // real date and not in the future (beyond the same 5-minute skew
     // the receiver merge allows). An invalid date makes checkinStatus
     // throw on every status read (new Date(NaN).toISOString()), and a
@@ -2047,13 +2038,13 @@ async function handleApi(req, res, pathname) {
       }
       lastCheckinAt = bsCheckin.lastCheckinAt;
     }
-    // (0.7.22) The "I was online" stamp rides along the same way:
+    // The "I was online" stamp rides along the same way:
     // a real date (or null), never in the future beyond the same
     // 5-minute skew — a future stamp would hide a real offline gap
-    // and defeat the grace. (0.8.8) A backup's check-in hold
+    // and defeat the grace. A backup's check-in hold
     // (heldUntil) is accepted and dropped, never a 400 — and NOT
-    // translated into a grace the way loadState does (audit
-    // finding 1): a restore counts as a check-in (the clock
+    // translated into a grace the way loadState does: a restore
+    // counts as a check-in (the clock
     // resets to now below) and the grace is cleared by design,
     // so there is no due check-in for a translated hold to
     // protect and no offline gap for it to describe. Dropping
@@ -2104,7 +2095,7 @@ async function handleApi(req, res, pathname) {
           ? bs.bitcoin.connection : { ok: null, checkedAt: null, detail: '' },
       },
       checkin: {
-        // (0.7.22) A restore is proof the owner is present, so it
+        // A restore is proof the owner is present, so it
         // counts as a check-in: the clock starts clean at the
         // restore moment. The backup's clock is still VALIDATED
         // above (a corrupt or future-dated clock rejects the whole
@@ -2116,7 +2107,7 @@ async function handleApi(req, res, pathname) {
         lastOnlineAt: now.toISOString(),
       },
       checkinKeys: restoredKeys,
-      // (0.8.9) The fee history rides along: the peak is computed
+      // The fee history rides along: the peak is computed
       // from these observations, so restoring without them would
       // reset the verdict to "still building" for a day. A backup
       // from before 0.8.9 carries none, which restores as empty.
@@ -2124,7 +2115,7 @@ async function handleApi(req, res, pathname) {
       // smuggle a bad entry into the peak.
       feeHistory: store.sanitizeFeeHistory(bs.feeHistory),
     };
-    // (0.8.0) The restore counts as a check-in (see the clock
+    // The restore counts as a check-in (see the clock
     // comment above): the offsets are measured against the OLD
     // clock, so they are reset to the new one — a carried offset
     // would otherwise push the effective last check-in into the
@@ -2137,7 +2128,7 @@ async function handleApi(req, res, pathname) {
       t.checkinInactiveSince = null;
     }
     for (const t of txs) syncCheckinFreeze(t, restored, now);
-    // (0.8.7) A restored set's check-in freeze resets the same way.
+    // A restored set's check-in freeze resets the same way.
     for (const s of restoredSets) {
       if (!store.hasTriggerType(s, 'checkin')) continue;
       s.checkinOffsetMs = 0;
@@ -2145,7 +2136,7 @@ async function handleApi(req, res, pathname) {
     }
     for (const s of restoredSets) syncCheckinFreeze(s, restored, now);
     store.saveState(DATA_DIR, restored);
-    // (0.8.3) The warnings describe the state that was just
+    // The warnings describe the state that was just
     // replaced — a recovery at boot, say — so they are stale now;
     // clear both lists.
     store.clearStateWarnings();
@@ -2157,7 +2148,7 @@ async function handleApi(req, res, pathname) {
     writeReceiverKeys(restored);
     if (Array.isArray(body.checkins)) store.writeCheckins(DATA_DIR, body.checkins.slice(-200));
     if (Array.isArray(body.broadcastLog)) store.writeBroadcastLog(DATA_DIR, body.broadcastLog.slice(-200));
-    // (0.7.22) The restore itself is a check-in — record it in
+    // The restore itself is a check-in — record it in
     // the history so the displayed last check-in matches the
     // refreshed clock. Appended after the backup's own history
     // (above), so it is the most recent entry; the method reads
@@ -2166,7 +2157,7 @@ async function handleApi(req, res, pathname) {
     // The restored state is served the same way as a read (a
     // one-rule set as its single rule — see GET /api/state).
     const servedRestored = sanitizeState(restored);
-    // (0.8.9) The fee history is state-internal — see GET
+    // The fee history is state-internal — see GET
     // /api/state — never served, even in a restore response.
     delete servedRestored.feeHistory;
     servedRestored.bitcoin.txs = serveTxs(servedRestored.bitcoin.txs || []);
@@ -2181,9 +2172,9 @@ async function handleApi(req, res, pathname) {
   if (req.method === 'POST' && pathname === '/api/bitcoin/connection/test') {
     const r = await bitcoin.testConnection(bitcoin.endpointsFor(state.settings), { probeOutputLookup: true });
     const conn = { ok: r.ok, checkedAt: now.toISOString(), detail: r.detail, results: r.results };
-    // (0.8.1, audit finding 4) The node test awaited the network —
+    // The node test awaited the network —
     // only the connection result rides into FRESH state.
-    // (0.8.5) The per-endpoint stamps ride over from the stored
+    // The per-endpoint stamps ride over from the stored
     // connection, then the live stamps (the test just asked both
     // endpoints) overwrite them.
     saveMutation((f) => {
@@ -2213,13 +2204,12 @@ async function handleApi(req, res, pathname) {
   // A spent verdict is recorded on the transaction (a stale release
   // record, kind 'dryrun'): staleness is a fact about the inputs, so
   // the card stays Stale — and stays in the Archived Transactions
-  // card — across refreshes and check-ins. Before 0.6.5 the verdict
-  // lived only in the page's memory, so a dry-run-declared stale
-  // transaction popped back to Ready on every refresh.
+  // card — across refreshes and check-ins (a verdict kept only in
+  // the page's memory would pop back to Ready on every refresh).
   if (req.method === 'POST' && pathname === '/api/broadcast/test') {
     const body = await readBody(req).catch(() => ({}));
     let txs = state.bitcoin.txs || [];
-    // (0.8.7) A set dry-run checks every member: { setId } names
+    // A set dry-run checks every member: { setId } names
     // the set, like { id } names one tx.
     let drySet = null;
     if (body && body.setId) {
@@ -2239,14 +2229,14 @@ async function handleApi(req, res, pathname) {
       }
       try {
         const r = await bitcoin.dryRun(DATA_DIR, { tx, endpoints: bitcoin.endpointsFor(state.settings), ttlMs: checkCadenceSecondsOf(state.settings) * 1000 });
-        // (0.8.0) A price rule's dry-run note carries the source
+        // A price rule's dry-run note carries the source
         // detail — which sources were used, their readings,
         // single-source fallback, or that they disagreed — because
-        // the subcard and the readiness card no longer repeat it
+        // the subcard and the readiness card do not repeat it
         // (it lives in the Exchange Status section and here, in
         // the dry-run notes). A price-fetch failure never breaks
         // the dry run itself; the note just says so.
-        // (0.8.7) A set member's dry-run note reads the SET's
+        // A set member's dry-run note reads the SET's
         // trigger — the member's own trigger is dormant while it
         // is attached.
         const trg = drySet ? store.triggerOf(drySet) : store.triggerOf(tx);
@@ -2270,8 +2260,8 @@ async function handleApi(req, res, pathname) {
         results.push({ id: tx.id, txid: tx.txid, label: tx.label || '', enabled: drySet ? !!drySet.enabled : !!tx.enabled, broadcastVia: validBroadcastVia(tx.broadcastVia), wouldBroadcast: false, error: e.message });
       }
     }
-    // Persist what the run found (0.7.12, third-audit finding 1 —
-    // three cases, not just stale): a broadcasted transaction is never
+    // Persist what the run found (three cases, not just
+    // stale): a broadcasted transaction is never
     // re-marked (its broadcast record takes precedence), and a stale
     // verdict is a fact and is left alone once recorded. An own-txid
     // spend is recorded as broadcast — recognition, not a re-send;
@@ -2281,7 +2271,7 @@ async function handleApi(req, res, pathname) {
     // confirmed spend turns it stale. The dry-run log entry (written
     // by bitcoin.dryRun) already records the run itself, so no second
     // log entry is written here.
-    // (0.8.1, audit finding 4) The verdicts are network facts
+    // The verdicts are network facts
     // collected above; only the per-tx updates ride into FRESH
     // state, with the same guards re-evaluated there — a tx
     // broadcast or deleted while the run was on the network must
@@ -2289,7 +2279,7 @@ async function handleApi(req, res, pathname) {
     const actions = [];
     for (const r of results) {
       const a = { id: r.id };
-      // The fee (0.7.18): a dry-run OVERWRITES the stored fee with
+      // The fee: a dry-run OVERWRITES the stored fee with
       // the freshly computed one — the input values were fetched
       // from the node for the freshness check anyway. A fee stored
       // wrong (e.g. by the units bug, which read the parent value
@@ -2326,10 +2316,10 @@ async function handleApi(req, res, pathname) {
           if (a.stale) {
             if (ftx.release && ftx.release.status === 'stale') continue;
             ftx.release = { status: 'stale', kind: 'dryrun', trigger: releaseTriggerFor(f, ftx), txid: ftx.txid, method: a.stale.method, lastAttemptAt: now.toISOString(), error: a.stale.error };
-            // (0.8.2) The dry run discovered the staleness — the
+            // The dry run discovered the staleness — the
             // tx's history should say so, not just its card.
             pushHistory(ftx, 'stale', a.stale.error);
-            // (0.8.7, revised) The set-stale rule: a stale member
+            // The set-stale rule: a stale member
             // does NOT archive its set — the verdict is noted on
             // the set's shared history, and the set keeps firing
             // for its non-stale members.
@@ -2347,7 +2337,7 @@ async function handleApi(req, res, pathname) {
                 txid: ftx.txid, broadcastedAt: now.toISOString(), method: a.own.method,
                 confirmations: null, blockHeight: a.own.blockHeight, found: true, checkedAt: now.toISOString(),
               };
-              // (0.8.2) The dry run discovered the tx is out there.
+              // The dry run discovered the tx is out there.
               pushHistory(ftx, 'broadcast', 'txid ' + shortTxid(ftx.txid));
               forwardMemberHistory(f, ftx, 'broadcast', 'txid ' + shortTxid(ftx.txid));
               if (a.own.blockHeight != null) {
@@ -2363,7 +2353,7 @@ async function handleApi(req, res, pathname) {
           if (a.conflict) {
             if (ftx.release && ftx.release.status === 'stale') continue;
             ftx.release = { status: 'conflict', kind: 'dryrun', trigger: releaseTriggerFor(f, ftx), txid: ftx.txid, method: a.conflict.method, lastAttemptAt: now.toISOString(), error: a.conflict.error };
-            // (0.8.2) The warning on the card gets its history line.
+            // The warning on the card gets its history line.
             pushHistory(ftx, 'conflict', a.conflict.error);
             forwardMemberHistory(f, ftx, 'conflict', a.conflict.error);
             continue;
@@ -2379,7 +2369,7 @@ async function handleApi(req, res, pathname) {
     // will reject it as non-final until the locktime passes, so it is
     // not counted here. It is named separately, so the summary never
     // implies it will successfully broadcast right now. A
-    // Slipstream-route transaction is named separately too (0.7.16):
+    // Slipstream-route transaction is named separately too:
     // it would be submitted to MARA, not broadcast to the public
     // mempool — so if every would-be transaction is Slipstream, the
     // summary says "would submit to Slipstream"; if only some are,
@@ -2392,7 +2382,7 @@ async function handleApi(req, res, pathname) {
     // transactions: only one of them can ever be confirmed, so the shared
     // input is flagged on both cards. A single dry-run does not run
     // this check — it is a property of the whole list. Archived
-    // transactions are excluded from the check (round 12): their fate
+    // transactions are excluded from the check: their fate
     // is decided, so a live transaction sharing an input with an
     // archived one is not warned about it.
     const overlaps = body && body.id ? [] : bitcoin.findSharedInputs(state.bitcoin.txs || []);

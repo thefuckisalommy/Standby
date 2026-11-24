@@ -2,7 +2,7 @@
 # Pattern: Umbrel injects `app_proxy`; the web service is reached via
 # APP_HOST: <app-id>_<service>_1 and APP_PORT (internal port).
 #
-# (0.8.11.1) Both services run as UID/GID 1000, the owner Umbrel gives
+# Both services run as UID/GID 1000, the owner Umbrel gives
 # app data — the image's `node` user, not root. Installs from before
 # 0.8.11.1 wrote their files as root; hooks/pre-start sets the ownership
 # (and moves the check-in directory under data/) on every start, before
@@ -30,7 +30,7 @@ services:
       # traffic.
       STANDBY_BIND: 0.0.0.0
       STANDBY_DEPLOYMENT: umbrel
-      # (0.8.11.1) The app login. Umbrel's own login only guards
+      # The app login. Umbrel's own login only guards
       # traffic through its proxy; every app shares one Docker
       # network, so any other app could reach this container's port
       # directly. APP_PASSWORD is Umbrel's stable per-install
@@ -49,7 +49,7 @@ services:
       CHECKIN_DIR: /checkin
     volumes:
       - ${APP_DATA_DIR}/data:/data
-      # (0.8.11.1) The check-in directory lives under data/ now, so it
+      # The check-in directory lives under data/ now, so it
       # moves with the rest of the app data (umbrelOS 2.0 storage
       # relocation) — hooks/pre-start migrates the old location.
       - ${APP_DATA_DIR}/data/checkin:/checkin
@@ -61,7 +61,7 @@ services:
       retries: 3
       start_period: 20s
 
-  # Check-in receiver (0.6.6): the check-in-only front door, on the LAN
+  # Check-in receiver: the check-in-only front door, on the LAN
   # at port 3101 — NOT behind Umbrel's app-auth proxy, because a key
   # holder has no Umbrel login. It runs the same image with a different
   # command, and it mounts ONLY the shared /checkin directory: the key

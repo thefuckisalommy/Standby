@@ -38,7 +38,7 @@
 #     regression run in parallel (distinct ports); DOM runs after
 #     API because it shares its ports.
 #
-# What it does NOT do: build or push the Docker image. (0.8.11.1)
+# What it does NOT do: build or push the Docker image.
 # The image workflow (.github/workflows/build-standby-image.yml)
 # calls this one first (workflow_call) and builds only if it
 # passes — so a push to main that changes standby/** is tested

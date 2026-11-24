@@ -1,6 +1,6 @@
 'use strict';
 // Standby — startup checks shared by the app and the check-in
-// receiver (0.8.11.1).
+// receiver.
 //
 // Writability: a Standby that cannot write its files is worse than
 // one that is down. Its saves fail one by one (a check-in that

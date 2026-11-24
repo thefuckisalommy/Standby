@@ -1,5 +1,5 @@
 'use strict';
-// Standby — encrypted backups (0.8.12).
+// Standby — encrypted backups.
 //
 // A backup holds every signed transaction, and a signed transaction
 // is bearer: whoever has the file can broadcast it. Unlike the data

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Standby — Umbrel pre-start hook (0.8.11.1). Runs as root on the
+# Standby — Umbrel pre-start hook. Runs as root on the
 # Umbrel host before the containers start, on every start (install,
 # update, restart). Idempotent.
 #

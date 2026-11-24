@@ -1,5 +1,5 @@
 'use strict';
-// Standby check-in receiver — the check-in-only front door (0.6.6).
+// Standby check-in receiver — the check-in-only front door.
 // A separate, minimal service: it holds NO transaction data (it mounts
 // only the shared CHECKIN_DIR, never the app's /data) and it exposes
 // exactly two routes:
@@ -23,7 +23,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-// (0.8.10, audit fix 2) The Host allowlist lives in lib/http.js —
+// The Host allowlist lives in lib/http.js —
 // one implementation for both servers. (fsync) The durable write
 // lives in lib/store.js — one implementation for every state file.
 // Both are pure requires with no load-time side effects, and the
@@ -40,12 +40,12 @@ const { requireWritable } = require('../lib/startup');
 const PORT = process.env.PORT ? CONFIG_PORT : 3101;
 const MAX_KEY_LEN = 256;
 
-// (0.8.11.1) The check-in directory must be writable (last.json),
+// The check-in directory must be writable (last.json),
 // or the receiver exits with the fix — see lib/startup.js.
 requireWritable([{ dir: CHECKIN_DIR, create: true }], DEPLOYMENT, 'Standby receiver');
 
 function sendJson(res, status, obj) {
-  // (0.8.10, audit fix 3) The receiver serves JSON only: no full
+  // The receiver serves JSON only: no full
   // CSP, just nosniff + frame-ancestors, so its responses cannot be
   // framed or sniffed as another type.
   res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -92,14 +92,14 @@ function writeLastCheckin(keyId, label, sourceIp) {
   if (sourceIp) doc.sourceIp = sourceIp;
   fs.mkdirSync(CHECKIN_DIR, { recursive: true });
   const file = path.join(CHECKIN_DIR, 'last.json');
-  // (0.8.10, fsync durability) Write + fsync + rename + dir fsync,
+  // Write + fsync + rename + dir fsync,
   // so a recorded check-in survives a power cut — a lost last.json
   // would silently move the broadcast clock forward.
   writeFileDurable(file, JSON.stringify(doc, null, 2) + '\n');
   return now;
 }
 
-// (0.8.10, audit fix) An uncaught exception is a crash, not a
+// An uncaught exception is a crash, not a
 // condition to serve through: Node warns that continuing after one
 // risks undefined state. So this is uncaughtExceptionMonitor — it
 // only LOGS; the process still terminates with Node's default
@@ -115,7 +115,7 @@ process.on('uncaughtExceptionMonitor', (e) => {
 });
 
 const server = http.createServer((req, res) => {
-  // (0.8.10, audit fix 2) Host allowlist — first, before the URL
+  // Host allowlist — first, before the URL
   // parse, routing, and key check. This port is published directly
   // on the LAN with no proxy in front of it, so the allowlist is
   // the rebinding defense here. 421, plain text, and a log line
@@ -132,9 +132,9 @@ const server = http.createServer((req, res) => {
   try {
     url = new URL(req.url, 'http://localhost');
   } catch (e) {
-    // (0.8.10, audit fix 1) A malformed request target (e.g.
-    // `GET // [`) used to throw here, uncaught, and kill the
-    // process. Answer 400 and keep serving instead.
+    // A malformed request target (e.g. `GET // [`) must not throw
+    // out of the handler and kill the process: answer 400 and keep
+    // serving.
     res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('Bad request URL');
     return;
@@ -147,8 +147,8 @@ const server = http.createServer((req, res) => {
 
   // POST /__test__/throw-uncaught (test-only): same as the app
   // server's hook — throw outside any handler so the suite can
-  // prove the receiver terminates instead of serving through it
-  // (0.8.10 audit fix). Gated on STANDBY_TEST_MODE=1, which only
+  // prove the receiver terminates instead of serving through it.
+  // Gated on STANDBY_TEST_MODE=1, which only
   // the test harness sets; without it this 404s like any unknown
   // path. Answers 200 first — the throw lands after the response.
   if (req.method === 'POST' && pathname === '/__test__/throw-uncaught') {
@@ -196,6 +196,6 @@ const server = http.createServer((req, res) => {
 server.listen(PORT, BIND, () => {
   console.log(`Standby check-in receiver listening on ${BIND}:${PORT} (checkin dir: ${CHECKIN_DIR})`);
   console.log('Standby receiver allowed Hosts: ' + describeAllowedHosts());
-  // (0.8.11.1) No bind warning here: the receiver is meant to be
+  // No bind warning here: the receiver is meant to be
   // reachable on the LAN, and every check-in needs a key.
 });

@@ -1,10 +1,10 @@
 'use strict';
-// Standby — history + release records (split from server.js, 0.8.7.3).
+// Standby — history + release records.
 const store = require('./store');
 const { DATA_DIR } = require('./config');
 const { setOfTx } = require('./triggers');
 
-// Per-transaction history (0.8.2): the tx's own event trail —
+// Per-transaction history: the tx's own event trail —
 // [{ ts, type, detail }], oldest first, capped at 50. Only
 // transitions are recorded (added, fired, broadcast, confirmed,
 // stale, failed, conflict, edited, armed, disarmed, slipstream)
@@ -54,7 +54,7 @@ function firedDetail(set, ruleResults, firedIndexes) {
     .join(' + ');
 }
 
-// (0.8.7, revised) The set-stale rule: a stale member does NOT
+// The set-stale rule: a stale member does NOT
 // archive its set. The set keeps evaluating and firing for its
 // non-stale members; only when EVERY member is stale does the
 // set read archived (see the all-terminal branch in
@@ -68,7 +68,7 @@ function noteSetMemberStale(fresh, tx, error) {
   pushHistory(fset, 'stale', store.memberHistoryDetail(fset, tx, error));
 }
 
-// (0.8.7, round 9) Single history: the set card shows ONE
+// Single history: the set card shows ONE
 // history — the set's. A member's own history keeps recording
 // (it resumes as the tx's trail if the tx ever leaves the set),
 // but the card renders only the set's trail — so a member's
@@ -103,17 +103,16 @@ function recordRelease(state, tx, record, logEntry) {
 }
 
 // Release evaluation — the heart of the app. Each ARMED transaction
-// carries its own rule set (0.8.2: AND / OR over check-in, price,
+// carries its own rule set (AND / OR over check-in, price,
 // UTXO, block-height, set-date, fee-market, manual rules), and the
 // evaluation runs every set in list order: the ones whose combined
 // condition holds fire, via broadcastOne() above. The check-in
-// clock is one rule type now — a check-in rule fires when its own
+// clock is one rule type — a check-in rule fires when its own
 // threshold is release-due; a price rule fires when the price has
 // held past its threshold for an hour; a UTXO rule fires when its
 // outpoint is spent by a confirmed transaction.
-//   1. Skip if nothing armed. There is NO global skip any more
-//      (0.8.0): pause is gone, and vacation is check-in-only —
-//      the check-in evaluator holds a check-in tx while on
+//   1. Skip if nothing armed. There is NO global skip: vacation
+//      is check-in-only — the check-in evaluator holds a check-in tx while on
 //      vacation, while price and UTXO evaluators never look at
 //      it. A disarmed tx is skipped per-tx (the `enabled` filter
 //      below), never by a global flag.
@@ -125,16 +124,16 @@ function recordRelease(state, tx, record, logEntry) {
 //      inputs, not the cycle).
 //   4. Freshness gate + broadcast per firing tx (see broadcastOne).
 //      One tx failing does not stop the others.
-// All-or-none (0.7.10): the firing set is decided once, before any
+// All-or-none: the firing set is decided once, before any
 // broadcast starts. A check-in that lands while the release is
 // running is still recorded and resets the clock for the NEXT
 // cycle, but it does not stop the txs still to broadcast — a release
-// that started finishes. (The audit's finding 1 recommended
-// re-evaluating the clock before each tx; the owner chose all-or-none
-// instead.) What still stops a tx mid-run: it was deleted, replaced,
+// that started finishes (re-evaluating the clock before each tx was
+// considered; all-or-none is the deliberate choice). What still
+// stops a tx mid-run: it was deleted, replaced,
 // or disabled — explicit owner actions.
 // A check-in clears the CHECK-IN rules' cycle-scoped release records
-// and starts a new cycle for them (0.8.0: a price or UTXO rule's
+// and starts a new cycle for them (a price or UTXO rule's
 // record belongs to its own trigger, not the clock) — a stale record
 // is not cycle-scoped and survives; but if a broadcast already went
 // out, the funds have already moved; the broadcast log keeps the

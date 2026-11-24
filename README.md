@@ -139,6 +139,10 @@ Two things to know. First, the fee floor: Slipstream only accepts transactions a
 
 **What Standby is not.** Standby is a helper, not an inheritance plan, and it cannot promise your transactions will ever be broadcast. It holds no keys and cannot recover anything by itself — it can only broadcast transactions you already signed and stored. It runs on one device that can fail, lose power, or be destroyed; it depends on network access and on a reachable node. The inputs your transactions spend can be moved first, which makes a stored transaction invalid; a stored transaction may not even be valid under Bitcoin's consensus rules, which Standby does not fully check; and even a transaction that does get broadcast can carry too little fee to confirm, leaving it stuck in the mempool. And like any software, it can have bugs. Any of those can mean your heirs receive nothing from this app — the broadcast never goes out, or it goes out and never confirms. If you use Standby as part of planning for the unexpected, have a backup that does not depend on this app working.
 
+## Changelog
+
+What changed in each release: [CHANGELOG.md](CHANGELOG.md).
+
 ## Security
 
 Security notes live in [SECURITY.md](SECURITY.md) — read it before arming a transaction. The short version: Standby has its own login (on Umbrel, the password shown on the app page; on Linux, `STANDBY_PASSWORD`); your signed transactions are stored unencrypted and are bearer, so the data directory is readable by the app's user only; and the check-in receiver on port 3101 is plain HTTP, so keep it on your trusted LAN and Tailscale network only. On the generic Docker path the login is optional and the web UI listens on localhost only by default; see "Run on any Linux box" before exposing it.

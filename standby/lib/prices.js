@@ -1,5 +1,5 @@
 'use strict';
-// Standby — price / fee / tip fetchers + caches (split from server.js, 0.8.7.3).
+// Standby — price / fee / tip fetchers + caches.
 const store = require('./store');
 const bitcoin = require('./bitcoin');
 const { caches } = require('./caches');
@@ -7,7 +7,7 @@ const { DATA_DIR } = require('./config');
 const { CHECK_CADENCE_SECONDS_DEFAULT, CHECK_CADENCE_SECONDS_MAX, CHECK_CADENCE_SECONDS_MIN, PRICE_AGREEMENT_PCT_DEFAULT, PRICE_AGREEMENT_PCT_MAX, PRICE_AGREEMENT_PCT_MIN } = require('./util');
 
 // ---------------------------------------------------------------------------
-// Trigger evaluation (0.8.0, unified 0.8.2). One pure condition
+// Trigger evaluation. One pure condition
 // function per rule type — checkXRule(state, rule, now, ctx) —
 // shared by BOTH paths: the evaluator (evaluateRule /
 // evaluateTrigger, which writes the rule's triggerState slice and
@@ -33,8 +33,8 @@ const { CHECK_CADENCE_SECONDS_DEFAULT, CHECK_CADENCE_SECONDS_MAX, CHECK_CADENCE_
 
 // The configured price sources (Settings: priceSources
 // {source1, source2}). Each slot is either a provider id string
-// ('kraken', ...) or a custom object { id: 'custom', url, path }
-// (0.8.1). An unusable value or two identical sources fall back
+// ('kraken', ...) or a custom object { id: 'custom', url, path }.
+// An unusable value or two identical sources fall back
 // to the defaults — the settings validator (PUT /api/settings)
 // rejects those, but a hand-edited or restored state must never
 // break the fetch.
@@ -56,7 +56,7 @@ function priceSourceError(v) {
   return 'unknown price provider: ' + v;
 }
 
-// The user controls (0.8.0), read defensively like
+// The user controls, read defensively like
 // priceSourcesOf above: the settings validator (PUT
 // /api/settings, restore) rejects out-of-range values, but a
 // hand-edited or restored state must never break an evaluation
@@ -104,15 +104,15 @@ async function fetchPriceCached(sources, cadenceSeconds) {
   return readings;
 }
 
-// The fee cache for the fee-market trigger (0.8.1): the economy
+// The fee cache for the fee-market trigger: the economy
 // fee from BOTH configured nodes (per endpoint, TTL = a fixed
 // 5 minutes — NODE_FEE_CACHE_TTL_MS below). The TTL is NOT the
 // check cadence: the market fee moves slowly (a low-fee window
 // lasts longer than 5 minutes), so one fetch per 5 minutes for
 // ALL fee rules combined is the intended tradeoff — the trigger
 // may fire up to 5 minutes late, and the fee pill shows a fee
-// up to 5 minutes old, the same trust-the-warm-cache philosophy
-// as the 0.8.4 fee-pill fix. This is separate from the hourly
+// up to 5 minutes old, the same trust-the-warm-cache approach
+// as the fee pill. This is separate from the hourly
 // caches.currentFees (used by the fee verdict): the verdict only
 // needs an hourly fee. The cache is keyed by the endpoint URLs
 // — a settings change makes it stale, so the next read fetches
@@ -124,7 +124,7 @@ async function fetchPriceCached(sources, cadenceSeconds) {
 // bitcoin.combineFeeReadings; no usable reading means 'unknown',
 // never a fire.
 
-const NODE_FEE_CACHE_TTL_MS = 5 * 60 * 1000; // (0.8.5) one fee fetch per 5 minutes, shared across all fee rules
+const NODE_FEE_CACHE_TTL_MS = 5 * 60 * 1000; // one fee fetch per 5 minutes, shared across all fee rules
 
 async function fetchNodeFeesCached(endpoints) {
   const eps = (endpoints && endpoints.length) ? endpoints : bitcoin.endpointsFor({ primaryApiUrl: 'https://mempool.space', secondaryApiUrl: 'https://blockstream.info/api' });
@@ -143,7 +143,7 @@ async function fetchNodeFeesCached(endpoints) {
 }
 
 // The tip heights as fetched from the nodes, cached for one tick
-// (0.8.5) — the same pattern as caches.nodeFee: N blockheight rules
+// — the same pattern as caches.nodeFee: N blockheight rules
 // in one tick cost ONE tip fetch, not N. The cache is keyed by
 // endpoint bases (a settings change busts it) and its TTL is the
 // check cadence. A cached read makes no HTTP request, so it does
@@ -182,8 +182,8 @@ function priceCacheForState(agreementPct) {
   };
 }
 
-// The consolidated exchange status for the readiness card
-// (0.8.0): one status for the configured price sources, so the
+// The consolidated exchange status for the readiness card:
+// one status for the configured price sources, so the
 // readiness card shows it once instead of repeating it per
 // price tx. OK = both responding and agreeing within the
 // configured agreement; degraded = one source down
@@ -228,7 +228,7 @@ function exchangeStatusFor(pc, sources, agreementPct) {
 }
 
 // Refresh the price cache when it is stale and any tx has a price
-// rule (0.8.0; 0.8.4: armed or not — a disarmed price tx's pill
+// rule, armed or not (a disarmed price tx's pill
 // reads the cache too, and the tick evaluates disarmed txs, so a
 // price rule that is disarmed-only must still keep the cache warm).
 // The 1-minute fast tick and the startup refresh call this, so a

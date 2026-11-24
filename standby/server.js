@@ -3,20 +3,18 @@
 // Serves the static UI and a JSON API backed by plain files in DATA_DIR.
 // Run:  PORT=3100 DATA_DIR=./data node server.js
 //
-// What this app is (0.7.22): a dead man's switch that does ONE thing —
-// broadcast the owner's pre-signed Bitcoin transactions if they stop
-// checking in past the broadcast threshold — or immediately, on the
-// owner's say-so (Broadcast Now on a transaction's own card, or
-// Broadcast Armed for the armed ones). There is no message delivery any more: no Part 1 /
-// Part 2, no recipient, no channels, no reminders. Each transaction is
-// signed in the owner's own wallet and pasted as raw hex; the app never
-// sees keys. Each has its own enable toggle and its own release
+// What this app is: it holds the owner's pre-signed Bitcoin
+// transactions and broadcasts them when their trigger fires — a
+// missed check-in, a price, a spent UTXO, a block height, a date, a
+// fee level — or immediately, on the owner's say-so (Broadcast Now on
+// a transaction's own card, or Broadcast Armed for the armed ones).
+// Each transaction is signed in the owner's own wallet and pasted as
+// raw hex; the app never sees keys. Each has its own enable toggle and its own release
 // record. New transactions are armed by default. The broadcast is REAL,
 // via the mempool API — a primary node and a secondary node (both
 // user-chosen mempool endpoints, default mempool.space and
 // blockstream.info/api), primary first, secondary if the primary does
-// not answer. There is no Bitcoin Core RPC path any more (removed in
-// 0.5.4). The "test" buttons are dry-runs that check the inputs are
+// not answer. The "test" buttons are dry-runs that check the inputs are
 // still unspent and never broadcast. A dry-run that finds spent inputs
 // records the transaction stale on the spot: staleness is a durable
 // fact about the inputs, not a cycle record and not page memory, so it
@@ -30,7 +28,7 @@
 // out (a manual broadcast does not count) and a check-in resets it
 // to 'on-track'. Broadcast Armed only attempts the armed transactions
 // that are not archived (broadcasted or stale).
-// 0.6.6 adds check-in API keys: a key lets a service or app check in
+// Check-in API keys: a key lets a service or app check in
 // for the owner, and it can only record a check-in — it cannot read
 // transactions or broadcast. Each service gets its own labelled key
 // (shown once, stored as a hash, revocable on its own), and the
@@ -53,7 +51,7 @@ const { refreshPriceIfStale } = require('./lib/prices');
 const { handleApi } = require('./lib/api');
 const { serveStatic, sendError, setSecurityHeaders, hostAllowed, describeAllowedHosts, startupSecurityNotes } = require('./lib/http');
 
-// (0.8.11.1) Before anything else touches the disk: the data
+// Before anything else touches the disk: the data
 // directory (and the check-in directory, when it exists) must be
 // writable, or the app exits with the fix — see lib/startup.js.
 // Then tighten an older install's permissions: the signed
@@ -67,14 +65,14 @@ requireWritable([
   if (tightened) console.log('Standby: made ' + tightened + ' data path(s) owner-only (0700 directory, 0600 files)');
 }
 
-// (0.8.10, audit fix) An uncaught exception is a crash, not a
+// An uncaught exception is a crash, not a
 // condition to serve through: Node warns that continuing after one
 // risks undefined state, and for an app that broadcasts
 // transactions a silently-corrupted process is worse than a short
 // outage. So this is uncaughtExceptionMonitor — it only LOGS; the
 // process still terminates with Node's default behaviour, and
 // Docker restarts it (restart: on-failure on both services, and
-// the Umbrel containers run the same policy — verified live).
+// the Umbrel containers run the same policy).
 // The request handler below is guarded, so a bad request still
 // gets a 400 instead of killing the process; only a throw OUTSIDE
 // a guarded handler reaches here. State is re-read from disk on
@@ -85,7 +83,7 @@ process.on('uncaughtExceptionMonitor', (e) => {
   console.error('uncaught exception:', e);
 });
 
-// (0.8.10, skip-save) Flush the heartbeat on shutdown: the "I was
+// Flush the heartbeat on shutdown: the "I was
 // online" stamp lives in heartbeat.json, throttled to one write
 // per 5 minutes — a shutdown inside the throttle window would
 // otherwise leave a stamp up to 5 minutes stale (harmless for
@@ -103,7 +101,7 @@ process.on('SIGTERM', flushHeartbeatAndExit);
 process.on('SIGINT', flushHeartbeatAndExit);
 
 const server = http.createServer((req, res) => {
-  // (0.8.10, audit fix 2) Host allowlist — first, before the URL
+  // Host allowlist — first, before the URL
   // parse, routing, and auth: a request whose Host is not an IP
   // literal, localhost, a *.local name, or a name in
   // STANDBY_ALLOWED_HOSTS is a DNS-rebinding probe, not a client.
@@ -120,9 +118,9 @@ const server = http.createServer((req, res) => {
   try {
     url = new URL(req.url, 'http://localhost');
   } catch (e) {
-    // (0.8.10, audit fix 1) A malformed request target (e.g.
-    // `GET // [`) used to throw here, uncaught, and kill the
-    // process. Answer 400 and keep serving instead.
+    // A malformed request target (e.g. `GET // [`) must not throw
+    // out of the handler and kill the process: answer 400 and keep
+    // serving.
     setSecurityHeaders(res);
     res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('Bad request URL');
@@ -151,20 +149,20 @@ server.listen(PORT, BIND, () => {
   console.log(`Standby ${VERSION} listening on ${BIND}:${PORT} (data: ${DATA_DIR}, deployment: ${DEPLOYMENT})`);
   console.log('Standby allowed Hosts: ' + describeAllowedHosts());
   console.log('Standby app login: ' + (PASSWORD ? 'required (STANDBY_PASSWORD set)' : 'off (STANDBY_PASSWORD unset)'));
-  // (0.8.11.1) Who can reach the API without a login? See
+  // Who can reach the API without a login? See
   // startupSecurityNotes in lib/http.js.
   const notes = startupSecurityNotes({ bind: BIND, deployment: DEPLOYMENT, password: PASSWORD });
   for (const line of notes.info) console.log(line);
   for (const line of notes.warnings) console.warn(line);
-  // (0.8.11.1) Endpoint overrides are never silent.
+  // Endpoint overrides are never silent.
   if (MEMPOOL_OVERRIDE) console.log('Standby: MEMPOOL_HOST is set — the primary node is ' + MEMPOOL_OVERRIDE + ' (the Settings value is ignored)');
   for (const k of IGNORED_TEST_OVERRIDES) console.warn('Standby: ' + k + ' is set but ignored — it is a test-only override (STANDBY_TEST_MODE=1)');
-  // (0.8.3) Compare the check-in keys in state with the receiver's
+  // Compare the check-in keys in state with the receiver's
   // key list once at startup — see verifyCheckinKeyStore above.
   verifyCheckinKeyStore();
 });
 
-// Release-evaluation timers (0.8.2): the full tick runs once
+// Release-evaluation timers: the full tick runs once
 // shortly after startup and then every checkCadenceSeconds; the
 // hourly tick runs once shortly after startup and then hourly.
 // The startup fee recompute runs once shortly after startup too
@@ -177,6 +175,6 @@ setTimeout(runFullTick, STARTUP_TICK_MS);
 setTimeout(runHourlyTick, STARTUP_TICK_MS);
 setTimeout(recomputeStoredFees, STARTUP_TICK_MS);
 setTimeout(refreshCurrentFeesIfStale, 2000);
-setTimeout(refreshPriceIfStale, 2000); // 0.8.0: a price rule's "currently $X" line is live on first load
+setTimeout(refreshPriceIfStale, 2000); // so a price rule's "currently $X" line is live on first load
 setInterval(runHourlyTick, 60 * 60 * 1000);
 rearmFullTick();

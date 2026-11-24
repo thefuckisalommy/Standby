@@ -16,7 +16,7 @@ COPY public ./public
 # command — `node checkin-receiver/server.js` — on LAN port 3101.
 COPY checkin-receiver ./checkin-receiver
 
-# (0.8.11.1) Run as the image's unprivileged `node` user (UID/GID
+# Run as the image's unprivileged `node` user (UID/GID
 # 1000), not root — on every install path, Umbrel included. The
 # mount points are created owned by it, so an empty named volume
 # starts writable; a bind-mounted host directory must be owned by

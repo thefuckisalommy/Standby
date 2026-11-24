@@ -4,7 +4,6 @@ name: Build standby image
 # to GHCR, so installing the app is just "click install" — no local
 # Docker build.
 #
-# (0.8.11.1)
 #   - The test suites run first (the reusable test.yml); no image is
 #     built from code that fails them.
 #   - Every image is tagged with the app version from

@@ -9,7 +9,7 @@
 # backup is just a copy of those two directories (or the in-app Backup
 # download). See README.md ("Run on any Linux box") and SECURITY.md.
 #
-# App login (0.8.11.1, optional): set STANDBY_PASSWORD — in a `.env` file
+# App login: set STANDBY_PASSWORD — in a `.env` file
 # next to this one (`STANDBY_PASSWORD=...`, chmod 600) or in the shell —
 # and the UI and API require it. Recommended whenever anything other than
 # you can reach port 3100 on this machine (other users, a LAN mapping).
@@ -25,7 +25,7 @@
 # stays localhost-only through the host-side port mapping below
 # (127.0.0.1:...:3100).
 #
-# (0.8.11.1) The two services are on SEPARATE networks. They share only
+# The two services are on SEPARATE networks. They share only
 # the ./checkin directory. The receiver is the LAN-facing one; on a
 # shared network it could call the web API directly, past everything
 # the receiver is meant to be unable to do.
