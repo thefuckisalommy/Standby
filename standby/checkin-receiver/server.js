@@ -23,6 +23,15 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+// (0.8.10, audit fix 2) The Host allowlist lives in lib/http.js —
+// one implementation for both servers. (fsync) The durable write
+// lives in lib/store.js — one implementation for every state file.
+// Both are pure requires with no load-time side effects, and the
+// receiver runs from the same image as the app, so the modules
+// are present; the receiver still mounts only /checkin and holds
+// no transaction data.
+const { hostAllowed, describeAllowedHosts } = require('../lib/http');
+const { writeFileDurable } = require('../lib/store');
 
 const PORT = parseInt(process.env.PORT || '3101', 10);
 const CHECKIN_DIR = process.env.CHECKIN_DIR || '/checkin';
@@ -76,8 +85,10 @@ function writeLastCheckin(keyId, label, sourceIp) {
   if (sourceIp) doc.sourceIp = sourceIp;
   fs.mkdirSync(CHECKIN_DIR, { recursive: true });
   const file = path.join(CHECKIN_DIR, 'last.json');
-  fs.writeFileSync(file + '.tmp', JSON.stringify(doc, null, 2) + '\n', 'utf8');
-  fs.renameSync(file + '.tmp', file);
+  // (0.8.10, fsync durability) Write + fsync + rename + dir fsync,
+  // so a recorded check-in survives a power cut — a lost last.json
+  // would silently move the broadcast clock forward.
+  writeFileDurable(file, JSON.stringify(doc, null, 2) + '\n');
   return now;
 }
 
@@ -91,6 +102,19 @@ process.on('uncaughtException', (e) => {
 });
 
 const server = http.createServer((req, res) => {
+  // (0.8.10, audit fix 2) Host allowlist — first, before the URL
+  // parse, routing, and key check. This port is published directly
+  // on the LAN with no proxy in front of it, so the allowlist is
+  // the rebinding defense here. 421, plain text, and a log line
+  // naming the rejected Host so a lockout is diagnosable.
+  if (!hostAllowed(req.headers.host)) {
+    console.warn('Standby receiver: rejected request with unrecognised Host header: ' + JSON.stringify(req.headers.host));
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Security-Policy', "frame-ancestors 'self'");
+    res.writeHead(421, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('Unrecognised Host header');
+    return;
+  }
   let url;
   try {
     url = new URL(req.url, 'http://localhost');
@@ -146,4 +170,5 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`Standby check-in receiver listening on :${PORT} (checkin dir: ${CHECKIN_DIR})`);
+  console.log('Standby receiver allowed Hosts: ' + describeAllowedHosts());
 });

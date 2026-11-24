@@ -170,6 +170,17 @@ def load_state_file():
 
 def save_state_file(stj):
     json.dump(stj, open(os.path.join(DATA, 'state.json'), 'w'), indent=2)
+    # (0.8.10, skip-save) A test-written state.json defines the
+    # world — including a backdated lastOnlineAt for a grace test.
+    # The heartbeat file is a runtime cache that loadState merges
+    # over the state's own stamp, so a fresh heartbeat left over
+    # from the running app would silently override the seeded
+    # clock. Drop it whenever state is seeded; the next tick
+    # rewrites it. (Same fix as verify099.py's save_state_file.)
+    try:
+        os.remove(os.path.join(DATA, 'heartbeat.json'))
+    except OSError:
+        pass
 
 
 def set_clock(days_back, online_days=0):

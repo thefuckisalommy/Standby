@@ -9,6 +9,15 @@ const path = require('path');
 const STATE_FILE = 'state.json';
 const CHECKIN_LOG = 'checkins.jsonl';
 const BROADCAST_LOG = 'broadcast.jsonl';
+// (0.8.10, skip-save) The heartbeat file: the live "I was online"
+// stamp, kept out of state.json so the every-minute tick does not
+// have to rewrite the whole state to record it. A few bytes,
+// tmp+rename for atomicity, NO backup rotation.
+const HEARTBEAT_FILE = 'heartbeat.json';
+// Throttle: at most one heartbeat write per 5 minutes per data
+// dir. Grace thresholds are 7 days flat / T/4 with a 6-hour
+// minimum, so 5 minutes of staleness costs nothing.
+const HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
 
 function defaultState() {
   const now = new Date().toISOString();
@@ -583,7 +592,7 @@ function resetStateFiles(dataDir) {
   try { names = fs.readdirSync(dataDir); } catch { return 0; }
   let removed = 0;
   for (const name of names) {
-    if (name === STATE_FILE || name === BACKUP_FILE || name === PRE_MIGRATION_FILE
+    if (name === STATE_FILE || name === BACKUP_FILE || name === PRE_MIGRATION_FILE || name === HEARTBEAT_FILE
         || name.startsWith(DAILY_BACKUP_PREFIX) || name.startsWith(CORRUPT_FILE_PREFIX)) {
       try { fs.unlinkSync(path.join(dataDir, name)); removed++; } catch { /* already gone */ }
     }
@@ -802,6 +811,21 @@ function loadState(dataDir) {
   // mergeDefaults already keeps a stored array; this pass drops
   // anything malformed and prunes past the 90-day window.
   state.feeHistory = sanitizeFeeHistory(state.feeHistory);
+  // (0.8.10, skip-save) Merge the heartbeat: the live "I was
+  // online" stamp lives in heartbeat.json (written by the tick,
+  // throttled to 5 minutes), and state.json's copy is only a
+  // fallback, refreshed on real saves. On EVERY load — state is
+  // re-read constantly and applyGrace runs on reads too — the
+  // in-memory value is max(heartbeat, state): a missing or
+  // corrupt heartbeat falls back to the state's own stamp, and a
+  // future-dated heartbeat is safe (grace math treats a negative
+  // gap as no grace). The merge is READ-ONLY: it never writes
+  // the merged value back — a write-back would defeat the
+  // saveState dedupe below, since the merged stamp would differ
+  // from the last written one on every load. The merged value
+  // rides along on the next REAL save instead, keeping the
+  // fallback copy within ~1 hour (the hourly node-test save).
+  mergeHeartbeat(state, dataDir);
   // (0.8.0) The `paused` setting is gone — Global Arm/Disarm
   // replaces it. Prune it from older state files so a stale
   // `paused: true` can never resurface through /api/state.
@@ -1058,14 +1082,178 @@ function loadState(dataDir) {
 function saveState(dataDir, state) {
   ensureDir(dataDir);
   state.updatedAt = new Date().toISOString();
+  // (0.8.10, skip-save) Write only when something MEANINGFUL
+  // changed: the comparison excludes updatedAt (stamped on every
+  // save), checkin.lastOnlineAt (refreshed by the heartbeat merge
+  // on every load), and each triggerState slice's lastEvalAt /
+  // lastPriceAt / lastOutspend.checkedAt (the evaluators stamp
+  // them on every evaluation — and the UI reads none of the
+  // three). Excluding updatedAt alone would not be enough: the
+  // merged heartbeat value advances every tick, so a comparison
+  // that included lastOnlineAt would differ every tick and the
+  // skip would never fire — and without the slice timestamps,
+  // the tick's trigger-state save would rewrite the file every
+  // tick anyway. The skip covers the backup rotation too: no
+  // write, no rotation. A skipped save still returns the state —
+  // callers never depend on the write having happened.
+  // The comparison is exact-string equality on the full content
+  // minus those fields, so a skip can only fire when the file
+  // already holds that content (modulo the excluded fields) —
+  // as long as the cache is valid. The cache is per process
+  // and per file path; a restart starts empty, so the first save
+  // after a restart always writes. But the cache is only valid
+  // while the file still holds what the last saveState wrote:
+  // any out-of-band writer (a hand-edit, a restore, a test
+  // seeding state.json directly) moves the file without telling
+  // the cache, and a mutation that restores the cached values
+  // would then be silently skipped. The DOM suite caught
+  // exactly that: Resume after a directly-seeded grace did
+  // nothing, because the cache still held the cleared grace
+  // from the previous Resume. So the cache is validated
+  // against the file's mtime+size before it is trusted: a
+  // mismatch means the file moved under us and the skip must
+  // not fire. (0.8.10, skip-save cache fix.)
+  const comparable = comparableState(state);
+  const file = path.join(dataDir, STATE_FILE);
+  const last = lastWritten.get(file);
+  if (last && last.comparable === comparable) {
+    try {
+      const st = fs.statSync(file);
+      if (st.mtimeMs === last.mtimeMs && st.size === last.size) return state;
+    } catch (e) { /* missing/unreadable: fall through and write */ }
+  }
   // (0.8.3) Rotate the backups while the current state.json is
   // still the previous version — see rotateStateBackups above.
   rotateStateBackups(dataDir);
-  const file = path.join(dataDir, STATE_FILE);
-  const tmp = file + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(state, null, 2) + '\n', 'utf8');
-  fs.renameSync(tmp, file);
+  writeFileDurable(file, JSON.stringify(state, null, 2) + '\n');
+  const written = fs.statSync(file);
+  lastWritten.set(file, { comparable, mtimeMs: written.mtimeMs, size: written.size });
   return state;
+}
+
+// The last saveState write, per state file: the comparison
+// string plus the file's mtime+size as written, so an
+// out-of-band edit invalidates the cache (see saveState above).
+// (0.8.10, skip-save — see saveState above.)
+const lastWritten = new Map();
+
+// The saveState comparison (0.8.10, skip-save): the state as it
+// would be written, minus the fields that advance on every tick
+// without meaning anything changed. See saveState for why each
+// field is excluded. Values that matter — statuses, reasons,
+// prices, tips, fees, outspends, grace, connection stamps —
+// all still compare, so any real change still writes.
+function comparableState(state) {
+  const copy = JSON.parse(JSON.stringify(state));
+  delete copy.updatedAt;
+  if (copy.checkin && typeof copy.checkin === 'object') delete copy.checkin.lastOnlineAt;
+  for (const tx of (copy.bitcoin && copy.bitcoin.txs) || []) {
+    for (const s of (Array.isArray(tx.triggerState) ? tx.triggerState : [])) {
+      if (s && typeof s === 'object') { delete s.lastEvalAt; delete s.lastPriceAt; if (s.lastOutspend && typeof s.lastOutspend === 'object') delete s.lastOutspend.checkedAt; }
+    }
+  }
+  for (const s of (copy.bitcoin && copy.bitcoin.sets) || []) {
+    for (const sl of (Array.isArray(s.triggerState) ? s.triggerState : [])) {
+      if (sl && typeof sl === 'object') { delete sl.lastEvalAt; delete sl.lastPriceAt; if (sl.lastOutspend && typeof sl.lastOutspend === 'object') delete sl.lastOutspend.checkedAt; }
+    }
+  }
+  return JSON.stringify(copy, null, 2);
+}
+
+// ---------------------------------------------------------------------------
+// Heartbeat (0.8.10, skip-save): the live "I was online" stamp,
+// kept in a tiny file of its own so the tick can record liveness
+// without rewriting the whole state. The tick calls
+// touchHeartbeat (throttled); shutdown calls writeHeartbeat
+// directly (the SIGTERM flush); loadState merges it back via
+// mergeHeartbeat below.
+function readHeartbeat(dataDir) {
+  // The heartbeat's lastOnlineAt ISO string, or null when the
+  // file is missing, unreadable, or malformed. Never throws —
+  // a bad heartbeat is a fallback, not an error.
+  try {
+    const doc = JSON.parse(fs.readFileSync(path.join(dataDir, HEARTBEAT_FILE), 'utf8'));
+    if (doc && typeof doc.lastOnlineAt === 'string') {
+      const at = new Date(doc.lastOnlineAt);
+      if (!Number.isNaN(at.getTime())) return doc.lastOnlineAt;
+    }
+  } catch (e) { /* missing/corrupt: fall back to state */ }
+  return null;
+}
+
+// In-memory throttle record: last heartbeat write per data dir
+// (ms since epoch). A fresh process starts empty, so its first
+// touchHeartbeat always writes.
+const heartbeatLastWrite = new Map();
+
+function writeHeartbeat(dataDir, isoNow) {
+  // Unconditional write (tmp+rename via writeFileDurable, NO
+  // backup rotation — the file is a few bytes and is rewritten
+  // every few minutes). Records the write for the throttle.
+  ensureDir(dataDir);
+  writeFileDurable(path.join(dataDir, HEARTBEAT_FILE), JSON.stringify({ lastOnlineAt: isoNow }) + '\n');
+  heartbeatLastWrite.set(dataDir, Date.now());
+}
+
+function touchHeartbeat(dataDir, isoNow) {
+  // Throttled write: at most once per HEARTBEAT_INTERVAL_MS per
+  // data dir. Returns true when it wrote.
+  const last = heartbeatLastWrite.get(dataDir) || 0;
+  if (Date.now() - last < HEARTBEAT_INTERVAL_MS) return false;
+  writeHeartbeat(dataDir, isoNow);
+  return true;
+}
+
+function mergeHeartbeat(state, dataDir) {
+  // (0.8.10, skip-save) Read-only merge — see the call site in
+  // loadState. The heartbeat wins when it is newer than the
+  // state's own stamp; otherwise the state's stamp stands.
+  if (!state.checkin || typeof state.checkin !== 'object') return;
+  const hb = readHeartbeat(dataDir);
+  if (!hb) return;
+  const cur = state.checkin.lastOnlineAt;
+  if (typeof cur !== 'string' || !cur || hb > cur) state.checkin.lastOnlineAt = hb;
+}
+
+// ---------------------------------------------------------------------------
+// Durable writes (0.8.10, fsync durability — the audit's durability
+// finding, fsync half only; the skip-save half is NOT done). A
+// tmp+rename is atomic, so a crash can never leave a torn state
+// file — but without an fsync the *latest* save can still be lost:
+// the rename may never reach the disk, and after a power cut the
+// directory can point at the previous version (or, on some
+// filesystems, at nothing). So: write the tmp file, fsync the file,
+// close, rename, then fsync the directory so the rename itself is
+// durable. The file fsync is mandatory — a failure there fails the
+// save loudly, exactly as a write failure would. The directory
+// fsync is best-effort: if the platform cannot fsync a directory
+// it warns and continues — the file contents are already durable,
+// only the directory entry might lag a power cut. A power-loss
+// guarantee cannot be unit-tested; the suite verifies the write
+// path (round-trip, no .tmp left behind), not the crash guarantee.
+function fsyncDir(dir) {
+  let fd;
+  try {
+    fd = fs.openSync(dir, 'r');
+    fs.fsyncSync(fd);
+  } catch (e) {
+    console.warn('Standby: could not fsync directory ' + dir + ': ' + e.message);
+  } finally {
+    if (fd !== undefined) { try { fs.closeSync(fd); } catch (e) {} }
+  }
+}
+
+function writeFileDurable(file, content) {
+  const tmp = file + '.tmp';
+  const fd = fs.openSync(tmp, 'w');
+  try {
+    fs.writeFileSync(fd, content, 'utf8');
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+  fs.renameSync(tmp, file);
+  fsyncDir(path.dirname(file));
 }
 
 function appendJsonl(dataDir, file, entry) {
@@ -1098,7 +1286,7 @@ function writeJsonl(dataDir, file, entries) {
 }
 
 module.exports = {
-  loadState, saveState, defaultState, newTxId, newSetId,
+  loadState, saveState, writeFileDurable, writeHeartbeat, touchHeartbeat, defaultState, newTxId, newSetId,
   appendCheckin, readCheckins, writeCheckins,
   appendBroadcastLog, readBroadcastLog, writeBroadcastLog,
   normalizeTrigger, normalizeRule, triggerOf, triggerRulesOf, triggerTypesOf, hasTriggerType,

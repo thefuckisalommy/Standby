@@ -2,6 +2,8 @@
 // Standby — static serving + request plumbing (split from server.js, 0.8.7.3).
 const store = require('./store');
 const fs = require('fs');
+const net = require('net');
+const os = require('os');
 const path = require('path');
 const { DATA_DIR, PUBLIC_DIR } = require('./config');
 const { sendError } = require('./util');
@@ -62,11 +64,15 @@ function setSecurityHeaders(res) {
 // app-auth cookie attached. So a state-changing /api request must
 // pass both checks:
 //   (a) a present Origin must match the host the request reached (the
-//       Host header), or the X-Forwarded-Host the proxy sets — or both
-//       sides must be loopback. A missing Origin (curl, a script, the
-//       DOM test shim — Node's fetch sends none) is still allowed.
-//       This is the same rule Umbrel's own Murmur app uses behind the
-//       app proxy, which preserves Host.
+//       Host header) — or both sides must be loopback. A missing Origin
+//       (curl, a script, the DOM test shim — Node's fetch sends none)
+//       is still allowed. This is the same rule Umbrel's own Murmur app
+//       uses behind the app proxy, which preserves Host.
+//       X-Forwarded-Host is NOT trusted here (0.8.10, audit fix 2):
+//       Umbrel's proxy sets it to the browser's Host, so behind the
+//       proxy it can never add information the Host header does not
+//       already carry — and a direct request can forge it freely.
+//       Trusting it used to let a spoofed Host+Origin pair pass.
 //   (b) the Content-Type must be application/json — a cross-origin
 //       HTML form can only send urlencoded / multipart / text, and a
 //       no-cors fetch cannot set a JSON content type without a CORS
@@ -85,14 +91,66 @@ function isLoopback(h) {
   return h === 'localhost' || h === '127.0.0.1' || h === '::1';
 }
 
+// ---------------------------------------------------------------------------
+// Host allowlist (0.8.10, audit fix 2): a DNS-rebinding page cannot
+// reach this server through the browser's own Host header — the page
+// is served from the attacker's domain, so its requests arrive with
+// the attacker's Host — but a direct fetch to a LAN IP, or a
+// same-origin request from a page the owner opened some other way,
+// still carries a legitimate Host. The allowlist keys off the
+// browser-facing names, which is safe because Umbrel's auth proxy
+// forwards Host verbatim (changeOrigin: false on both proxy layers,
+// verified in umbreld source Nov 23) — the container sees exactly
+// what the browser sent, never the internal container name.
+//   Allowed with zero configuration: any IP literal (an IP Host
+//   cannot be rebound — rebinding sends the attacker's domain),
+//   'localhost', any '*.local' name, and the machine's own
+//   hostname (os.hostname() — covers a bare http://umbrel).
+//   Escape hatch: STANDBY_ALLOWED_HOSTS, a comma-separated list of
+//   extra hostnames (Tailscale MagicDNS *.ts.net, a custom domain,
+//   a .onion address, a reverse-proxy hostname). On Umbrel there
+//   is no UI for adding an env var, so that means editing a file
+//   on the Pi — the default rule covers every access path Ryan
+//   uses (LAN IP, umbrel.local, Tailscale IP, localhost) with
+//   nothing to configure. A missing Host header is rejected:
+//   HTTP/1.1 clients always send one, and accepting a request
+//   with no Host would defeat the check.
+function hostnameOf(hostHeader) {
+  return hostOf(hostHeader);
+}
+
+function extraAllowedHosts() {
+  return (process.env.STANDBY_ALLOWED_HOSTS || '').split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function hostAllowed(hostHeader) {
+  const name = hostnameOf(hostHeader);
+  if (!name) return false;
+  if (net.isIP(name)) return true;
+  if (name === 'localhost' || name.endsWith('.local')) return true;
+  if (name === os.hostname().toLowerCase()) return true;
+  if (extraAllowedHosts().includes(name)) return true;
+  return false;
+}
+
+// One line for the startup log, so a lockout is diagnosable at a
+// glance: the default rule plus any names from the env var.
+function describeAllowedHosts() {
+  const parts = ['any IP literal', 'localhost', '*.local', os.hostname().toLowerCase()];
+  const extra = extraAllowedHosts();
+  if (extra.length) parts.push('STANDBY_ALLOWED_HOSTS: ' + extra.join(', '));
+  return parts.join(', ');
+}
+
 function csrfAllowed(req) {
   const origin = req.headers.origin;
   if (origin) {
     let oh;
     try { oh = hostOf(new URL(origin).hostname); } catch { return false; }
     const host = hostOf(req.headers.host);
-    const fwd = hostOf((req.headers['x-forwarded-host'] || '').split(',')[0]);
-    if (oh !== host && oh !== fwd && !(isLoopback(oh) && isLoopback(host))) return false;
+    if (oh !== host && !(isLoopback(oh) && isLoopback(host))) return false;
   }
   const ct = (req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
   if (ct !== 'application/json') return false;
@@ -127,4 +185,4 @@ function saveMutation(mutator) {
   return fresh;
 }
 
-module.exports = { MIME, serveStatic, hostOf, isLoopback, csrfAllowed, saveMutation, setSecurityHeaders, CSP };
+module.exports = { MIME, serveStatic, hostOf, hostnameOf, hostAllowed, describeAllowedHosts, isLoopback, csrfAllowed, saveMutation, setSecurityHeaders, CSP };

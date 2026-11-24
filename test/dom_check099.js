@@ -2082,6 +2082,12 @@ function check(name, cond, detail) {
   heldSt.checkin.lastCheckinAt = new Date(heldNow - 40 * 86400000 - 30000).toISOString();
   heldSt.checkin.lastOnlineAt = new Date(heldNow - 40 * 86400000).toISOString();
   fs.writeFileSync(DATA_FILE, JSON.stringify(heldSt, null, 2) + '\n');
+  // (0.8.10, skip-save) Drop the heartbeat cache too: a
+  // test-written state.json defines the world, and the fresh
+  // heartbeat left over from the running app would silently
+  // override the seeded 40-day gap on the rerender's read.
+  // (Same fix as the API and regression suites' seeders.)
+  try { fs.unlinkSync(DATA_FILE.replace('state.json', 'heartbeat.json')); } catch (e) { /* no heartbeat yet */ }
   await rerender(appJs);
   const heldBar35 = checkinBar('Dom Check-in');
   const heldBar10 = checkinBar('Dom Check-in 10d');
@@ -2462,7 +2468,14 @@ function check(name, cond, detail) {
     elText(els['grace-held']));
   // Under a day left: a grace ending ~12h out reads
   // "less than a day left" instead of "0 days left".
-  setDomGrace({ graceUntil: new Date(Date.now() + 12 * 3600000).toISOString(), triggeredAt: new Date(Date.now() - 6 * 86400000).toISOString(), offlineGapDays: 8 });
+  // triggeredAt is 6.5 days ago (not 6): with until 12h out
+  // the duration is exactly 7 days, so Math.round lands on 7.
+  // A 6-day trigger puts the duration at exactly 6.5 days —
+  // the rounding boundary — and a 1 ms gap between the seed's
+  // two Date.now() calls flips the render to "Day 6 of 6"
+  // (measured ~0.1% of seeds; a pre-existing flake, not an
+  // app bug — the app only ever creates whole-day durations).
+  setDomGrace({ graceUntil: new Date(Date.now() + 12 * 3600000).toISOString(), triggeredAt: new Date(Date.now() - 6.5 * 86400000).toISOString(), offlineGapDays: 8 });
   await rerender(appJs);
   check('grace card: under a day left reads "less than a day left" (Day 6 of 7)',
     els['grace-bar-day'] && els['grace-bar-day'].textContent === 'Day 6 of 7'

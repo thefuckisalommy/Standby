@@ -191,6 +191,25 @@ Boots the branch-0.8.5 app (port 3438), the check-in receiver
       the API, and the receiver; the load-failure notice renders
       its message as text, never as HTML (the DOM half of fix 4
       lives in dom_check099_error.js).
+  33. Audit fix 2 + fsync (0.8.10): the Host allowlist — a foreign
+      Host gets a 421 on both servers, IP literals / localhost /
+      *.local / the machine's hostname pass, STANDBY_ALLOWED_HOSTS
+      adds names, and a spoofed X-Forwarded-Host no longer
+      bypasses the CSRF gate; fsync durability — a save
+      round-trips through state.json with no .tmp left behind,
+      and the receiver's last.json does the same. (True power-loss
+      durability cannot be unit-tested; the suite verifies the
+      write path, not the crash guarantee.)
+  34. Skip-save + heartbeat (0.8.10): quiet ticks leave state.json
+      byte-identical with its mtime untouched (and the heartbeat
+      unrewritten inside its 5-minute throttle); a grace activation
+      still writes; the heartbeat advances across a restart and
+      the served lastOnlineAt is the merged heartbeat value; a
+      SIGTERM flush lands the heartbeat and exits 0; a missing or
+      corrupt heartbeat falls back to state.lastOnlineAt (checked
+      directly against lib/store.js — the running server rewrites
+      the heartbeat on its first tick, so a live test could not
+      observe the fallback).
 Ports: app 3438, receiver 3439, stubs 18235/18236 — no collision
 with the 095 suite (app 3388, receiver 3389, stubs 18175/18176) or
 the 096 suite (app 3398, receiver 3399, stubs 18185/18186).
@@ -202,6 +221,8 @@ import http.client
 import json
 import os
 import shutil
+import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -241,6 +262,46 @@ def raw_get(path, base):
     conn.endheaders()
     r = conn.getresponse()
     return r.status, r.read()
+
+
+def raw_req(method, path, base, host=None, headers=None, body=None):
+    # Like raw_get, but the Host header is caller-controlled (or
+    # omitted) and extra headers / a body can be sent — for the
+    # Host-allowlist checks, where urllib would always send its own
+    # Host. Returns (status, body bytes).
+    u = urllib.parse.urlparse(base)
+    conn = http.client.HTTPConnection(u.hostname, u.port, timeout=5)
+    conn.putrequest(method, path, skip_host=True)
+    if host is not None:
+        conn.putheader('Host', host)
+    for k, vv in (headers or {}).items():
+        conn.putheader(k, vv)
+    if body is not None:
+        conn.putheader('Content-Length', str(len(body)))
+    conn.endheaders(body)
+    r = conn.getresponse()
+    return r.status, r.read()
+
+
+def raw_socket_status(request_lines, base):
+    # A bare socket: the only way to send a request with no Host
+    # header at all. (http.client always sends one unless told not
+    # to — and Node rejects a Host-less HTTP/1.1 request at the
+    # parser, before the handler ever runs — so the request must
+    # be HTTP/1.0, where Host is optional.) Returns the status int.
+    u = urllib.parse.urlparse(base)
+    s = socket.create_connection((u.hostname, u.port), timeout=5)
+    try:
+        s.sendall(request_lines)
+        data = b''
+        while b'\r\n\r\n' not in data:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+        return int(data.split(b' ')[1])
+    finally:
+        s.close()
 
 
 def resp_headers(method, path, base):
@@ -302,6 +363,18 @@ def load_state_file():
 
 def save_state_file(stj):
     json.dump(stj, open(os.path.join(DATA, 'state.json'), 'w'), indent=2)
+    # (0.8.10, skip-save) A test-written state.json defines the
+    # world — including a backdated lastOnlineAt for a grace test.
+    # The heartbeat file is a runtime cache that loadState merges
+    # over the state's own stamp, so a fresh heartbeat left over
+    # from the running app would silently override the seeded
+    # clock (the same reason §22 removes the receiver's last.json
+    # before simulating a clock). Drop it whenever state is
+    # seeded; the next tick rewrites it.
+    try:
+        os.remove(os.path.join(DATA, 'heartbeat.json'))
+    except OSError:
+        pass
 
 
 def state_tx(tx_id, base=BASE):
@@ -5325,6 +5398,297 @@ def main():
               hdrs.get('content-security-policy'))
         check('32 headers: receiver /health carries no X-Frame-Options',
               'x-frame-options' not in hdrs, hdrs)
+
+        # --- 33. audit fix 2 (Host allowlist) + fsync (0.8.10) -------
+        # (fix 2) A foreign Host is a DNS-rebinding probe, not a
+        # client: 421 on both servers, before routing or auth. An
+        # IP literal, localhost, a *.local name, and the machine's
+        # own hostname pass with zero configuration; a missing Host
+        # is rejected too.
+        s, body = raw_req('GET', '/api/health', BASE, host='evil.example')
+        check('33 hosts: foreign Host gets 421 on the app',
+              s == 421 and body == b'Unrecognised Host header', (s, body))
+        s, body = raw_req('GET', '/health', RBASE, host='evil.example')
+        check('33 hosts: foreign Host gets 421 on the receiver',
+              s == 421 and body == b'Unrecognised Host header', (s, body))
+        s, body = raw_req('GET', '/api/health', BASE, host='127.0.0.1:3438')
+        check('33 hosts: IP literal Host passes', s == 200, (s, body))
+        s, body = raw_req('GET', '/api/health', BASE, host='umbrel.local')
+        check('33 hosts: umbrel.local passes', s == 200, (s, body))
+        s, body = raw_req('GET', '/api/health', BASE, host=os.uname().nodename.lower())
+        check('33 hosts: machine hostname passes', s == 200, (s, body))
+        check('33 hosts: missing Host header is rejected',
+              raw_socket_status(b'GET /api/health HTTP/1.0\r\n\r\n', BASE) == 421)
+        check('33 hosts: startup log names the allowed Hosts',
+              'Standby allowed Hosts: any IP literal, localhost, *.local, ' in read_log(),
+              read_log()[-500:])
+        # STANDBY_ALLOWED_HOSTS: a second instance on port 3440
+        # (§31's port — its instance is stopped by now) with two
+        # extra names. The names pass, anything else still 421s,
+        # and the IP-literal rule still holds with the var set.
+        extra_data = '/tmp/heirloom099-extra'
+        extra_checkin = '/tmp/heirloom099-extra-checkin'
+        shutil.rmtree(extra_data, ignore_errors=True)
+        shutil.rmtree(extra_checkin, ignore_errors=True)
+        check('33 hosts: port 3440 free', port_closed(3440))
+        extra_env = dict(APP_ENV)
+        extra_env.update({'PORT': '3440', 'DATA_DIR': extra_data, 'CHECKIN_DIR': extra_checkin,
+                          'STANDBY_ALLOWED_HOSTS': 'extra.ts.net, custom.example'})
+        extra_base = 'http://127.0.0.1:3440'
+        extra_app = start(['node', 'server.js'], env=extra_env, cwd=APP, log=LOG)
+        check('33 hosts: STANDBY_ALLOWED_HOSTS instance comes up', wait_up(extra_base))
+        s, body = raw_req('GET', '/api/health', extra_base, host='extra.ts.net')
+        check('33 hosts: STANDBY_ALLOWED_HOSTS name passes', s == 200, (s, body))
+        s, body = raw_req('GET', '/api/health', extra_base, host='custom.example')
+        check('33 hosts: second STANDBY_ALLOWED_HOSTS name passes', s == 200, (s, body))
+        s, body = raw_req('GET', '/api/health', extra_base, host='other.example')
+        check('33 hosts: a name not in STANDBY_ALLOWED_HOSTS is rejected',
+              s == 421, (s, body))
+        s, body = raw_req('GET', '/api/health', extra_base, host='127.0.0.1:3440')
+        check('33 hosts: IP literal still passes with STANDBY_ALLOWED_HOSTS set',
+              s == 200, (s, body))
+        stop(extra_app)
+        # X-Forwarded-Host is no longer trusted: a matching Origin
+        # smuggled in via XFH must not pass the CSRF gate. (Before
+        # the fix, Origin evil.example + XFH evil.example passed
+        # it.) A matching Origin still passes — the gate itself is
+        # intact, only the forged-header bypass is gone.
+        s, body = raw_req('POST', '/api/checkin', BASE, host='127.0.0.1:3438',
+                          headers={'Origin': 'https://evil.example',
+                                   'X-Forwarded-Host': 'evil.example',
+                                   'Content-Type': 'application/json'},
+                          body=b'{"method": "app"}')
+        check('33 hosts: spoofed X-Forwarded-Host no longer bypasses the CSRF gate',
+              s == 403, (s, body))
+        s, r = req('POST', '/api/checkin', {'method': 'app'},
+                   headers={'Origin': 'http://127.0.0.1:3438'})
+        check('33 hosts: a matching Origin still passes the CSRF gate',
+              s == 200, (s, r))
+        # (fsync) A save round-trips through the file: the value
+        # written via the API is the value on disk, the file loads
+        # cleanly, and no .tmp file is left behind. The cadence is
+        # restored to 60 afterwards (the §22 pattern).
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 33})
+        check('33 fsync: settings save succeeds (200)', s == 200, (s, r))
+        check('33 fsync: no state.json.tmp left behind',
+              not os.path.exists(os.path.join(DATA, 'state.json.tmp')),
+              os.listdir(DATA))
+        _saved = {}
+        try:
+            _saved = load_state_file()
+        except Exception:
+            pass
+        check('33 fsync: saved value round-trips through state.json',
+              _saved.get('settings', {}).get('checkCadenceSeconds') == 33,
+              _saved.get('settings', {}).get('checkCadenceSeconds'))
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 60})
+        check('33 fsync: cadence restored to 60 (200)', s == 200, (s, r))
+        # (fsync, receiver) A check-in writes last.json durably:
+        # the file parses with the key id, and no .tmp is left.
+        s, r = req('POST', '/api/checkin-keys', {'label': '33 fsync'})
+        check('33 fsync: key creates (201)', s == 201, (s, r))
+        key_plain = r.get('plain') if s == 201 else None
+        key_id = (r.get('key') or {}).get('id') if s == 201 else None
+        s, r = req('POST', '/checkin', {}, base=RBASE, headers={'Authorization': 'Bearer ' + (key_plain or '')})
+        check('33 fsync: receiver check-in succeeds (200)', s == 200 and r.get('ok') is True, (s, r))
+        try:
+            _last = json.load(open(os.path.join(CHECKIN_DIR, 'last.json')))
+        except Exception:
+            _last = {}
+        check('33 fsync: last.json written with the key id',
+              _last.get('keyId') == key_id, _last)
+        check('33 fsync: no last.json.tmp left behind',
+              not os.path.exists(os.path.join(CHECKIN_DIR, 'last.json.tmp')),
+              os.listdir(CHECKIN_DIR))
+        check('33 fsync: no keys.json.tmp left behind',
+              not os.path.exists(os.path.join(CHECKIN_DIR, 'keys.json.tmp')),
+              os.listdir(CHECKIN_DIR))
+        s, r = req('DELETE', '/api/checkin-keys/' + (key_id or 'none'), base=BASE)
+        check('33 fsync: key revokes (200)', s == 200, (s, r))
+
+        # --- 34. skip-save + heartbeat (0.8.10) -------------------------
+        # (a) Quiet ticks write nothing: with a watching price tx
+        # (so the tick has work — it evaluates every tick) and the
+        # cadence at 10 s, two full ticks leave state.json
+        # byte-identical with its mtime untouched, and the
+        # heartbeat unrewritten inside its 5-minute throttle. The
+        # stub price/tip/fee are fixed, so nothing meaningful
+        # changes — the dedupe must skip both the stamp-block save
+        # and the trigger-state save.
+        delete_all_txs()
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 10})
+        check('34 quiet: cadence set to 10 s', s == 200, (s, r))
+        s, r = add_tx('34 quiet price', {'type': 'price', 'params': {'op': '>=', 'value': 200000}}, 121000, trigger_confirmed=True)
+        check('34 quiet: watching price tx adds (201)', s == 201, (s, r))
+        q34 = r['tx']['id'] if s == 201 else None
+        check('34 quiet: one tick evaluates it (slice watching)',
+              wait_slice(q34, {'status': 'watching'}), rule_slice(state_tx(q34)) if q34 else None)
+        s, st = req('GET', '/api/state')
+        check('34 quiet: no pending external check-in before the snapshot', s == 200, (s, r))
+        before_bytes = open(os.path.join(DATA, 'state.json'), 'rb').read()
+        before_mtime = os.path.getmtime(os.path.join(DATA, 'state.json'))
+        hb_before = json.load(open(os.path.join(DATA, 'heartbeat.json')))
+        hb_mtime_before = os.path.getmtime(os.path.join(DATA, 'heartbeat.json'))
+        time.sleep(25)
+        check('34 quiet: state.json byte-identical across two ticks',
+              open(os.path.join(DATA, 'state.json'), 'rb').read() == before_bytes)
+        check('34 quiet: state.json mtime untouched across two ticks',
+              os.path.getmtime(os.path.join(DATA, 'state.json')) == before_mtime,
+              (before_mtime, os.path.getmtime(os.path.join(DATA, 'state.json'))))
+        check('34 quiet: heartbeat unrewritten inside its throttle',
+              os.path.getmtime(os.path.join(DATA, 'heartbeat.json')) == hb_mtime_before
+              and json.load(open(os.path.join(DATA, 'heartbeat.json'))) == hb_before)
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 60})
+        check('34 quiet: cadence restored to 60 s', s == 200, (s, r))
+        delete_all_txs()
+        # (b) A grace activation still writes: backdate the clock
+        # 10 days (flat leg) with an armed 35-day check-in tx, drop
+        # the heartbeat and the receiver's last.json so the seeded
+        # clock survives (the §22 pattern), restart, and the
+        # startup tick's grace must persist to state.json.
+        s, r = add_tx('34 gap checkin', {'type': 'checkin', 'params': {'thresholdDays': 35}}, 121002)
+        check('34 grace: gap check-in tx adds (201)', s == 201, (s, r))
+        seed_mtime = []
+        def seed_gap_34():
+            try:
+                os.remove(os.path.join(CHECKIN_DIR, 'last.json'))
+            except OSError:
+                pass
+            stj = load_state_file()
+            stj['checkin']['lastCheckinAt'] = iso_ago(days=20)
+            stj['checkin']['lastOnlineAt'] = iso_ago(days=10)
+            save_state_file(stj)  # also drops heartbeat.json
+            seed_mtime.append(os.path.getmtime(os.path.join(DATA, 'state.json')))
+        check('34 grace: app restarted with a 10-day gap', restart(before_start=seed_gap_34))
+        s, st = req('GET', '/api/state')
+        check('34 grace: the grace is active', st.get('grace', {}).get('active') is True, st.get('grace'))
+        gap_file = load_state_file()
+        check('34 grace: activation persisted to state.json (graceUntil set)',
+              isinstance((gap_file.get('grace') or {}).get('graceUntil'), str), gap_file.get('grace'))
+        check('34 grace: state.json mtime advanced on the activation',
+              seed_mtime and os.path.getmtime(os.path.join(DATA, 'state.json')) > seed_mtime[0],
+              (seed_mtime, os.path.getmtime(os.path.join(DATA, 'state.json'))))
+        # (c) The heartbeat advances across a restart, and the
+        # served lastOnlineAt is the merged heartbeat value.
+        hb1 = json.load(open(os.path.join(DATA, 'heartbeat.json')))
+        check('34 heartbeat: heartbeat exists with a recent value after the gap restart',
+              isinstance(hb1.get('lastOnlineAt'), str)
+              and abs((datetime.now(timezone.utc) - datetime.fromisoformat(hb1['lastOnlineAt'].replace('Z', '+00:00'))).total_seconds()) < 120, hb1)
+        check('34 heartbeat: app restarted', restart())
+        hb2 = json.load(open(os.path.join(DATA, 'heartbeat.json')))
+        check('34 heartbeat: heartbeat advances across a restart',
+              isinstance(hb2.get('lastOnlineAt'), str) and hb2['lastOnlineAt'] > hb1['lastOnlineAt'], (hb1, hb2))
+        s, st = req('GET', '/api/state')
+        check('34 heartbeat: served lastOnlineAt is the merged heartbeat value',
+              st.get('checkin', {}).get('lastOnlineAt') == hb2['lastOnlineAt'],
+              (st.get('checkin', {}).get('lastOnlineAt'), hb2))
+        s, r = req('POST', '/api/grace/resume', {})
+        check('34 grace: resumed after the checks', s == 200, (s, r))
+        delete_all_txs()
+        # (d) SIGTERM flush: a fresh instance on port 3440, its
+        # heartbeat deleted, SIGTERM at once — the next tick is up
+        # to 60 s away, so only the flush can recreate the file —
+        # and the process must exit 0.
+        sig_data = '/tmp/heirloom099-sigterm'
+        sig_checkin = '/tmp/heirloom099-sigterm-checkin'
+        shutil.rmtree(sig_data, ignore_errors=True)
+        shutil.rmtree(sig_checkin, ignore_errors=True)
+        check('34 sigterm: port 3440 free', port_closed(3440))
+        sig_env = dict(APP_ENV)
+        sig_env.update({'PORT': '3440', 'DATA_DIR': sig_data, 'CHECKIN_DIR': sig_checkin})
+        sig_base = 'http://127.0.0.1:3440'
+        sig_app = start(['node', 'server.js'], env=sig_env, cwd=APP, log=LOG)
+        check('34 sigterm: instance comes up', wait_up(sig_base))
+        try:
+            os.remove(os.path.join(sig_data, 'heartbeat.json'))
+        except OSError:
+            pass
+        sig_app.send_signal(signal.SIGTERM)
+        try:
+            sig_code = sig_app.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            sig_code = None
+            stop(sig_app)
+        check('34 sigterm: process exits 0 on SIGTERM', sig_code == 0, sig_code)
+        try:
+            hb_sig = json.load(open(os.path.join(sig_data, 'heartbeat.json')))
+            hb_sig_at = hb_sig.get('lastOnlineAt')
+        except Exception:
+            hb_sig_at = None
+        check('34 sigterm: SIGTERM flush lands the heartbeat',
+              isinstance(hb_sig_at, str)
+              and abs((datetime.now(timezone.utc) - datetime.fromisoformat(hb_sig_at.replace('Z', '+00:00'))).total_seconds()) < 30, hb_sig_at)
+        # (e) Missing/corrupt heartbeat falls back to the state's
+        # own lastOnlineAt — checked directly against lib/store.js
+        # in a scratch data dir (no server: the running server
+        # rewrites the heartbeat on its first tick, so a live test
+        # could not observe the fallback). The dedupe itself is
+        # pinned the same way: an identical save skips, a real
+        # change writes.
+        hb_dir = '/tmp/heirloom099-heartbeat'
+        shutil.rmtree(hb_dir, ignore_errors=True)
+        os.makedirs(hb_dir)
+        hb_seed = load_state_file()
+        hb_seed['checkin']['lastOnlineAt'] = iso_ago(days=2)
+        json.dump(hb_seed, open(os.path.join(hb_dir, 'state.json'), 'w'), indent=2)
+        open(os.path.join(hb_dir, 'heartbeat.json'), 'w').write('{not json')
+
+        def node_out(script):
+            rr = subprocess.run(['node', '-e', script], cwd=APP, capture_output=True, text=True, timeout=20)
+            return rr.stdout.strip(), rr.stderr.strip()
+        node_load = ("const s=require('./lib/store');"
+                     "console.log(s.loadState(%s).checkin.lastOnlineAt);" % json.dumps(hb_dir))
+        out, err = node_out(node_load)
+        check('34 fallback: corrupt heartbeat falls back to state.lastOnlineAt',
+              out == hb_seed['checkin']['lastOnlineAt'], out + err)
+        os.remove(os.path.join(hb_dir, 'heartbeat.json'))
+        out, err = node_out(node_load)
+        check('34 fallback: missing heartbeat falls back to state.lastOnlineAt',
+              out == hb_seed['checkin']['lastOnlineAt'], out + err)
+        hb_new = iso_ago(minutes=5)
+        json.dump({'lastOnlineAt': hb_new}, open(os.path.join(hb_dir, 'heartbeat.json'), 'w'))
+        out, err = node_out(node_load)
+        check('34 fallback: newer heartbeat wins the merge', out == hb_new, out + err)
+        hb_old = iso_ago(days=3)
+        json.dump({'lastOnlineAt': hb_old}, open(os.path.join(hb_dir, 'heartbeat.json'), 'w'))
+        out, err = node_out(node_load)
+        check('34 fallback: older heartbeat loses to state.lastOnlineAt',
+              out == hb_seed['checkin']['lastOnlineAt'], out + err)
+        node_dedupe = ("const fs=require('fs');const s=require('./lib/store');"
+                       "const d=%s;const st=s.loadState(d);"
+                       "s.saveState(d, st);const m1=fs.statSync(d+'/state.json').mtimeMs;"
+                       "s.saveState(d, st);const m2=fs.statSync(d+'/state.json').mtimeMs;"
+                       "st.settings.checkCadenceSeconds=61;s.saveState(d, st);"
+                       "const m3=fs.statSync(d+'/state.json').mtimeMs;"
+                       "console.log(m1===m2 ? 'SKIP' : 'WROTE', m3>m2 ? 'WROTE-ON-CHANGE' : 'NO-WRITE');"
+                       % json.dumps(hb_dir))
+        out, err = node_out(node_dedupe)
+        check('34 dedupe: identical save skips, a real change writes',
+              out == 'SKIP WROTE-ON-CHANGE', out + err)
+        # The cache must not survive an out-of-band edit: the DOM
+        # suite caught Resume doing nothing after a directly-seeded
+        # grace, because the cache still held the cleared grace
+        # from the previous Resume and the restoring mutation
+        # compared equal. Seed an active grace by writing the
+        # file directly (bypassing saveState), then restore the
+        # cached cleared grace through saveState: the mtime+size
+        # validation must force the write.
+        node_oob = ("const fs=require('fs');const s=require('./lib/store');"
+                    "const d=%s;const st=s.loadState(d);"
+                    "st.grace={graceUntil:null,triggeredAt:null,offlineGapDays:null};"
+                    "s.saveState(d, st);const m1=fs.statSync(d+'/state.json').mtimeMs;"
+                    "s.saveState(d, st);const m2=fs.statSync(d+'/state.json').mtimeMs;"
+                    "const oob=s.loadState(d);"
+                    "oob.grace={graceUntil:null,triggeredAt:new Date().toISOString(),offlineGapDays:12};"
+                    "fs.writeFileSync(d+'/state.json', JSON.stringify(oob, null, 2)+'\\n');"
+                    "const back=s.loadState(d);"
+                    "back.grace={graceUntil:null,triggeredAt:null,offlineGapDays:null};"
+                    "s.saveState(d, back);const m3=fs.statSync(d+'/state.json').mtimeMs;"
+                    "console.log(m1===m2 ? 'SKIP' : 'WROTE', m3>m2 ? 'WROTE-AFTER-OOB' : 'SKIPPED-AFTER-OOB');"
+                    % json.dumps(hb_dir))
+        out, err = node_out(node_oob)
+        check('34 dedupe: an out-of-band edit invalidates the cache (Resume-after-seed writes)',
+              out == 'SKIP WROTE-AFTER-OOB', out + err)
 
     finally:
         for p in list(v.procs):
