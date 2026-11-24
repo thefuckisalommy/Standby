@@ -580,6 +580,14 @@ class El {
     this.id = '';
   }
   appendChild(c) { this.children.push(c); return c; }
+  insertBefore(c, ref) {
+    // (0.8.10, fix 4) The load-failure notice uses insertBefore
+    // (first child of <main>); a null/unknown ref appends, like the
+    // real DOM. The shim's <main> override captures the insert.
+    const i = ref ? this.children.indexOf(ref) : -1;
+    if (i === -1) this.children.push(c); else this.children.splice(i, 0, c);
+    return c;
+  }
   removeChild(c) { this.children = this.children.filter((x) => x !== c); return c; }
   addEventListener(ev, fn) { (this.listeners[ev] = this.listeners[ev] || []).push(fn); }
   setAttribute() {}
@@ -643,7 +651,7 @@ function tabSections() {
 
 global.document = {
   getElementById: (id) => els[id] || (els[id] = Object.assign(new El('div'), { id })),
-  querySelector: (sel) => (sel === 'main' ? Object.assign(new El('main'), { insertAdjacentHTML: (pos, html) => { global.__loadError = html; } }) : new El('div')),
+  querySelector: (sel) => (sel === 'main' ? Object.assign(new El('main'), { insertAdjacentHTML: (pos, html) => { global.__loadError = html; }, insertBefore: (el, ref) => { global.__loadNotice = el; } }) : new El('div')),
   querySelectorAll: (sel) => {
     if (sel === '#tabs button') return tabEls();
     if (sel === 'section.tab') return tabSections();
@@ -961,13 +969,13 @@ function check(name, cond, detail) {
     JSON.stringify(panelSelectValues(rulePanels('edit')[0], 'edit-rule-0-feemarket-dir')));
   const fmId = ((st0.bitcoin.txs || []).find((t) => t.label === 'Dom Feemarket') || {}).id;
   check('feemarket direction: the seeded feemarket tx id is known', !!fmId, 'id=' + fmId);
-  const fmFlip = fmId ? await fetch('/api/bitcoin/txs/' + fmId, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ trigger: { type: 'feemarket', params: { maxFeeRate: 0.5, direction: 'above' } }, triggerConfirmed: true }) }) : null;
+  const fmFlip = fmId ? await fetch('/api/bitcoin/txs/' + fmId, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ trigger: { type: 'feemarket', params: { maxFeeRate: 2, direction: 'above' } }, triggerConfirmed: true }) }) : null;
   check('feemarket direction: flipping the rule to above via the API succeeds', !!fmFlip && fmFlip.status === 200, fmFlip ? 'status=' + fmFlip.status : 'no id');
   await rerender(appJs);
   const fmCard = cardByTitle('Dom Feemarket');
   const fmParts = fmCard && triggerParts(fmCard);
-  check('feemarket direction: the subcard condition now reads "tx fees are >= 0.5 sat/vB"',
-    !!fmParts && fmParts.cond === 'Fires when tx fees are >= 0.5 sat/vB', fmParts ? fmParts.cond : 'no subcard');
+  check('feemarket direction: the subcard condition now reads "tx fees are >= 2 sat/vB"',
+    !!fmParts && fmParts.cond === 'Fires when tx fees are >= 2 sat/vB', fmParts ? fmParts.cond : 'no subcard');
   // Flip it back so later sections see the default 'below' rule.
   const fmBack = fmId ? await fetch('/api/bitcoin/txs/' + fmId, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ trigger: { type: 'feemarket', params: { maxFeeRate: 0.5, direction: 'below' } }, triggerConfirmed: true }) }) : null;
   check('feemarket direction: flipping the rule back to below via the API succeeds', !!fmBack && fmBack.status === 200, fmBack ? 'status=' + fmBack.status : 'no id');
@@ -1716,23 +1724,24 @@ function check(name, cond, detail) {
 
   // --- 10b. node capability details, variant C: summary row + details on tap (0.8.1) ---
   // Static HTML: each node is a <details> — the summary is just
-  // the node name + status pill, and the detail holds the three
+  // the node name + status pill, and the detail holds the four
   // checks as plain label — value lines (no pills).
   for (const lbl of ['primary', 'secondary']) {
     check('node checks static: the ' + lbl + ' node is a <details> with a capability block (static HTML)',
       idx.indexOf('<details id="btc-' + lbl + '-details" class="node-details">') !== -1
       && idx.indexOf('id="btc-' + lbl + '-checks"') !== -1, '');
-    check('node checks static: the ' + lbl + ' detail has Broadcast / Fee estimates / Block height value spans (static HTML)',
+    check('node checks static: the ' + lbl + ' detail has Broadcast / Fee estimates / Block height / Output lookup value spans (static HTML)',
       idx.indexOf('id="btc-' + lbl + '-broadcast-value"') !== -1
       && idx.indexOf('id="btc-' + lbl + '-fees-value"') !== -1
-      && idx.indexOf('id="btc-' + lbl + '-height-value"') !== -1, '');
+      && idx.indexOf('id="btc-' + lbl + '-height-value"') !== -1
+      && idx.indexOf('id="btc-' + lbl + '-outputLookup-value"') !== -1, '');
     check('node checks static: the ' + lbl + ' detail has no per-check pills (static HTML)',
       idx.indexOf('id="btc-' + lbl + '-broadcast"') === -1
       && idx.indexOf('id="btc-' + lbl + '-fees"') === -1
       && idx.indexOf('id="btc-' + lbl + '-height"') === -1, '');
   }
-  check('node checks static: the capability labels read Broadcast / Fee estimates / Block height (static HTML)',
-    (idx.match(/>Broadcast</g) || []).length >= 2 && (idx.match(/>Fee estimates</g) || []).length >= 2 && (idx.match(/>Block height</g) || []).length >= 2, '');
+  check('node checks static: the capability labels read Broadcast / Fee estimates / Block height / Output lookup (static HTML)',
+    (idx.match(/>Broadcast</g) || []).length >= 2 && (idx.match(/>Fee estimates</g) || []).length >= 2 && (idx.match(/>Block height</g) || []).length >= 2 && (idx.match(/>Output lookup</g) || []).length >= 2, '');
   // Dynamic: the launcher ran a connection test against both
   // stubs (full mempool-style nodes), so both nodes are OK and
   // the detail holds the measured values — in the Settings card
@@ -1756,6 +1765,9 @@ function check(name, cond, detail) {
     check('node checks: the ' + lbl + ' Block height value reads Height 900,000',
       els['btc-' + lbl + '-height-value'] && els['btc-' + lbl + '-height-value'].textContent === 'Height 900,000',
       els['btc-' + lbl + '-height-value'] && els['btc-' + lbl + '-height-value'].textContent);
+    check('node checks: the ' + lbl + ' Output lookup value reads Batch',
+      els['btc-' + lbl + '-outputLookup-value'] && els['btc-' + lbl + '-outputLookup-value'].textContent === 'Batch',
+      els['btc-' + lbl + '-outputLookup-value'] && els['btc-' + lbl + '-outputLookup-value'].textContent);
     check('node checks: the Dashboard Node Status ' + lbl + ' pill reads OK too',
       els['readiness-' + lbl + '-status'] && els['readiness-' + lbl + '-status'].textContent === 'OK',
       els['readiness-' + lbl + '-status'] && els['readiness-' + lbl + '-status'].textContent);
@@ -2074,6 +2086,12 @@ function check(name, cond, detail) {
   heldSt.checkin.lastCheckinAt = new Date(heldNow - 40 * 86400000 - 30000).toISOString();
   heldSt.checkin.lastOnlineAt = new Date(heldNow - 40 * 86400000).toISOString();
   fs.writeFileSync(DATA_FILE, JSON.stringify(heldSt, null, 2) + '\n');
+  // (0.8.10, skip-save) Drop the heartbeat cache too: a
+  // test-written state.json defines the world, and the fresh
+  // heartbeat left over from the running app would silently
+  // override the seeded 40-day gap on the rerender's read.
+  // (Same fix as the API and regression suites' seeders.)
+  try { fs.unlinkSync(DATA_FILE.replace('state.json', 'heartbeat.json')); } catch (e) { /* no heartbeat yet */ }
   await rerender(appJs);
   const heldBar35 = checkinBar('Dom Check-in');
   const heldBar10 = checkinBar('Dom Check-in 10d');
@@ -2454,7 +2472,14 @@ function check(name, cond, detail) {
     elText(els['grace-held']));
   // Under a day left: a grace ending ~12h out reads
   // "less than a day left" instead of "0 days left".
-  setDomGrace({ graceUntil: new Date(Date.now() + 12 * 3600000).toISOString(), triggeredAt: new Date(Date.now() - 6 * 86400000).toISOString(), offlineGapDays: 8 });
+  // triggeredAt is 6.5 days ago (not 6): with until 12h out
+  // the duration is exactly 7 days, so Math.round lands on 7.
+  // A 6-day trigger puts the duration at exactly 6.5 days —
+  // the rounding boundary — and a 1 ms gap between the seed's
+  // two Date.now() calls flips the render to "Day 6 of 6"
+  // (measured ~0.1% of seeds; a pre-existing flake, not an
+  // app bug — the app only ever creates whole-day durations).
+  setDomGrace({ graceUntil: new Date(Date.now() + 12 * 3600000).toISOString(), triggeredAt: new Date(Date.now() - 6.5 * 86400000).toISOString(), offlineGapDays: 8 });
   await rerender(appJs);
   check('grace card: under a day left reads "less than a day left" (Day 6 of 7)',
     els['grace-bar-day'] && els['grace-bar-day'].textContent === 'Day 6 of 7'
@@ -3432,8 +3457,8 @@ function check(name, cond, detail) {
     && idx.indexOf('Installed version:') !== -1 && idx.indexOf('id="app-version"') !== -1, '');
   check('app version static: the card has no "?" button and no details (just the version line)',
     idx.indexOf('id="help-version"') === -1, '');
-  check('app version: the installed version reads 0.8.9 (from /api/health)',
-    els['app-version'] && els['app-version'].textContent === '0.8.9',
+  check('app version: the installed version reads 0.8.10 (from /api/health)',
+    els['app-version'] && els['app-version'].textContent === '0.8.10',
     els['app-version'] && els['app-version'].textContent);
   setFilter('general');
   check('app version: the card is visible under General',

@@ -6,7 +6,7 @@ const { caches } = require('./caches');
 const { checkinClock, checkinLiveOffsetMs, isGraceActive } = require('./checkin');
 const { DATA_DIR } = require('./config');
 const { forwardMemberHistory, noteSetMemberStale, pushHistory, recordRelease, shortTxid } = require('./history');
-const { PRICE_JUMP_WINDOW_MS, checkCadenceSecondsOf, fetchNodeFeesCached, fetchPriceCached, fetchTipHeightsCached, priceAgreementPctOf, priceSourcesOf } = require('./prices');
+const { checkCadenceSecondsOf, fetchNodeFeesCached, fetchPriceCached, fetchTipHeightsCached, priceAgreementPctOf, priceSourcesOf } = require('./prices');
 const { releaseTriggerFor, singleTriggerConditionText, toTriggerSet, triggerConditionText, triggerLabel } = require('./triggers');
 const { days } = require('./util');
 
@@ -81,25 +81,17 @@ function checkCheckinRule(state, rule, now, ctx) {
 //   (b) Fail-safe: a reading that is not valid — the sources
 //       disagree by more than the configured agreement, or
 //       neither answers — does not fire, marks 'unknown', and
-//       keeps the last good state (so a bad reading cannot
-//       become the baseline for the jump
-//       guard).
-//   (c) Sanity bounds on the READING: a price outside
-//       $1–$100,000,000 is bad data, not a market move — do not
-//       fire on it, and do not let it become the baseline for the
-//       jump guard (lastPrice keeps the last GOOD reading). The
-//       provider fetch already refuses out-of-bounds prices; this
-//       is the safety net on the effective price.
-//   (d) The 10x-jump guard: a price that moved 10x since the last
-//       GOOD reading is a bad feed, not a market move — but only
-//       when the last reading is recent (within an hour). Over a
-//       longer gap a real 10x move is possible (the app was off
-//       for months), so an old baseline does not veto a new price.
+//       keeps the last good state (lastPrice keeps the last GOOD
+//       reading, so the subcard still shows it).
+// A large move both sources agree on is trusted and fires —
+// there is no range check: the two-source agreement is the
+// only protection.
 async function checkPriceRule(state, rule, now, ctx) {
   const p = rule.params;
   const prev = (ctx && ctx.prevSlice && typeof ctx.prevSlice === 'object') ? ctx.prevSlice : {};
   // The last GOOD state, kept across unknown readings (fail-safe):
-  // a disagreement or outage never fires the rule.
+  // a disagreement or outage never fires the rule, and the subcard
+  // keeps showing the last price it could trust.
   const keepGood = {
     lastPrice: (typeof prev.lastPrice === 'number' && Number.isFinite(prev.lastPrice)) ? prev.lastPrice : null,
     lastPriceAt: (typeof prev.lastPriceAt === 'string' && prev.lastPriceAt) ? prev.lastPriceAt : null,
@@ -128,30 +120,6 @@ async function checkPriceRule(state, rule, now, ctx) {
     };
   }
   const price = comb.price;
-  if (price < store.PRICE_MIN_USD || price > store.PRICE_MAX_USD) {
-    return {
-      fire: false, status: 'unknown', reason: 'implausible price reading ($' + price.toLocaleString('en-US') + ') — ignored',
-      slice: {
-        ...freshTriggerState(now, 'unknown', 'implausible price reading ($' + price.toLocaleString('en-US') + ') — ignored'),
-        ...keepGood, lastError: 'price out of bounds: $' + price.toLocaleString('en-US'), priceMode: comb.mode, priceNote: comb.note,
-      },
-      detail: { price, mode: comb.mode }, warning: null,
-    };
-  }
-  const lastPrice = keepGood.lastPrice;
-  const lastAt = (typeof keepGood.lastPriceAt === 'string' && keepGood.lastPriceAt) ? new Date(keepGood.lastPriceAt).getTime() : NaN;
-  if (lastPrice !== null && Number.isFinite(lastAt) && (now.getTime() - lastAt) <= PRICE_JUMP_WINDOW_MS
-      && (price > lastPrice * 10 || price < lastPrice / 10)) {
-    return {
-      fire: false, status: 'unknown', reason: 'implausible price jump ($' + lastPrice.toLocaleString('en-US') + ' → $' + price.toLocaleString('en-US') + ') — ignored',
-      slice: {
-        ...freshTriggerState(now, 'unknown', 'implausible price jump ($' + lastPrice.toLocaleString('en-US') + ' → $' + price.toLocaleString('en-US') + ') — ignored'),
-        ...keepGood, lastError: 'price jumped 10x since the last reading: $' + lastPrice.toLocaleString('en-US') + ' → $' + price.toLocaleString('en-US'), priceMode: comb.mode, priceNote: comb.note,
-      },
-      detail: { price, mode: comb.mode }, warning: null,
-    };
-  }
-  // The reading is good: it becomes the new baseline.
   const holding = p.op === '>=' ? price >= p.value : price <= p.value;
   // The stored reason is trigger-only — the effective price, no
   // per-source note (that lives in priceNote as data, and in the
@@ -404,9 +372,8 @@ function checkSetDateRule(state, rule, now, ctx) {
 // configured nodes (combineFeeReadings) but NO agreement check:
 // the PRIMARY node's fee is the one that counts — the secondary
 // is only a fallback if the primary is down. One node down means
-// the other is used alone, with no agreement check. No 10x-jump
-// guard: fee spikes are real and are exactly what an 'above' rule
-// is for — the guard would block the trigger from doing its job.
+// the other is used alone, with no agreement check. Fee spikes
+// are real and are exactly what an 'above' rule is for.
 // The fee comes from the cached fetch (TTL = 5 minutes),
 // so the trigger may see a move up to 5 minutes late. Fail-safe: if no
 // usable fee can be read, the trigger is 'unknown' — it never
@@ -692,7 +659,7 @@ function ruleStatusFor(state, tx, rule, slice, now) {
     // Status section (readiness card) and the dry-run notes, not
     // on a per-tx line. The subcard reads lastPrice directly.
     // A holding price is due at once — no sustained wait (the
-    // two-source agreement is the guard, not a time delay).
+    // two-source agreement is the protection, not a time delay).
     const shown = '$' + price.toLocaleString('en-US');
     const holding = trg.params.op === '>=' ? price >= trg.params.value : price <= trg.params.value;
     if (!holding) return { ...base, status: 'watching', reason: 'currently ' + shown, lastPrice: price, priceMode: mode, priceNote: note };
@@ -859,10 +826,8 @@ function triggerStatusFor(state, tx, now) {
 // per-rule warning (an unconfirmed UTXO spend warns without
 // firing), else null. A price rule reports fire=true when both
 // sources agree the price is already past the threshold — there is
-// no sustained wait, so a single live sample that both sources
-// agree on proves the condition. The 10x-jump guard does not apply
-// here (it needs a stored baseline — the evaluator owns it); only
-// the absolute bounds are checked.
+// no sustained wait and no range check, so a single live sample
+// that both sources agree on proves the condition.
 // The gate answers the RAW condition: no grace, no vacation, no
 // disarm. A price rule that is past its threshold during a grace,
 // or a check-in rule that is due during vacation, still reports

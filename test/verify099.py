@@ -7,7 +7,7 @@ Boots the branch-0.8.5 app (port 3438), the check-in receiver
 (both fixed: tip height 900000, economy fee 1 sat/vB, price 98200)
 — and checks the 0.8.1 trigger work:
 
-  1. health reports version 0.8.9.
+  1. health reports version 0.8.10.
   2. Block-height trigger: validation at add (bad heights rejected,
      good ones accepted), checkTriggerNow (a height already reached
      fires + warns, a future height watches), evaluation via the
@@ -144,11 +144,16 @@ Boots the branch-0.8.5 app (port 3438), the check-in receiver
       cost one batch request; a 404 is never cached — a spend
       that appears after the parent was unknown is detected on
       the next evaluation; a confirmed-spend UTXO rule reuses
-      the shared per-tick tip cache.
+      the shared per-tick tip cache. (0.8.10) Every lookup tries
+      the batch first now (generic outspend negotiation), so a
+      lone watched output costs one batch request, not one
+      singular one — the count per outpoint is unchanged, only
+      the route moved; §37 proves the negotiation itself.
   26. Batch cache consult + in-flight dedup (0.8.6 fold-in):
       a batch lookup whose watched outputs are all fresh in the
       per-outpoint cache costs zero requests; two simultaneous
-      singular lookups of one outpoint cost one request; two
+      lookups of one outpoint cost one request (0.8.10: one batch
+      request, since every lookup tries the batch first); two
       simultaneous batch lookups cost one request (module-level
       check — the app's single-flight lock means two batch
       fetches can never overlap through the HTTP API); a failed
@@ -185,6 +190,59 @@ Boots the branch-0.8.5 app (port 3438), the check-in receiver
      nothing, and an already-stale tx is never re-checked
      (the stub outspend counters prove zero requests on a
      second hourly tick with no live staged txs left).
+  32. Audit fixes 1/3/4 (0.8.10): a malformed request target gets a
+      400 and the process keeps serving (app server and receiver);
+      security headers (X-Frame-Options, nosniff, CSP) on the page,
+      the API, and the receiver; the load-failure notice renders
+      its message as text, never as HTML (the DOM half of fix 4
+      lives in dom_check099_error.js).
+  33. Audit fix 2 + fsync (0.8.10): the Host allowlist — a foreign
+      Host gets a 421 on both servers, IP literals / localhost /
+      *.local / the machine's hostname pass, STANDBY_ALLOWED_HOSTS
+      adds names, and a spoofed X-Forwarded-Host no longer
+      bypasses the CSRF gate; fsync durability — a save
+      round-trips through state.json with no .tmp left behind,
+      and the receiver's last.json does the same. (True power-loss
+      durability cannot be unit-tested; the suite verifies the
+      write path, not the crash guarantee.)
+  34. Skip-save + heartbeat (0.8.10): quiet ticks leave state.json
+      byte-identical with its mtime untouched (and the heartbeat
+      unrewritten inside its 5-minute throttle); a grace activation
+      still writes; the heartbeat advances across a restart and
+      the served lastOnlineAt is the merged heartbeat value; a
+      SIGTERM flush lands the heartbeat and exits 0; a missing or
+      corrupt heartbeat falls back to state.lastOnlineAt (checked
+      directly against lib/store.js — the running server rewrites
+      the heartbeat on its first tick, so a live test could not
+      observe the fallback).
+  35. 0.8.10 follow-ups: a future-dated heartbeat is ignored and
+      the merged lastOnlineAt is capped at now + 5 minutes, so a
+      grace still activates after a real outage (a live restart
+      plus direct node checks, including the documented residual
+      that both stamps future together still cap and activate no
+      grace); the heartbeat throttle treats a backward clock jump
+      as expired; hostnames with a trailing dot pass the
+      allowlist and a bare "." still gets a 421; the
+      check-in/broadcast JSONL logs round-trip durably with no
+      .tmp left behind.
+  36. 0.8.10 audit fix: an uncaught exception
+      terminates the process (uncaughtExceptionMonitor) on both
+      servers — a scratch server hit with the test-only throw
+      hook exits nonzero with the log line recorded.
+  37. Generic outspend negotiation (0.8.10): the mempool client
+      tries the batch outspend shape first and falls back to the
+      singular shape when a node does not serve the batch, and
+      remembers per node which shape worked — so it works with
+      any implementation (batch-only, singular-only, both,
+      neither) without hard-coding any inventory. Proved with
+      the stub's outspend-mode hook: (a) a batch-only node
+      answers a lone-output lookup via the batch, zero singular;
+      (b) a singular-only node answers via the singular, and the
+      second lookup goes singular-first (no second batch call);
+      (c) a node serving neither reads unknown, never fires;
+      (d) the rule evaluation's batch path falls through to the
+      singular when both nodes are singular-only; (e) a 500 on
+      the batch still throws (no fallback for server errors).
 Ports: app 3438, receiver 3439, stubs 18235/18236 — no collision
 with the 095 suite (app 3388, receiver 3389, stubs 18175/18176) or
 the 096 suite (app 3398, receiver 3399, stubs 18185/18186).
@@ -192,13 +250,19 @@ Reuses the 094 helpers (import verify094 — importing does not run
 main()) and never touches the 095 files or the main app/ copy.
 """
 import copy
+import http.client
 import json
 import os
 import shutil
+import signal
+import socket
 import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -209,6 +273,80 @@ check = v.check
 
 def req(method, path, body=None, base=None, timeout=20, headers=None):
     return v.req(method, path, body, base=base or BASE, timeout=timeout, headers=headers)
+
+
+# The expected security-header policy (0.8.10, fix 3) — kept in sync
+# with the CSP constant in branch-0810-fixes/lib/http.js. Asserted
+# exactly below: a drifted policy is a real regression, not a
+# cosmetic one.
+CSP_0810 = ("default-src 'self'; script-src 'self'; style-src 'self' "
+            "'unsafe-inline'; img-src 'self'; connect-src 'self'; "
+            "object-src 'none'; base-uri 'self'; frame-ancestors 'self'")
+
+
+def raw_get(path, base):
+    # Sends the request line verbatim (no client-side URL
+    # normalization) and returns (status, body bytes) — so a
+    # malformed target like // [ reaches the server exactly as typed.
+    u = urllib.parse.urlparse(base)
+    conn = http.client.HTTPConnection(u.hostname, u.port, timeout=5)
+    conn.putrequest('GET', path)
+    conn.putheader('Host', '%s:%d' % (u.hostname, u.port))
+    conn.endheaders()
+    r = conn.getresponse()
+    return r.status, r.read()
+
+
+def raw_req(method, path, base, host=None, headers=None, body=None):
+    # Like raw_get, but the Host header is caller-controlled (or
+    # omitted) and extra headers / a body can be sent — for the
+    # Host-allowlist checks, where urllib would always send its own
+    # Host. Returns (status, body bytes).
+    u = urllib.parse.urlparse(base)
+    conn = http.client.HTTPConnection(u.hostname, u.port, timeout=5)
+    conn.putrequest(method, path, skip_host=True)
+    if host is not None:
+        conn.putheader('Host', host)
+    for k, vv in (headers or {}).items():
+        conn.putheader(k, vv)
+    if body is not None:
+        conn.putheader('Content-Length', str(len(body)))
+    conn.endheaders(body)
+    r = conn.getresponse()
+    return r.status, r.read()
+
+
+def raw_socket_status(request_lines, base):
+    # A bare socket: the only way to send a request with no Host
+    # header at all. (http.client always sends one unless told not
+    # to — and Node rejects a Host-less HTTP/1.1 request at the
+    # parser, before the handler ever runs — so the request must
+    # be HTTP/1.0, where Host is optional.) Returns the status int.
+    u = urllib.parse.urlparse(base)
+    s = socket.create_connection((u.hostname, u.port), timeout=5)
+    try:
+        s.sendall(request_lines)
+        data = b''
+        while b'\r\n\r\n' not in data:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+        return int(data.split(b' ')[1])
+    finally:
+        s.close()
+
+
+def resp_headers(method, path, base):
+    # (status, {lower-cased header name: value}) for one request —
+    # v.req returns the parsed body only, and the header checks
+    # below need the raw response headers.
+    r = urllib.request.Request(base + path, method=method)
+    try:
+        with urllib.request.urlopen(r, timeout=10) as resp:
+            return resp.status, {k.lower(): vv for k, vv in resp.headers.items()}
+    except urllib.error.HTTPError as e:
+        return e.code, {k.lower(): vv for k, vv in e.headers.items()}
 
 
 craft = v.craft
@@ -258,6 +396,18 @@ def load_state_file():
 
 def save_state_file(stj):
     json.dump(stj, open(os.path.join(DATA, 'state.json'), 'w'), indent=2)
+    # (0.8.10, skip-save) A test-written state.json defines the
+    # world — including a backdated lastOnlineAt for a grace test.
+    # The heartbeat file is a runtime cache that loadState merges
+    # over the state's own stamp, so a fresh heartbeat left over
+    # from the running app would silently override the seeded
+    # clock (the same reason §22 removes the receiver's last.json
+    # before simulating a clock). Drop it whenever state is
+    # seeded; the next tick rewrites it.
+    try:
+        os.remove(os.path.join(DATA, 'heartbeat.json'))
+    except OSError:
+        pass
 
 
 def state_tx(tx_id, base=BASE):
@@ -482,7 +632,7 @@ def main():
 
         # --- 1. health + version ----------------------------------------
         s, h = req('GET', '/api/health')
-        check('1 health reports version 0.8.9', h.get('version') == '0.8.9', h)
+        check('1 health reports version 0.8.10', h.get('version') == '0.8.10', h)
 
         # --- 2. block-height trigger --------------------------------------
         # Validation at add: bad heights rejected, good ones accepted.
@@ -1614,16 +1764,18 @@ def main():
         s, r = req('POST', '/api/bitcoin/connection/test', {})
         check('10 nodes: connection test returns 200', s == 200, (s, r))
         res = {x.get('endpoint'): x for x in r.get('results', [])}
-        check('10 nodes: primary is OK with all three checks ready',
+        check('10 nodes: primary is OK with all four checks ready',
               res.get('primary', {}).get('status') == 'ok'
               and res.get('primary', {}).get('checks', {}).get('height', {}).get('ok') is True
               and res.get('primary', {}).get('checks', {}).get('fees', {}).get('ok') is True
-              and res.get('primary', {}).get('checks', {}).get('broadcast', {}).get('ok') is True,
+              and res.get('primary', {}).get('checks', {}).get('broadcast', {}).get('ok') is True
+              and res.get('primary', {}).get('checks', {}).get('outputLookup', {}).get('ok') is True,
               res.get('primary'))
         check('10 nodes: primary shows the measured values next to each status',
               res.get('primary', {}).get('checks', {}).get('height', {}).get('value') == 'Height 900,000'
               and res.get('primary', {}).get('checks', {}).get('fees', {}).get('value') == '1 sat/vB'
-              and res.get('primary', {}).get('checks', {}).get('broadcast', {}).get('value') == 'Reachable',
+              and res.get('primary', {}).get('checks', {}).get('broadcast', {}).get('value') == 'Reachable'
+              and res.get('primary', {}).get('checks', {}).get('outputLookup', {}).get('value') == 'Batch',
               res.get('primary', {}).get('checks'))
         check('10 nodes: secondary is OK too', res.get('secondary', {}).get('status') == 'ok', res.get('secondary'))
         check('10 nodes: overall ok is true', r.get('ok') is True, r.get('ok'))
@@ -1653,13 +1805,18 @@ def main():
               res.get('secondary', {}).get('status') == 'caution'
               and res.get('secondary', {}).get('checks', {}).get('height', {}).get('ok') is True
               and res.get('secondary', {}).get('checks', {}).get('fees', {}).get('ok') is False
-              and res.get('secondary', {}).get('checks', {}).get('broadcast', {}).get('ok') is False,
+              and res.get('secondary', {}).get('checks', {}).get('broadcast', {}).get('ok') is False
+              and res.get('secondary', {}).get('checks', {}).get('outputLookup', {}).get('ok') is False,
               res.get('secondary'))
         check('10 nodes: height-only secondary shows the height value and the failure reasons',
               res.get('secondary', {}).get('checks', {}).get('height', {}).get('value') == 'Height 900,000'
               and res.get('secondary', {}).get('checks', {}).get('fees', {}).get('value') == 'no fee endpoint'
-              and res.get('secondary', {}).get('checks', {}).get('broadcast', {}).get('value') == 'answered HTTP 404',
+              and res.get('secondary', {}).get('checks', {}).get('broadcast', {}).get('value') == 'answered HTTP 404'
+              and res.get('secondary', {}).get('checks', {}).get('outputLookup', {}).get('value') == 'Unavailable — UTXO rules can\u2019t be evaluated',
               res.get('secondary', {}).get('checks'))
+        check('10 nodes: height-only secondary detail lists every failing check (multi-failure format)',
+              'output lookup:' in res.get('secondary', {}).get('detail', ''),
+              res.get('secondary', {}).get('detail'))
         check('10 nodes: primary stays OK while secondary is CAUTION', res.get('primary', {}).get('status') == 'ok', res.get('primary'))
         check('10 nodes: overall ok stays true with a CAUTION node', r.get('ok') is True, r.get('ok'))
         # An Esplora-style server (height + /api/fee-estimates,
@@ -1690,8 +1847,12 @@ def main():
               res.get('secondary', {}).get('status') == 'caution'
               and res.get('secondary', {}).get('checks', {}).get('height', {}).get('ok') is True
               and res.get('secondary', {}).get('checks', {}).get('fees', {}).get('ok') is True
-              and res.get('secondary', {}).get('checks', {}).get('broadcast', {}).get('ok') is False,
+              and res.get('secondary', {}).get('checks', {}).get('broadcast', {}).get('ok') is False
+              and res.get('secondary', {}).get('checks', {}).get('outputLookup', {}).get('ok') is False,
               res.get('secondary'))
+        check('10 nodes: Esplora-style output lookup is unavailable (both outspend routes 404)',
+              res.get('secondary', {}).get('checks', {}).get('outputLookup', {}).get('value') == 'Unavailable — UTXO rules can\u2019t be evaluated',
+              res.get('secondary', {}).get('checks', {}).get('outputLookup'))
         check('10 nodes: Esplora-style fee value is the 6-block rate',
               res.get('secondary', {}).get('checks', {}).get('fees', {}).get('value') == '1 sat/vB',
               res.get('secondary', {}).get('checks', {}).get('fees'))
@@ -1703,7 +1864,9 @@ def main():
         res = {x.get('endpoint'): x for x in r.get('results', [])}
         check('10 nodes: unreachable secondary is FAIL',
               res.get('secondary', {}).get('status') == 'fail'
-              and res.get('secondary', {}).get('ok') is False,
+              and res.get('secondary', {}).get('ok') is False
+              and res.get('secondary', {}).get('checks', {}).get('outputLookup', {}).get('detail') == 'not checked — height failed'
+              and res.get('secondary', {}).get('checks', {}).get('outputLookup', {}).get('value') == '—',
               res.get('secondary'))
         check('10 nodes: overall ok stays true with one good node', r.get('ok') is True, r.get('ok'))
         # Restore the stub secondary and stop the height-only server.
@@ -3708,8 +3871,10 @@ def main():
         # checks of the same outpoint cost ONE stub request per
         # cadence window (shared outpoint cache, TTL = cadence).
         # (b) Several watched outputs of one funding tx cost ONE
-        # batch /outspends request; a single watched output keeps
-        # the singular endpoint. (c) A 404 is never cached — a
+        # batch /outspends request; (0.8.10) a single watched
+        # output now also tries the batch first (generic outspend
+        # negotiation) — the count per outpoint is unchanged, only
+        # the route moved. (c) A 404 is never cached — a
         # spend that appears after the parent was unknown is
         # detected on the next evaluation. (d) A confirmed-spend
         # UTXO rule reuses the shared per-tick tip cache — no extra
@@ -3731,7 +3896,9 @@ def main():
         s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 3600})
         check('25 setup: cadence parked at 3600 s', s == 200, (s, r))
         # (a) Two rules, one outpoint: the startup tick's evaluation
-        # costs ONE singular outspend request, primary only.
+        # costs ONE batch outspend request, primary only — (0.8.10)
+        # every lookup tries the batch first now, so the lone
+        # outpoint is answered by the batch, not the singular.
         s, r = add_tx('UTXO 25a', {'type': 'utxo', 'params': {'outpoint': FINNEY + ':1', 'confirmations': 1}}, 111500)
         check('25 dedup: first same-outpoint tx adds', s == 201, (s, r))
         utxo_a1 = r['tx']['id'] if s == 201 else None
@@ -3744,8 +3911,8 @@ def main():
         p0, s0, bp0, bs0 = outspend_counts()
         check('25 dedup: app restarted (cold caches, startup tick is the measured evaluation)', restart())
         p1, s1, bp1, bs1 = outspend_counts()
-        check('25 dedup: two rules on one outpoint cost ONE singular request, primary only, no batch',
-              (p1, s1, bp1, bs1) == (p0 + 1, s0, bp0, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        check('25 dedup: two rules on one outpoint cost ONE batch request, primary only, no singular',
+              (p1, s1, bp1, bs1) == (p0, s0, bp0 + 1, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
         for tid in (utxo_a1, utxo_a2):
             t = state_tx(tid)
             check('25 dedup: the disarmed tx IS evaluated (slice watching, still unspent)',
@@ -3789,8 +3956,8 @@ def main():
         check('25 batch: the batched outpoint is served from the cache (zero new requests)',
               (p1, s1, bp1, bs1) == (p0, s0, bp0, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
         delete_all_txs()
-        # (b2) One watched output of a funding tx: the singular
-        # endpoint, no batch.
+        # (b2) One watched output of a funding tx: (0.8.10) the
+        # batch first — one batch request, no singular.
         s, r = add_tx('UTXO 25e', {'type': 'utxo', 'params': {'outpoint': SECOND + ':0', 'confirmations': 1}}, 111504)
         check('25 single: lone-output tx adds', s == 201, (s, r))
         utxo_e = r['tx']['id'] if s == 201 else None
@@ -3799,8 +3966,8 @@ def main():
         p0, s0, bp0, bs0 = outspend_counts()
         check('25 single: app restarted', restart())
         p1, s1, bp1, bs1 = outspend_counts()
-        check('25 single: one watched output costs ONE singular request, primary only, zero batch',
-              (p1, s1, bp1, bs1) == (p0 + 1, s0, bp0, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        check('25 single: one watched output costs ONE batch request, primary only, zero singular',
+              (p1, s1, bp1, bs1) == (p0, s0, bp0 + 1, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
         t = state_tx(utxo_e)
         check('25 single: the lone output reads watching (SECOND:0 unspent)',
               rule_slice(t).get('status') == 'watching', rule_slice(t))
@@ -3933,12 +4100,12 @@ def main():
         check('26 batch-cache: the spent output still reads due from the cached batch',
               rule_slice(t).get('status') == 'due', rule_slice(t))
         delete_all_txs()
-        # (b) Two simultaneous singular lookups of one outpoint
-        # cost ONE request: the stub delays its answer 400 ms so
-        # the second lookup lands while the first is still in
-        # flight, and the in-flight map shares it. A restart
-        # first, for a cold cache — otherwise the cache alone
-        # would answer both for free and prove nothing.
+        # (b) Two simultaneous lookups of one outpoint cost ONE
+        # request: the stub delays its answer 400 ms so the second
+        # lookup lands while the first is still in flight, and the
+        # in-flight map shares it. (0.8.10) The shared request is
+        # a batch one now — every lookup tries the batch first.
+        # A restart first, for a cold cache — otherwise the cache
         check('26 inflight: caches cleared for a cold outpoint cache', clear_caches())
         s, r = req('POST', '/__test__/outspend-delay', {'ms': 400}, base=STUB_BASE_P)
         check('26 inflight: primary stub delays outspend answers 400 ms', s == 200 and r.get('delayMs') == 400, r)
@@ -3955,8 +4122,8 @@ def main():
         check('26 inflight: both read the same answer (watching, unspent)',
               all(x[1].get('status') == 'watching' and x[1].get('fire') is False for x in results_26), results_26)
         p1, s1, bp1, bs1 = outspend_counts()
-        check('26 inflight: two simultaneous singular lookups cost ONE request, primary only, zero batch',
-              (p1, s1, bp1, bs1) == (p0 + 1, s0, bp0, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        check('26 inflight: two simultaneous lookups cost ONE batch request, primary only, zero singular',
+              (p1, s1, bp1, bs1) == (p0, s0, bp0 + 1, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
         s, r = req('POST', '/__test__/outspend-delay', {'ms': 0}, base=STUB_BASE_P)
         s, r = req('POST', '/__test__/outspend-delay', {'ms': 0}, base=STUB_BASE_S)
         check('26 inflight: stub delays cleared', s == 200, (s, r))
@@ -3996,7 +4163,7 @@ def main():
         check('26 batch-inflight: two simultaneous batch lookups cost ONE batch request',
               bp1_26 == bp0_26 + 1, (bp0_26, bp1_26))
         # (d) A failed request does not poison the in-flight map:
-        # with both stubs answering 500, a singular lookup fails
+        # with both stubs answering 500, a lookup fails
         # (unknown, never cached); with the failure cleared, the
         # retry fetches fresh and reads the real answer. If the
         # rejected promise stayed in the map, the retry would
@@ -4011,8 +4178,8 @@ def main():
         check('26 fail: trigger check runs while both stubs fail', s == 200, (s, r))
         check('26 fail: the rule reads unknown while both nodes fail', r.get('status') == 'unknown', r)
         p1, s1, bp1, bs1 = outspend_counts()
-        check('26 fail: the failed lookup tried both endpoints (one request each)',
-              (p1, s1, bp1, bs1) == (p0 + 1, s0 + 1, bp0, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        check('26 fail: the failed lookup tried both endpoints (one batch request each)',
+              (p1, s1, bp1, bs1) == (p0, s0, bp0 + 1, bs0 + 1), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
         s, r = req('POST', '/__test__/outspend-fail', {'fail': False}, base=STUB_BASE_P)
         s, r = req('POST', '/__test__/outspend-fail', {'fail': False}, base=STUB_BASE_S)
         check('26 fail: stub failures cleared', s == 200, (s, r))
@@ -4023,7 +4190,7 @@ def main():
               r.get('status') == 'watching' and r.get('fire') is False, r)
         p1, s1, bp1, bs1 = outspend_counts()
         check('26 fail: the retry issues a FRESH request (the failure did not poison the map)',
-              (p1, s1, bp1, bs1) == (p0 + 1, s0, bp0, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+              (p1, s1, bp1, bs1) == (p0, s0, bp0 + 1, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
         # Cleanup: cadence back to 60.
         s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 60})
         check('26 cleanup: cadence restored to 60 s', s == 200, (s, r))
@@ -4112,14 +4279,19 @@ def main():
         p1, s1, bp1, bs1 = outspend_counts()
         # (0.8.7.4) The startup tick now does two things: the
         # hourly freshness refresh (§30) checks each live staged
-        # member input — FINNEY:1, FINNEY:2, SECOND:0 — three
-        # singular requests, primary only, no batch — and the
+        # member input — FINNEY:1, FINNEY:2, SECOND:0 — and the
         # set's UTXO rule on FINNEY:1 then reads the shared cache
-        # the refresh populated, costing zero extra requests. One
-        # request per outpoint still holds, through the cache
-        # rather than a second lookup; the tick total is three.
-        check('27 single: startup tick costs THREE singular requests (freshness refresh of the 3 member inputs), primary only, no batch',
-              (p1, s1, bp1, bs1) == (p0 + 3, s0, bp0, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        # the refresh populated, costing zero extra requests.
+        # (0.8.10) Every lookup tries the batch first: FINNEY:1
+        # costs one batch request (which also answers FINNEY:0
+        # into the cache); FINNEY:2 costs a second batch request
+        # for the same funding tx — the batch answer itself is
+        # not cached — plus a singular fallback, because the
+        # batch array has no vout 2 (the stub's FINNEY has only
+        # 2 outputs); SECOND:0 costs one batch request. The tick
+        # total is three batch + one singular, primary only.
+        check('27 single: startup tick costs THREE batch + ONE singular requests (freshness refresh of the 3 member inputs), primary only',
+              (p1, s1, bp1, bs1) == (p0 + 1, s0, bp0 + 3, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
         bc1 = broadcast_counts()
         check('27 single: the startup tick broadcast nothing', bc1 == bc0, (bc0, bc1))
         x = state_set(set27a)
@@ -4140,8 +4312,8 @@ def main():
         s, r, res = release_results()
         check('27 single: release check runs (cold cache)', s == 200, (s, r))
         p1, s1, bp1, bs1 = outspend_counts()
-        check('27 single: the set rule alone costs ONE singular request on a cold cache, primary only, no batch',
-              (p1, s1, bp1, bs1) == (p0 + 1, s0, bp0, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        check('27 single: the set rule alone costs ONE batch request on a cold cache, primary only, no singular',
+              (p1, s1, bp1, bs1) == (p0, s0, bp0 + 1, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
         # (b) Fire broadcasts ALL members: retarget the set to a
         # past setdate, then a manual release check sends all
         # three through the per-tx broadcast path.
@@ -5243,12 +5415,747 @@ def main():
             except Exception:
                 pass
 
+        # --- 32. audit fixes 1/3/4 (0.8.10) ---------------------------
+        # (fix 1) A malformed request target gets a 400 and the
+        # process keeps serving — the app server and the receiver
+        # alike. (fix 3) Security headers on the page, the API, and
+        # the receiver.
+        s, body = raw_get('//[', BASE)
+        check('32 crash: malformed request line gets 400, not a dead server',
+              s == 400 and body == b'Bad request URL', (s, body))
+        s, r = req('GET', '/api/health')
+        check('32 crash: app still answers after the malformed request',
+              s == 200 and r.get('version') == '0.8.10', (s, r))
+        s, body = raw_get('//[', RBASE)
+        check('32 crash: malformed request line to the receiver gets 400',
+              s == 400 and body == b'Bad request URL', (s, body))
+        check('32 crash: receiver still answers after the malformed request',
+              wait_up(RBASE, path='/health'))
+        s, hdrs = resp_headers('GET', '/', BASE)
+        check('32 headers: / carries X-Frame-Options DENY',
+              hdrs.get('x-frame-options') == 'DENY', hdrs)
+        check('32 headers: / carries nosniff',
+              hdrs.get('x-content-type-options') == 'nosniff', hdrs)
+        check('32 headers: / carries the CSP (script-src self, inline styles allowed)',
+              hdrs.get('content-security-policy') == CSP_0810, hdrs.get('content-security-policy'))
+        s, hdrs = resp_headers('GET', '/api/health', BASE)
+        check('32 headers: /api/health carries X-Frame-Options DENY',
+              hdrs.get('x-frame-options') == 'DENY', hdrs)
+        check('32 headers: /api/health carries nosniff',
+              hdrs.get('x-content-type-options') == 'nosniff', hdrs)
+        check('32 headers: /api/health carries the full CSP',
+              hdrs.get('content-security-policy') == CSP_0810, hdrs.get('content-security-policy'))
+        s, hdrs = resp_headers('GET', '/health', RBASE)
+        check('32 headers: receiver /health carries nosniff',
+              hdrs.get('x-content-type-options') == 'nosniff', hdrs)
+        check('32 headers: receiver /health carries frame-ancestors only (no full CSP)',
+              hdrs.get('content-security-policy') == "frame-ancestors 'self'",
+              hdrs.get('content-security-policy'))
+        check('32 headers: receiver /health carries no X-Frame-Options',
+              'x-frame-options' not in hdrs, hdrs)
+
+        # --- 33. audit fix 2 (Host allowlist) + fsync (0.8.10) -------
+        # (fix 2) A foreign Host is a DNS-rebinding probe, not a
+        # client: 421 on both servers, before routing or auth. An
+        # IP literal, localhost, a *.local name, and the machine's
+        # own hostname pass with zero configuration; a missing Host
+        # is rejected too.
+        s, body = raw_req('GET', '/api/health', BASE, host='evil.example')
+        check('33 hosts: foreign Host gets 421 on the app',
+              s == 421 and body == b'Unrecognised Host header', (s, body))
+        s, body = raw_req('GET', '/health', RBASE, host='evil.example')
+        check('33 hosts: foreign Host gets 421 on the receiver',
+              s == 421 and body == b'Unrecognised Host header', (s, body))
+        s, body = raw_req('GET', '/api/health', BASE, host='127.0.0.1:3438')
+        check('33 hosts: IP literal Host passes', s == 200, (s, body))
+        s, body = raw_req('GET', '/api/health', BASE, host='umbrel.local')
+        check('33 hosts: umbrel.local passes', s == 200, (s, body))
+        s, body = raw_req('GET', '/api/health', BASE, host=os.uname().nodename.lower())
+        check('33 hosts: machine hostname passes', s == 200, (s, body))
+        check('33 hosts: missing Host header is rejected',
+              raw_socket_status(b'GET /api/health HTTP/1.0\r\n\r\n', BASE) == 421)
+        check('33 hosts: startup log names the allowed Hosts',
+              'Standby allowed Hosts: any IP literal, localhost, *.local, ' in read_log(),
+              read_log()[-500:])
+        # STANDBY_ALLOWED_HOSTS: a second instance on port 3440
+        # (§31's port — its instance is stopped by now) with two
+        # extra names. The names pass, anything else still 421s,
+        # and the IP-literal rule still holds with the var set.
+        extra_data = '/tmp/heirloom099-extra'
+        extra_checkin = '/tmp/heirloom099-extra-checkin'
+        shutil.rmtree(extra_data, ignore_errors=True)
+        shutil.rmtree(extra_checkin, ignore_errors=True)
+        check('33 hosts: port 3440 free', port_closed(3440))
+        extra_env = dict(APP_ENV)
+        extra_env.update({'PORT': '3440', 'DATA_DIR': extra_data, 'CHECKIN_DIR': extra_checkin,
+                          'STANDBY_ALLOWED_HOSTS': 'extra.ts.net, custom.example'})
+        extra_base = 'http://127.0.0.1:3440'
+        extra_app = start(['node', 'server.js'], env=extra_env, cwd=APP, log=LOG)
+        check('33 hosts: STANDBY_ALLOWED_HOSTS instance comes up', wait_up(extra_base))
+        s, body = raw_req('GET', '/api/health', extra_base, host='extra.ts.net')
+        check('33 hosts: STANDBY_ALLOWED_HOSTS name passes', s == 200, (s, body))
+        s, body = raw_req('GET', '/api/health', extra_base, host='custom.example')
+        check('33 hosts: second STANDBY_ALLOWED_HOSTS name passes', s == 200, (s, body))
+        s, body = raw_req('GET', '/api/health', extra_base, host='other.example')
+        check('33 hosts: a name not in STANDBY_ALLOWED_HOSTS is rejected',
+              s == 421, (s, body))
+        s, body = raw_req('GET', '/api/health', extra_base, host='127.0.0.1:3440')
+        check('33 hosts: IP literal still passes with STANDBY_ALLOWED_HOSTS set',
+              s == 200, (s, body))
+        stop(extra_app)
+        # X-Forwarded-Host is no longer trusted: a matching Origin
+        # smuggled in via XFH must not pass the CSRF gate. (Before
+        # the fix, Origin evil.example + XFH evil.example passed
+        # it.) A matching Origin still passes — the gate itself is
+        # intact, only the forged-header bypass is gone.
+        s, body = raw_req('POST', '/api/checkin', BASE, host='127.0.0.1:3438',
+                          headers={'Origin': 'https://evil.example',
+                                   'X-Forwarded-Host': 'evil.example',
+                                   'Content-Type': 'application/json'},
+                          body=b'{"method": "app"}')
+        check('33 hosts: spoofed X-Forwarded-Host no longer bypasses the CSRF gate',
+              s == 403, (s, body))
+        s, r = req('POST', '/api/checkin', {'method': 'app'},
+                   headers={'Origin': 'http://127.0.0.1:3438'})
+        check('33 hosts: a matching Origin still passes the CSRF gate',
+              s == 200, (s, r))
+        # (fsync) A save round-trips through the file: the value
+        # written via the API is the value on disk, the file loads
+        # cleanly, and no .tmp file is left behind. The cadence is
+        # restored to 60 afterwards (the §22 pattern).
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 33})
+        check('33 fsync: settings save succeeds (200)', s == 200, (s, r))
+        check('33 fsync: no state.json.tmp left behind',
+              not os.path.exists(os.path.join(DATA, 'state.json.tmp')),
+              os.listdir(DATA))
+        _saved = {}
+        try:
+            _saved = load_state_file()
+        except Exception:
+            pass
+        check('33 fsync: saved value round-trips through state.json',
+              _saved.get('settings', {}).get('checkCadenceSeconds') == 33,
+              _saved.get('settings', {}).get('checkCadenceSeconds'))
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 60})
+        check('33 fsync: cadence restored to 60 (200)', s == 200, (s, r))
+        # (fsync, receiver) A check-in writes last.json durably:
+        # the file parses with the key id, and no .tmp is left.
+        s, r = req('POST', '/api/checkin-keys', {'label': '33 fsync'})
+        check('33 fsync: key creates (201)', s == 201, (s, r))
+        key_plain = r.get('plain') if s == 201 else None
+        key_id = (r.get('key') or {}).get('id') if s == 201 else None
+        s, r = req('POST', '/checkin', {}, base=RBASE, headers={'Authorization': 'Bearer ' + (key_plain or '')})
+        check('33 fsync: receiver check-in succeeds (200)', s == 200 and r.get('ok') is True, (s, r))
+        try:
+            _last = json.load(open(os.path.join(CHECKIN_DIR, 'last.json')))
+        except Exception:
+            _last = {}
+        check('33 fsync: last.json written with the key id',
+              _last.get('keyId') == key_id, _last)
+        check('33 fsync: no last.json.tmp left behind',
+              not os.path.exists(os.path.join(CHECKIN_DIR, 'last.json.tmp')),
+              os.listdir(CHECKIN_DIR))
+        check('33 fsync: no keys.json.tmp left behind',
+              not os.path.exists(os.path.join(CHECKIN_DIR, 'keys.json.tmp')),
+              os.listdir(CHECKIN_DIR))
+        s, r = req('DELETE', '/api/checkin-keys/' + (key_id or 'none'), base=BASE)
+        check('33 fsync: key revokes (200)', s == 200, (s, r))
+
+        # --- 34. skip-save + heartbeat (0.8.10) -------------------------
+        # (a) Quiet ticks write nothing: with a watching price tx
+        # (so the tick has work — it evaluates every tick) and the
+        # cadence at 10 s, two full ticks leave state.json
+        # byte-identical with its mtime untouched, and the
+        # heartbeat unrewritten inside its 5-minute throttle. The
+        # stub price/tip/fee are fixed, so nothing meaningful
+        # changes — the dedupe must skip both the stamp-block save
+        # and the trigger-state save.
+        delete_all_txs()
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 10})
+        check('34 quiet: cadence set to 10 s', s == 200, (s, r))
+        s, r = add_tx('34 quiet price', {'type': 'price', 'params': {'op': '>=', 'value': 200000}}, 121000, trigger_confirmed=True)
+        check('34 quiet: watching price tx adds (201)', s == 201, (s, r))
+        q34 = r['tx']['id'] if s == 201 else None
+        check('34 quiet: one tick evaluates it (slice watching)',
+              wait_slice(q34, {'status': 'watching'}), rule_slice(state_tx(q34)) if q34 else None)
+        s, st = req('GET', '/api/state')
+        check('34 quiet: no pending external check-in before the snapshot', s == 200, (s, r))
+        before_bytes = open(os.path.join(DATA, 'state.json'), 'rb').read()
+        before_mtime = os.path.getmtime(os.path.join(DATA, 'state.json'))
+        hb_before = json.load(open(os.path.join(DATA, 'heartbeat.json')))
+        hb_mtime_before = os.path.getmtime(os.path.join(DATA, 'heartbeat.json'))
+        time.sleep(25)
+        check('34 quiet: state.json byte-identical across two ticks',
+              open(os.path.join(DATA, 'state.json'), 'rb').read() == before_bytes)
+        check('34 quiet: state.json mtime untouched across two ticks',
+              os.path.getmtime(os.path.join(DATA, 'state.json')) == before_mtime,
+              (before_mtime, os.path.getmtime(os.path.join(DATA, 'state.json'))))
+        check('34 quiet: heartbeat unrewritten inside its throttle',
+              os.path.getmtime(os.path.join(DATA, 'heartbeat.json')) == hb_mtime_before
+              and json.load(open(os.path.join(DATA, 'heartbeat.json'))) == hb_before)
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 60})
+        check('34 quiet: cadence restored to 60 s', s == 200, (s, r))
+        delete_all_txs()
+        # (b) A grace activation still writes: backdate the clock
+        # 10 days (flat leg) with an armed 35-day check-in tx, drop
+        # the heartbeat and the receiver's last.json so the seeded
+        # clock survives (the §22 pattern), restart, and the
+        # startup tick's grace must persist to state.json.
+        s, r = add_tx('34 gap checkin', {'type': 'checkin', 'params': {'thresholdDays': 35}}, 121002)
+        check('34 grace: gap check-in tx adds (201)', s == 201, (s, r))
+        seed_mtime = []
+        def seed_gap_34():
+            try:
+                os.remove(os.path.join(CHECKIN_DIR, 'last.json'))
+            except OSError:
+                pass
+            stj = load_state_file()
+            stj['checkin']['lastCheckinAt'] = iso_ago(days=20)
+            stj['checkin']['lastOnlineAt'] = iso_ago(days=10)
+            save_state_file(stj)  # also drops heartbeat.json
+            seed_mtime.append(os.path.getmtime(os.path.join(DATA, 'state.json')))
+        check('34 grace: app restarted with a 10-day gap', restart(before_start=seed_gap_34))
+        s, st = req('GET', '/api/state')
+        check('34 grace: the grace is active', st.get('grace', {}).get('active') is True, st.get('grace'))
+        gap_file = load_state_file()
+        check('34 grace: activation persisted to state.json (graceUntil set)',
+              isinstance((gap_file.get('grace') or {}).get('graceUntil'), str), gap_file.get('grace'))
+        check('34 grace: state.json mtime advanced on the activation',
+              seed_mtime and os.path.getmtime(os.path.join(DATA, 'state.json')) > seed_mtime[0],
+              (seed_mtime, os.path.getmtime(os.path.join(DATA, 'state.json'))))
+        # (c) The heartbeat advances across a restart, and the
+        # served lastOnlineAt is the merged heartbeat value.
+        hb1 = json.load(open(os.path.join(DATA, 'heartbeat.json')))
+        check('34 heartbeat: heartbeat exists with a recent value after the gap restart',
+              isinstance(hb1.get('lastOnlineAt'), str)
+              and abs((datetime.now(timezone.utc) - datetime.fromisoformat(hb1['lastOnlineAt'].replace('Z', '+00:00'))).total_seconds()) < 120, hb1)
+        check('34 heartbeat: app restarted', restart())
+        hb2 = json.load(open(os.path.join(DATA, 'heartbeat.json')))
+        check('34 heartbeat: heartbeat advances across a restart',
+              isinstance(hb2.get('lastOnlineAt'), str) and hb2['lastOnlineAt'] > hb1['lastOnlineAt'], (hb1, hb2))
+        s, st = req('GET', '/api/state')
+        check('34 heartbeat: served lastOnlineAt is the merged heartbeat value',
+              st.get('checkin', {}).get('lastOnlineAt') == hb2['lastOnlineAt'],
+              (st.get('checkin', {}).get('lastOnlineAt'), hb2))
+        s, r = req('POST', '/api/grace/resume', {})
+        check('34 grace: resumed after the checks', s == 200, (s, r))
+        delete_all_txs()
+        # (d) SIGTERM flush: a fresh instance on port 3440, its
+        # heartbeat deleted, SIGTERM at once — the next tick is up
+        # to 60 s away, so only the flush can recreate the file —
+        # and the process must exit 0.
+        sig_data = '/tmp/heirloom099-sigterm'
+        sig_checkin = '/tmp/heirloom099-sigterm-checkin'
+        shutil.rmtree(sig_data, ignore_errors=True)
+        shutil.rmtree(sig_checkin, ignore_errors=True)
+        check('34 sigterm: port 3440 free', port_closed(3440))
+        sig_env = dict(APP_ENV)
+        sig_env.update({'PORT': '3440', 'DATA_DIR': sig_data, 'CHECKIN_DIR': sig_checkin})
+        sig_base = 'http://127.0.0.1:3440'
+        sig_app = start(['node', 'server.js'], env=sig_env, cwd=APP, log=LOG)
+        check('34 sigterm: instance comes up', wait_up(sig_base))
+        try:
+            os.remove(os.path.join(sig_data, 'heartbeat.json'))
+        except OSError:
+            pass
+        sig_app.send_signal(signal.SIGTERM)
+        try:
+            sig_code = sig_app.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            sig_code = None
+            stop(sig_app)
+        check('34 sigterm: process exits 0 on SIGTERM', sig_code == 0, sig_code)
+        try:
+            hb_sig = json.load(open(os.path.join(sig_data, 'heartbeat.json')))
+            hb_sig_at = hb_sig.get('lastOnlineAt')
+        except Exception:
+            hb_sig_at = None
+        check('34 sigterm: SIGTERM flush lands the heartbeat',
+              isinstance(hb_sig_at, str)
+              and abs((datetime.now(timezone.utc) - datetime.fromisoformat(hb_sig_at.replace('Z', '+00:00'))).total_seconds()) < 30, hb_sig_at)
+        # (e) Missing/corrupt heartbeat falls back to the state's
+        # own lastOnlineAt — checked directly against lib/store.js
+        # in a scratch data dir (no server: the running server
+        # rewrites the heartbeat on its first tick, so a live test
+        # could not observe the fallback). The dedupe itself is
+        # pinned the same way: an identical save skips, a real
+        # change writes.
+        hb_dir = '/tmp/heirloom099-heartbeat'
+        shutil.rmtree(hb_dir, ignore_errors=True)
+        os.makedirs(hb_dir)
+        hb_seed = load_state_file()
+        hb_seed['checkin']['lastOnlineAt'] = iso_ago(days=2)
+        json.dump(hb_seed, open(os.path.join(hb_dir, 'state.json'), 'w'), indent=2)
+        open(os.path.join(hb_dir, 'heartbeat.json'), 'w').write('{not json')
+
+        def node_out(script):
+            rr = subprocess.run(['node', '-e', script], cwd=APP, capture_output=True, text=True, timeout=20)
+            return rr.stdout.strip(), rr.stderr.strip()
+        node_load = ("const s=require('./lib/store');"
+                     "console.log(s.loadState(%s).checkin.lastOnlineAt);" % json.dumps(hb_dir))
+        out, err = node_out(node_load)
+        check('34 fallback: corrupt heartbeat falls back to state.lastOnlineAt',
+              out == hb_seed['checkin']['lastOnlineAt'], out + err)
+        os.remove(os.path.join(hb_dir, 'heartbeat.json'))
+        out, err = node_out(node_load)
+        check('34 fallback: missing heartbeat falls back to state.lastOnlineAt',
+              out == hb_seed['checkin']['lastOnlineAt'], out + err)
+        hb_new = iso_ago(minutes=5)
+        json.dump({'lastOnlineAt': hb_new}, open(os.path.join(hb_dir, 'heartbeat.json'), 'w'))
+        out, err = node_out(node_load)
+        check('34 fallback: newer heartbeat wins the merge', out == hb_new, out + err)
+        hb_old = iso_ago(days=3)
+        json.dump({'lastOnlineAt': hb_old}, open(os.path.join(hb_dir, 'heartbeat.json'), 'w'))
+        out, err = node_out(node_load)
+        check('34 fallback: older heartbeat loses to state.lastOnlineAt',
+              out == hb_seed['checkin']['lastOnlineAt'], out + err)
+        node_dedupe = ("const fs=require('fs');const s=require('./lib/store');"
+                       "const d=%s;const st=s.loadState(d);"
+                       "s.saveState(d, st);const m1=fs.statSync(d+'/state.json').mtimeMs;"
+                       "s.saveState(d, st);const m2=fs.statSync(d+'/state.json').mtimeMs;"
+                       "st.settings.checkCadenceSeconds=61;s.saveState(d, st);"
+                       "const m3=fs.statSync(d+'/state.json').mtimeMs;"
+                       "console.log(m1===m2 ? 'SKIP' : 'WROTE', m3>m2 ? 'WROTE-ON-CHANGE' : 'NO-WRITE');"
+                       % json.dumps(hb_dir))
+        out, err = node_out(node_dedupe)
+        check('34 dedupe: identical save skips, a real change writes',
+              out == 'SKIP WROTE-ON-CHANGE', out + err)
+        # The cache must not survive an out-of-band edit: the DOM
+        # suite caught Resume doing nothing after a directly-seeded
+        # grace, because the cache still held the cleared grace
+        # from the previous Resume and the restoring mutation
+        # compared equal. Seed an active grace by writing the
+        # file directly (bypassing saveState), then restore the
+        # cached cleared grace through saveState: the mtime+size
+        # validation must force the write.
+        node_oob = ("const fs=require('fs');const s=require('./lib/store');"
+                    "const d=%s;const st=s.loadState(d);"
+                    "st.grace={graceUntil:null,triggeredAt:null,offlineGapDays:null};"
+                    "s.saveState(d, st);const m1=fs.statSync(d+'/state.json').mtimeMs;"
+                    "s.saveState(d, st);const m2=fs.statSync(d+'/state.json').mtimeMs;"
+                    "const oob=s.loadState(d);"
+                    "oob.grace={graceUntil:null,triggeredAt:new Date().toISOString(),offlineGapDays:12};"
+                    "fs.writeFileSync(d+'/state.json', JSON.stringify(oob, null, 2)+'\\n');"
+                    "const back=s.loadState(d);"
+                    "back.grace={graceUntil:null,triggeredAt:null,offlineGapDays:null};"
+                    "s.saveState(d, back);const m3=fs.statSync(d+'/state.json').mtimeMs;"
+                    "console.log(m1===m2 ? 'SKIP' : 'WROTE', m3>m2 ? 'WROTE-AFTER-OOB' : 'SKIPPED-AFTER-OOB');"
+                    % json.dumps(hb_dir))
+        out, err = node_out(node_oob)
+        check('34 dedupe: an out-of-band edit invalidates the cache (Resume-after-seed writes)',
+              out == 'SKIP WROTE-AFTER-OOB', out + err)
+
+        # --- 35. 0.8.10 follow-ups ------------------------------------
+        # (a) A future-dated heartbeat must not suppress a grace:
+        # seed an 8-day-stale state stamp with a heartbeat 2 days
+        # in the future, restart, and the grace must activate on
+        # the flat 7-day leg. Before the fix the merge took the
+        # future stamp (a negative gap reads as no gap at all) and
+        # the first tick could fire a due transaction.
+        s, r = add_tx('35 future heartbeat', {'type': 'checkin', 'params': {'thresholdDays': 35}}, 121004)
+        check('35 clamp: gap check-in tx adds (201)', s == 201, (s, r))
+        def seed_future_hb_35():
+            try:
+                os.remove(os.path.join(CHECKIN_DIR, 'last.json'))
+            except OSError:
+                pass
+            stj = load_state_file()
+            stj['checkin']['lastCheckinAt'] = iso_ago(days=20)
+            stj['checkin']['lastOnlineAt'] = iso_ago(days=8)
+            save_state_file(stj)  # also drops heartbeat.json
+            json.dump({'lastOnlineAt': iso_in(days=2)}, open(os.path.join(DATA, 'heartbeat.json'), 'w'))
+        check('35 clamp: app restarted with a future heartbeat over an 8-day gap', restart(before_start=seed_future_hb_35))
+        s, st = req('GET', '/api/state')
+        check('35 clamp: the grace is active despite the future heartbeat', st.get('grace', {}).get('active') is True, st.get('grace'))
+        check('35 clamp: served lastOnlineAt is not the future stamp',
+              isinstance(st.get('checkin', {}).get('lastOnlineAt'), str)
+              and st['checkin']['lastOnlineAt'] <= iso_in(minutes=6),
+              st.get('checkin', {}).get('lastOnlineAt'))
+        s, r = req('POST', '/api/grace/resume', {})
+        check('35 clamp: resumed after the checks', s == 200, (s, r))
+        delete_all_txs()
+        # (b) The clamp, pinned directly against lib/store.js in a
+        # scratch data dir (the §34(e) pattern): a future
+        # heartbeat is ignored, a future state stamp is capped,
+        # and both future together cap too — the documented
+        # residual, which activates no grace until the heartbeat
+        # rewrites correctly.
+        cl_dir = '/tmp/heirloom099-clamp'
+        shutil.rmtree(cl_dir, ignore_errors=True)
+        os.makedirs(cl_dir)
+        cl_seed = load_state_file()
+        cl_seed['checkin']['lastOnlineAt'] = iso_ago(days=8)
+        cl_seed['grace'] = {'graceUntil': None, 'triggeredAt': None, 'offlineGapDays': None}
+        json.dump(cl_seed, open(os.path.join(cl_dir, 'state.json'), 'w'), indent=2)
+        json.dump({'lastOnlineAt': iso_in(days=2)}, open(os.path.join(cl_dir, 'heartbeat.json'), 'w'))
+        node_load = ("const s=require('./lib/store');"
+                     "console.log(s.loadState(%s).checkin.lastOnlineAt);" % json.dumps(cl_dir))
+        out, err = node_out(node_load)
+        check('35 clamp: future heartbeat ignored, state stamp stands',
+              out == cl_seed['checkin']['lastOnlineAt'], out + err)
+        node_grace = ("const s=require('./lib/store');const c=require('./lib/checkin');"
+                      "const d=%s;const st=s.loadState(d);"
+                      "console.log(c.applyGrace(st, new Date()) ? 'GRACE' : 'NO-GRACE');"
+                      % json.dumps(cl_dir))
+        out, err = node_out(node_grace)
+        check('35 clamp: grace activates on the merged 8-day gap', out == 'GRACE', out + err)
+        cl_seed['checkin']['lastOnlineAt'] = iso_in(days=1)
+        json.dump(cl_seed, open(os.path.join(cl_dir, 'state.json'), 'w'), indent=2)
+        os.remove(os.path.join(cl_dir, 'heartbeat.json'))
+        out, err = node_out(node_load)
+        try:
+            _cap = datetime.fromisoformat(out.replace('Z', '+00:00'))
+        except Exception:
+            _cap = None
+        check('35 clamp: future state stamp capped at now + 5 minutes',
+              _cap is not None and datetime.now(timezone.utc) < _cap <= datetime.now(timezone.utc) + timedelta(minutes=6),
+              out + err)
+        json.dump({'lastOnlineAt': iso_in(days=2)}, open(os.path.join(cl_dir, 'heartbeat.json'), 'w'))
+        out, err = node_out(node_load)
+        try:
+            _cap2 = datetime.fromisoformat(out.replace('Z', '+00:00'))
+        except Exception:
+            _cap2 = None
+        check('35 clamp: both future together still cap at now + 5 minutes',
+              _cap2 is not None and datetime.now(timezone.utc) < _cap2 <= datetime.now(timezone.utc) + timedelta(minutes=6),
+              out + err)
+        out, err = node_out(node_grace)
+        check('35 clamp: both future together activate no grace (documented residual)', out == 'NO-GRACE', out + err)
+        # (c) The heartbeat throttle treats a backward clock jump
+        # as expired: write, confirm the immediate re-touch is
+        # throttled, jump the fake clock back 10 days, and the
+        # next touch writes.
+        node_throttle = ("const s=require('./lib/store');const fs=require('fs');"
+                         "const d=%s;fs.rmSync(d,{recursive:true,force:true});fs.mkdirSync(d,{recursive:true});"
+                         "let now=Date.now();const real=Date.now;Date.now=()=>now;"
+                         "const iso=(ms)=>new Date(ms).toISOString();"
+                         "const a=s.touchHeartbeat(d,iso(now))?'WROTE':'SKIP';"
+                         "const b=s.touchHeartbeat(d,iso(now))?'WROTE':'SKIP';"
+                         "now-=10*24*3600*1000;"
+                         "const c=s.touchHeartbeat(d,iso(now))?'WROTE':'SKIP';"
+                         "Date.now=real;console.log(a+' '+b+' '+c);"
+                         % json.dumps('/tmp/heirloom099-throttle'))
+        out, err = node_out(node_throttle)
+        check('35 throttle: write, throttled re-touch, backward jump writes again',
+              out == 'WROTE SKIP WROTE', out + err)
+        # (d) Trailing-dot hostnames: "localhost." IS localhost
+        # and "umbrel.local." IS umbrel.local (a trailing dot
+        # marks a fully-qualified name), so both pass; a bare "."
+        # is empty after the strip and still gets a 421.
+        s, body = raw_req('GET', '/api/health', BASE, host='localhost.')
+        check('35 hosts: localhost. passes', s == 200, (s, body))
+        s, body = raw_req('GET', '/api/health', BASE, host='umbrel.local.')
+        check('35 hosts: umbrel.local. passes', s == 200, (s, body))
+        s, body = raw_req('GET', '/api/health', BASE, host='localhost.:3438')
+        check('35 hosts: localhost. with a port passes', s == 200, (s, body))
+        s, body = raw_req('GET', '/api/health', BASE, host='.')
+        check('35 hosts: bare . is still rejected',
+              s == 421 and body == b'Unrecognised Host header', (s, body))
+        s, body = raw_req('GET', '/health', RBASE, host='localhost.')
+        check('35 hosts: localhost. passes on the receiver', s == 200, (s, body))
+        # (e) The JSONL logs are durable: a live app check-in
+        # lands in checkins.jsonl with no .tmp left behind, and
+        # the node round-trip (append + full rewrite) reads back
+        # what was written.
+        s, r = req('POST', '/api/checkin', {'method': 'app'}, headers={'Origin': 'http://127.0.0.1:3438'})
+        check('35 jsonl: app check-in succeeds (200)', s == 200, (s, r))
+        _log = os.path.join(DATA, 'checkins.jsonl')
+        try:
+            _rows = [json.loads(x) for x in open(_log).read().split('\n') if x.strip()]
+        except Exception:
+            _rows = []
+        check('35 jsonl: check-in lands in checkins.jsonl',
+              any(x.get('method') == 'app' for x in _rows), _rows[-3:] if _rows else None)
+        check('35 jsonl: no checkins.jsonl.tmp left behind',
+              not os.path.exists(_log + '.tmp'), os.listdir(DATA))
+        node_jsonl = ("const s=require('./lib/store');const fs=require('fs');"
+                      "const d=%s;fs.rmSync(d,{recursive:true,force:true});fs.mkdirSync(d,{recursive:true});"
+                      "s.appendCheckin(d,{ts:'2026-11-23T00:00:00.000Z',method:'t1'});"
+                      "s.appendCheckin(d,{ts:'2026-11-23T00:01:00.000Z',method:'t2'});"
+                      "const a=s.readCheckins(d,50);"
+                      "s.writeCheckins(d,[{ts:'2026-11-23T00:02:00.000Z',method:'w'}]);"
+                      "const b=s.readCheckins(d,50);"
+                      "const tmp=!fs.existsSync(d+'/checkins.jsonl.tmp');"
+                      "console.log(a.length===2&&a[1].method==='t2'&&b.length===1&&b[0].method==='w'&&tmp?'OK':'FAIL');"
+                      % json.dumps('/tmp/heirloom099-jsonl'))
+        out, err = node_out(node_jsonl)
+        check('35 jsonl: append + rewrite round-trip with no .tmp', out == 'OK', out + err)
+        # --- 36. uncaught exception (0.8.10 audit fix) ----------------
+        # An uncaught exception terminates the process
+        # (uncaughtExceptionMonitor) instead of serving through
+        # it: a scratch app server and a scratch receiver, each
+        # hit with its test-only throw hook, must exit nonzero
+        # with the log line recorded, and their ports must close.
+        # (The request-level 400 handling for a malformed URL
+        # is untouched — §32 still covers it.)
+        uc_data = '/tmp/heirloom099-uncaught'
+        uc_checkin = '/tmp/heirloom099-uncaught-checkin'
+        uc_log = '/tmp/heirloom099-uncaught.log'
+        shutil.rmtree(uc_data, ignore_errors=True)
+        shutil.rmtree(uc_checkin, ignore_errors=True)
+        uc_env = dict(APP_ENV)
+        uc_env.update({'PORT': '3440', 'DATA_DIR': uc_data, 'CHECKIN_DIR': uc_checkin})
+        uc = start(['node', 'server.js'], env=uc_env, cwd=APP, log=uc_log)
+        check('36 uncaught: scratch app server starts', wait_up('http://127.0.0.1:3440'))
+        s, r = req('POST', '/api/__test__/throw-uncaught', {}, base='http://127.0.0.1:3440')
+        check('36 uncaught: app hook answers 200', s == 200, (s, r))
+        check('36 uncaught: app server exits on an uncaught exception',
+              wait_until(lambda: uc.poll() is not None, deadline=10), uc.poll())
+        check('36 uncaught: app exit code is nonzero',
+              uc.poll() not in (None, 0), uc.poll())
+        _uc_log = open(uc_log).read() if os.path.exists(uc_log) else ''
+        check('36 uncaught: app log records the exception',
+              'uncaught exception:' in _uc_log, _uc_log[-300:] if _uc_log else None)
+        check('36 uncaught: scratch app port is closed again', port_closed(3440))
+        rc_log = '/tmp/heirloom099-uncaught-recv.log'
+        rc = start(['node', 'server.js'], env={'PORT': '3441', 'CHECKIN_DIR': uc_checkin},
+                   cwd=os.path.join(APP, 'checkin-receiver'), log=rc_log)
+        check('36 uncaught: scratch receiver starts', wait_up('http://127.0.0.1:3441', path='/health'))
+        s, r = req('POST', '/__test__/throw-uncaught', {}, base='http://127.0.0.1:3441')
+        check('36 uncaught: receiver hook answers 200', s == 200, (s, r))
+        check('36 uncaught: receiver exits on an uncaught exception',
+              wait_until(lambda: rc.poll() is not None, deadline=10), rc.poll())
+        check('36 uncaught: receiver exit code is nonzero',
+              rc.poll() not in (None, 0), rc.poll())
+        _rc_log = open(rc_log).read() if os.path.exists(rc_log) else ''
+        check('36 uncaught: receiver log records the exception',
+              'uncaught exception:' in _rc_log, _rc_log[-300:] if _rc_log else None)
+        check('36 uncaught: scratch receiver port is closed again', port_closed(3441))
+        # --- 37. Generic outspend negotiation (0.8.10) -----------------
+        # Mempool-compatible APIs differ in which outspend endpoints
+        # they serve: mempool.space and Esplora serve both the batch
+        # /outspends and the singular /outspend/:vout; a self-hosted
+        # mempool backend v3 serves only the batch; some other
+        # implementation may serve only the singular. The client
+        # must not assume any inventory: it tries the batch first,
+        # falls back to the singular on a route-missing signal, and
+        # remembers per node which shape worked. Proved with the
+        # stub's outspend-mode hook (POST /__test__/outspend-mode).
+        # Cadence is parked at 3600 s so the TTL window is wide and
+        # only this section's evaluations move the counters. The
+        # modes are restored to 'both' at the end so nothing leaks
+        # into later sections.
+        def set_outspend_mode(mode, base):
+            s, r = req('POST', '/__test__/outspend-mode', {'mode': mode}, base=base)
+            return s == 200 and r.get('mode') == mode
+        def trig_utxo(outpoint, confs=1):
+            return req('POST', '/api/triggers/check', {'trigger': {'type': 'utxo', 'params': {'outpoint': outpoint, 'confirmations': confs}}})
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 3600})
+        check('37 setup: cadence parked at 3600 s', s == 200, (s, r))
+        check('37 setup: caches cleared for a cold outpoint cache', clear_caches())
+        # (a) Batch-only node (the self-hosted v3 shape): a lone
+        # watched output is answered by the batch, zero singular.
+        check('37 batch-only: primary stub serves batch only', set_outspend_mode('batch', STUB_BASE_P))
+        check('37 batch-only: secondary stub serves both', set_outspend_mode('both', STUB_BASE_S))
+        p0, s0, bp0, bs0 = outspend_counts()
+        s, r = trig_utxo(FINNEY + ':1')
+        check('37 batch-only: trigger check runs', s == 200, (s, r))
+        check('37 batch-only: the unspent outpoint reads watching (not due, no fire)',
+              r.get('status') == 'watching' and r.get('fire') is False, r)
+        p1, s1, bp1, bs1 = outspend_counts()
+        check('37 batch-only: ONE batch request, primary only, zero singular',
+              (p1, s1, bp1, bs1) == (p0, s0, bp0 + 1, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        # (b) Singular-only node: the batch 404s, the singular
+        # answers — and the second lookup goes singular-first,
+        # proving the shape is learned per base (no second batch
+        # call). The caches are cleared between the lookups so the
+        # second one fetches fresh; the learned shape survives a
+        # cache clear (it is capability state, reset only by a
+        # restart).
+        check('37 singular-only: primary stub serves singular only', set_outspend_mode('singular', STUB_BASE_P))
+        check('37 singular-only: caches cleared for a cold outpoint cache', clear_caches())
+        p0, s0, bp0, bs0 = outspend_counts()
+        s, r = trig_utxo(FINNEY + ':1')
+        check('37 singular-only: first trigger check runs', s == 200, (s, r))
+        check('37 singular-only: the unspent outpoint reads watching',
+              r.get('status') == 'watching' and r.get('fire') is False, r)
+        p1, s1, bp1, bs1 = outspend_counts()
+        check('37 singular-only: first lookup costs ONE batch 404 + ONE singular request, primary only',
+              (p1, s1, bp1, bs1) == (p0 + 1, s0, bp0 + 1, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        check('37 singular-only: caches cleared again (shape record survives)', clear_caches())
+        p0, s0, bp0, bs0 = outspend_counts()
+        s, r = trig_utxo(FINNEY + ':1')
+        check('37 singular-only: second trigger check runs', s == 200, (s, r))
+        check('37 singular-only: the second lookup still reads watching',
+              r.get('status') == 'watching' and r.get('fire') is False, r)
+        p1, s1, bp1, bs1 = outspend_counts()
+        check('37 singular-only: second lookup goes singular-first — ONE singular request, ZERO batch',
+              (p1, s1, bp1, bs1) == (p0 + 1, s0, bp0, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        # (c) Neither shape: both routes 404 on both nodes — the
+        # rule reads unknown and never fires. The primary, whose
+        # shape was learned as singular-only in (b), tries its
+        # singular first (one singular, zero batch); the secondary
+        # tries the batch first, then the singular.
+        check('37 neither: primary stub serves neither shape', set_outspend_mode('neither', STUB_BASE_P))
+        check('37 neither: secondary stub serves neither shape', set_outspend_mode('neither', STUB_BASE_S))
+        check('37 neither: caches cleared for a cold outpoint cache', clear_caches())
+        p0, s0, bp0, bs0 = outspend_counts()
+        s, r = trig_utxo(FINNEY + ':1')
+        check('37 neither: trigger check runs', s == 200, (s, r))
+        check('37 neither: the unreadable outpoint reads unknown, never fires',
+              r.get('status') == 'unknown' and r.get('fire') is False, r)
+        p1, s1, bp1, bs1 = outspend_counts()
+        check('37 neither: primary one singular / zero batch, secondary one batch + one singular',
+              (p1, s1, bp1, bs1) == (p0 + 1, s0 + 1, bp0, bs0 + 1), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        # (d) The rule evaluation's batch path falls through to the
+        # singular when both nodes are singular-only: two txs watch
+        # FINNEY:0 (spent) and FINNEY:1 (unspent); the startup tick
+        # must read them due and watching. The batch is attempted on
+        # both nodes first (one 404 each), then the singular answers
+        # both outpoints on the primary. (The restart also resets
+        # the learned shape record, so this proves the fall-through
+        # itself, not the record.)
+        check('37 fallthrough: primary stub serves singular only', set_outspend_mode('singular', STUB_BASE_P))
+        check('37 fallthrough: secondary stub serves singular only', set_outspend_mode('singular', STUB_BASE_S))
+        s, r = add_tx('UTXO 37a', {'type': 'utxo', 'params': {'outpoint': FINNEY + ':0', 'confirmations': 1}}, 111700, True)
+        check('37 fallthrough: first same-funding-tx tx adds (trigger confirmed)', s == 201, (s, r))
+        utxo_37a = r['tx']['id'] if s == 201 else None
+        s, r = add_tx('UTXO 37b', {'type': 'utxo', 'params': {'outpoint': FINNEY + ':1', 'confirmations': 1}}, 111701)
+        check('37 fallthrough: second same-funding-tx tx adds', s == 201, (s, r))
+        utxo_37b = r['tx']['id'] if s == 201 else None
+        for tid in (utxo_37a, utxo_37b):
+            s, r = req('PUT', '/api/bitcoin/txs/' + tid, {'enabled': False})
+        check('37 fallthrough: both txs disarm', s == 200, (s, r))
+        p0, s0, bp0, bs0 = outspend_counts()
+        check('37 fallthrough: app restarted (cold shape record, startup tick is the measured evaluation)', restart())
+        p1, s1, bp1, bs1 = outspend_counts()
+        check('37 fallthrough: the tick costs ONE batch 404 per node + TWO singular requests on the primary',
+              (p1, s1, bp1, bs1) == (p0 + 2, s0, bp0 + 1, bs0 + 1), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        t = state_tx(utxo_37a)
+        check('37 fallthrough: the spent output reads due (11 confirmations)',
+              rule_slice(t).get('status') == 'due', rule_slice(t))
+        t = state_tx(utxo_37b)
+        check('37 fallthrough: the unspent output reads watching',
+              rule_slice(t).get('status') == 'watching' and rule_slice(t).get('reason') == 'still unspent', rule_slice(t))
+        delete_all_txs()
+        # (e) A 500 on the batch still throws — no fallback for a
+        # server error. The primary is batch-only and failing; the
+        # secondary is both and healthy, so the check still reads
+        # watching via the secondary — but the primary must show
+        # exactly one batch request and ZERO singular ones (the
+        # 500 never triggered the singular fallback).
+        check('37 no-fallback-on-500: app restarted (cold shape record)', restart())
+        check('37 no-fallback-on-500: primary stub serves batch only', set_outspend_mode('batch', STUB_BASE_P))
+        check('37 no-fallback-on-500: secondary stub serves both', set_outspend_mode('both', STUB_BASE_S))
+        s, r = req('POST', '/__test__/outspend-fail', {'fail': True}, base=STUB_BASE_P)
+        check('37 no-fallback-on-500: primary stub fails outspend requests', s == 200 and r.get('fail') is True, r)
+        check('37 no-fallback-on-500: caches cleared for a cold outpoint cache', clear_caches())
+        p0, s0, bp0, bs0 = outspend_counts()
+        s, r = trig_utxo(FINNEY + ':1')
+        check('37 no-fallback-on-500: trigger check runs', s == 200, (s, r))
+        check('37 no-fallback-on-500: the check still reads watching (secondary answers)',
+              r.get('status') == 'watching' and r.get('fire') is False, r)
+        p1, s1, bp1, bs1 = outspend_counts()
+        check('37 no-fallback-on-500: the primary shows ONE batch 500 and ZERO singular (no fallback on a server error)',
+              (p1, s1, bp1, bs1) == (p0, s0, bp0 + 1, bs0 + 1), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        s, r = req('POST', '/__test__/outspend-fail', {'fail': False}, base=STUB_BASE_P)
+        check('37 no-fallback-on-500: primary stub failure cleared', s == 200, (s, r))
+        # Cleanup: both stubs serve both shapes again, cadence back
+        # to 60.
+        check('37 cleanup: primary stub serves both shapes again', set_outspend_mode('both', STUB_BASE_P))
+        check('37 cleanup: secondary stub serves both shapes again', set_outspend_mode('both', STUB_BASE_S))
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 60})
+        check('37 cleanup: cadence restored to 60 s', s == 200, (s, r))
+        delete_all_txs()
+        # --- 38. Output lookup node status check (0.8.10) --------------
+        # The connection test gains a fourth capability, Output
+        # lookup: the probe asks the node for the spend status of
+        # the genesis coinbase output (a fixed, well-known outpoint
+        # every synced node knows), through the §37 negotiation —
+        # batch first, singular as fallback — and reports which
+        # shape answered. Cadence is parked at 3600 s so no tick
+        # fires mid-section and moves the outspend counters; the
+        # caches are cleared before each shape flip so the probe
+        # fetches fresh (the shape record survives a cache clear —
+        # it is capability state, reset only by a restart).
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 3600})
+        check('38 setup: cadence parked at 3600 s', s == 200, (s, r))
+        check('38 setup: caches cleared for a cold outpoint cache', clear_caches())
+        # Baseline (both shapes served): the probe answers via the
+        # batch on both nodes, and both nodes are OK with all four
+        # checks ready.
+        p0, s0, bp0, bs0 = outspend_counts()
+        s, r = req('POST', '/api/bitcoin/connection/test', {})
+        check('38 baseline: connection test returns 200', s == 200, (s, r))
+        res = {x.get('endpoint'): x for x in r.get('results', [])}
+        check('38 baseline: primary output lookup reads Batch and the node is OK',
+              res.get('primary', {}).get('status') == 'ok'
+              and res.get('primary', {}).get('checks', {}).get('outputLookup', {}).get('ok') is True
+              and res.get('primary', {}).get('checks', {}).get('outputLookup', {}).get('value') == 'Batch',
+              res.get('primary', {}).get('checks', {}).get('outputLookup'))
+        check('38 baseline: secondary output lookup reads Batch too',
+              res.get('secondary', {}).get('checks', {}).get('outputLookup', {}).get('value') == 'Batch',
+              res.get('secondary', {}).get('checks', {}).get('outputLookup'))
+        p1, s1, bp1, bs1 = outspend_counts()
+        check('38 baseline: the probe costs ONE batch request per node, zero singular',
+              (p1, s1, bp1, bs1) == (p0, s0, bp0 + 1, bs0 + 1), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        # Singular-only node (the shape a node serves when it has
+        # no batch route): the batch 404s, the singular answers,
+        # and the value names it — the node is still OK.
+        check('38 singular-only: primary stub serves singular only', set_outspend_mode('singular', STUB_BASE_P))
+        check('38 singular-only: caches cleared for a cold outpoint cache', clear_caches())
+        p0, s0, bp0, bs0 = outspend_counts()
+        s, r = req('POST', '/api/bitcoin/connection/test', {})
+        res = {x.get('endpoint'): x for x in r.get('results', [])}
+        check('38 singular-only: primary output lookup reads Singular and the node stays OK',
+              res.get('primary', {}).get('status') == 'ok'
+              and res.get('primary', {}).get('checks', {}).get('outputLookup', {}).get('ok') is True
+              and res.get('primary', {}).get('checks', {}).get('outputLookup', {}).get('value') == 'Singular',
+              res.get('primary', {}).get('checks', {}).get('outputLookup'))
+        p1, s1, bp1, bs1 = outspend_counts()
+        check('38 singular-only: the probe costs ONE batch 404 + ONE singular on the primary, ONE batch on the secondary',
+              (p1, s1, bp1, bs1) == (p0 + 1, s0, bp0 + 1, bs0 + 1), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        # The learned shape survives a cache clear: the second
+        # probe goes singular-first — ONE singular, ZERO batch on
+        # the primary — and still reads Singular.
+        check('38 singular-only: caches cleared again (shape record survives)', clear_caches())
+        p0, s0, bp0, bs0 = outspend_counts()
+        s, r = req('POST', '/api/bitcoin/connection/test', {})
+        res = {x.get('endpoint'): x for x in r.get('results', [])}
+        check('38 singular-only: the second probe still reads Singular',
+              res.get('primary', {}).get('checks', {}).get('outputLookup', {}).get('value') == 'Singular',
+              res.get('primary', {}).get('checks', {}).get('outputLookup'))
+        p1, s1, bp1, bs1 = outspend_counts()
+        check('38 singular-only: the second probe costs ONE singular, ZERO batch on the primary',
+              (p1, s1, bp1, bs1) == (p0 + 1, s0, bp0, bs0 + 1), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        # Neither shape: both routes 404 on the primary — the
+        # check reads Unavailable with the reason as its value,
+        # the node drops to CAUTION (height still works), and the
+        # tooltip names the missing capability plainly. Overall ok
+        # stays true: the height probe passed, so the node is usable.
+        check('38 neither: primary stub serves neither shape', set_outspend_mode('neither', STUB_BASE_P))
+        check('38 neither: caches cleared for a cold outpoint cache', clear_caches())
+        p0, s0, bp0, bs0 = outspend_counts()
+        s, r = req('POST', '/api/bitcoin/connection/test', {})
+        res = {x.get('endpoint'): x for x in r.get('results', [])}
+        check('38 neither: primary output lookup reads Unavailable and the node is CAUTION',
+              res.get('primary', {}).get('status') == 'caution'
+              and res.get('primary', {}).get('checks', {}).get('outputLookup', {}).get('ok') is False
+              and res.get('primary', {}).get('checks', {}).get('outputLookup', {}).get('value') == 'Unavailable — UTXO rules can\u2019t be evaluated',
+              res.get('primary', {}).get('checks', {}).get('outputLookup'))
+        check('38 neither: the CAUTION tooltip names the missing capability plainly',
+              res.get('primary', {}).get('detail') == 'Height OK, but output lookup is unavailable — UTXO rules cannot be evaluated against this node.',
+              res.get('primary', {}).get('detail'))
+        check('38 neither: overall ok stays true with a CAUTION node', r.get('ok') is True, r.get('ok'))
+        check('38 neither: secondary stays OK',
+              res.get('secondary', {}).get('status') == 'ok', res.get('secondary'))
+        p1, s1, bp1, bs1 = outspend_counts()
+        check('38 neither: the probe costs ONE singular, ZERO batch on the primary (recorded singular-only, 404 returns at once)',
+              (p1, s1, bp1, bs1) == (p0 + 1, s0, bp0, bs0 + 1), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        # Cleanup: the primary serves both shapes again, cadence
+        # back to 60, and the app restarts so the learned
+        # singular-only record does not leak past this section.
+        check('38 cleanup: primary stub serves both shapes again', set_outspend_mode('both', STUB_BASE_P))
+        s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 60})
+        check('38 cleanup: cadence restored to 60 s', s == 200, (s, r))
+        check('38 cleanup: app restarted (cold shape record)', restart())
+
     finally:
         for p in list(v.procs):
             stop(p)
 
     # --- 11. no server left running -------------------------------------
-    for port in (PORT, RECEIVER_PORT, STUB_P, STUB_S, 18190, 18191, 3440):
+    for port in (PORT, RECEIVER_PORT, STUB_P, STUB_S, 18190, 18191, 3440, 3441):
         check('11 no server left running on port %d' % port, port_closed(port))
 
     print()

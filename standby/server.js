@@ -45,14 +45,74 @@
 
 const http = require('http');
 const { PORT, VERSION, DATA_DIR, STARTUP_TICK_MS } = require('./lib/config');
+const store = require('./lib/store');
 const { verifyCheckinKeyStore } = require('./lib/checkin');
 const { runFullTick, runHourlyTick, refreshCurrentFeesIfStale, recomputeStoredFees, rearmFullTick } = require('./lib/release');
 const { refreshPriceIfStale } = require('./lib/prices');
 const { handleApi } = require('./lib/api');
-const { serveStatic, sendError } = require('./lib/http');
+const { serveStatic, sendError, setSecurityHeaders, hostAllowed, describeAllowedHosts } = require('./lib/http');
+
+// (0.8.10, audit fix) An uncaught exception is a crash, not a
+// condition to serve through: Node warns that continuing after one
+// risks undefined state, and for an app that broadcasts
+// transactions a silently-corrupted process is worse than a short
+// outage. So this is uncaughtExceptionMonitor — it only LOGS; the
+// process still terminates with Node's default behaviour, and
+// Docker restarts it (restart: on-failure on both services, and
+// the Umbrel containers run the same policy — verified live).
+// The request handler below is guarded, so a bad request still
+// gets a 400 instead of killing the process; only a throw OUTSIDE
+// a guarded handler reaches here. State is re-read from disk on
+// every load, so a restarted process does not carry a torn
+// in-memory snapshot from the failed handler — and a failed
+// check-in is visible (the POST fails), never silent.
+process.on('uncaughtExceptionMonitor', (e) => {
+  console.error('uncaught exception:', e);
+});
+
+// (0.8.10, skip-save) Flush the heartbeat on shutdown: the "I was
+// online" stamp lives in heartbeat.json, throttled to one write
+// per 5 minutes — a shutdown inside the throttle window would
+// otherwise leave a stamp up to 5 minutes stale (harmless for
+// grace, which needs hours, but a clean flush costs nothing and
+// keeps the stamp exact). process.exit(0) is EXPLICIT: a handler
+// that returns without exiting makes Node ignore the signal, and
+// Umbrel SIGKILLs after its grace period — stalling the update
+// and losing the flush. SIGINT gets the same treatment for a
+// local Ctrl-C stop.
+function flushHeartbeatAndExit() {
+  try { store.writeHeartbeat(DATA_DIR, new Date().toISOString()); } catch (e) { console.error('heartbeat flush failed:', e); }
+  process.exit(0);
+}
+process.on('SIGTERM', flushHeartbeatAndExit);
+process.on('SIGINT', flushHeartbeatAndExit);
 
 const server = http.createServer((req, res) => {
-  const url = new URL(req.url, 'http://localhost');
+  // (0.8.10, audit fix 2) Host allowlist — first, before the URL
+  // parse, routing, and auth: a request whose Host is not one of
+  // the machine's own names (or an IP literal, or a name in
+  // STANDBY_ALLOWED_HOSTS) is a DNS-rebinding probe, not a client.
+  // 421, plain text, and a log line naming the rejected Host so a
+  // lockout is diagnosable instead of silent.
+  if (!hostAllowed(req.headers.host)) {
+    console.warn('Standby: rejected request with unrecognised Host header: ' + JSON.stringify(req.headers.host));
+    setSecurityHeaders(res);
+    res.writeHead(421, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('Unrecognised Host header');
+    return;
+  }
+  let url;
+  try {
+    url = new URL(req.url, 'http://localhost');
+  } catch (e) {
+    // (0.8.10, audit fix 1) A malformed request target (e.g.
+    // `GET // [`) used to throw here, uncaught, and kill the
+    // process. Answer 400 and keep serving instead.
+    setSecurityHeaders(res);
+    res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('Bad request URL');
+    return;
+  }
   const pathname = url.pathname;
   if (pathname.startsWith('/api/')) {
     handleApi(req, res, pathname).catch((e) => {
@@ -67,6 +127,7 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`Standby ${VERSION} listening on :${PORT} (data: ${DATA_DIR})`);
+  console.log('Standby allowed Hosts: ' + describeAllowedHosts());
   // (0.8.3) Compare the check-in keys in state with the receiver's
   // key list once at startup — see verifyCheckinKeyStore above.
   verifyCheckinKeyStore();

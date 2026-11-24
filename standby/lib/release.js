@@ -1070,14 +1070,24 @@ async function runFullTick() {
   try {
     const st0 = store.loadState(DATA_DIR);
     mergeExternalCheckin(st0, now);
-    applyGrace(st0, now); // the grace for all triggers (0.8.0, extended 0.8.8, unified 0.8.8) — judged on the same stale stamp, before it is refreshed; the unconditional save below persists it
+    applyGrace(st0, now); // the grace for all triggers (0.8.0, extended 0.8.8, unified 0.8.8) — judged on the same stale stamp, before it is refreshed; the save below persists it when it sets one
     // Vacation expiry (0.8.0): a dated vacation ends at the end
     // of its last day — the clock resumes from its frozen count.
     // Judged here on the full tick (and on every release
     // evaluation, see evaluateRelease), so a lapsed vacation
     // never lingers past the next tick.
     expireVacation(st0, now);
-    st0.checkin.lastOnlineAt = now.toISOString();
+    // (0.8.10, skip-save) The "I was online" stamp no longer
+    // lives in state.json: the tick records liveness in the
+    // heartbeat file instead (throttled to one write per 5
+    // minutes), and loadState merges it back on every read — so
+    // the stamp applyGrace judged on above is at most 5 minutes
+    // old, far below any grace threshold, and an expired grace
+    // cannot re-set on the next read. The save below still runs,
+    // but saveState's dedupe skips the write when nothing
+    // meaningful changed (a grace activation, a vacation expiry,
+    // a merged check-in, or a node-stamp change still writes).
+    store.touchHeartbeat(DATA_DIR, now.toISOString());
     mergeNodeStamps(st0);
     store.saveState(DATA_DIR, st0);
   } catch (e) { console.error('grace / lastOnlineAt update failed:', e); }
@@ -1198,7 +1208,14 @@ function mergeNodeStamps(state) {
 // against the endpoint as currently configured.
 async function testNodes() {
   const state = store.loadState(DATA_DIR);
-  const r = await bitcoin.testConnection(bitcoin.endpointsFor(state.settings));
+  // The hourly tick does NOT probe output lookup (see
+  // testConnection): it reuses the last probed check for each
+  // endpoint, from the stored connection results, so the tick
+  // costs no outspend request and never warms the negotiation's
+  // shape record. A fresh probe happens on the Test connection
+  // button instead.
+  const prevResults = (state.bitcoin.connection && Array.isArray(state.bitcoin.connection.results)) ? state.bitcoin.connection.results : [];
+  const r = await bitcoin.testConnection(bitcoin.endpointsFor(state.settings), { probeOutputLookup: false, prevResults });
   // Merge into FRESH state (see refreshConfirmations): an edit landing
   // while the node test was on the network would otherwise be
   // clobbered by the save of this stale copy. The Dashboard only

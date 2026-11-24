@@ -62,8 +62,11 @@ function writeReceiverKeys(state) {
       keys: (state.checkinKeys || []).map((k) => ({ id: k.id, label: k.label, hash: k.hash })),
     };
     const file = path.join(CHECKIN_DIR, 'keys.json');
-    fs.writeFileSync(file + '.tmp', JSON.stringify(doc, null, 2) + '\n', 'utf8');
-    fs.renameSync(file + '.tmp', file);
+    // (0.8.10, fsync durability) Same durable write as state.json:
+    // a lost keys.json write would silently resurrect a revoked key
+    // or lose a new one, and the receiver reads this file fresh on
+    // every check-in.
+    store.writeFileDurable(file, JSON.stringify(doc, null, 2) + '\n');
   } catch (e) {
     // No shared directory (a plain `node server.js` run, or the
     // receiver is not installed) — the keys are inert until it is.
@@ -355,13 +358,15 @@ function smallestArmedCheckinThresholdDays(state) {
 // never the old heldUntil pushout (now + half the threshold),
 // which the unification deliberately removed. Runs in
 // evaluateRelease and on the GET /api/state and /api/status
-// reads, and on the hourly tick — so a returning app notices
+// reads, and on the full tick — so a returning app notices
 // the gap promptly, before any held rule can fire.
-// Returns true when it set a grace. (The hourly tick refreshes
-// lastOnlineAt right after this runs, so an expired grace is
-// not re-set on the same stale stamp — a fresh gap after the
-// app returns is what sets the next one.) Grace off (the
-// toggle, or a stored duration of 0 kept for back-compat)
+// Returns true when it set a grace. (The tick records liveness
+// in heartbeat.json right after this runs — throttled to 5
+// minutes — and loadState merges it back, so the stamp the next
+// read or tick judges on is at most 5 minutes old: an expired
+// grace is not re-set on the same stale stamp, and a fresh gap
+// after the app returns is what sets the next one.) Grace off
+// (the toggle, or a stored duration of 0 kept for back-compat)
 // means no grace is ever set.
 function applyGrace(state, now) {
   if (isGraceActive(state, now)) return false;

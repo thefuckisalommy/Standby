@@ -1523,10 +1523,11 @@
   // (see slotName below). While enabled it shows the configured
   // host, as before; Settings still shows the host.
   // One node's status line (0.8.1): the host plus an overall pill —
-  // OK (all three capabilities ready), CAUTION (the height probe
-  // works but broadcast and/or fees are not ready), FAIL (the
-  // height probe failed — unreachable or not a node at all), or
-  // Not tested / Not set. The pill's tooltip carries the detail.
+  // OK (all four capabilities ready), CAUTION (the height probe
+  // works but broadcast, fees, and/or output lookup are not ready),
+  // FAIL (the height probe failed — unreachable or not a node at
+  // all), or Not tested / Not set. The pill's tooltip carries the
+  // detail.
   // In the Settings nodes card (prefix 'btc-') the three
   // capability rows render under it too; the Dashboard (prefix
   // 'readiness-') has no capability elements, so it shows the
@@ -1603,7 +1604,7 @@
     pill.title = res.detail || '';
     if (checksEl) renderNodeChecks(prefix, label, res);
   }
-  // The three capability checks under one node's summary row,
+  // The four capability checks under one node's summary row,
   // variant C (0.8.1): the node is a <details> — the summary is
   // just the node name + status pill, and the checks open on tap
   // as plain label — value lines, no pills. On failure the value
@@ -1619,6 +1620,7 @@
     setNodeCheckValue(prefix + label + '-broadcast-value', checks.broadcast);
     setNodeCheckValue(prefix + label + '-fees-value', checks.fees);
     setNodeCheckValue(prefix + label + '-height-value', checks.height);
+    setNodeCheckValue(prefix + label + '-outputLookup-value', checks.outputLookup);
   }
   function setNodeCheckValue(id, check) {
     var val = $(id);
@@ -6087,7 +6089,14 @@
 
   load().catch(function (e) {
     if (/state\.json is (corrupt|missing)/.test(e.message)) { showStateError(e.message); return; }
-    document.querySelector('main').insertAdjacentHTML('afterbegin',
-      '<div class="notice bad">Could not load Standby state: ' + e.message + '</div>');
+    // (0.8.10, audit fix 4) The message is error text, not HTML:
+    // build the notice with textContent so markup in it renders
+    // literally instead of being parsed (insertAdjacentHTML used
+    // to splice e.message straight into the page).
+    var main = document.querySelector('main');
+    var notice = document.createElement('div');
+    notice.className = 'notice bad';
+    notice.textContent = 'Could not load Standby state: ' + e.message;
+    main.insertBefore(notice, main.firstChild);
   });
 })();

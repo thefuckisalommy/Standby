@@ -46,7 +46,7 @@
 const crypto = require('crypto');
 const http = require('http');
 const https = require('https');
-const { appendBroadcastLog, PRICE_MIN_USD, PRICE_MAX_USD, sanitizeFeeHistory, FEE_HISTORY_WINDOW_DAYS, FEE_HISTORY_MIN_OBSERVATIONS, FEE_HISTORY_MAX_ENTRIES } = require('./store');
+const { appendBroadcastLog, sanitizeFeeHistory, FEE_HISTORY_WINDOW_DAYS, FEE_HISTORY_MIN_OBSERVATIONS, FEE_HISTORY_MAX_ENTRIES } = require('./store');
 
 const MAX_TX_BYTES = 1000000; // 1 MB, same ceiling as the API body limit
 const MAX_RESPONSE_BYTES = 1024 * 1024; // 1 MB — a mempool reply is a 64-char txid or small JSON; anything bigger is a faulty endpoint, not data
@@ -1178,7 +1178,6 @@ async function fetchPriceFromProvider(provider) {
   try { raw = provider.parse(data); } catch { throw new Error(provider.label + ' has no usable BTC price'); }
   const price = (typeof raw === 'number') ? raw : (typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : NaN);
   if (!Number.isFinite(price) || price <= 0) throw new Error(provider.label + ' has no usable BTC price');
-  if (price < PRICE_MIN_USD || price > PRICE_MAX_USD) throw new Error(provider.label + ' price out of bounds: $' + price.toLocaleString('en-US'));
   return price;
 }
 
@@ -1238,19 +1237,10 @@ function combinePriceReadings(readings, agreementPct) {
     }
   }
   if (valid.length === 0) {
-    // No source answered with a usable price. A feed returning a
-    // price outside the sanity bounds is bad data, not a market
-    // move — name it as implausible (the old single-source guard's
-    // wording), so the owner can tell garbage from an outage. A
-    // feed that did not answer at all is 'unavailable'.
-    const bad = ['source1', 'source2'].filter((slot) => {
-      const r = (readings || {})[slot];
-      return r && r.error && /out of bounds/.test(r.error);
-    });
-    if (bad.length) {
-      const names = bad.map((slot) => readings[slot].error).join('; ');
-      return { valid: false, price: null, mode: 'none', note: '', reason: 'implausible price reading (' + names + ') — ignored', readings };
-    }
+    // No source answered with a usable price — the feed is down
+    // (or returned garbage), not a market move. There is no range
+    // check: a reading both sources agree on is trusted, whatever
+    // its size — the agreement check is the only protection.
     return { valid: false, price: null, mode: 'none', note: '', reason: 'price unavailable — will retry', readings };
   }
   if (valid.length === 1) {
@@ -1262,7 +1252,7 @@ function combinePriceReadings(readings, agreementPct) {
     // The other source either did not answer (unreachable) or
     // answered with garbage (invalid data) — name which, so the
     // owner can tell an outage from a bad feed.
-    const otherWhy = /out of bounds|no usable BTC price/.test(otherErr) ? 'returned invalid data' : 'unreachable';
+    const otherWhy = /no usable BTC price/.test(otherErr) ? 'returned invalid data' : 'unreachable';
     return { valid: true, price: only.price, mode: 'single',
       note: only.label + ' only — ' + otherLabel + ' ' + otherWhy, reason: '', readings };
   }
@@ -1543,6 +1533,27 @@ async function getSlipstreamTxStatus(txid) {
 // unspent, never permission to fire.
 const outspendCache = new Map(); // key -> { fetchedAtMs, result }
 const OUTSPEND_CACHE_DEFAULT_TTL_MS = 60 * 1000;
+// (0.8.10, generic outspend negotiation) Learned outspend
+// shape, per node base: the bases whose batch route has been
+// proven missing — a batch 404 followed by a singular success.
+// Mempool-compatible APIs differ in which outspend endpoints they
+// serve: mempool.space and Esplora serve both the batch
+// /api/tx/:txid/outspends and the singular
+// /api/tx/:txid/outspend/:vout, while a self-hosted mempool
+// backend v3 serves only the batch (its /api/v1/* has no singular
+// route). The client must not hard-code any implementation's
+// inventory: it tries the batch first, falls back to the singular
+// on a route-missing signal, and remembers the bases that needed
+// the fallback, so the fallback costs one extra request once, not
+// every tick. The record is per base (primary and secondary may
+// differ) and in-memory only — a restart re-learns it, in case a
+// node is upgraded. A base leaves the set the moment its batch
+// answers again. It is capability state, not a cached answer, so
+// the test-only clear-caches hook does NOT reset it — only a
+// restart does. (A suite that flips a stub's shape resets the
+// record with restart(), and proves the learning with a second
+// lookup on the same base.)
+const singularOnlyBases = new Set();
 // Test-only (speedup): drop every outspend cache entry and every
 // in-flight dedup promise, so the next lookup fetches fresh —
 // the same cold-cache state a restart produces, without one.
@@ -1589,19 +1600,74 @@ function outspendCachePut(apiBase, prevTxid, prevVout, result) {
 
 // mempool API: GET /api/tx/:txid/outspend/:vout
 //   200 {spent} / {spent, txid, vin, status}  |  404 = tx unknown to mempool
-async function mempoolOutspend(prevTxid, prevVout, apiBase, ttlMs) {
+// (0.8.10, generic outspend negotiation) One outpoint's spend
+// status, from whichever outspend shape this node serves. The
+// batch is tried first: it answers every output of the funding tx
+// in one request (and caches the requested outpoint's entry), and
+// it is the shape the most implementations serve — a self-hosted
+// mempool backend v3 keeps the batch and drops the singular. When
+// the batch cannot answer (404: the parent is unknown to this node,
+// or the batch route does not exist here — the two are
+// indistinguishable from the status alone), the singular is tried
+// for that outpoint. If the singular then succeeds, this base is
+// recorded singular-only, so later lookups go straight to the
+// singular and the fallback costs one extra request once, not
+// every tick. A 404 from BOTH shapes is unknown — cannot prove
+// spent or unspent; NEVER cached. Any other failure (429/500/503,
+// ...) still throws exactly as before: a transient or server error
+// is never disguised as "route missing". `skipBatch` is for the
+// rule evaluation's batch path (checkOutspend below): the batch
+// was already attempted for this funding tx by the batch object,
+// so only the singular remains untried for this endpoint.
+// The shape record is trusted once learned — a singular 404 on a
+// recorded base means the parent is unknown, not that the route
+// vanished — and a restart re-learns it from scratch.
+async function mempoolOutspend(prevTxid, prevVout, apiBase, ttlMs, skipBatch) {
   const cached = outspendCacheGet(apiBase, prevTxid, prevVout, ttlMs);
   if (cached !== undefined) return cached;
   const key = outspendCacheKey(apiBase, prevTxid, prevVout);
   const inflight = outspendInflight.get(key);
   if (inflight) return inflight;
   const p = (async () => {
-    const res = await mempoolReq('/api/tx/' + prevTxid + '/outspend/' + prevVout, 'GET', undefined, apiBase);
-    if (res.status === 404) return null; // unknown — cannot prove spent or unspent; NEVER cached
-    if (res.status !== 200) throw new Error('mempool outspend check failed (HTTP ' + res.status + ')');
-    const parsed = JSON.parse(res.body);
-    outspendCachePut(apiBase, prevTxid, prevVout, parsed);
-    return parsed;
+    const shapes = skipBatch ? ['singular']
+      : (singularOnlyBases.has(apiBase) ? ['singular', 'batch'] : ['batch', 'singular']);
+    let batchAnswered = false;
+    for (const shape of shapes) {
+      if (shape === 'batch') {
+        // Only the requested outpoint's entry is cached (the
+        // cacheVout argument) — the batch answers every output of
+        // the funding tx, but caching its siblings would plant
+        // answers for outpoints nobody asked about.
+        const arr = await mempoolOutspends(prevTxid, apiBase, ttlMs, prevVout);
+        if (arr === null) continue; // batch cannot answer — try the singular
+        // The batch answered, so this base serves it — even when
+        // the array has no entry for this vout (the parent is known
+        // and the route works, so the outpoint does not exist in
+        // it); the singular is still tried for that outpoint,
+        // because a node may know an output the batch does not list.
+        batchAnswered = true;
+        singularOnlyBases.delete(apiBase);
+        const entry = Array.isArray(arr) ? arr[prevVout] : null;
+        // Cache this outpoint's entry explicitly: the batch fetch
+        // above is shared (in-flight dedup) with any concurrent
+        // lookup for a sibling vout of the same txid, and only the
+        // fetch's own cacheVout is cached there — this caller's
+        // entry must be cached by the caller.
+        if (entry && typeof entry === 'object') { outspendCachePut(apiBase, prevTxid, prevVout, entry); return entry; }
+        continue;
+      }
+      const res = await mempoolReq('/api/tx/' + prevTxid + '/outspend/' + prevVout, 'GET', undefined, apiBase);
+      if (res.status === 404) return null; // unknown — cannot prove spent or unspent; NEVER cached
+      if (res.status === 405 || res.status === 501) continue; // singular route missing here — try the batch
+      if (res.status !== 200) throw new Error('mempool outspend check failed (HTTP ' + res.status + ')');
+      const parsed = JSON.parse(res.body);
+      // The singular answered while the batch did not, so the
+      // batch route is missing on this base — remember it.
+      if (!batchAnswered) singularOnlyBases.add(apiBase);
+      outspendCachePut(apiBase, prevTxid, prevVout, parsed);
+      return parsed;
+    }
+    return null; // neither shape could answer — unknown, never cached
   })();
   outspendInflight.set(key, p);
   try { return await p; }
@@ -1614,18 +1680,32 @@ async function mempoolOutspend(prevTxid, prevVout, apiBase, ttlMs) {
 //   A batch answer populates the per-output cache above, so a later
 //   singular lookup of one of those outpoints hits the cache.
 //   A 404 is never cached (same rule as the singular call).
-async function mempoolOutspends(prevTxid, apiBase, ttlMs) {
+//   (0.8.10, generic outspend negotiation) A 405 or 501 is the
+//   same as a 404 here — the route does not exist on this node —
+//   so it also returns null (unknown, never cached) instead of
+//   throwing: the caller (mempoolOutspend) then tries the singular
+//   shape. Any other failure still throws.
+//   `cacheVout` scopes the cache population: when the batch is
+//   fetched for ONE outpoint (mempoolOutspend's batch-first path),
+//   only that outpoint's entry is cached — a batch fetched for
+//   FINNEY:1 must not plant an answer for FINNEY:0, which nobody
+//   asked about and which a later gate could then read as if it
+//   were a fresh observation. When it is undefined (the rule
+//   evaluation's batch path, where every fetched output is watched)
+//   all entries are cached, as before.
+async function mempoolOutspends(prevTxid, apiBase, ttlMs, cacheVout) {
   const key = apiBase + '|' + prevTxid;
   const inflight = outspendsInflight.get(key);
   if (inflight) return inflight;
   const p = (async () => {
     const res = await mempoolReq('/api/tx/' + prevTxid + '/outspends', 'GET', undefined, apiBase);
-    if (res.status === 404) return null; // unknown — NEVER cached
+    if (res.status === 404 || res.status === 405 || res.status === 501) return null; // unknown, or route missing — NEVER cached
     if (res.status !== 200) throw new Error('mempool outspends check failed (HTTP ' + res.status + ')');
     const arr = JSON.parse(res.body);
     if (Array.isArray(arr)) {
+      const only = (cacheVout === undefined || cacheVout === null) ? null : Number(cacheVout);
       arr.forEach((entry, i) => {
-        if (entry && typeof entry === 'object') outspendCachePut(apiBase, prevTxid, i, entry);
+        if (entry && typeof entry === 'object' && (only === null || i === only)) outspendCachePut(apiBase, prevTxid, i, entry);
       });
     }
     return arr;
@@ -1845,20 +1925,33 @@ async function checkOutspend(outpoint, endpoints, opts) {
   // answers them all. A batch answer that cannot say about this
   // output (unknown parent, or no entry for this vout) is unknown,
   // never unspent — the same fail-safe as the singular path.
+  // (0.8.10, generic outspend negotiation) A batch unknown is
+  // ambiguous: the parent may be unknown to these nodes, or the
+  // batch route may not exist on them. When every endpoint failed
+  // outright (b.error), that is a hard failure, not a route
+  // question — return unknown as before. Otherwise fall through
+  // to the singular loop below: the singular is the other shape,
+  // and it may answer where the batch could not. The batch was
+  // already attempted for this funding tx, so the loop skips a
+  // redundant batch attempt per endpoint (skipBatch).
+  let batchTried = false;
   if (batch && batch.hasBatch(prevTxid) && Number.isFinite(prevVout) && prevVout >= 0) {
     const b = await batch.fetch(prevTxid);
-    if (b.unknown) {
-      return { outpoint, spent: false, confirmed: false, txid: null, blockHeight: null, unknown: true,
-        checkedVia: b.checkedVia, checkedBase: b.checkedBase, error: b.error || undefined };
+    if (!b.unknown) {
+      const entry = Array.isArray(b.results) ? b.results[prevVout] : null;
+      return outspendEntryToResult(outpoint, entry, b.checkedVia, b.checkedBase);
     }
-    const entry = Array.isArray(b.results) ? b.results[prevVout] : null;
-    return outspendEntryToResult(outpoint, entry, b.checkedVia, b.checkedBase);
+    if (b.error) {
+      return { outpoint, spent: false, confirmed: false, txid: null, blockHeight: null, unknown: true,
+        checkedVia: b.checkedVia, checkedBase: b.checkedBase, error: b.error };
+    }
+    batchTried = true;
   }
   const errors = [];
   let first404 = null;
   for (const ep of endpoints) {
     try {
-      const out = await mempoolOutspend(prevTxid, prevVout, ep.base, ttlMs);
+      const out = await mempoolOutspend(prevTxid, prevVout, ep.base, ttlMs, batchTried);
       if (out === null) {
         if (!first404) first404 = ep;
         continue;
@@ -2461,9 +2554,27 @@ function findSharedInputs(txs) {
 // { ok, detail, results: [{ endpoint, base, ok, detail }] }. The probe
 // is the tip height, which both mempool.space and Esplora answer.
 // ---------------------------------------------------------------------------
-async function testConnection(endpoints) {
+async function testConnection(endpoints, opts) {
+  // opts.probeOutputLookup (default true): the output-lookup
+  // capability is probed on demand — the Test connection
+  // button. The hourly tick passes false and the last probed
+  // check for each endpoint (opts.prevResults), so the tick
+  // costs no outspend request, never warms the negotiation's
+  // shape record (a tick that warmed it would change which
+  // route later lookups take), and keeps showing the last
+  // probed shape. Only a genuinely probed check carries
+  // forward: the 'not checked — height failed' placeholder
+  // (value '—') is not a probe result, so it never blocks OK
+  // on a later tick. A check that was never probed stays absent.
+  const probeOutputLookup = !opts || opts.probeOutputLookup !== false;
+  const prevResults = (opts && Array.isArray(opts.prevResults)) ? opts.prevResults : [];
   const results = [];
-  for (const ep of endpoints) results.push({ endpoint: ep.label, base: ep.base, ...(await testOnePath(ep.base)) });
+  for (const ep of endpoints) {
+    const prev = prevResults.find((x) => x && x.endpoint === ep.label && x.base === ep.base);
+    const prevCheck = prev && prev.checks ? prev.checks.outputLookup : null;
+    const prevOutputLookup = (prevCheck && typeof prevCheck === 'object' && prevCheck.value !== '—') ? prevCheck : null;
+    results.push({ endpoint: ep.label, base: ep.base, ...(await testOnePath(ep.base, probeOutputLookup, prevOutputLookup)) });
+  }
   const ok = results.some((r) => r.ok);
   const detail = results
     .map((r) => (r.endpoint === 'primary' ? 'Primary' : 'Secondary') + ' (' + mempoolHostLabel(r.base) + '): ' + r.status.toUpperCase() + ' — ' + r.detail)
@@ -2471,12 +2582,14 @@ async function testConnection(endpoints) {
   return { ok, detail, results };
 }
 
-// One endpoint, three capabilities (0.8.1): block height, fee
-// estimates, and broadcast. Each check returns {ok, detail}.
+// One endpoint, four capabilities (0.8.1, 0.8.10): block height, fee
+// estimates, broadcast, and output lookup. Each check returns {ok, detail}.
 // The overall status:
-//   OK — all three good.
+//   OK — all probed capabilities good (output lookup counts only
+//     once it has been probed — a check that was never probed
+//     neither blocks OK nor shows a value).
 //   CAUTION — the height probe works (the endpoint IS a node) but
-//     broadcast and/or fees are not ready.
+//     broadcast, fees, and/or output lookup are not ready.
 //   FAIL — the height probe fails (network error, timeout, or a
 //     non-200 answer): the endpoint is unreachable or is not a
 //     mempool/Esplora API at all. Height is the gate because it is
@@ -2484,22 +2597,48 @@ async function testConnection(endpoints) {
 // `ok` stays true for OK and CAUTION (the old meaning: the height
 // probe passed, so the node is usable) and false for FAIL, so the
 // stored connection.ok keeps its old semantics.
-async function testOnePath(apiBase) {
+// `probeOutputLookup` — whether to probe the output-lookup
+// capability now (the Test connection button does; the hourly
+// tick does not, and instead passes the last probed check for
+// this endpoint as `prevOutputLookup`, so the tick costs no
+// outspend request and never warms the negotiation's shape
+// record). The detail is the pill tooltip: when output lookup
+// is the ONLY failing check it names it plainly ("Height OK, but
+// output lookup is unavailable — UTXO rules cannot be evaluated
+// against this node."); otherwise it lists every probed check the
+// way the earlier format did, extended with the output-lookup
+// detail when one was probed.
+async function testOnePath(apiBase, probeOutputLookup, prevOutputLookup) {
   const height = await testNodeHeight(apiBase);
   if (!height.ok) {
     return {
       ok: false, status: 'fail',
       detail: 'height: ' + height.detail,
-      checks: { height, fees: { ok: false, detail: 'not checked — height failed', value: '—' }, broadcast: { ok: false, detail: 'not checked — height failed', value: '—' } },
+      checks: { height, fees: { ok: false, detail: 'not checked — height failed', value: '—' }, broadcast: { ok: false, detail: 'not checked — height failed', value: '—' }, outputLookup: { ok: false, detail: 'not checked — height failed', value: '—' } },
     };
   }
   const fees = await testNodeFees(apiBase);
   const broadcast = await testNodeBroadcast(apiBase);
-  const allOk = fees.ok && broadcast.ok;
-  const detail = 'height ' + height.detail + ' · fees: ' + fees.detail + ' · broadcast: ' + broadcast.detail;
+  // Output lookup is probed on demand (see testConnection): the
+  // button probes it fresh through the negotiation; the tick
+  // reuses the last probed check for this endpoint. A check that
+  // was never probed stays absent — it neither blocks OK nor
+  // shows a value — until the user tests the connection.
+  const outputLookup = probeOutputLookup ? await testNodeOutputLookup(apiBase) : (prevOutputLookup || null);
+  const checks = { height, fees, broadcast };
+  if (outputLookup) checks.outputLookup = outputLookup;
+  const allOk = fees.ok && broadcast.ok && (outputLookup ? outputLookup.ok : true);
+  let detail;
+  if (outputLookup && !outputLookup.ok && fees.ok && broadcast.ok) {
+    detail = 'Height OK, but output lookup is unavailable — UTXO rules cannot be evaluated against this node.';
+  } else {
+    const parts = ['height ' + height.detail, 'fees: ' + fees.detail, 'broadcast: ' + broadcast.detail];
+    if (outputLookup) parts.push('output lookup: ' + outputLookup.detail);
+    detail = parts.join(' · ');
+  }
   return {
     ok: true, status: allOk ? 'ok' : 'caution', detail,
-    checks: { height, fees, broadcast },
+    checks,
   };
 }
 
@@ -2650,7 +2789,7 @@ async function fetchNodeFeeReadings(endpoints) {
 // highest economy fee ever observed is orders of magnitude below
 // it, and the fee-market trigger's own threshold caps at the
 // same value (store.js). An implausible reading is ignored, never
-// trusted — like the price trigger's out-of-bounds guard.
+// trusted — bad data, not a market move.
 const FEE_IMPLAUSIBLE_SATVB = 10000;
 
 // Combine two fetched fee readings into one effective fee —
@@ -2662,10 +2801,9 @@ const FEE_IMPLAUSIBLE_SATVB = 10000;
 // alone — mode 'single' (the other is unreachable). Neither
 // valid → invalid, mode 'none'. An implausible reading
 // (> FEE_IMPLAUSIBLE_SATVB) is never valid — it is bad data,
-// not a market move, so it is ignored rather than trusted. No
-// 10x-jump guard: fee spikes are real and are exactly what an
-// 'above' rule is for — the guard would block the trigger from
-// doing its job. Returns { valid, fee, mode, note, reason,
+// not a market move, so it is ignored rather than trusted. Fee
+// spikes are real and are exactly what an 'above' rule is for.
+// Returns { valid, fee, mode, note, reason,
 // readings }. Pure — no I/O, so the evaluator, the UI status,
 // and the already-true check all agree on one rule.
 function combineFeeReadings(readings) {
@@ -2722,6 +2860,38 @@ async function testNodeBroadcast(apiBase) {
     return { ok: false, detail: 'answered HTTP ' + res.status, value: 'answered HTTP ' + res.status };
   } catch (e) {
     return { ok: false, detail: e.message, value: e.message };
+  }
+}
+
+// Output lookup: the outspend status of the genesis coinbase
+// output — a fixed, well-known outpoint every synced node knows
+// (the genesis block's only output is unspent), so a node that
+// cannot answer it serves no outspend shape at all. Read-only:
+// a lookup, never a broadcast, and no funds move. The lookup
+// goes through the generic outspend negotiation (mempoolOutspend):
+// batch first, singular as fallback — and the value names the
+// shape that answered, from the per-base shape record the
+// negotiation keeps (singular-only, or batch by default). A null
+// answer (neither shape) is unavailable: UTXO rules cannot be
+// evaluated against this node. A server error throws and is
+// reported as the reason, never disguised as unavailable. The
+// shape record is trusted once learned (a node upgraded to serve
+// the batch still reads Singular until a restart re-learns it) —
+// the value names the learned capability, which is what the
+// status row reports. On failure the value IS the reason, like
+// the other checks.
+const GENESIS_COINBASE_TXID = '4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b';
+async function testNodeOutputLookup(apiBase) {
+  try {
+    const out = await mempoolOutspend(GENESIS_COINBASE_TXID, 0, apiBase);
+    if (out === null) {
+      return { ok: false, detail: 'unavailable — UTXO rules cannot be evaluated against this node', value: 'Unavailable — UTXO rules can\u2019t be evaluated' };
+    }
+    const shape = singularOnlyBases.has(apiBase) ? 'Singular' : 'Batch';
+    return { ok: true, detail: 'ready (' + shape.toLowerCase() + ')', value: shape };
+  } catch (e) {
+    const msg = e.message || String(e);
+    return { ok: false, detail: msg, value: msg };
   }
 }
 

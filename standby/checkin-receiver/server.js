@@ -23,12 +23,26 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+// (0.8.10, audit fix 2) The Host allowlist lives in lib/http.js —
+// one implementation for both servers. (fsync) The durable write
+// lives in lib/store.js — one implementation for every state file.
+// Both are pure requires with no load-time side effects, and the
+// receiver runs from the same image as the app, so the modules
+// are present; the receiver still mounts only /checkin and holds
+// no transaction data.
+const { hostAllowed, describeAllowedHosts } = require('../lib/http');
+const { writeFileDurable } = require('../lib/store');
 
 const PORT = parseInt(process.env.PORT || '3101', 10);
 const CHECKIN_DIR = process.env.CHECKIN_DIR || '/checkin';
 const MAX_KEY_LEN = 256;
 
 function sendJson(res, status, obj) {
+  // (0.8.10, audit fix 3) The receiver serves JSON only: no full
+  // CSP, just nosniff + frame-ancestors, so its responses cannot be
+  // framed or sniffed as another type.
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Content-Security-Policy', "frame-ancestors 'self'");
   const body = JSON.stringify(obj);
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body) });
   res.end(body);
@@ -71,16 +85,68 @@ function writeLastCheckin(keyId, label, sourceIp) {
   if (sourceIp) doc.sourceIp = sourceIp;
   fs.mkdirSync(CHECKIN_DIR, { recursive: true });
   const file = path.join(CHECKIN_DIR, 'last.json');
-  fs.writeFileSync(file + '.tmp', JSON.stringify(doc, null, 2) + '\n', 'utf8');
-  fs.renameSync(file + '.tmp', file);
+  // (0.8.10, fsync durability) Write + fsync + rename + dir fsync,
+  // so a recorded check-in survives a power cut — a lost last.json
+  // would silently move the broadcast clock forward.
+  writeFileDurable(file, JSON.stringify(doc, null, 2) + '\n');
   return now;
 }
 
+// (0.8.10, audit fix) An uncaught exception is a crash, not a
+// condition to serve through: Node warns that continuing after one
+// risks undefined state. So this is uncaughtExceptionMonitor — it
+// only LOGS; the process still terminates with Node's default
+// behaviour, and Docker restarts it (restart: on-failure, and the
+// Umbrel receiver container runs the same policy — verified
+// live). The request handler below is guarded, so a bad request
+// still gets a 400 instead of killing the process; only a throw
+// OUTSIDE a guarded handler reaches here. A failed check-in is
+// visible (the POST fails), and the check-in state is re-read
+// from disk, so a restarted receiver loses nothing durable.
+process.on('uncaughtExceptionMonitor', (e) => {
+  console.error('uncaught exception:', e);
+});
+
 const server = http.createServer((req, res) => {
-  const url = new URL(req.url, 'http://localhost');
+  // (0.8.10, audit fix 2) Host allowlist — first, before the URL
+  // parse, routing, and key check. This port is published directly
+  // on the LAN with no proxy in front of it, so the allowlist is
+  // the rebinding defense here. 421, plain text, and a log line
+  // naming the rejected Host so a lockout is diagnosable.
+  if (!hostAllowed(req.headers.host)) {
+    console.warn('Standby receiver: rejected request with unrecognised Host header: ' + JSON.stringify(req.headers.host));
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Security-Policy', "frame-ancestors 'self'");
+    res.writeHead(421, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('Unrecognised Host header');
+    return;
+  }
+  let url;
+  try {
+    url = new URL(req.url, 'http://localhost');
+  } catch (e) {
+    // (0.8.10, audit fix 1) A malformed request target (e.g.
+    // `GET // [`) used to throw here, uncaught, and kill the
+    // process. Answer 400 and keep serving instead.
+    res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('Bad request URL');
+    return;
+  }
   const pathname = url.pathname;
 
   if (req.method === 'GET' && pathname === '/health') {
+    return sendJson(res, 200, { ok: true });
+  }
+
+  // POST /__test__/throw-uncaught (test-only): same as the app
+  // server's hook — throw outside any handler so the suite can
+  // prove the receiver terminates instead of serving through it
+  // (0.8.10 audit fix). Gated on STANDBY_TEST_MODE=1, which only
+  // the test harness sets; without it this 404s like any unknown
+  // path. Answers 200 first — the throw lands after the response.
+  if (req.method === 'POST' && pathname === '/__test__/throw-uncaught') {
+    if (process.env.STANDBY_TEST_MODE !== '1') return sendJson(res, 404, { error: 'not found' });
+    setTimeout(() => { throw new Error('test-only uncaught exception'); }, 0);
     return sendJson(res, 200, { ok: true });
   }
 
@@ -122,4 +188,5 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`Standby check-in receiver listening on :${PORT} (checkin dir: ${CHECKIN_DIR})`);
+  console.log('Standby receiver allowed Hosts: ' + describeAllowedHosts());
 });
