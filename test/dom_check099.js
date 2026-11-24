@@ -969,13 +969,13 @@ function check(name, cond, detail) {
     JSON.stringify(panelSelectValues(rulePanels('edit')[0], 'edit-rule-0-feemarket-dir')));
   const fmId = ((st0.bitcoin.txs || []).find((t) => t.label === 'Dom Feemarket') || {}).id;
   check('feemarket direction: the seeded feemarket tx id is known', !!fmId, 'id=' + fmId);
-  const fmFlip = fmId ? await fetch('/api/bitcoin/txs/' + fmId, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ trigger: { type: 'feemarket', params: { maxFeeRate: 0.5, direction: 'above' } }, triggerConfirmed: true }) }) : null;
+  const fmFlip = fmId ? await fetch('/api/bitcoin/txs/' + fmId, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ trigger: { type: 'feemarket', params: { maxFeeRate: 2, direction: 'above' } }, triggerConfirmed: true }) }) : null;
   check('feemarket direction: flipping the rule to above via the API succeeds', !!fmFlip && fmFlip.status === 200, fmFlip ? 'status=' + fmFlip.status : 'no id');
   await rerender(appJs);
   const fmCard = cardByTitle('Dom Feemarket');
   const fmParts = fmCard && triggerParts(fmCard);
-  check('feemarket direction: the subcard condition now reads "tx fees are >= 0.5 sat/vB"',
-    !!fmParts && fmParts.cond === 'Fires when tx fees are >= 0.5 sat/vB', fmParts ? fmParts.cond : 'no subcard');
+  check('feemarket direction: the subcard condition now reads "tx fees are >= 2 sat/vB"',
+    !!fmParts && fmParts.cond === 'Fires when tx fees are >= 2 sat/vB', fmParts ? fmParts.cond : 'no subcard');
   // Flip it back so later sections see the default 'below' rule.
   const fmBack = fmId ? await fetch('/api/bitcoin/txs/' + fmId, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ trigger: { type: 'feemarket', params: { maxFeeRate: 0.5, direction: 'below' } }, triggerConfirmed: true }) }) : null;
   check('feemarket direction: flipping the rule back to below via the API succeeds', !!fmBack && fmBack.status === 200, fmBack ? 'status=' + fmBack.status : 'no id');
