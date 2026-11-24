@@ -249,6 +249,7 @@ the 096 suite (app 3398, receiver 3399, stubs 18185/18186).
 Reuses the 094 helpers (import verify094 — importing does not run
 main()) and never touches the 095 files or the main app/ copy.
 """
+import base64
 import copy
 import http.client
 import json
@@ -647,7 +648,7 @@ def main():
 
         # --- 1. health + version ----------------------------------------
         s, h = req('GET', '/api/health')
-        check('1 health reports version 0.8.11.1', h.get('version') == '0.8.11.1', h)
+        check('1 health reports version 0.8.12', h.get('version') == '0.8.12', h)
 
         # --- 2. block-height trigger --------------------------------------
         # Validation at add: bad heights rejected, good ones accepted.
@@ -5440,7 +5441,7 @@ def main():
               s == 400 and body == b'Bad request URL', (s, body))
         s, r = req('GET', '/api/health')
         check('32 crash: app still answers after the malformed request',
-              s == 200 and r.get('version') == '0.8.11.1', (s, r))
+              s == 200 and r.get('version') == '0.8.12', (s, r))
         s, body = raw_get('//[', RBASE)
         check('32 crash: malformed request line to the receiver gets 400',
               s == 400 and body == b'Bad request URL', (s, body))
@@ -6187,7 +6188,7 @@ def main():
         _bind_checkin = '/tmp/heirloom099-bind-checkin'
         _expected_bind = APP_ENV.get('STANDBY_BIND', '127.0.0.1')
         check('39 bind: main instance listen line names the profile bind',
-              ('Standby 0.8.11.1 listening on %s:%d (data: ' % (_expected_bind, PORT)) in read_log(),
+              ('Standby 0.8.12 listening on %s:%d (data: ' % (_expected_bind, PORT)) in read_log(),
               read_log()[-500:])
 
         def _bind_log_text():
@@ -6300,7 +6301,7 @@ def main():
         _auth_app = _bind_instance({'STANDBY_PASSWORD': _pw})
         check('40 auth: instance comes up', wait_up(_ab))
         s, r = req('GET', '/api/health', base=_ab)
-        check('40 auth: health is public', s == 200 and r.get('version') == '0.8.11.1', (s, r))
+        check('40 auth: health is public', s == 200 and r.get('version') == '0.8.12', (s, r))
         s, r = req('GET', '/api/auth/status', base=_ab)
         check('40 auth: status says required, not authenticated',
               s == 200 and r == {'required': True, 'authenticated': False}, (s, r))
@@ -6383,6 +6384,75 @@ def main():
               'FATAL: cannot write its files' in _cp.stderr and 'chown -R 1000:1000 data checkin' in _cp.stderr,
               _cp.stderr[-500:])
         os.remove(_blocker)
+
+        # --- 41. encrypted backups (0.8.12) --------------------------
+        # POST /api/backup {password} returns the backup encrypted
+        # (scrypt + AES-256-GCM, lib/backupcrypto.js); restore asks
+        # for the password; tools/decrypt-backup.js opens the file
+        # with no Standby. Plain backups (GET, or POST without a
+        # password) are unchanged.
+        _bpw = 'a long enough backup passphrase'
+        s, r = req('POST', '/api/backup', {'password': 'short'})
+        check('41 backup: a password under 12 characters is 400', s == 400 and '12 characters' in r.get('error', ''), (s, r))
+        s, plain = req('GET', '/api/backup')
+        check('41 backup: GET still returns the plain backup', s == 200 and plain.get('format') == 'standby-backup', s)
+        s, r = req('POST', '/api/backup', {})
+        check('41 backup: POST without a password returns the plain backup', s == 200 and r.get('format') == 'standby-backup', s)
+        s, enc = req('POST', '/api/backup', {'password': _bpw}, timeout=60)
+        check('41 backup: POST with a password returns the encrypted envelope',
+              s == 200 and enc.get('format') == 'standby-backup-encrypted' and enc.get('version') == 1, (s, list(enc)))
+        check('41 backup: nothing but the envelope fields is in the clear',
+              sorted(enc) == ['cipher', 'data', 'format', 'kdf', 'version']
+              and sorted(enc.get('kdf', {})) == ['N', 'name', 'p', 'r', 'salt']
+              and sorted(enc.get('cipher', {})) == ['iv', 'name'], (sorted(enc), enc.get('kdf'), enc.get('cipher')))
+        check('41 backup: scrypt N=2^17 r=8 p=1, AES-256-GCM',
+              enc.get('kdf', {}).get('name') == 'scrypt' and enc['kdf'].get('N') == 2 ** 17
+              and enc['kdf'].get('r') == 8 and enc['kdf'].get('p') == 1
+              and enc.get('cipher', {}).get('name') == 'aes-256-gcm', (enc.get('kdf'), enc.get('cipher')))
+        _txids = sorted(t.get('id') for t in plain['state']['bitcoin']['txs'])
+        if _txids:
+            _hex0 = plain['state']['bitcoin']['txs'][0].get('hex', '')
+            check('41 backup: no signed hex appears in the encrypted file',
+                  _hex0 and _hex0 not in json.dumps(enc), '')
+        # The standalone tool decrypts it to the same backup.
+        _encf = '/tmp/heirloom099-backup.encrypted.json'
+        with open(_encf, 'w') as f:
+            json.dump(enc, f)
+        _tool = os.path.join(APP, '..', 'tools', 'decrypt-backup.js')
+        _cp = subprocess.run(['node', _tool, _encf], env=dict(os.environ, STANDBY_BACKUP_PASSWORD=_bpw),
+                             capture_output=True, text=True, timeout=60)
+        _dec = None
+        try:
+            _dec = json.loads(_cp.stdout)
+        except Exception:
+            pass
+        check('41 tool: decrypt-backup.js opens the file with the right password',
+              _cp.returncode == 0 and isinstance(_dec, dict) and _dec.get('format') == 'standby-backup'
+              and sorted(t.get('id') for t in _dec['state']['bitcoin']['txs']) == _txids,
+              (_cp.returncode, _cp.stderr[-300:]))
+        _cp = subprocess.run(['node', _tool, _encf], env=dict(os.environ, STANDBY_BACKUP_PASSWORD='the wrong passphrase'),
+                             capture_output=True, text=True, timeout=60)
+        check('41 tool: a wrong password exits 1 with a clear message',
+              _cp.returncode == 1 and 'wrong password' in _cp.stderr and not _cp.stdout, (_cp.returncode, _cp.stderr[-200:]))
+        os.remove(_encf)
+        # Restore: missing, wrong, tampered, out-of-range, swapped header, right.
+        s, r = req('POST', '/api/restore', enc, timeout=60)
+        check('41 restore: no password is 400 asking for it', s == 400 and 'enter its password' in r.get('error', ''), (s, r))
+        s, r = req('POST', '/api/restore', dict(enc, password='the wrong passphrase'), timeout=60)
+        check('41 restore: a wrong password is 400', s == 400 and 'wrong password' in r.get('error', ''), (s, r))
+        _raw = bytearray(base64.b64decode(enc['data']))
+        _raw[3] ^= 1
+        s, r = req('POST', '/api/restore', dict(enc, data=base64.b64encode(bytes(_raw)).decode(), password=_bpw), timeout=60)
+        check('41 restore: a tampered file is 400', s == 400 and 'damaged' in r.get('error', ''), (s, r))
+        s, r = req('POST', '/api/restore', dict(enc, kdf=dict(enc['kdf'], N=2 ** 22), password=_bpw), timeout=60)
+        check('41 restore: an out-of-range scrypt N is refused before any work', s == 400 and 'out of range' in r.get('error', ''), (s, r))
+        s, r = req('POST', '/api/restore', dict(enc, kdf=dict(enc['kdf'], N=2 ** 16), password=_bpw), timeout=60)
+        check('41 restore: an altered header (N) fails authentication', s == 400 and 'damaged' in r.get('error', ''), (s, r))
+        s, r = req('POST', '/api/restore', dict(enc, password=_bpw), timeout=60)
+        check('41 restore: the right password restores', s == 200 and r.get('ok') is True, (s, r))
+        s, after = req('GET', '/api/backup')
+        check('41 restore: the restored transactions match the backup',
+              sorted(t.get('id') for t in after['state']['bitcoin']['txs']) == _txids, '')
 
     finally:
         for p in list(v.procs):

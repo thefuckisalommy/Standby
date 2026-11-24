@@ -25,7 +25,7 @@ Standby is a transaction broadcasting tool: you sign Bitcoin transactions in you
 - **Two nodes** — a primary (mempool.space) with a secondary (blockstream.info) as fallback. The secondary can be turned off in Settings for primary-only use, with no fallback anywhere.
 - **Slipstream broadcast route** — each transaction can go out via the public mempool or MARA Pool's private mempool (Slipstream). A Slipstream submission stays private until MARA mines it and reads “Slipstream Pending” until the public nodes see it. It can carry an opt-in Public Fallback (1, 3, 7, 14, 30, 60, or 90 days; Never by default): if MARA hasn't confirmed it in time, Standby broadcasts it publicly instead.
 - **Pending Transactions** — the card above Archived for transactions out the door but unconfirmed: “Broadcast” for public, “Slipstream Pending” for MARA. Once confirmed, a tx moves to Archived. A pending tx's hex and route are locked (label and notes can still change), and a Slipstream-pending tx has a manual “Broadcast publicly” button.
-- **Backup and restore** — export everything (including check-in keys) as a `standby-backup` file and restore it on a fresh install.
+- **Backup and restore** — export everything (including check-in keys), encrypted with a password you choose or unencrypted, and restore it on a fresh install. An encrypted backup can also be opened without Standby with `tools/decrypt-backup.js`.
 
 ## Setup
 
@@ -81,8 +81,8 @@ Both containers run as UID 1000 with a read-only filesystem, no Linux capabiliti
 ```sh
 mkdir -p data checkin && sudo chown -R 1000:1000 data checkin
 docker network create standby-web && docker network create standby-checkin
-docker run -d --name standby-web --restart on-failure --network standby-web -p 127.0.0.1:3100:3100 -v "$PWD/data:/data" -v "$PWD/checkin:/checkin" -e STANDBY_BIND=0.0.0.0 -e STANDBY_PASSWORD="<your password>" ghcr.io/thefuckisalommy/standby:0.8.11.1
-docker run -d --name standby-checkin --restart on-failure --network standby-checkin -p 3101:3101 -v "$PWD/checkin:/checkin" -e PORT=3101 -e CHECKIN_DIR=/checkin -e STANDBY_BIND=0.0.0.0 ghcr.io/thefuckisalommy/standby:0.8.11.1 node checkin-receiver/server.js
+docker run -d --name standby-web --restart on-failure --network standby-web -p 127.0.0.1:3100:3100 -v "$PWD/data:/data" -v "$PWD/checkin:/checkin" -e STANDBY_BIND=0.0.0.0 -e STANDBY_PASSWORD="<your password>" ghcr.io/thefuckisalommy/standby:0.8.12
+docker run -d --name standby-checkin --restart on-failure --network standby-checkin -p 3101:3101 -v "$PWD/checkin:/checkin" -e PORT=3101 -e CHECKIN_DIR=/checkin -e STANDBY_BIND=0.0.0.0 ghcr.io/thefuckisalommy/standby:0.8.12 node checkin-receiver/server.js
 # open http://localhost:3100
 ```
 (`-e STANDBY_BIND=0.0.0.0` is required here: the app binds localhost by default, and a loopback bind inside a container never receives traffic forwarded to the container's IP. The image runs as UID 1000, hence the `chown`.)

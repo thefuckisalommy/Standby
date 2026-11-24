@@ -411,24 +411,68 @@
     $('state-error-card').style.display = '';
   }
 
+  // ---------- restore, plain or encrypted (0.8.12) ----------
+  // Both restore paths (Settings, and the state-error card) read the
+  // file, and — when it is an encrypted backup — ask for its password
+  // in a small dialog, then send the file's JSON with the password
+  // added. The server decrypts it (lib/backupcrypto.js); a wrong
+  // password comes back as an ordinary error. Cancelling the dialog
+  // rejects with a 'cancelled' error the callers stay quiet about.
+  function readFileText(file) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onload = function () { resolve(reader.result); };
+      reader.onerror = function () { reject(new Error('could not read the backup file')); };
+      reader.readAsText(file);
+    });
+  }
+  var restorePwPending = null;
+  function closeRestorePw(err) {
+    $('restore-pw-modal').classList.remove('open');
+    $('restore-password').value = '';
+    var p = restorePwPending;
+    restorePwPending = null;
+    if (p && err) p.reject(err);
+    return p;
+  }
+  function askBackupPassword() {
+    return new Promise(function (resolve, reject) {
+      restorePwPending = { resolve: resolve, reject: reject };
+      $('restore-pw-modal').classList.add('open');
+      $('restore-password').focus();
+    });
+  }
+  $('restore-pw-form').addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    var pw = $('restore-password').value;
+    var p = closeRestorePw(null);
+    if (p) p.resolve(pw);
+  });
+  $('restore-pw-x').addEventListener('click', function () { closeRestorePw(new Error('cancelled')); });
+  $('btn-restore-pw-cancel').addEventListener('click', function () { closeRestorePw(new Error('cancelled')); });
+  async function restoreBackupFile(file) {
+    var backup;
+    try { backup = JSON.parse(await readFileText(file)); } catch (e) { throw new Error('this is not a Standby backup file (not JSON)'); }
+    if (backup && backup.format === 'standby-backup-encrypted') {
+      backup.password = await askBackupPassword();
+    }
+    return api('POST', '/api/restore', backup);
+  }
+
   $('btn-state-restore').addEventListener('click', function () { $('state-restore-file').click(); });
 
   $('state-restore-file').addEventListener('change', async function () {
     var file = $('state-restore-file').files && $('state-restore-file').files[0];
     if (!file) return;
     try {
-      var text = await new Promise(function (resolve, reject) {
-        var reader = new FileReader();
-        reader.onload = function () { resolve(reader.result); };
-        reader.onerror = function () { reject(new Error('could not read the backup file')); };
-        reader.readAsText(file);
-      });
-      var backup = JSON.parse(text);
-      var r = await api('POST', '/api/restore', backup);
+      var r = await restoreBackupFile(file);
       setMsg($('state-error-msg'), 'Restored ' + r.restoredTxs + ' transaction(s) and settings from the backup.', true);
       $('state-restore-file').value = '';
       location.reload();
-    } catch (e) { setMsg($('state-error-msg'), e.message, false); $('state-restore-file').value = ''; }
+    } catch (e) {
+      if (e.message !== 'cancelled') setMsg($('state-error-msg'), e.message, false);
+      $('state-restore-file').value = '';
+    }
   });
 
   $('btn-state-reset').addEventListener('click', function () {
@@ -5863,7 +5907,7 @@
     },
     backup: {
       title: 'Data backup',
-      body: 'Back up or restore everything Standby knows. A backup is a file holding all your staged transactions, triggers, and settings.\n\nRestoring replaces the current state with the backup\u2019s \u2014 a restore counts as a check-in and clears any active grace period.\n\nIt is a plain, unencrypted JSON file \u2014 keep it somewhere safe. It contains the signed hexes, which reveal the destination addresses and amounts, so treat it like the transactions themselves.',
+      body: 'Back up or restore everything Standby knows. A backup is a file holding all your staged transactions, triggers, and settings.\n\nRestoring replaces the current state with the backup\u2019s \u2014 a restore counts as a check-in and clears any active grace period.\n\nDownload it encrypted with a password you choose (recommended) or unencrypted. Encrypted, the file is useless without the password \u2014 and Standby cannot recover a lost password, so write it down somewhere other than this device. Unencrypted, it contains the signed hexes, which anyone can broadcast and which reveal the destination addresses and amounts, so treat it like the transactions themselves.\n\nAn encrypted backup can also be opened without Standby, using tools/decrypt-backup.js from the Standby repository.',
       triggers: ['general'],
     },
     // No title/body: the version card has no "?" button and no
@@ -6079,20 +6123,101 @@
   });
 
   // ---------- data backup ----------
-  $('btn-backup-download').addEventListener('click', async function () {
+  // (0.8.12) Download Backup opens a dialog: encrypted with a
+  // password the owner chooses (the default), or unencrypted after a
+  // warning. The server encrypts (POST /api/backup {password}), so the
+  // plain backup never crosses the network when encrypted.
+  function backupMode() { return $('backup-mode-plain').checked ? 'plain' : 'encrypted'; }
+  function syncBackupMode() {
+    var enc = backupMode() === 'encrypted';
+    $('backup-encrypted-fields').style.display = enc ? '' : 'none';
+    $('backup-plain-fields').style.display = enc ? 'none' : '';
+    $('btn-backup-modal-download').textContent = enc ? 'Download encrypted backup' : 'Download unencrypted backup';
+  }
+  function closeBackupModal() {
+    $('backup-modal').classList.remove('open');
+    $('backup-password').value = '';
+    $('backup-password2').value = '';
+    useTypedPassword();
+    setMsg($('backup-modal-msg'), '', true);
+  }
+  // Two ways to set the password: typed twice, or generated. A
+  // generated passphrase replaces the typing fields and is shown once,
+  // in full (it wraps on a phone) — nothing to repeat or confirm.
+  var generatedPassphrase = null;
+  function useTypedPassword() {
+    generatedPassphrase = null;
+    $('backup-generated').textContent = '';
+    $('backup-generated-fields').style.display = 'none';
+    $('backup-typed-fields').style.display = '';
+  }
+  $('btn-backup-own').addEventListener('click', function () {
+    useTypedPassword();
+    setMsg($('backup-modal-msg'), '', true);
+    $('backup-password').focus();
+  });
+  $('backup-mode-encrypted').addEventListener('change', syncBackupMode);
+  $('backup-mode-plain').addEventListener('change', syncBackupMode);
+  $('backup-modal-x').addEventListener('click', closeBackupModal);
+  $('btn-backup-modal-cancel').addEventListener('click', closeBackupModal);
+  $('btn-backup-download').addEventListener('click', function () {
+    $('backup-mode-encrypted').checked = true;
+    syncBackupMode();
+    $('backup-modal').classList.add('open');
+  });
+  // A random passphrase: 6 groups of 5 from an unambiguous alphabet
+  // (no 0/o, 1/l/i) — about 145 bits. Shown in the clear so it can be
+  // written down.
+  $('btn-backup-generate').addEventListener('click', function () {
+    var alphabet = 'abcdefghjkmnpqrstuvwxyz23456789';
+    var bytes = new Uint32Array(30);
+    window.crypto.getRandomValues(bytes);
+    var groups = [];
+    for (var g = 0; g < 6; g++) {
+      var w = '';
+      for (var i = 0; i < 5; i++) w += alphabet[bytes[g * 5 + i] % alphabet.length];
+      groups.push(w);
+    }
+    generatedPassphrase = groups.join('-');
+    $('backup-password').value = '';
+    $('backup-password2').value = '';
+    $('backup-generated').textContent = generatedPassphrase;
+    $('backup-typed-fields').style.display = 'none';
+    $('backup-generated-fields').style.display = '';
+    setMsg($('backup-modal-msg'), 'Write this passphrase down now — it is not stored anywhere.', 'warn');
+  });
+  $('btn-backup-modal-download').addEventListener('click', async function () {
+    var enc = backupMode() === 'encrypted';
+    var body = {};
+    if (enc && generatedPassphrase) {
+      body.password = generatedPassphrase;
+    } else if (enc) {
+      var pw = $('backup-password').value;
+      if (pw.length < 12) { setMsg($('backup-modal-msg'), 'The password must be at least 12 characters.', false); return; }
+      if (pw !== $('backup-password2').value) { setMsg($('backup-modal-msg'), 'The two passwords do not match.', false); return; }
+      body.password = pw;
+    }
+    var btn = $('btn-backup-modal-download');
+    btn.disabled = true;
+    setMsg($('backup-modal-msg'), enc ? 'Encrypting…' : 'Preparing…', true);
     try {
-      var backup = await api('GET', '/api/backup');
+      var backup = await api('POST', '/api/backup', body);
       var blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
       var url = URL.createObjectURL(blob);
       var a = document.createElement('a');
       a.href = url;
-      a.download = 'standby-backup-' + new Date().toISOString().slice(0, 10) + '.json';
+      a.download = 'standby-backup-' + new Date().toISOString().slice(0, 10) + (enc ? '.encrypted' : '') + '.json';
       if (document.body) document.body.appendChild(a);
       a.click();
       if (document.body) document.body.removeChild(a);
       URL.revokeObjectURL(url);
-      setMsg($('backup-msg'), 'Backup downloaded.', true);
-    } catch (e) { setMsg($('backup-msg'), e.message, false); }
+      closeBackupModal();
+      setMsg($('backup-msg'), enc ? 'Encrypted backup downloaded.' : 'Unencrypted backup downloaded — keep it somewhere safe.', enc ? true : 'warn');
+    } catch (e) {
+      setMsg($('backup-modal-msg'), e.message, false);
+    } finally {
+      btn.disabled = false;
+    }
   });
 
   $('btn-backup-restore').addEventListener('click', function () { $('backup-file').click(); });
@@ -6101,18 +6226,14 @@
     var file = $('backup-file').files && $('backup-file').files[0];
     if (!file) return;
     try {
-      var text = await new Promise(function (resolve, reject) {
-        var reader = new FileReader();
-        reader.onload = function () { resolve(reader.result); };
-        reader.onerror = function () { reject(new Error('could not read the backup file')); };
-        reader.readAsText(file);
-      });
-      var backup = JSON.parse(text);
-      var r = await api('POST', '/api/restore', backup);
+      var r = await restoreBackupFile(file);
       setMsg($('backup-msg'), 'Restored ' + r.restoredTxs + ' transaction(s) and settings from the backup.', true);
       $('backup-file').value = '';
       await load();
-    } catch (e) { setMsg($('backup-msg'), e.message, false); }
+    } catch (e) {
+      if (e.message !== 'cancelled') setMsg($('backup-msg'), e.message, false);
+      $('backup-file').value = '';
+    }
   });
 
   // App version card (0.8.0): the installed version, from /api/health,

@@ -9,6 +9,7 @@ const { caches, clearCaches } = require('./caches');
 const { applyGrace, checkinLiveOffsetMs, checkinStatus, graceStatus, hashCheckinKey, inDangerZone, mergeExternalCheckin, newCheckinKeyId, publicCheckinKey, resetCheckin, sanitizeState, startupWarnings, syncCheckinFreeze, writeReceiverKeys } = require('./checkin');
 const { CHECKIN_DIR, DATA_DIR, TEST_MODE, VERSION } = require('./config');
 const auth = require('./auth');
+const backupcrypto = require('./backupcrypto');
 const { HISTORY_MAX, forwardMemberHistory, noteSetMemberStale, pushHistory, shortTxid } = require('./history');
 const { csrfAllowed, fetchSiteAllowed, saveMutation } = require('./http');
 const { checkCadenceSecondsOf, exchangeStatusFor, fetchPriceCached, priceAgreementPctOf, priceCacheForState, priceSourceError, priceSourcesOf } = require('./prices');
@@ -1660,7 +1661,12 @@ async function handleApi(req, res, pathname) {
   // addresses and amounts — treat it like the transactions themselves.
   // It also carries the check-in key hashes (not the keys — those were
   // never stored), so a restored setup keeps its keys working.
-  if (req.method === 'GET' && pathname === '/api/backup') {
+  // GET /api/backup — the plain (unencrypted) backup document.
+  // POST /api/backup {password?} (0.8.12) — the same document, or,
+  // with a password, encrypted with it (lib/backupcrypto.js). The
+  // UI uses POST so a password never appears in a URL; GET stays
+  // for scripts.
+  const buildBackup = () => {
     // (0.8.2) The backup carries the SERVED form of each tx (a
     // one-rule set as its single rule) — restore accepts both
     // shapes, and the backup is compared against the served
@@ -1669,7 +1675,7 @@ async function handleApi(req, res, pathname) {
     const backupState = JSON.parse(JSON.stringify(state));
     backupState.bitcoin.txs = serveTxs(backupState.bitcoin.txs || []);
     backupState.bitcoin.sets = serveSets(backupState.bitcoin.sets || []);
-    return sendJson(res, 200, {
+    return {
       format: 'standby-backup',
       version: 1,
       app: 'standby',
@@ -1677,7 +1683,18 @@ async function handleApi(req, res, pathname) {
       state: backupState,
       checkins: store.readCheckins(DATA_DIR, 200),
       broadcastLog: store.readBroadcastLog(DATA_DIR, 200),
-    });
+    };
+  };
+  if (req.method === 'GET' && pathname === '/api/backup') {
+    return sendJson(res, 200, buildBackup());
+  }
+  if (req.method === 'POST' && pathname === '/api/backup') {
+    const body = await readBody(req);
+    const password = body && body.password;
+    if (password === undefined || password === null || password === '') return sendJson(res, 200, buildBackup());
+    const problem = backupcrypto.passwordProblem(password);
+    if (problem) return sendError(res, 400, problem);
+    return sendJson(res, 200, await backupcrypto.encryptBackup(buildBackup(), password));
   }
 
   // POST /api/restore — restore a backup document (the parsed JSON from
@@ -1688,7 +1705,18 @@ async function handleApi(req, res, pathname) {
   // Replaces the state wholesale; the logs are replaced too when the
   // backup carries them. Returns the restored transaction count.
   if (req.method === 'POST' && pathname === '/api/restore') {
-    const body = await readBody(req);
+    let body = await readBody(req);
+    // (0.8.12) An encrypted backup is decrypted first — the UI sends
+    // the file's JSON with the password added as `password` — then
+    // validated exactly like a plain one.
+    if (backupcrypto.isEncryptedBackup(body)) {
+      try {
+        body = await backupcrypto.decryptBackup(body, body.password);
+      } catch (e) {
+        if (e instanceof backupcrypto.BackupCryptoError) return sendError(res, 400, e.message);
+        throw e;
+      }
+    }
     if (!body || typeof body !== 'object' || body.format !== 'standby-backup') {
       return sendError(res, 400, 'not a Standby backup file (format must be standby-backup)');
     }

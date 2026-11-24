@@ -402,7 +402,7 @@
         <h2>Data backup</h2>
         <button class="help-btn" id="help-backup" data-help="backup" aria-label="About this setting" title="About this setting">?</button>
       </div>
-      <p class="muted">The backup is not encrypted.</p>
+      <p class="muted">Download an encrypted backup (recommended) or an unencrypted one.</p>
       <p class="inline-btns">
         <button id="btn-backup-download">Download Backup</button>
         <button id="btn-backup-restore">Restore</button>
@@ -669,6 +669,61 @@
       <input type="password" id="login-password" autocomplete="current-password" required>
       <p class="inline-btns"><button type="submit" class="primary" id="btn-login">Log in</button></p>
       <p id="login-msg" class="muted"></p>
+    </form>
+  </div>
+</div>
+
+<!-- Backup download (0.8.12): encrypted with a password the owner
+     chooses (the default), or unencrypted after a warning. -->
+<div id="backup-modal" class="modal-overlay">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="backup-modal-title">
+    <button id="backup-modal-x" class="modal-x" aria-label="Close">×</button>
+    <h3 id="backup-modal-title">Download backup</h3>
+    <p class="muted">A backup holds every signed transaction. Anyone with an unencrypted backup can broadcast them.</p>
+    <label class="radio-line"><input type="radio" name="backup-mode" id="backup-mode-encrypted" value="encrypted" checked> Encrypted with a password (recommended)</label>
+    <label class="radio-line"><input type="radio" name="backup-mode" id="backup-mode-plain" value="plain"> Unencrypted</label>
+    <div id="backup-encrypted-fields">
+      <!-- Either the owner types a password twice, or Standby
+           generates one: then the typing fields go and the generated
+           passphrase is shown once, in full, to be written down. -->
+      <div id="backup-typed-fields">
+        <label for="backup-password">Backup password (at least 12 characters)</label>
+        <input type="password" id="backup-password" autocomplete="new-password">
+        <label for="backup-password2">Repeat the password</label>
+        <input type="password" id="backup-password2" autocomplete="new-password">
+        <p class="inline-btns"><button type="button" id="btn-backup-generate">Generate a passphrase instead</button></p>
+      </div>
+      <div id="backup-generated-fields" style="display:none">
+        <label>Your backup passphrase — write it down</label>
+        <p id="backup-generated" class="generated-pass"></p>
+        <p class="inline-btns"><button type="button" id="btn-backup-own">Type my own password instead</button></p>
+      </div>
+      <p class="muted">Write the password down somewhere other than this device. Standby cannot recover it — without it, the backup cannot be restored.</p>
+    </div>
+    <div id="backup-plain-fields" style="display:none">
+      <p class="notice bad">Unencrypted: anyone who gets this file can broadcast your transactions and see where they send funds. Keep it somewhere only you can reach.</p>
+    </div>
+    <p class="inline-btns">
+      <button type="button" class="primary" id="btn-backup-modal-download">Download</button>
+      <button type="button" id="btn-backup-modal-cancel">Cancel</button>
+    </p>
+    <p id="backup-modal-msg" class="muted"></p>
+  </div>
+</div>
+
+<!-- Restore of an encrypted backup (0.8.12): asks for its password.
+     Used by both restore paths (Settings and the state-error card). -->
+<div id="restore-pw-modal" class="modal-overlay">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="restore-pw-title">
+    <button id="restore-pw-x" class="modal-x" aria-label="Close">×</button>
+    <h3 id="restore-pw-title">This backup is encrypted</h3>
+    <form id="restore-pw-form">
+      <label for="restore-password">Backup password</label>
+      <input type="password" id="restore-password" autocomplete="off" required>
+      <p class="inline-btns">
+        <button type="submit" class="primary" id="btn-restore-pw">Restore</button>
+        <button type="button" id="btn-restore-pw-cancel">Cancel</button>
+      </p>
     </form>
   </div>
 </div>

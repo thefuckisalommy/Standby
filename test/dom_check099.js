@@ -3347,7 +3347,7 @@ function check(name, cond, detail) {
   }
   check('trim static: the kept short hints are still in the page',
     idx.indexOf('A mempool API endpoint — not an Electrum server or Bitcoin Core RPC') !== -1
-    && idx.indexOf('The backup is not encrypted') !== -1
+    && idx.indexOf('Download an encrypted backup (recommended) or an unencrypted one.') !== -1
     && idx.indexOf('POST /checkin to check in, GET /health to test') !== -1
     && idx.indexOf('A reading is only trusted when the two agree within <span id="price-sources-agreement">5%</span>.') !== -1, '');
   // The trimmed facts still live in the "?" pop-outs (app.js).
@@ -3356,7 +3356,7 @@ function check(name, cond, detail) {
   // escapes, not the decoded apostrophe.
   check('trim static: the moved facts still live in the "?" pop-outs',
     appJs.indexOf('price, UTXO, block-height, set-date, and fee-market triggers keep firing') !== -1
-    && appJs.indexOf('It contains the signed hexes, which reveal the destination addresses and amounts') !== -1
+    && appJs.indexOf('which reveal the destination addresses and amounts') !== -1
     && appJs.indexOf('A key can only check in') !== -1
     && appJs.indexOf('The Low multiplier must stay above the Medium one') !== -1
     && appJs.indexOf('or your own mempool on the LAN') !== -1
@@ -3457,8 +3457,8 @@ function check(name, cond, detail) {
     && idx.indexOf('Installed version:') !== -1 && idx.indexOf('id="app-version"') !== -1, '');
   check('app version static: the card has no "?" button and no details (just the version line)',
     idx.indexOf('id="help-version"') === -1, '');
-  check('app version: the installed version reads 0.8.11.1 (from /api/health)',
-    els['app-version'] && els['app-version'].textContent === '0.8.11.1',
+  check('app version: the installed version reads 0.8.12 (from /api/health)',
+    els['app-version'] && els['app-version'].textContent === '0.8.12',
     els['app-version'] && els['app-version'].textContent);
   setFilter('general');
   check('app version: the card is visible under General',

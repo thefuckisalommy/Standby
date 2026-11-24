@@ -39,9 +39,33 @@ The check-in connection is plain HTTP: the key travels unencrypted. On the gener
 
 The receiver holds no transaction data: it has two routes (`GET /health`, `POST /checkin`), mounts only the checkin directory, and cannot read, generate, or broadcast anything. It answers every bad key with the same generic 401, so a caller learns nothing about the setup. Each check-in records the caller's address, shown in the Recent check-ins log, so a check-in you didn't make is visible.
 
-## Backups are not encrypted
+## Backups: encrypt them
 
-A backup is a plain JSON file of everything needed to restore the setup: every signed transaction (hex included), your settings, and the check-in clock, plus the check-in and broadcast history and the check-in key hashes. It contains the signed hexes, which reveal the destination addresses and amounts, so treat it like the transactions themselves and keep it somewhere safe.
+A backup holds everything needed to restore the setup: every signed transaction (hex included), your settings and the check-in clock, plus the check-in and broadcast history and the check-in key hashes. Download Backup offers two choices:
+
+- **Encrypted with a password you choose** (the default, recommended). The file is useless without the password. Standby cannot recover a lost password, so write it down somewhere other than the device. The dialog can generate a strong passphrase for you.
+- **Unencrypted.** Anyone who gets the file can broadcast your transactions and see where they send funds. Treat it like the transactions themselves.
+
+Encryption happens on the device, before the backup is sent to your browser, so an encrypted backup never crosses your network unencrypted. Restoring an encrypted backup asks for its password.
+
+**Opening a backup without Standby.** `tools/decrypt-backup.js` in this repository decrypts a backup with nothing but Node.js 18+ — for when the device is gone, or for anyone you have given the file and password to:
+
+```sh
+node decrypt-backup.js standby-backup-2026-11-24.encrypted.json > backup.json
+```
+
+**Format** (version 1), for anyone writing their own decryptor: a JSON file
+
+```json
+{ "format": "standby-backup-encrypted", "version": 1,
+  "kdf":    { "name": "scrypt", "N": 131072, "r": 8, "p": 1, "salt": "<base64>" },
+  "cipher": { "name": "aes-256-gcm", "iv": "<base64, 12 bytes>" },
+  "data":   "<base64: ciphertext followed by the 16-byte GCM tag>" }
+```
+
+The key is scrypt(password as UTF-8, salt, N, r, p), 32 bytes. The GCM additional data is the UTF-8 JSON array `[format, version, kdf.name, kdf.N, kdf.r, kdf.p, kdf.salt, cipher.name, cipher.iv]` (compact, no spaces). The decrypted bytes are a gzipped plain `standby-backup` JSON document.
+
+The copies kept on the device itself (`state.json` and its daily snapshots) are not encrypted: Standby has to read them unattended to broadcast, so the key would have to sit next to them. They are readable by the app's own user only.
 
 ## What leaves the device
 

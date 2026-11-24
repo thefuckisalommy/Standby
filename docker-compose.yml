@@ -49,7 +49,7 @@ x-hardening: &hardening
 services:
   web:
     <<: *hardening
-    image: ghcr.io/thefuckisalommy/standby:0.8.11.1
+    image: ghcr.io/thefuckisalommy/standby:0.8.12
     stop_grace_period: 1m30s
     environment:
       PORT: 3100
@@ -76,7 +76,7 @@ services:
   # a trusted LAN or Tailscale network.
   checkin:
     <<: *hardening
-    image: ghcr.io/thefuckisalommy/standby:0.8.11.1
+    image: ghcr.io/thefuckisalommy/standby:0.8.12
     command: ["node", "checkin-receiver/server.js"]
     stop_grace_period: 1m
     environment:
