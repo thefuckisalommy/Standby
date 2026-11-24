@@ -1,5 +1,5 @@
 'use strict';
-// Standby — static serving + request plumbing (split from server.js, 0.8.7.3).
+// Standby — static serving + request plumbing.
 const store = require('./store');
 const fs = require('fs');
 const net = require('net');
@@ -19,7 +19,7 @@ const MIME = {
 
 function serveStatic(req, res, pathname) {
   let file = pathname === '/' ? 'index.html' : pathname.slice(1);
-  // Prevent path traversal. (0.8.11.1) Compare against the
+  // Prevent path traversal. Compare against the
   // directory WITH a trailing separator: a bare prefix check would
   // also accept a sibling like ".../public-old/x".
   const resolved = path.resolve(PUBLIC_DIR, file);
@@ -32,7 +32,7 @@ function serveStatic(req, res, pathname) {
 }
 
 // ---------------------------------------------------------------------------
-// Security headers (0.8.10, audit fix 3): every response carries
+// Security headers: every response carries
 // X-Frame-Options (the UI is never legitimately framed) and
 // X-Content-Type-Options: nosniff, plus a Content-Security-Policy.
 // The policy is minimal for what this page actually uses: its only
@@ -55,7 +55,7 @@ function setSecurityHeaders(res) {
 }
 
 // ---------------------------------------------------------------------------
-// CSRF protection (0.7.12, third-audit finding 2). The UI is the only
+// CSRF protection. The UI is the only
 // browser client: it fetches this API from the same origin, and api()
 // in public/app.js sends Content-Type: application/json on every call
 // (verified — the file has a single fetch, with that header always
@@ -69,11 +69,11 @@ function setSecurityHeaders(res) {
 //       (curl, a script, the DOM test shim — Node's fetch sends none)
 //       is still allowed. This is the same rule Umbrel's own Murmur app
 //       uses behind the app proxy, which preserves Host.
-//       X-Forwarded-Host is NOT trusted here (0.8.10, audit fix 2):
+//       X-Forwarded-Host is NOT trusted here:
 //       Umbrel's proxy sets it to the browser's Host, so behind the
 //       proxy it can never add information the Host header does not
-//       already carry — and a direct request can forge it freely.
-//       Trusting it used to let a spoofed Host+Origin pair pass.
+//       already carry — and a direct request can forge it freely,
+//       which would let a spoofed Host+Origin pair pass.
 //   (b) the Content-Type must be application/json — a cross-origin
 //       HTML form can only send urlencoded / multipart / text, and a
 //       no-cors fetch cannot set a JSON content type without a CORS
@@ -86,7 +86,7 @@ function hostOf(h) {
     return (close === -1 ? h.slice(1) : h.slice(1, close)).toLowerCase();
   }
   let name = h.split(':')[0].toLowerCase();
-  // (0.8.10, follow-up) A trailing dot marks a fully-qualified
+  // A trailing dot marks a fully-qualified
   // name in DNS — "localhost." IS localhost — so strip one after
   // the port is split off. A bare "." becomes "" and is still
   // rejected (hostAllowed requires a non-empty name).
@@ -99,28 +99,26 @@ function isLoopback(h) {
 }
 
 // ---------------------------------------------------------------------------
-// Host allowlist (0.8.10, audit fix 2): a DNS-rebinding page cannot
+// Host allowlist: a DNS-rebinding page cannot
 // reach this server through the browser's own Host header — the page
 // is served from the attacker's domain, so its requests arrive with
 // the attacker's Host — but a direct fetch to a LAN IP, or a
 // same-origin request from a page the owner opened some other way,
 // still carries a legitimate Host. The allowlist keys off the
 // browser-facing names, which is safe because Umbrel's auth proxy
-// forwards Host verbatim (changeOrigin: false on both proxy layers,
-// verified in umbreld source Nov 23) — the container sees exactly
+// forwards Host verbatim (changeOrigin: false on both proxy layers
+// in umbreld) — the container sees exactly
 // what the browser sent, never the internal container name.
 //   Allowed with zero configuration: any IP literal (an IP Host
 //   cannot be rebound — rebinding sends the attacker's domain),
-//   'localhost', and any '*.local' name. (0.8.11) The machine's
-//   own hostname (os.hostname()) is NO LONGER in the default
-//   rule: in Docker it was the container ID, not the host's name,
-//   so it helped a bare-metal install only — and a hostname that
-//   passes by default is a hostname an attacker can also reach
-//   the app by. Reach the app by a hostname and list it in
+//   'localhost', and any '*.local' name. The machine's own
+//   hostname (os.hostname()) is deliberately not in the default
+//   rule: in Docker it is the container ID, not the host's name.
+//   Reach the app by a hostname and list it in
 //   STANDBY_ALLOWED_HOSTS instead; see the README ("Reaching the
 //   UI"). A bare http://umbrel does not resolve on the LAN
 //   anyway — only umbrel.local does, via mDNS.
-//   (0.8.11.1) Note what this check does and does not stop: it
+//   Note what this check does and does not stop: it
 //   stops DNS rebinding (an attacker's domain in the Host header).
 //   It does NOT stop a client that connects by IP — on Umbrel that
 //   includes every other app on the shared Docker network. That is
@@ -161,11 +159,10 @@ function describeAllowedHosts() {
   return parts.join(', ');
 }
 
-// (0.8.11.1) Startup security notes — replaces the 0.8.11
-// bindWarning, which keyed off STANDBY_ALLOWED_HOSTS (a setting
-// that WIDENS access, so setting it should never silence a
-// warning) and fired on every Docker install. The real question
-// is: can something other than the owner reach this API without a
+// Startup security notes. They deliberately ignore
+// STANDBY_ALLOWED_HOSTS: that setting WIDENS access, so setting it
+// must never silence a warning. The question they answer is: can something
+// other than the owner reach this API without a
 // login? Returns { warnings: [...], info: [...] } — warnings are
 // logged with console.warn, info with console.log.
 //   - Umbrel with no password: other apps on the shared Docker
@@ -194,7 +191,7 @@ function startupSecurityNotes({ bind, deployment, password }) {
   return { warnings, info };
 }
 
-// (0.8.11.1) Fetch-metadata check, for EVERY /api request (reads
+// Fetch-metadata check, for EVERY /api request (reads
 // included): a browser marks each request with Sec-Fetch-Site.
 // 'same-origin' is the app's own page; 'none' is the owner typing
 // the URL or opening a bookmark. 'same-site' is another port on
@@ -228,11 +225,10 @@ function csrfAllowed(req) {
 // The release-record statuses the app itself writes (see recordRelease
 // / broadcastOne): 'stale', 'failed', 'broadcast', 'conflict' — the
 // last is an input spent by another transaction that is NOT confirmed
-// yet (0.7.12, third-audit finding 1): a warning, not a verdict —
+// yet: a warning, not a verdict —
 // the transaction stays active and a broadcast is still attempted.
-// A backup carrying any other status is not a real record (0.7.12,
-// third-audit finding 4).
-// (0.8.1, audit finding 4) A mutating API handler loads state once at
+// A backup carrying any other status is not a real record.
+// A mutating API handler loads state once at
 // the top of handleApi, then awaits the network (fee lookups, trigger
 // checks, node tests) — or just the request body — before saving. A
 // second request, or the tick, may have saved newer state in between,

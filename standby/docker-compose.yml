@@ -2,7 +2,7 @@
 # Pattern: Umbrel injects `app_proxy`; the web service is reached via
 # APP_HOST: <app-id>_<service>_1 and APP_PORT (internal port).
 #
-# (0.8.11.1) Both services run as UID/GID 1000, the owner Umbrel gives
+# Both services run as UID/GID 1000, the owner Umbrel gives
 # app data — the image's `node` user, not root. Installs from before
 # 0.8.11.1 wrote their files as root; hooks/pre-start sets the ownership
 # (and moves the check-in directory under data/) on every start, before
@@ -19,10 +19,16 @@ services:
     # Prebuilt for amd64 and arm64 by GitHub Actions
     # (.github/workflows/build-standby-image.yml), tagged with the app
     # version — installing the app just pulls it, no build step.
-    image: ghcr.io/thefuckisalommy/standby:0.8.11.1
+    image: ghcr.io/thefuckisalommy/standby:0.8.12
     user: "1000:1000"
     restart: on-failure
     stop_grace_period: 1m30s
+    # Same hardening as the generic install: nothing in the container
+    # is writable except the mounted data, and no Linux capabilities.
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
     environment:
       PORT: 3100
       # STANDBY_BIND=0.0.0.0: the Umbrel proxy connects to the
@@ -30,7 +36,7 @@ services:
       # traffic.
       STANDBY_BIND: 0.0.0.0
       STANDBY_DEPLOYMENT: umbrel
-      # (0.8.11.1) The app login. Umbrel's own login only guards
+      # The app login. Umbrel's own login only guards
       # traffic through its proxy; every app shares one Docker
       # network, so any other app could reach this container's port
       # directly. APP_PASSWORD is Umbrel's stable per-install
@@ -49,12 +55,19 @@ services:
       CHECKIN_DIR: /checkin
     volumes:
       - ${APP_DATA_DIR}/data:/data
-      # (0.8.11.1) The check-in directory lives under data/ now, so it
+      # The check-in directory lives under data/ now, so it
       # moves with the rest of the app data (umbrelOS 2.0 storage
       # relocation) — hooks/pre-start migrates the old location.
       - ${APP_DATA_DIR}/data/checkin:/checkin
+    # Healthy while the API answers and the state file loads.
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:3100/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
-  # Check-in receiver (0.6.6): the check-in-only front door, on the LAN
+  # Check-in receiver: the check-in-only front door, on the LAN
   # at port 3101 — NOT behind Umbrel's app-auth proxy, because a key
   # holder has no Umbrel login. It runs the same image with a different
   # command, and it mounts ONLY the shared /checkin directory: the key
@@ -68,11 +81,15 @@ services:
   # a newer timestamp from last.json on every status read and on the
   # hourly tick.
   checkin:
-    image: ghcr.io/thefuckisalommy/standby:0.8.11.1
+    image: ghcr.io/thefuckisalommy/standby:0.8.12
     command: ["node", "checkin-receiver/server.js"]
     user: "1000:1000"
     restart: on-failure
     stop_grace_period: 1m
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
     environment:
       PORT: 3101
       # Same bind and allowlist as the web service — a check-in by
@@ -86,3 +103,9 @@ services:
       - ${APP_DATA_DIR}/data/checkin:/checkin
     ports:
       - "3101:3101"
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:3101/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

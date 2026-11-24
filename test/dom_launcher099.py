@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Launch Standby 0.8.11.1 + mempool stubs with
+"""Launch Standby 0.8.12 + mempool stubs with
 seeded trigger data, run dom_check099.js against it, then stop
 everything. Reuses the verify script's helpers (importing it does
 not run its main()).
@@ -44,11 +44,11 @@ _TESTDIR = os.path.dirname(os.path.abspath(__file__))
 GOAL = os.path.dirname(_TESTDIR)
 BRANCH = v.app_dir(GOAL)
 TESTDIR = _TESTDIR
-DATA = '/tmp/heirloom099-dom'
-CHECKIN_DIR = '/tmp/heirloom099-dom-checkin'
+DATA = '/tmp/standby-test099-dom'
+CHECKIN_DIR = '/tmp/standby-test099-dom-checkin'
 BASE = 'http://127.0.0.1:3478'
 RBASE = 'http://127.0.0.1:3479'
-LOG = '/tmp/heirloom099-dom-proc.log'
+LOG = '/tmp/standby-test099-dom-proc.log'
 FINNEY_OUTPOINT = 'f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16:1'
 
 # (0.8.11, secure defaults) Profile dimension, same as the API and
@@ -118,7 +118,7 @@ try:
     assert v.wait_up(BASE), 'app did not come up'
     assert v.wait_up(RBASE, path='/health'), 'receiver did not come up'
     s, h = v.req('GET', '/api/health', base=BASE)
-    assert h.get('version') == '0.8.11.1', h
+    assert h.get('version') == '0.8.12', h
     s, r = v.req('PUT', '/api/settings', {'primaryApiUrl': 'http://127.0.0.1:18275',
                                           'secondaryApiUrl': 'http://127.0.0.1:18276'}, base=BASE)
     assert s == 200, r
@@ -175,11 +175,11 @@ try:
     # Error-screen phase (0.8.3): the main DOM run boots a healthy
     # app, so the broken-state error view and the restore /
     # start-fresh flows get their own instance on ports 3468/3469
-    # (stubs 18265/18266, data /tmp/heirloom099-dom-err). The
+    # (stubs 18265/18266, data /tmp/standby-test099-dom-err). The
     # script kills and respawns the app itself by exact PID; the
     # launcher stops the receiver + stubs here.
-    err_data = '/tmp/heirloom099-dom-err'
-    err_checkin = '/tmp/heirloom099-dom-err-checkin'
+    err_data = '/tmp/standby-test099-dom-err'
+    err_checkin = '/tmp/standby-test099-dom-err-checkin'
     shutil.rmtree(err_data, ignore_errors=True)
     shutil.rmtree(err_checkin, ignore_errors=True)
     e1 = v.start(['node', v.STUB, '18265'], log=LOG)

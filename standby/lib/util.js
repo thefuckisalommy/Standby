@@ -1,9 +1,9 @@
 'use strict';
-// Standby — HTTP + validation helpers (split from server.js, 0.8.7.3).
+// Standby — HTTP + validation helpers.
 const { MAX_BODY } = require('./config');
 
 function sendJson(res, status, obj) {
-  // (0.8.10, audit fix 3) Security headers live in lib/http.js and
+  // Security headers live in lib/http.js and
   // are required lazily: http.js requires this module (for
   // sendError), so a top-level require here would be a load-time
   // cycle and capture undefined exports.
@@ -17,18 +17,29 @@ function sendError(res, status, message) {
   sendJson(res, status, { error: message });
 }
 
+// An error that is the CLIENT's fault, safe to show it: the request
+// dispatcher answers it with its own status and message. Any other
+// error is logged in full and answered with a bare 'internal error'
+// — internal details (paths, stack-derived text) stay in the log.
+function clientError(status, message) {
+  const e = new Error(message);
+  e.statusCode = status;
+  e.expose = true;
+  return e;
+}
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let size = 0;
     const chunks = [];
     req.on('data', (c) => {
       size += c.length;
-      if (size > MAX_BODY) { reject(new Error('body too large')); req.destroy(); return; }
+      if (size > MAX_BODY) { reject(clientError(413, 'body too large')); req.destroy(); return; }
       chunks.push(c);
     });
     req.on('end', () => {
       try { resolve(chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {}); }
-      catch { reject(new Error('invalid JSON')); }
+      catch { reject(clientError(400, 'invalid JSON')); }
     });
     req.on('error', reject);
   });
@@ -45,7 +56,7 @@ function asStr(v, maxLen) {
   return v.slice(0, maxLen);
 }
 
-// Broadcast route (0.7.16): which network a transaction goes out
+// Broadcast route: which network a transaction goes out
 // on. 'public' is the mempool nodes (primary, then secondary);
 // 'slipstream' is MARA Slipstream (direct to MARA Pool's private
 // mempool). Per transaction, chosen when it is added and changeable
@@ -57,7 +68,7 @@ function validBroadcastVia(v) {
   return v === 'slipstream' ? 'slipstream' : 'public';
 }
 
-// Public fallback (0.7.17): a per-transaction OPT-IN timer on a
+// Public fallback: a per-transaction OPT-IN timer on a
 // Slipstream-route transaction. If the transaction is not publicly
 // visible within the chosen number of days, Standby broadcasts it
 // publicly instead — the automatic version of the manual "Broadcast
@@ -74,16 +85,15 @@ function validPublicFallbackDays(v) {
   return (typeof v === 'number' && PUBLIC_FALLBACK_DAYS.includes(v)) ? v : null;
 }
 
-// Grace period (0.8.0, extended 0.8.8): when the app comes back after being
+// Grace period: when the app comes back after being
 // offline, price, UTXO, block-height, set-date, and fee-market
 // triggers are paused for a grace period so they do not fire on
 // conditions that changed while the app was away.
 // graceOfflineDays is the offline gap that
 // triggers it; graceDurationDays is how long it lasts, or null
 // = indefinite (until the owner resumes from the dashboard
-// card). A stored 0 still means off (back-compat with the old
-// dropdown, which offered it) — but the UI never sends 0
-// anymore: the graceEnabled toggle is the off switch. The
+// card). A stored 0 still means off (older state may hold it) —
+// the UI never sends 0: the graceEnabled toggle is the off switch. The
 // allowed values are exactly the ones the Settings
 // dropdowns offer; anything else is a 400 at PUT /api/settings
 // — a bad grace setting must not silently become a different
@@ -91,12 +101,12 @@ function validPublicFallbackDays(v) {
 // missing value becomes Never at serve time).
 const GRACE_OFFLINE_DAYS = [1, 3, 7, 14, 30];
 // 0 = off, kept for back-compat: the grace is never set, so every
-// trigger evaluates normally (0.8.8). null (indefinite) is separate —
+// trigger evaluates normally. null (indefinite) is separate —
 // it is not in this list because the dropdown sends it as the
 // string 'indefinite', which the save handler maps to null.
 const GRACE_DURATION_DAYS = [0, 1, 3, 7, 14, 30];
 
-// User controls (0.8.0): the Settings cards for price agreement,
+// User controls: the Settings cards for price agreement,
 // check cadence, and fee verdict. Each is a number input with a
 // min/max bound — anything outside is a 400 at PUT /api/settings
 // and at restore, never a silent clamp (a bad value must not
@@ -111,4 +121,4 @@ function days(from, to) {
   return Math.floor((to - from) / 86400000);
 }
 
-module.exports = { sendJson, sendError, readBody, clampInt, asStr, validBroadcastVia, PUBLIC_FALLBACK_DAYS, validPublicFallbackDays, GRACE_OFFLINE_DAYS, GRACE_DURATION_DAYS, PRICE_AGREEMENT_PCT_MIN, PRICE_AGREEMENT_PCT_MAX, PRICE_AGREEMENT_PCT_DEFAULT, CHECK_CADENCE_SECONDS_MIN, CHECK_CADENCE_SECONDS_MAX, CHECK_CADENCE_SECONDS_DEFAULT, FEE_LOW_MULT_MIN, FEE_LOW_MULT_MAX, FEE_LOW_MULT_DEFAULT, FEE_MED_MULT_MIN, FEE_MED_MULT_MAX, FEE_MED_MULT_DEFAULT, days };
+module.exports = { sendJson, sendError, clientError, readBody, clampInt, asStr, validBroadcastVia, PUBLIC_FALLBACK_DAYS, validPublicFallbackDays, GRACE_OFFLINE_DAYS, GRACE_DURATION_DAYS, PRICE_AGREEMENT_PCT_MIN, PRICE_AGREEMENT_PCT_MAX, PRICE_AGREEMENT_PCT_DEFAULT, CHECK_CADENCE_SECONDS_MIN, CHECK_CADENCE_SECONDS_MAX, CHECK_CADENCE_SECONDS_DEFAULT, FEE_LOW_MULT_MIN, FEE_LOW_MULT_MAX, FEE_LOW_MULT_DEFAULT, FEE_MED_MULT_MIN, FEE_MED_MULT_MAX, FEE_MED_MULT_DEFAULT, days };

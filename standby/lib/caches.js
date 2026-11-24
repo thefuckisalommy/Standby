@@ -1,5 +1,5 @@
 'use strict';
-// Standby — shared fetch caches (split from server.js, 0.8.7.3).
+// Standby — shared fetch caches.
 // One holder object whose identity never changes: the fetchers
 // REASSIGN the caches (caches.price = {...}), so destructured imports
 // would go stale. Every reader/writer goes through `caches.*`.

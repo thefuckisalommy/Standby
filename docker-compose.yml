@@ -9,7 +9,7 @@
 # backup is just a copy of those two directories (or the in-app Backup
 # download). See README.md ("Run on any Linux box") and SECURITY.md.
 #
-# App login (0.8.11.1, optional): set STANDBY_PASSWORD — in a `.env` file
+# App login: set STANDBY_PASSWORD — in a `.env` file
 # next to this one (`STANDBY_PASSWORD=...`, chmod 600) or in the shell —
 # and the UI and API require it. Recommended whenever anything other than
 # you can reach port 3100 on this machine (other users, a LAN mapping).
@@ -25,7 +25,7 @@
 # stays localhost-only through the host-side port mapping below
 # (127.0.0.1:...:3100).
 #
-# (0.8.11.1) The two services are on SEPARATE networks. They share only
+# The two services are on SEPARATE networks. They share only
 # the ./checkin directory. The receiver is the LAN-facing one; on a
 # shared network it could call the web API directly, past everything
 # the receiver is meant to be unable to do.
@@ -49,7 +49,7 @@ x-hardening: &hardening
 services:
   web:
     <<: *hardening
-    image: ghcr.io/thefuckisalommy/standby:0.8.11.1
+    image: ghcr.io/thefuckisalommy/standby:0.8.12
     stop_grace_period: 1m30s
     environment:
       PORT: 3100
@@ -64,6 +64,15 @@ services:
     ports:
       - "127.0.0.1:${STANDBY_WEB_PORT:-3100}:3100"
     networks: [web]
+    # Healthy while the API answers and the state file loads (a
+    # corrupt state makes /api/health fail). Shown by `docker ps`;
+    # Docker itself does not restart an unhealthy container.
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:3100/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   # Check-in receiver: the check-in-only front door. It runs the same image
   # with a different command and mounts ONLY the shared /checkin directory:
@@ -76,7 +85,7 @@ services:
   # a trusted LAN or Tailscale network.
   checkin:
     <<: *hardening
-    image: ghcr.io/thefuckisalommy/standby:0.8.11.1
+    image: ghcr.io/thefuckisalommy/standby:0.8.12
     command: ["node", "checkin-receiver/server.js"]
     stop_grace_period: 1m
     environment:
@@ -89,6 +98,12 @@ services:
     ports:
       - "${STANDBY_CHECKIN_PORT:-3101}:3101"
     networks: [checkin]
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:3101/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
 networks:
   web:

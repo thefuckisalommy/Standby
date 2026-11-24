@@ -1,10 +1,10 @@
 'use strict';
-// Standby — trigger text + serve shaping (split from server.js, 0.8.7.3).
+// Standby — trigger text + serve shaping.
 const store = require('./store');
 const bitcoin = require('./bitcoin');
 const { days, validPublicFallbackDays } = require('./util');
 
-// Triggers (0.8.0). Each transaction carries its own trigger — see
+// Triggers. Each transaction carries its own trigger — see
 // lib/store.js for the shapes and normalizeTrigger/triggerOf. These
 // are the server-side presentation helpers; the evaluator lives
 // below, next to evaluateRelease.
@@ -82,7 +82,7 @@ function ruleConditionShort(rule) {
   }
 }
 
-// One rule's condition in full — the 0.8.0/0.8.1 text, unchanged.
+// One rule's condition in full.
 function singleTriggerConditionText(trigger) {
   const t = (trigger && trigger.type) ? trigger : store.defaultTrigger();
   switch (t.type) {
@@ -92,7 +92,7 @@ function singleTriggerConditionText(trigger) {
       return 'Fires when BTC price ' + (t.params.op === '>=' ? '≥' : '≤') + ' $' + t.params.value.toLocaleString('en-US');
     case 'utxo': {
       const parts = String(t.params.outpoint || '').split(':');
-      // (0.8.0) The confirmation mode rides on the condition:
+      // The confirmation mode rides on the condition:
       // the default (1 confirmation) reads as before — "is spent"
       // already meant confirmed — while unconfirmed and N > 1 say
       // so explicitly, so the subcard names the rule.
@@ -117,7 +117,7 @@ function singleTriggerConditionText(trigger) {
 }
 
 // The rule types that fired this broadcast, joined — the type
-// stamped on a release record (0.8.0): the rule(s) that fired it,
+// stamped on a release record: the rule(s) that fired it,
 // or the tx's current rule types when nothing fired it (a manual
 // broadcast, a dry-run verdict, a confirmation refresh). One rule
 // reads as its type, exactly as before ('price', 'checkin'); several
@@ -136,7 +136,7 @@ function triggerTypesLabel(tx) {
   return store.triggerTypesOf(tx).join('+');
 }
 
-// Trigger sets (0.8.7). setOfTx finds the set a transaction
+// Trigger sets. setOfTx finds the set a transaction
 // belongs to (at most one — the load-time sanitizer enforces it);
 // setMembers returns a set's transactions, in the set's own order.
 function setOfTx(state, txId) {
@@ -181,10 +181,10 @@ function fallbackDeadline(tx) {
   return new Date(at + days * 86400000);
 }
 
-// The tx as the API serves it (0.8.2, interim dual-shape serving):
+// The tx as the API serves it:
 // a one-rule set is served as its single rule with its triggerState
-// as the single slice (the legacy shape — the 0.8.1 frontend and the
-// 098 suites only ever see that for one-rule txs); a multi-rule set
+// as the single slice (the single-rule shape clients and tests
+// expect for one-rule txs); a multi-rule set
 // is served as the set, with the per-rule state array. The stored
 // form is always the set — this only shapes what leaves the server.
 // A shallow copy: the stored record keeps its set. Remove this when
@@ -203,7 +203,7 @@ function serveTxs(txs) {
   return (txs || []).map(serveTx);
 }
 
-// The set as the API serves it (0.8.7): the same dual-shape
+// The set as the API serves it: the same dual-shape
 // serving as serveTx — a one-rule set as its single rule with a
 // flat triggerState, a multi-rule set as the set with the
 // per-rule array. The stored form is always the set.

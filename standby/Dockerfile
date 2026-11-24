@@ -1,5 +1,8 @@
 # Standby — single-container Node 24 app
-FROM node:24-alpine
+# The base image is pinned by digest (the multi-arch index), so a
+# rebuild of the same commit gets the same base. Dependabot
+# (.github/dependabot.yml) proposes digest updates as pull requests.
+FROM node:24-alpine@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5
 
 WORKDIR /app
 
@@ -13,7 +16,7 @@ COPY public ./public
 # command — `node checkin-receiver/server.js` — on LAN port 3101.
 COPY checkin-receiver ./checkin-receiver
 
-# (0.8.11.1) Run as the image's unprivileged `node` user (UID/GID
+# Run as the image's unprivileged `node` user (UID/GID
 # 1000), not root — on every install path, Umbrel included. The
 # mount points are created owned by it, so an empty named volume
 # starts writable; a bind-mounted host directory must be owned by

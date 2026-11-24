@@ -1,0 +1,20 @@
+# Dependabot: proposes updates as pull requests — they run the test
+# suites like any other PR, and nothing merges by itself.
+#   - github-actions: the third-party actions, which the workflows pin
+#     to commit SHAs (Dependabot keeps the SHA and its version comment
+#     in step).
+#   - docker: the Node base image in standby/Dockerfile, pinned by
+#     digest.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: docker
+    directory: "/standby"
+    schedule:
+      interval: weekly

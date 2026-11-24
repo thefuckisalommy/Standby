@@ -24,7 +24,7 @@
 </header>
 
 <main>
-  <!-- State-load error (0.8.3): shown in place of the normal UI
+  <!-- State-load error: shown in place of the normal UI
        when the state file cannot be loaded and no backup could be
        recovered. The app cannot run, but it can still be rescued:
        restore a backup file, or start fresh. -->
@@ -160,11 +160,10 @@
 
   <!-- ============ SETTINGS ============ -->
   <section class="tab" id="tab-settings">
-    <!-- (0.8.0) The "Check-in Settings" card is gone with the global
-         broadcast threshold: each check-in transaction carries its
-         own threshold ("Days of silence", set when it is added or
-         edited), so there is no check-in setting left to save. -->
-    <!-- Settings filter (0.8.0): a dropdown at the top of the
+    <!-- There is no global check-in setting: each check-in
+         transaction carries its own threshold ("Days of silence",
+         set when it is added or edited). -->
+    <!-- Settings filter: a dropdown at the top of the
          tab, so it takes one row instead of two. The filter reads
          the same triggers array the "?" pop-out renders its
          "Applies to" line from (SETTINGS_HELP in app.js) — one
@@ -361,7 +360,7 @@
       <div class="inline-unit" id="set-fee-low-row"><input id="set-fee-low" type="number" min="1" max="10" step="0.5" value="2"><span>× peak tx fee</span></div>
       <label for="set-fee-medium">High Risk at or below</label>
       <div class="inline-unit" id="set-fee-medium-row"><input id="set-fee-medium" type="number" min="0.5" max="5" step="0.5" value="1"><span>× peak tx fee</span></div>
-      <!-- Fee verdict zone bar (0.8.0): always visible under the
+      <!-- Fee verdict zone bar: always visible under the
            numbers, showing the three zones as a bar that moves
            live as you type. No ticks or axis label below —
            the ranges are written inside each zone. -->
@@ -376,7 +375,7 @@
         <button id="btn-save-fee-verdict" class="primary">Save broadcast fee risk</button>
       </p>
       <p id="fee-verdict-msg" class="muted"></p>
-      <!-- Fee history note (0.8.9): what the peak actually covers,
+      <!-- Fee history note: what the peak actually covers,
            or that it is still building — set by renderSettings. -->
       <p id="fee-history-note" class="muted"></p>
     </div>
@@ -402,7 +401,7 @@
         <h2>Data backup</h2>
         <button class="help-btn" id="help-backup" data-help="backup" aria-label="About this setting" title="About this setting">?</button>
       </div>
-      <p class="muted">The backup is not encrypted.</p>
+      <p class="muted">Download an encrypted backup (recommended) or an unencrypted one.</p>
       <p class="inline-btns">
         <button id="btn-backup-download">Download Backup</button>
         <button id="btn-backup-restore">Restore</button>
@@ -411,7 +410,7 @@
       <p id="backup-msg" class="muted"></p>
     </div>
 
-    <!-- Session (0.8.11.1): only shown when the app login is on.
+    <!-- Session: only shown when the app login is on.
          Logging out signs out every device. -->
     <div class="card" id="card-session" style="display:none">
       <div class="section-head">
@@ -422,7 +421,7 @@
       <p id="logout-msg" class="muted"></p>
     </div>
 
-    <!-- App version (0.8.0): a short card at the very bottom of
+    <!-- App version: a short card at the very bottom of
          General settings showing the installed version, from
          /api/health. It only changes on an update. No "?" button
          and no details pop-out — just the version line. -->
@@ -451,10 +450,9 @@
   </div>
 </div>
 
-<!-- Edit-transaction popup (0.7.16 amendment): editing used to
-     hijack the Add-transaction card at the bottom of the tab, which
-     scrolled the page all the way down on a phone. It is a popup
-     now — the Add card stays "Add" only. -->
+<!-- Edit-transaction popup: editing happens in a popup, so it
+     never scrolls the page down to a form at the bottom of the tab
+     on a phone. -->
 <div id="edit-modal" class="modal-overlay">
   <div class="modal" role="dialog" aria-modal="true">
     <button id="edit-modal-x" class="modal-x" aria-label="Close">×</button>
@@ -462,7 +460,7 @@
     <p id="edit-locked-note" class="muted" style="display:none">The hex and broadcast route cannot be changed once the transaction has been broadcast.</p>
     <label for="edit-label">Label (optional)</label>
     <input id="edit-label" type="text" placeholder="e.g. Move 0.5 BTC to the heir's wallet">
-    <!-- (0.8.7 fix, round 6) One construct: every card is a
+    <!-- One construct: every card is a
          trigger set, so this modal is the same shape as the set
          modal — a Transactions section (the transaction being
          edited, as a member entry, plus blank entries appended
@@ -527,7 +525,7 @@
   </div>
 </div>
 
-<!-- Edit trigger-set popup (0.8.7): one label and the ONE
+<!-- Edit trigger-set popup: one label and the ONE
      rule set that drives the set's transactions. The
      Transactions section lists the current members — each
      with a remove button (removed members return to
@@ -581,9 +579,7 @@
 </div>
 
 
-<!-- Add-transaction popup (0.8.0): the Add form used to be a
-     card at the bottom of the Transactions tab. It is a popup
-     now — three buttons open it: the Getting Started button,
+<!-- Add-transaction popup. Three buttons open it: the Getting Started button,
      the "+ Add a pre-signed transaction" button at the bottom
      of the Transactions tab, and the oval "+ Add Tx" in the
      Staged Transactions header. The popup never switches tabs
@@ -592,7 +588,7 @@
   <div class="modal" role="dialog" aria-modal="true">
     <button id="add-modal-x" class="modal-x" aria-label="Close">×</button>
     <h3 id="btc-form-title">Add a transaction</h3>
-    <!-- (0.8.7 fix, round 3) "+ Add Tx" IS "add trigger set":
+    <!-- "+ Add Tx" IS "add trigger set":
          one save creates a COMPLETE INDEPENDENT new trigger
          set — ONE label for the set, above the transaction
          inputs; repeatable tx entries (notes + hex each) inside
@@ -656,7 +652,7 @@
   </div>
 </div>
 
-<!-- App login (0.8.11.1): shown only when the server requires a
+<!-- App login: shown only when the server requires a
      password (STANDBY_PASSWORD; on Umbrel it is the password shown
      on the app's page). It covers the page until a login succeeds;
      the page then reloads with the session token in place. -->
@@ -669,6 +665,61 @@
       <input type="password" id="login-password" autocomplete="current-password" required>
       <p class="inline-btns"><button type="submit" class="primary" id="btn-login">Log in</button></p>
       <p id="login-msg" class="muted"></p>
+    </form>
+  </div>
+</div>
+
+<!-- Backup download: encrypted with a password the owner
+     chooses (the default), or unencrypted after a warning. -->
+<div id="backup-modal" class="modal-overlay">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="backup-modal-title">
+    <button id="backup-modal-x" class="modal-x" aria-label="Close">×</button>
+    <h3 id="backup-modal-title">Download backup</h3>
+    <p class="muted">A backup holds every signed transaction. Anyone with an unencrypted backup can broadcast them.</p>
+    <label class="radio-line"><input type="radio" name="backup-mode" id="backup-mode-encrypted" value="encrypted" checked> Encrypted with a password (recommended)</label>
+    <label class="radio-line"><input type="radio" name="backup-mode" id="backup-mode-plain" value="plain"> Unencrypted</label>
+    <div id="backup-encrypted-fields">
+      <!-- Either the owner types a password twice, or Standby
+           generates one: then the typing fields go and the generated
+           passphrase is shown once, in full, to be written down. -->
+      <div id="backup-typed-fields">
+        <label for="backup-password">Backup password (at least 12 characters)</label>
+        <input type="password" id="backup-password" autocomplete="new-password">
+        <label for="backup-password2">Repeat the password</label>
+        <input type="password" id="backup-password2" autocomplete="new-password">
+        <p class="inline-btns"><button type="button" id="btn-backup-generate">Generate a passphrase instead</button></p>
+      </div>
+      <div id="backup-generated-fields" style="display:none">
+        <label>Your backup passphrase — write it down</label>
+        <p id="backup-generated" class="generated-pass"></p>
+        <p class="inline-btns"><button type="button" id="btn-backup-own">Type my own password instead</button></p>
+      </div>
+      <p class="muted">Write the password down somewhere other than this device. Standby cannot recover it — without it, the backup cannot be restored.</p>
+    </div>
+    <div id="backup-plain-fields" style="display:none">
+      <p class="notice bad">Unencrypted: anyone who gets this file can broadcast your transactions and see where they send funds. Keep it somewhere only you can reach.</p>
+    </div>
+    <p class="inline-btns">
+      <button type="button" class="primary" id="btn-backup-modal-download">Download</button>
+      <button type="button" id="btn-backup-modal-cancel">Cancel</button>
+    </p>
+    <p id="backup-modal-msg" class="muted"></p>
+  </div>
+</div>
+
+<!-- Restore of an encrypted backup: asks for its password.
+     Used by both restore paths (Settings and the state-error card). -->
+<div id="restore-pw-modal" class="modal-overlay">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="restore-pw-title">
+    <button id="restore-pw-x" class="modal-x" aria-label="Close">×</button>
+    <h3 id="restore-pw-title">This backup is encrypted</h3>
+    <form id="restore-pw-form">
+      <label for="restore-password">Backup password</label>
+      <input type="password" id="restore-password" autocomplete="off" required>
+      <p class="inline-btns">
+        <button type="submit" class="primary" id="btn-restore-pw">Restore</button>
+        <button type="button" id="btn-restore-pw-cancel">Cancel</button>
+      </p>
     </form>
   </div>
 </div>

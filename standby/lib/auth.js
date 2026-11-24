@@ -1,5 +1,5 @@
 'use strict';
-// Standby — app login (0.8.11.1).
+// Standby — app login.
 //
 // Why: the Host allowlist stops DNS rebinding, but not a client
 // that connects by IP. On Umbrel every app shares one Docker
@@ -12,8 +12,7 @@
 // Umbrel shows on the app's page (deterministicPassword: true).
 // On the generic Docker / bare installs it is optional.
 //
-// Off when STANDBY_PASSWORD is empty: every request is allowed,
-// exactly as before 0.8.11.1.
+// Off when STANDBY_PASSWORD is empty: every request is allowed.
 //
 // How a request proves itself:
 //   - The UI logs in once (POST /api/login) and gets a session

@@ -1,5 +1,5 @@
 'use strict';
-// Mempool API stub for Heirloom local verification. Serves the endpoints
+// Mempool API stub for Standby local verification. Serves the endpoints
 // the app uses: tip height, outspend, tx lookup, tx broadcast.
 //   node stubs.js <port>   (env SENTINEL_TXID)
 // Finney txid: f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16

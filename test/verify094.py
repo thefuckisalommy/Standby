@@ -189,8 +189,8 @@ def app_dir(root, candidates=('branch-0811-secure-defaults', 'branch-0810-fixes'
 APP = os.path.join(GOAL, 'app')
 FINNEY = 'f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16'
 SECOND = 'aa' * 32
-DATA = '/tmp/heirloom094'
-CHECKIN_DIR = '/tmp/heirloom094-checkin'
+DATA = '/tmp/standby-test094'
+CHECKIN_DIR = '/tmp/standby-test094-checkin'
 PORT = 3378
 BASE = 'http://127.0.0.1:%d' % PORT
 RECEIVER_PORT = 3379
@@ -377,7 +377,7 @@ SENTINEL_TXID = txid_of(SENTINEL_HEX)
 procs = []
 
 
-def start(cmd, env=None, cwd=None, log='/tmp/heirloom094-proc.log'):
+def start(cmd, env=None, cwd=None, log='/tmp/standby-test094-proc.log'):
     e = dict(os.environ)
     if env:
         e.update(env)
@@ -423,7 +423,7 @@ def stop(p):
 
 
 def main():
-    for d in (DATA, '/tmp/heirloom094-env', '/tmp/heirloom094-mig', CHECKIN_DIR):
+    for d in (DATA, '/tmp/standby-test094-env', '/tmp/standby-test094-mig', CHECKIN_DIR):
         shutil.rmtree(d, ignore_errors=True)
     # 0.7.20: every app instance refreshes the 90-day fee peak 2s
     # after startup — point the fetch at the primary stub for the
@@ -559,7 +559,7 @@ def main():
         # same dead base also serves the current recommended fees,
         # so currentFees stays null too (the Critical check is
         # skipped, not guessed).
-        nofee_dir = '/tmp/heirloom094-nofee'
+        nofee_dir = '/tmp/standby-test094-nofee'
         shutil.rmtree(nofee_dir, ignore_errors=True)
         shutil.rmtree(nofee_dir + '-checkin', ignore_errors=True)
         app_nf = start(['node', 'server.js'],
@@ -731,7 +731,7 @@ def main():
         check('hourly tick re-tests the nodes on its own (results fresh after restart)', tick_ok, conn)
 
         # env override still wins for the primary
-        env_dir = '/tmp/heirloom094-env'
+        env_dir = '/tmp/standby-test094-env'
         app_env = start(['node', 'server.js'],
                         env={'PORT': '3274', 'DATA_DIR': env_dir,
                              'MEMPOOL_HOST': '127.0.0.1', 'MEMPOOL_PORT': '18159', 'MEMPOOL_PROTOCOL': 'http:'},
@@ -751,7 +751,7 @@ def main():
             stop(app_env)
 
         # 0.5.3 -> 0.6.5 migration: RPC password deleted, custom endpoint kept
-        mig = '/tmp/heirloom094-mig'
+        mig = '/tmp/standby-test094-mig'
         os.makedirs(mig, exist_ok=True)
         seed = {
             'version': 3,
@@ -1315,7 +1315,7 @@ def main():
         check('revoke the untitled key (tidy up)', s == 200, r)
 
         # --- 0.6.5: overlaps derived on read; edit clears them ------
-        ov_dir = '/tmp/heirloom094-overlap'
+        ov_dir = '/tmp/standby-test094-overlap'
         shutil.rmtree(ov_dir, ignore_errors=True)
         os.makedirs(ov_dir, exist_ok=True)
         app_ov = start(['node', 'server.js'], env={'PORT': '3276', 'DATA_DIR': ov_dir}, cwd=APP)
@@ -1347,7 +1347,7 @@ def main():
         # armed txs left, the armed-only call fails cleanly instead
         # of broadcasting nothing. A plain broadcast all still sends
         # the disarmed tx.
-        armed_dir = '/tmp/heirloom094-armed'
+        armed_dir = '/tmp/standby-test094-armed'
         shutil.rmtree(armed_dir, ignore_errors=True)
         os.makedirs(armed_dir, exist_ok=True)
         app_armed = start(['node', 'server.js'], env={'PORT': '3277', 'DATA_DIR': armed_dir}, cwd=APP)
@@ -1391,7 +1391,7 @@ def main():
         # hit with two transactions sharing an input). The
         # confirmations check must report it not found, persist
         # that verdict, and keep saying so on a second check.
-        drop_dir = '/tmp/heirloom094-dropped'
+        drop_dir = '/tmp/standby-test094-dropped'
         shutil.rmtree(drop_dir, ignore_errors=True)
         os.makedirs(drop_dir, exist_ok=True)
         app_drop = start(['node', 'server.js'], env={'PORT': '3380', 'DATA_DIR': drop_dir}, cwd=APP)
@@ -1444,7 +1444,7 @@ def main():
         # threshold the status must flip to 'release-due' at exactly 35
         # days (not a day late), and stay 'on-track' an hour before.
         # No txs at all here, so no tick can broadcast anything.
-        tdata = '/tmp/heirloom094-timer'
+        tdata = '/tmp/standby-test094-timer'
         tbase = 'http://127.0.0.1:3382'
         shutil.rmtree(tdata, ignore_errors=True)
         app_t = start(['node', 'server.js'],
@@ -1511,7 +1511,7 @@ def main():
         # Delayed stubs (400 ms on every outspend answer) open a window
         # a check-in can land in. Uses its own stubs + app so the delay
         # does not slow the rest of the suite.
-        rdata = '/tmp/heirloom094-race'
+        rdata = '/tmp/standby-test094-race'
         rbase = 'http://127.0.0.1:3384'
         shutil.rmtree(rdata, ignore_errors=True)
         rs1 = start(['node', STUB, '18162'],
@@ -1590,7 +1590,7 @@ def main():
         # clobbering the edit; it now merges only the confirmation
         # fields into fresh state. Delayed tx-lookup stubs (400 ms)
         # open a window an edit can land in.
-        cdata = '/tmp/heirloom094-conc'
+        cdata = '/tmp/standby-test094-conc'
         cbase = 'http://127.0.0.1:3386'
         shutil.rmtree(cdata, ignore_errors=True)
         cs1 = start(['node', STUB, '18161'],
@@ -1645,7 +1645,7 @@ def main():
         # the release is all-or-none. Delayed broadcast stubs (1500 ms
         # on every POST /api/tx) open a window a check-in, a disable,
         # or a delete can land in while a broadcast is on the network.
-        bdata = '/tmp/heirloom094-bcast'
+        bdata = '/tmp/standby-test094-bcast'
         bbase = 'http://127.0.0.1:3388'
         shutil.rmtree(bdata, ignore_errors=True)
         bs1 = start(['node', STUB, '18163'],
@@ -1782,7 +1782,7 @@ def main():
         # entry is 'unknown', not 'blocked'. The old code said
         # wouldBroadcast False while the note said the broadcast would
         # be attempted, and logged the run as 'blocked'.
-        udata = '/tmp/heirloom094-unknown'
+        udata = '/tmp/standby-test094-unknown'
         ubase = 'http://127.0.0.1:3390'
         shutil.rmtree(udata, ignore_errors=True)
         us1 = start(['node', STUB, '18165'], env={'SENTINEL_TXID': SENTINEL_TXID})
@@ -1824,7 +1824,7 @@ def main():
         # instead of growing the process. Both stubs answer the
         # outspend check with a 2 MB body; the dry-run must fail
         # cleanly (naming the cap) and the app must stay up.
-        hdata = '/tmp/heirloom094-bigresp'
+        hdata = '/tmp/standby-test094-bigresp'
         hbase = 'http://127.0.0.1:3392'
         shutil.rmtree(hdata, ignore_errors=True)
         hs1 = start(['node', STUB, '18167'],
@@ -1861,7 +1861,7 @@ def main():
         # the txid sent. Both stubs answer 200 with 'not-a-txid', so
         # the broadcast must FAIL (not be recorded as broadcasted) and
         # the tx must stay un-broadcast, ready to retry.
-        xdata = '/tmp/heirloom094-badtxid'
+        xdata = '/tmp/standby-test094-badtxid'
         xbase = 'http://127.0.0.1:3394'
         shutil.rmtree(xdata, ignore_errors=True)
         xs1 = start(['node', STUB, '18169'],
@@ -1902,7 +1902,7 @@ def main():
         # cannot overlap. Two concurrent Broadcast Now calls for one
         # tx, with the broadcast delayed 1500 ms: exactly one
         # broadcasts, the other is skipped as already in progress.
-        gdata = '/tmp/heirloom094-guard'
+        gdata = '/tmp/standby-test094-guard'
         gbase = 'http://127.0.0.1:3396'
         shutil.rmtree(gdata, ignore_errors=True)
         gs1 = start(['node', STUB, '18171'],
@@ -1957,7 +1957,7 @@ def main():
         # break it — and a cross-origin form or no-cors fetch cannot
         # satisfy either. No stubs needed: pause/resume/settings do
         # not touch the nodes.
-        cdata = '/tmp/heirloom094-csrf'
+        cdata = '/tmp/standby-test094-csrf'
         cbase = 'http://127.0.0.1:3398'
         shutil.rmtree(cdata, ignore_errors=True)
         app_csrf = start(['node', 'server.js'],
@@ -2018,8 +2018,8 @@ def main():
         # skips (the clock is on-track) and broadcasts nothing. A
         # second, fresh tx is the tell: if the merge had not
         # happened it would broadcast in the second run.
-        qdata = '/tmp/heirloom094-relcheck'
-        qcheck = '/tmp/heirloom094-relcheck-checkin'
+        qdata = '/tmp/standby-test094-relcheck'
+        qcheck = '/tmp/standby-test094-relcheck-checkin'
         qbase = 'http://127.0.0.1:3400'
         qrbase = 'http://127.0.0.1:3401'
         shutil.rmtree(qdata, ignore_errors=True)
@@ -2099,7 +2099,7 @@ def main():
         # corrupt backup can no longer silently disable a transaction
         # or break every status read. A valid restore still applies,
         # including one carrying a matching broadcasted record.
-        wdata = '/tmp/heirloom094-restore'
+        wdata = '/tmp/standby-test094-restore'
         wbase = 'http://127.0.0.1:3400'
         shutil.rmtree(wdata, ignore_errors=True)
         app_w = start(['node', 'server.js'],
@@ -2200,7 +2200,7 @@ def main():
         # via STUB_CONFLICT_MODE — and 'ee'*32 as spent by the txid
         # in STUB_OWN_SPEND_TXID. The mode flips by restarting the
         # stubs, exactly like the primary-down sections restart theirs.
-        fdata = '/tmp/heirloom094-finding1'
+        fdata = '/tmp/standby-test094-finding1'
         fbase = 'http://127.0.0.1:3402'
         shutil.rmtree(fdata, ignore_errors=True)
         fs1 = start(['node', STUB, '18175'],
@@ -2337,7 +2337,7 @@ def main():
         # must now be rejected whole (400), state untouched — while
         # a valid restore carrying matching txids (and matching
         # kinds, or no kind at all) still applies.
-        w2data = '/tmp/heirloom094-restore2'
+        w2data = '/tmp/standby-test094-restore2'
         w2base = 'http://127.0.0.1:3406'
         shutil.rmtree(w2data, ignore_errors=True)
         app_w2 = start(['node', 'server.js'],
@@ -2416,8 +2416,8 @@ def main():
         # in-app check-ins, and manual broadcasts are unaffected
         # (they do not touch last.json); the condition is visible in
         # GET /api/status as checkinReadError.
-        gdata = '/tmp/heirloom094-readerror'
-        gcheck = '/tmp/heirloom094-readerror-checkin'
+        gdata = '/tmp/standby-test094-readerror'
+        gcheck = '/tmp/standby-test094-readerror-checkin'
         gbase = 'http://127.0.0.1:3408'
         shutil.rmtree(gdata, ignore_errors=True)
         shutil.rmtree(gcheck, ignore_errors=True)
@@ -2562,7 +2562,7 @@ def main():
         # the status stays 'release-due' and the release keeps
         # running. 'Broadcasted' only once every armed transaction
         # has reached a terminal state (broadcasted or stale).
-        rdata = '/tmp/heirloom094-retry'
+        rdata = '/tmp/standby-test094-retry'
         rbase = 'http://127.0.0.1:3410'
         shutil.rmtree(rdata, ignore_errors=True)
         # Craft both hexes BEFORE the stubs start: the stub must know
@@ -2700,7 +2700,7 @@ def main():
         # summary counts only the transactions that would actually
         # land (a timelocked one is named separately, not counted as
         # 'would broadcast'). The stub tip height is fixed at 900000.
-        tdata = '/tmp/heirloom094-timelock'
+        tdata = '/tmp/standby-test094-timelock'
         tbase = 'http://127.0.0.1:3412'
         shutil.rmtree(tdata, ignore_errors=True)
         ts1 = start(['node', STUB, '18181'], env={'SENTINEL_TXID': SENTINEL_TXID})
@@ -2815,7 +2815,7 @@ def main():
         # --- import (0.7.15): hex file + fully-signed PSBT ---
         # No mempool stubs: import is pure parsing/finalization, no
         # network. App on 3414 (next free after the 3412 timelock app).
-        idata = '/tmp/heirloom094-import'
+        idata = '/tmp/standby-test094-import'
         ibase = 'http://127.0.0.1:3414'
         shutil.rmtree(idata, ignore_errors=True)
         app_i = start(['node', 'server.js'],
@@ -3216,7 +3216,7 @@ def main():
         # SLIPSTREAM_API_URL points at the primary stub; the
         # /__test__/slipstream/* endpoints drive the MARA transitions
         # (visible = MARA mined it, drop = MARA dropped it).
-        sdata = '/tmp/heirloom094-slipstream'
+        sdata = '/tmp/standby-test094-slipstream'
         sbase = 'http://127.0.0.1:3416'
         sstub = 'http://127.0.0.1:18183'
         shutil.rmtree(sdata, ignore_errors=True)
@@ -3563,7 +3563,7 @@ def main():
         # fires for a tx that is already publicly visible (recognised
         # as broadcast instead), already broadcast, stale, disarmed,
         # or while paused — and Broadcast All never triggers it.
-        fdata = '/tmp/heirloom094-fallback'
+        fdata = '/tmp/standby-test094-fallback'
         fbase = 'http://127.0.0.1:3419'
         fstub = 'http://127.0.0.1:18187'
         shutil.rmtree(fdata, ignore_errors=True)
@@ -3964,7 +3964,7 @@ def main():
         # computed one, and a restart recomputes every stored fee,
         # so a wrong stored fee self-corrects; restore carries the
         # fee through.
-        edata = '/tmp/heirloom094-fee'
+        edata = '/tmp/standby-test094-fee'
         ebase = 'http://127.0.0.1:3420'
         shutil.rmtree(edata, ignore_errors=True)
         es1 = start(['node', STUB, '18189'], env={'SENTINEL_TXID': SENTINEL_TXID})
@@ -4116,7 +4116,7 @@ def main():
         # and half (clock) are read from the threshold, never
         # hardcoded: thr/4 is 8.75 days, thr/2 is 17.5 days on the
         # 35-day threshold.
-        hdata = '/tmp/heirloom094-hold'
+        hdata = '/tmp/standby-test094-hold'
         hbase = 'http://127.0.0.1:3383'
         shutil.rmtree(hdata, ignore_errors=True)
         shutil.rmtree(hdata + '-checkin', ignore_errors=True)

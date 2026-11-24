@@ -1,11 +1,10 @@
 'use strict';
-// Standby UI — vanilla JS, no build step. Talks to the JSON API in server.js.
-// 0.3.0: the app does one thing — broadcast a pre-signed Bitcoin
-// transaction at release. There is no message delivery any more.
+// Standby UI — vanilla JS, no build step. Talks to the JSON API
+// (standby/lib/api.js).
 (function () {
   var S = null; // cached state
-  var stateErrorShown = false; // the 0.8.3 state-load error view is up
-  // Live view (0.8.5): the 1-second timer below refreshes the page
+  var stateErrorShown = false; // the state-load error view is up
+  // Live view: the 1-second timer below refreshes the page
   // from the server once per check cadence, patching changed values
   // in place — never rebuilding the DOM the owner is touching.
   var lastStatus = null; // the last /api/status payload (for the live tick)
@@ -26,7 +25,7 @@
     el.style.color = ok === false ? '#f87171' : ok === 'warn' ? '#fbbf24' : '';
   }
 
-  // App login (0.8.11.1): when the server requires a password, the
+  // App login: when the server requires a password, the
   // session token from POST /api/login is kept in localStorage —
   // scoped to this exact origin (host AND port), unlike a cookie,
   // so no other app on the same host can read it — and sent in the
@@ -87,7 +86,7 @@
     return d.toLocaleDateString() + ', ' + d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
   }
 
-  // The readiness "last checked" caption (0.8.1): time only when
+  // The readiness "last checked" caption: time only when
   // the check was today ("4:29 PM"), date + time when older — the
   // full fmtDateShort string is too long to share the "Exchange
   // Status" label line at 390px.
@@ -108,7 +107,7 @@
     return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   }
 
-  // The per-tx History (0.8.2): the event titles, the dot colour
+  // The per-tx History: the event titles, the dot colour
   // per type (green = confirmed, amber = fired / conflict, red =
   // failed / stale, grey = the rest), and the short timestamp
   // ("Nov 15, 6:55 PM") the timeline rows show.
@@ -130,9 +129,9 @@
     return new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
   }
 
-  // The check-in freeze (0.8.0): the live frozen time for a tx —
+  // The check-in freeze: the live frozen time for a tx —
   // the banked offset plus the open inactive period, if any.
-  // Mirrors server.js checkinLiveOffsetMs. A tx that was disarmed
+  // Mirrors lib/checkin.js checkinLiveOffsetMs. A tx that was disarmed
   // or on vacation has time that never counted toward its
   // countdown, so the danger zone is measured from the EFFECTIVE
   // last check-in, not the raw one.
@@ -145,7 +144,7 @@
     return base;
   }
 
-  // The danger zone (0.7.22): the last 25% of the check-in window —
+  // The danger zone: the last 25% of the check-in window —
   // the time remaining until the due date is a quarter of the
   // threshold or less (already past due is inside the zone).
   // thresholdDays is the threshold to measure against (the
@@ -197,8 +196,7 @@
     return String(r);
   }
 
-  // The fee verdict (0.7.20, extended 0.7.21 with Critical Risk,
-  // peak accumulated 0.8.9): is this tx's FIXED fee good enough
+  // The fee verdict: is this tx's FIXED fee good enough
   // for a long-term hold? The ladder, against the peak (the 90th
   // percentile of the hourly economy-fee observations Standby
   // records from its own nodes, S.bitcoin.feePeak; the window they
@@ -206,7 +204,7 @@
   // S.bitcoin.feePeakObservations):
   // Low Risk at `lowMult`x the peak, Medium Risk at `medMult`x–
   // `lowMult`x, High Risk below the peak (Settings: Fee verdict;
-  // defaults 2 and 1). 0.7.21 adds the CURRENT check first: a fee
+  // defaults 2 and 1). The CURRENT check comes first: a fee
   // below the current economy fee (served as
   // S.bitcoin.currentFees.economyFee) would not confirm within a
   // day right now, so it is Critical Risk whatever the history
@@ -227,7 +225,7 @@
   }
 
   // The pill class for a fee verdict: Low green, Medium amber,
-  // High a LIGHTER red (0.7.21), Critical the current red — so
+  // High a LIGHTER red, Critical the current red — so
   // the worst level is visibly the deepest red.
   function feeVerdictCls(v) {
     if (v === 'Low Risk') return 'ok';
@@ -250,7 +248,7 @@
     return v;
   }
 
-  // The fee verdict for one tx right now (0.8.5): the verdict of
+  // The fee verdict for one tx right now: the verdict of
   // the tx's stored fee rate against the current peak and economy
   // fee — null when the tx is settled or pending (its fee is
   // moot) or the inputs are unknown. One place, so the card's Fee
@@ -263,7 +261,7 @@
     return feeVerdict(tx.feeRateSatVb, S.bitcoin.feePeak, S.bitcoin.currentFees && S.bitcoin.currentFees.economyFee, S.settings && S.settings.feeLowMultiplier, S.settings && S.settings.feeMediumMultiplier);
   }
 
-  // The fee-risk pop-out (0.7.21): the Fee line is clickable and
+  // The fee-risk pop-out: the Fee line is clickable and
   // opens the shared showDetails pop-out with HOW the verdict was
   // calculated — the peak, your fee, the current economy
   // fee, and the reason for the level — so the verdict is
@@ -272,7 +270,7 @@
   function showFeePopout(tx, verdict) {
     var peak = S.bitcoin.feePeak;
     var win = S.bitcoin.feePeakWindowDays;
-    // The window the peak covers (0.8.9, accumulated): the
+    // The window the peak covers: the
     // observations reach back at most 90 days; a young history
     // reaches back only as far as it has been recording. The label
     // names the real window — "90-day peak" at 90 days, "peak over
@@ -398,7 +396,7 @@
   }
 
   // The state file could not be loaded and no backup could be
-  // recovered (0.8.3): the app cannot run, but it can still be
+  // recovered: the app cannot run, but it can still be
   // rescued — restore a backup file, or start fresh. Only a
   // state-load error shows this view; any other load failure
   // (a network error, say) keeps the plain notice at startup
@@ -411,24 +409,68 @@
     $('state-error-card').style.display = '';
   }
 
+  // ---------- restore, plain or encrypted ----------
+  // Both restore paths (Settings, and the state-error card) read the
+  // file, and — when it is an encrypted backup — ask for its password
+  // in a small dialog, then send the file's JSON with the password
+  // added. The server decrypts it (lib/backupcrypto.js); a wrong
+  // password comes back as an ordinary error. Cancelling the dialog
+  // rejects with a 'cancelled' error the callers stay quiet about.
+  function readFileText(file) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onload = function () { resolve(reader.result); };
+      reader.onerror = function () { reject(new Error('could not read the backup file')); };
+      reader.readAsText(file);
+    });
+  }
+  var restorePwPending = null;
+  function closeRestorePw(err) {
+    $('restore-pw-modal').classList.remove('open');
+    $('restore-password').value = '';
+    var p = restorePwPending;
+    restorePwPending = null;
+    if (p && err) p.reject(err);
+    return p;
+  }
+  function askBackupPassword() {
+    return new Promise(function (resolve, reject) {
+      restorePwPending = { resolve: resolve, reject: reject };
+      $('restore-pw-modal').classList.add('open');
+      $('restore-password').focus();
+    });
+  }
+  $('restore-pw-form').addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    var pw = $('restore-password').value;
+    var p = closeRestorePw(null);
+    if (p) p.resolve(pw);
+  });
+  $('restore-pw-x').addEventListener('click', function () { closeRestorePw(new Error('cancelled')); });
+  $('btn-restore-pw-cancel').addEventListener('click', function () { closeRestorePw(new Error('cancelled')); });
+  async function restoreBackupFile(file) {
+    var backup;
+    try { backup = JSON.parse(await readFileText(file)); } catch (e) { throw new Error('this is not a Standby backup file (not JSON)'); }
+    if (backup && backup.format === 'standby-backup-encrypted') {
+      backup.password = await askBackupPassword();
+    }
+    return api('POST', '/api/restore', backup);
+  }
+
   $('btn-state-restore').addEventListener('click', function () { $('state-restore-file').click(); });
 
   $('state-restore-file').addEventListener('change', async function () {
     var file = $('state-restore-file').files && $('state-restore-file').files[0];
     if (!file) return;
     try {
-      var text = await new Promise(function (resolve, reject) {
-        var reader = new FileReader();
-        reader.onload = function () { resolve(reader.result); };
-        reader.onerror = function () { reject(new Error('could not read the backup file')); };
-        reader.readAsText(file);
-      });
-      var backup = JSON.parse(text);
-      var r = await api('POST', '/api/restore', backup);
+      var r = await restoreBackupFile(file);
       setMsg($('state-error-msg'), 'Restored ' + r.restoredTxs + ' transaction(s) and settings from the backup.', true);
       $('state-restore-file').value = '';
       location.reload();
-    } catch (e) { setMsg($('state-error-msg'), e.message, false); $('state-restore-file').value = ''; }
+    } catch (e) {
+      if (e.message !== 'cancelled') setMsg($('state-error-msg'), e.message, false);
+      $('state-restore-file').value = '';
+    }
   });
 
   $('btn-state-reset').addEventListener('click', function () {
@@ -446,12 +488,12 @@
     'vacation': 'warn', 'not-started': 'muted', 'grace': 'warn',
   };
 
-  // Triggers (0.8.0): the rule that fires a transaction. The tx's
+  // Triggers: the rule that fires a transaction. The tx's
   // trigger, normalized — a missing or unusable trigger defaults
   // Normalize ONE rule: a rule with an unknown shape falls back
   // to the check-in trigger at 35 days, so a legacy tx (written
   // before triggers existed) reads as a check-in rule. There is
-  // no global threshold any more: 35 is the per-tx default.
+  // no global threshold: 35 is the per-tx default.
   // Mirrors lib/store.js normalizeRule — the frontend cannot import
   // that module, so the normalization is duplicated here (same
   // pattern as the feeVerdict mirror).
@@ -481,7 +523,7 @@
     }
     return { type: 'checkin', params: { thresholdDays: 35 } };
   }
-  // (0.8.2) A transaction now carries a rule SET, not one
+  // A transaction carries a rule SET, not one
   // trigger: {op: 'AND'|'OR', rules: [...]}. The server still
   // serves a one-rule set as its single rule with a flat
   // triggerState (legacy shape), so the set normalizer accepts
@@ -498,7 +540,7 @@
   // The per-rule triggerState slices, parallel to the rules.
   // The server serves a flat slice for a one-rule set, and one
   // ruleset object for a multi-rule set — its per-rule slices
-  // live under .rules (see server.js triggerStatusFor). A
+  // live under .rules (see lib/rules.js triggerStatusFor). A
   // one-rule set served as an array (the old interim shape)
   // reads the same way. Missing slices read as {}.
   function triggerStatesOf(tx) {
@@ -531,7 +573,7 @@
   }
   // The set's condition in plain words — the per-rule
   // conditions joined with AND / OR. A one-rule set reads
-  // exactly like the single rule (identical to 0.8.1); for
+  // exactly like the single rule; for
   // later rules the "Fires when/on" prefix is dropped, so a
   // two-rule set reads "Fires when BTC price ≥ $150,000 OR the
   // chain reaches block 1,000,000".
@@ -610,7 +652,7 @@
     // for a manual broadcast).
     return (ts && ts.reason) ? ts.reason : 'Not evaluated yet';
   }
-  // The per-rule state pill (0.8.2 v2): whether this rule's
+  // The per-rule state pill: whether this rule's
   // criterion is met right now, from its triggerStatus slice —
   // so an AND set shows at a glance which rules hold and which
   // don't. 'due' / 'release-due' → "Met" (green); 'watching' /
@@ -647,9 +689,9 @@
     return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + 'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
   }
 
-  // Grace period (0.8.0, extended 0.8.8, unified 0.8.8): the card at the top of the dashboard,
+  // Grace period: the card at the top of the dashboard,
   // shown whenever a grace is active — even with nothing held.
-  // The copy follows the approved mockup exactly:
+  // The copy (keep it exactly):
   // "Grace period has been activated because the device was offline
   // for 3 days." / "2 transactions are held by grace, 1 of them
   // would fire now." — the held line carries both numbers (held,
@@ -660,7 +702,7 @@
   // Nov 30" right; under a day left it reads "less than a day
   // left"; an indefinite grace has no bar, just "until you resume".
   // The Resume row puts the button first with its note to the
-  // right. (0.8.5) Shared with the live tick: patchLive calls this
+  // right. Shared with the live tick: patchLive calls this
   // instead of rebuilding the dashboard, so the card's text
   // stays fresh without touching anything else.
   function renderGraceCard() {
@@ -723,7 +765,7 @@
     }
   }
 
-  // The check-in card's head (0.8.5): the status pill, the
+  // The check-in card's head: the status pill, the
   // explainer line under it, and the last check-in date.
   // Shared with the live tick: patchLive calls this instead of
   // rebuilding the dashboard.
@@ -753,7 +795,7 @@
     lastEl.textContent = status.lastCheckinAt ? fmtDateShort(status.lastCheckinAt) : '—';
   }
 
-  // The per-tx check-in bars as data (0.8.5): one entry per ACTIVE
+  // The per-tx check-in bars as data: one entry per ACTIVE
   // check-in RULE, from status.checkinTxs when the server sends
   // it, else derived from the txs' own triggerState slices (the
   // same shape, for an older server). Shared by renderDashboard
@@ -772,7 +814,7 @@
       // that rule's triggerState slice — the same shape the
       // server sends in status.checkinTxs.
       bars = [];
-      // (0.8.7) Set members get no bar of their own — their own
+      // Set members get no bar of their own — their own
       // check-in triggers are dormant while attached; the SET
       // gets one bar per check-in rule, like a tx.
       var memberIds = {};
@@ -786,7 +828,7 @@
           if (rule.type !== 'checkin') return;
           var ts = bstates[i] || {};
           var th = rule.params.thresholdDays;
-          // (0.8.8) A past-due slice while a grace is active reads
+          // A past-due slice while a grace is active reads
           // 'grace', not 'release-due' — the rule is held.
           var bst = ts.status || 'not-started';
           if (graceActive() && bst === 'release-due') bst = 'grace';
@@ -824,8 +866,8 @@
     return bars;
   }
 
-  var readinessEls = {}; // entry key -> { item, row, pill, feePill }: the readiness row, so the live tick can patch its pills in place. A standalone tx keys by its tx id; a set keys by 'set:' + its set id. A set's member lines key by their tx id (0.8.7, round 11).
-  // Exchange Status rows (0.8.0): one row per configured price
+  var readinessEls = {}; // entry key -> { item, row, pill, feePill }: the readiness row, so the live tick can patch its pills in place. A standalone tx keys by its tx id; a set keys by 'set:' + its set id. A set's member lines key by their tx id.
+  // Exchange Status rows: one row per configured price
   // source, each with its own status pill and last price.
   // There is NO overall agreement pill next to the header:
   // the status (OK / Failed) lives only on each exchange
@@ -835,11 +877,11 @@
   // never inside the label span, and never the error reason;
   // that detail lives in the Settings card only. The pill
   // stays pinned to the right edge, with the Node pills.
-  // (0.8.5) Shared with the live tick.
-  // Exchange Status (0.8.0): one row per configured price
+  // Shared with the live tick.
+  // Exchange Status: one row per configured price
   // source, with the live price and the last-checked time.
   function renderExchangeRows(status) {
-    // (0.8.7) A set's price rule counts too — its members'
+    // A set's price rule counts too — its members'
     // own price rules are dormant while attached.
     var hasPriceTx = (S.bitcoin.txs || []).some(function (t) { return hasRuleType(t, 'price') && !setOfTxId(t.id); })
       || (S.bitcoin.sets || []).some(function (s) { return hasRuleType(s, 'price'); });
@@ -853,7 +895,7 @@
         var priceEl = $('readiness-exchange-' + (i + 1) + '-price');
         if (!host || !pill) return;
         host.textContent = src.label || src.provider || '';
-        // Per-row checked time (0.8.5): "checked 11:53 PM -
+        // Per-row checked time: "checked 11:53 PM -
         // $61,392.8" — the price refresh's time (currentPriceAt,
         // one refresh for both sources, so the two rows show the
         // same time as each other), a dash, then the last price.
@@ -868,7 +910,7 @@
     }
   }
 
-  // The member line's text (0.8.7, round 12): "Tx N — <first 16
+  // The member line's text: "Tx N — <first 16
   // of the txid>…" on the left, the amount ("0.00013681 BTC",
   // the same value the tx subcard head shows) on the right.
   // Members have no label, so the number + short txid is the
@@ -878,8 +920,7 @@
   // stale. A tx with no txid falls back to "Tx N" on the left;
   // a tx with no parseable amount leaves the amount blank. The
   // status pill lives ONLY on the set header row — member lines
-  // carry no pill at all (round 11's per-member pill is gone,
-  // and with it the set-arm gate for member pills).
+  // carry no pill at all.
   function readinessMemberParts(tx, index) {
     var short = (tx.txid || '').slice(0, 16);
     var left = 'Tx ' + index + (short ? ' \u2014 ' + short + '\u2026' : '');
@@ -889,7 +930,7 @@
   }
 
   // How a transaction is NAMED anywhere another surface refers
-  // to it (0.8.7, round 13): a set member is always named by its
+  // to it: a set member is always named by its
   // set — '"<set label>" - Tx N', N the member's 1-based index
   // in the set's stored txIds order (the same numbering the
   // readiness lines use, so "Tx 2" means the same transaction in
@@ -925,7 +966,7 @@
     }
     return '"' + (tx.label || shortTxid16(tx.txid) || 'Untitled transaction') + '"';
   }
-  // A check-in bar's label (0.8.7, round 13): bars name a
+  // A check-in bar's label: bars name a
   // standalone tx or a set — members never get a bar of their
   // own (the server sends the set's bar instead). A standalone
   // tx resolves through txDisplayName, so a label-less one reads
@@ -935,15 +976,15 @@
     return tx ? txDisplayName(tx) : (b.label || '');
   }
 
-  // The release-readiness entries (0.8.7, round 10): ONE entry
+  // The release-readiness entries: ONE entry
   // per trigger set, not one per transaction. A set's members
   // share one trigger set, so they share one readiness row —
   // headed by the SET's label, with the SET's pill (the same
   // pill the set card shows) and the set's condition line. A
   // member tx has no label of its own (the label lives on the
-  // set since round 3), so per-member rows rendered it as
-  // "Untitled transaction" with an Unknown pill from its frozen
-  // triggerState — and the set itself got no row at all.
+  // set), so per-member rows would render it as "Untitled
+  // transaction" with an Unknown pill from its frozen triggerState
+  // — and the set itself would get no row at all.
   // Standalone txs (sets of one) render exactly as before.
   // Entries walk the txs in stored order, emitting a set at its
   // first member's position, so the list keeps the order the
@@ -975,7 +1016,7 @@
 
   function renderDashboard(status) {
     renderGraceCard();
-    // Getting Started card (0.8.0): the empty-state card at the
+    // Getting Started card: the empty-state card at the
     // top of the Dashboard, shown only when no transactions are
     // STAGED (active). Archived (settled) and pending
     // transactions do not count — the card returns when the last
@@ -988,7 +1029,7 @@
     var anyStaged = (S.bitcoin.txs || []).some(function (t) { return !txStatus(t).settled && !txStatus(t).pending; });
     var gsCard = $('getting-started-card');
     if (gsCard) gsCard.style.display = anyStaged ? 'none' : '';
-    // (0.8.0) The check-in card renders when any rule uses the
+    // The check-in card renders when any rule uses the
     // check-in trigger — check-in is one trigger among
     // several now, not the whole app, so a price- or UTXO-only
     // setup has no countdown to show. Only ACTIVE check-in
@@ -1004,7 +1045,7 @@
     var showCheckin = anyCheckinActive || !(S.bitcoin.txs || []).length;
     $('checkin-card').style.display = showCheckin ? '' : 'none';
     renderStatusHead(status);
-    // The per-tx check-in bars (0.8.0): one block per ACTIVE
+    // The per-tx check-in bars: one block per ACTIVE
     // check-in tx — the label above, the bar, and "X of N
     // days elapsed" below. Each bar measures its OWN window: the
     // server sends it per tx as status.checkinTxs[].windowDays —
@@ -1017,7 +1058,7 @@
     // while more than 3/4 of the window remains, amber past
     // that, red in the last quarter. Overdue is a full red bar.
     // A frozen bar is grey instead — it is held, not live.
-    // (0.8.8) A bar past due while a grace is active reads
+    // A bar past due while a grace is active reads
     // 'grace', not 'release-due': amber, captioned "— held by
     // grace" — the due date is not pushed out by the grace, so
     // the bar must not read as due while the rule is held.
@@ -1035,7 +1076,7 @@
       var frozen = b.enabled === false;
       var block = document.createElement('div');
       block.className = 'ck-tx' + (frozen ? ' frozen' : '');
-      // (0.8.5) The live tick finds this bar by tx + rule and
+      // The live tick finds this bar by tx + rule and
       // ticks its countdown locally — the window it measures
       // against rides on the element, so no second lookup.
       block.dataset.txId = b.id;
@@ -1059,25 +1100,25 @@
       block.appendChild(cap);
       barsEl.appendChild(block);
     });
-    // The transactions, one row each (0.7.19): the label with its
+    // The transactions, one row each: the label with its
     // status pill — the same pill the transaction's own card shows
     // ("armed", "Timelocked + armed", ...), via
     // txPillText(tx, txStatus(tx)). Only the active ones: pending
     // and archived transactions live in their own cards and will
     // never broadcast at release, so they are not listed here.
     // (No shared-input pill tweak here — that stays on the tx cards.)
-    // (0.7.20) Each row also carries the fee verdict as a second
+    // Each row also carries the fee verdict as a second
     // pill next to the status pill ("armed" + "Med Fee Risk"),
     // colour-coded like the status pill. No verdict when the fee
     // rate is unknown or the peak has no history yet — the
     // row then shows only the status pill.
-    // (0.8.7, round 10) One row per trigger set, not per
+    // One row per trigger set, not per
     // transaction: a set renders once, headed by the SET's label
     // with the SET's pill (setPillText / setStatus — the same
     // pill the set card shows) and the set's condition line. A
     // set row carries NO fee pill: the fee is per transaction,
     // and it lives inside each member's Details on the tx card.
-    // (0.8.7, round 11) Under the header, one sub-line per LIVE
+    // Under the header, one sub-line per LIVE
     // member: the member's amount + its own pill (never a label
     // — members have none). Settled / pending members are
     // omitted; they already show on the tx card / Pending
@@ -1088,7 +1129,7 @@
     readinessEls = {};
     if (entries.length) {
       entries.forEach(function (e) {
-        // (0.8.0) One block per armed rule: the label + the status
+        // One block per armed rule: the label + the status
         // pill on the first line (and the fee pill, unchanged, on
         // a standalone tx row), the trigger's condition on the
         // second line — the same summary the tx card shows
@@ -1159,7 +1200,7 @@
           });
         }
         txsEl.appendChild(item);
-        // (0.8.5) The live tick patches this row's pills in place.
+        // The live tick patches this row's pills in place.
         readinessEls[key] = { item: item, row: row, pill: pill, feePill: fpill };
       });
     } else {
@@ -1180,8 +1221,8 @@
   }
 
   // The Logs tab: the broadcast log and the recent check-ins. They
-  // used to live on the Dashboard; they are here now so the Dashboard
-  // is only the status and the check-in — one view, no scroll.
+  // live here so the Dashboard is only the status and the check-in
+  // — one view, no scroll.
   function renderLogs(checkins, blog) {
     var tbody = $('broadcast-log');
     tbody.innerHTML = '';
@@ -1217,7 +1258,7 @@
     }
   }
 
-  // A check-in (0.7.20): no success message below the button — the
+  // A check-in: no success message below the button — the
   // refreshed bars and last-check-in date ARE the confirmation,
   // so the "Checked in just now." line was redundant.
   // A FAILED check-in still reports its error here.
@@ -1233,7 +1274,7 @@
     } catch (e) { setMsg($('checkin-msg'), e.message, false); }
   });
 
-  // Grace period (0.8.0): "Resume now" on the dashboard card
+  // Grace period: "Resume now" on the dashboard card
   // ends the grace immediately. The card hiding is the
   // confirmation — load() re-renders with no grace active, so
   // the card disappears and the pills read "armed" again.
@@ -1246,7 +1287,7 @@
     } catch (e) { setMsg($('grace-msg'), e.message, false); }
   });
 
-  // Add-transaction popup (0.8.0): the Add form is a modal now,
+  // Add-transaction popup: the Add form is a modal now,
   // not a card at the bottom of the Transactions tab. Three buttons
   // open it — the Getting Started button, the "+ Add a pre-signed
   // transaction" button at the bottom of the Transactions tab, and
@@ -1268,7 +1309,7 @@
     if (m) m.classList.remove('open');
   }
 
-  // ---------- Add modal: repeatable transactions, one set label (0.8.7 fix, round 3) ----------
+  // ---------- Add modal: repeatable transactions, one set label ----------
   // "+ Add Tx" IS "add trigger set": one save creates a COMPLETE
   // INDEPENDENT new trigger set. ONE label sits above the tx
   // inputs (the set's label — there is no per-entry label); each
@@ -1311,7 +1352,7 @@
       if (s.removeBtn) s.removeBtn.style.display = sets.length > 1 ? '' : 'none';
     });
   }
-  // (0.8.7 fix, round 6) One builder for a blank
+  // One builder for a blank
   // new-transaction entry — the same construct in the Add
   // modal, the set modal, and the single-transaction edit
   // modal: notes + hex + a per-entry import button + a
@@ -1485,7 +1526,7 @@
   // each tx is for, at a glance, in the list.
   var editingId = null; // id of the tx loaded into the add form, or null
   var dryRunResults = {}; // tx id -> { text, ok, verdict, spent, unknown, error }: the last dry-run result per transaction, shown in its own card. The *line* is page memory only — but a spent verdict is also recorded on the transaction server-side (a stale release record), a conflict verdict the same way (a conflict release record — a warning, not a verdict), and an own-txid verdict as a broadcast record, so the Stale / Conflict / Broadcasted status itself survives a refresh.
-  // Per-card expandable state, kept across re-renders (0.7.18):
+  // Per-card expandable state, kept across re-renders:
   // clicking a card button (Dry-run, the arm toggle, ...) reloads
   // the list and rebuilds every card's DOM — without this map the
   // rebuild resets each <details> to its default, so using a
@@ -1501,13 +1542,13 @@
   // with the full info instead of expanding inline, so there is
   // no inline state to preserve.
   var txUiState = {};
-  // The public fallback (0.7.17): a per-transaction opt-in timer on a
+  // The public fallback: a per-transaction opt-in timer on a
   // Slipstream-route transaction — if MARA has not confirmed it
   // within the chosen days, Standby broadcasts it publicly instead.
   // The same seven durations the server accepts, plus Never (null).
   var FALLBACK_DAYS = [1, 3, 7, 14, 30, 60, 90];
-  // The one-sentence explainer under the Add form's fallback select
-  // (0.7.17): what the chosen duration means. Never means MARA
+  // The one-sentence explainer under the Add form's fallback select:
+  // what the chosen duration means. Never means MARA
   // holds it until it is mined or dropped — no automatic fallback.
   function fallbackAddNote(days) {
     if (days === null || days === undefined || days === '') return 'No automatic fallback \u2014 it stays with MARA until mined or dropped.';
@@ -1531,7 +1572,7 @@
     if (left <= 0) return '(fallback due \u2014 broadcasts publicly on the next check)';
     return '(' + left + (left === 1 ? ' day' : ' days') + ' left before fallback)';
   }
-  // The Public Fallback row's text (0.8.5): the duration, plus the
+  // The Public Fallback row's text: the duration, plus the
   // countdown while Slipstream-pending, or "from broadcast" while
   // still active. Shared by renderBitcoin and the live tick.
   function txFallbackText(tx, st) {
@@ -1546,19 +1587,19 @@
     return fbText;
   }
   var txCardEls = {}; // tx id -> { row, sentLine, pill, rules, feeVerdictEl, maraEl, fallbackValueEl }: the rendered card, so the confirmations poll and the live tick can update it in place
-  var setCardEls = {}; // set id -> { row, pill, rules }: the rendered set card, for the live tick (0.8.7)
+  var setCardEls = {}; // set id -> { row, pill, rules }: the rendered set card, for the live tick
 
   function hostOf(u) { try { return new URL(u).host; } catch (e) { return u || ''; } }
   // One node's row — the host, plus a pill for the last test of that
   // endpoint (OK / Failed / Not tested). `prefix` is 'readiness-' on the
   // Dashboard and 'btc-' on the Settings tab; both render the same
-  // data. A blank URL means no secondary node is set. One exception
-  // (0.8.8): while the secondary is DISABLED, the Dashboard
+  // data. A blank URL means no secondary node is set. One exception:
+  // while the secondary is DISABLED, the Dashboard
   // secondary row names the slot, not the provider — it reads
   // "Secondary Node" because there is no real node behind it
   // (see slotName below). While enabled it shows the configured
   // host, as before; Settings still shows the host.
-  // One node's status line (0.8.1): the host plus an overall pill —
+  // One node's status line: the host plus an overall pill —
   // OK (all four capabilities ready), CAUTION (the height probe
   // works but broadcast, fees, and/or output lookup are not ready),
   // FAIL (the height probe failed — unreachable or not a node at
@@ -1573,7 +1614,7 @@
     var host = $(prefix + label);
     var pill = $(prefix + label + '-status');
     var checksEl = $(prefix + label + '-checks');
-    // Per-row checked time (0.8.5): the readiness rows carry
+    // Per-row checked time: the readiness rows carry
     // their own "checked …" left of the pill — each endpoint's
     // own last-answered stamp (connection.nodeCheckedAt), not
     // the shared connection-test time: the tick asks the primary
@@ -1582,7 +1623,7 @@
     // an invented one. Only the readiness rows have this
     // element; the Settings rows have none, so they are untouched.
     var checkedEl = $(prefix + label + '-checked');
-    // (0.8.8) The Dashboard readiness row names the slot, not the
+    // The Dashboard readiness row names the slot, not the
     // provider, but ONLY while the secondary is disabled: with no
     // real node behind it there is no name to show, so the row
     // reads "Secondary Node". While enabled the row shows the
@@ -1599,7 +1640,7 @@
       if (checkedEl) checkedEl.textContent = '';
       return;
     }
-    // (0.8.8) Secondary disabled: the pill says Disabled — never
+    // Secondary disabled: the pill says Disabled — never
     // Offline, Failed, or a stale timestamp — and no checks or
     // checked time are shown. The saved secondary URL is still
     // named in Settings (it comes back when the node is
@@ -1641,7 +1682,7 @@
     if (checksEl) renderNodeChecks(prefix, label, res);
   }
   // The four capability checks under one node's summary row,
-  // variant C (0.8.1): the node is a <details> — the summary is
+  // variant C: the node is a <details> — the summary is
   // just the node name + status pill, and the checks open on tap
   // as plain label — value lines, no pills. On failure the value
   // IS the reason, shown in red. Only the Settings nodes card has
@@ -1669,7 +1710,7 @@
   // After a connection test, open the details of any node that is
   // not OK so the failure is visible without a tap — and never
   // close anything: a node the owner opened by hand stays open
-  // across the test (0.8.5). Runs once per test, never on
+  // across the test. Runs once per test, never on
   // re-render, so it does not fight a manual open/close.
   function openFailedNodeDetails() {
     var conn = (S.bitcoin && S.bitcoin.connection) || null;
@@ -1713,7 +1754,7 @@
   // which node, and how deep it is. confirmations === null means it
   // has not been checked yet (or the check failed — the checkedAt stays
   // old then, so the number reads as stale rather than wrong).
-  // (0.8.7.1) The state words follow the verdict the server records
+  // The state words follow the verdict the server records
   // on the not-found path: a missing tx whose input is spent-confirmed
   // reads stale — never "may have been dropped" — and one whose input
   // has an unconfirmed spend says so. Confirmed wins over a stale
@@ -1732,7 +1773,7 @@
     } else if (b.conflictInput) {
       conf = 'not found on the network — its input is spent by ' + shortTxid16(b.conflictInput.spentBy) + ', but that spend is not confirmed yet';
     } else if (b.found === false) {
-      // (0.8.7.1) `found` is the verdict — a stale confirmation
+      // `found` is the verdict — a stale confirmation
       // count (0, from before the tx dropped out) must not read
       // "in the mempool" for a tx no node knows.
       conf = 'not found on the network — it may have been dropped from the mempool or replaced';
@@ -1746,7 +1787,7 @@
     return 'Broadcast ' + fmtDate(b.broadcastedAt) + ' via ' + methodLabel(b.method) + ' — ' + conf + '.';
   }
 
-  // (0.8.7.1) The broadcast line's colour follows the verdict, not
+  // The broadcast line's colour follows the verdict, not
   // the mere fact of a broadcast record: confirmed green, unconfirmed
   // amber, not-found (or stale) red. A release-only line stays muted.
   function broadcastLineCls(tx) {
@@ -1805,8 +1846,8 @@
   // clean check clears it; a dry-run that could not reach the
   // nodes is Node Failure; a failed release is Failed; a dry-run
   // that could not say either way is Unverified; otherwise an armed
-  // tx is Ready and an unarmed one is "unarmed" (0.7.20 — the pill
-  // reads just "unarmed", not "Disabled + unarmed"). `settled` marks a
+  // tx is Ready and an unarmed one is "unarmed" (just that, not
+  // "Disabled + unarmed"). `settled` marks a
   // card whose body is collapsed and whose dry-run button is
   // disabled — a broadcasted-and-confirmed, failed, or stale
   // transaction (the Archived card). `pending` marks a card that is
@@ -1822,7 +1863,7 @@
   // redundant: if it were not ready, the pill would already name
   // the problem, e.g. "Timelocked + armed"), and a problem state
   // reads "Label + armed". An unarmed card's pill reads just
-  // Grace period (0.8.0, extended 0.8.8): whether the grace is
+  // Grace period: whether the grace is
   // active right now. S.grace is the computed view the server
   // serves on /api/state and /api/status ({ active, indefinite,
   // graceUntil, triggeredAt, offlineGapDays }) — null when no
@@ -1834,7 +1875,7 @@
   }
   // Whether THIS tx is held by the grace: armed, with a
   // price, UTXO, block-height, set-date, fee-market, or
-  // check-in rule (0.8.8: check-in rules are held by the same
+  // check-in rule (check-in rules are held by the same
   // grace as everything else), and still active (not settled
   // or pending).
   function graceHoldsTx(tx) {
@@ -1861,7 +1902,7 @@
   // whose condition is met).
   function graceHeldTxCount() {
     var ids = {};
-    // (0.8.8, audit finding 3) A set member's own trigger is
+    // A set member's own trigger is
     // parked while attached — the set's trigger is the one that
     // fires — so members are skipped here and counted through
     // their set below. Judging a member by its parked trigger
@@ -1875,7 +1916,7 @@
     return Object.keys(ids).length;
   }
   // How many of the held transactions would fire right now if
-  // the grace lifted (0.8.8, both-numbers card): the same held
+  // the grace lifted: the same held
   // population as graceHeldTxCount, restricted to txs/sets whose
   // served triggerStatus reads wouldFire — the backend's raw
   // condition, judged on the best data available without any new
@@ -1898,14 +1939,14 @@
     return Object.keys(ids).length;
   }
 
-  // "unarmed" (0.7.20 — "Disabled + unarmed" was silly: the arm
-  // state is the whole status, not a prefix on another one). A
+  // "unarmed" — the arm state is the whole status, not a prefix
+  // on another one. A
   // settled or pending card has no arm state, so it keeps its
   // plain label.
   function txPillText(tx, st) {
     if (st.settled || st.pending) return st.label;
     if (!tx.enabled) return 'unarmed';
-    // Grace (0.8.0, extended 0.8.8): an armed tx held by the grace
+    // Grace: an armed tx held by the grace
     // reads just "Grace" — the pill's text is the status, and
     // the arm state is already in the amber colour.
     if (st.label === 'Grace') return 'Grace';
@@ -1920,8 +1961,7 @@
   // instead of running under the label. `cls` is the row's own
   // class (tx-route, tx-fallback, ...) so a row can be found by
   // name. Every value is sans like every other Details value
-  // (round 9 took the TXID off monospace, round 13 the Input
-  // entries — no monospace value remains). The space between
+  // (no monospace values). The space between
   // label and value lives at the END of the label span: the label
   // is sans for every row, so that space is the same width on all
   // of them. The label's trailing space is not rendered (it sits
@@ -1941,7 +1981,7 @@
     return r;
   }
 
-  // One Inputs/Outputs entry row (0.7.18 round 8): a kv row like
+  // One Inputs/Outputs entry row: a kv row like
   // every other Details row — the label ("Input 1", "Output 1")
   // in the 120px label column, the content on the same line in
   // the value column. The content is truncated to one line (an
@@ -1965,8 +2005,8 @@
     return r;
   }
 
-  // The pop-outs for the TXID and the Inputs/Outputs entries
-  // (0.7.18 round 8): the shared showDetails pop-out (X, Close,
+  // The pop-outs for the TXID and the Inputs/Outputs entries:
+  // the shared showDetails pop-out (X, Close,
   // backdrop to dismiss) with the full info in a kv list — the
   // card itself never changes, so nothing shifts or wraps.
   function showTxidPopout(tx) {
@@ -2006,7 +2046,7 @@
     if ((tx.release && tx.release.status === 'stale') || (dr && dr.spent)) {
       return { label: 'Stale', cls: 'bad', settled: true, pending: false };
     }
-    // Slipstream Pending (0.7.16): submitted to Slipstream, not yet
+    // Slipstream Pending: submitted to Slipstream, not yet
     // visible in the public mempool. A pseudo-pending-but-success
     // state — the card lives in the Pending Transactions card, with
     // its own amber pill, distinct from Broadcasted and from Failed.
@@ -2016,7 +2056,7 @@
     if (tx.release && tx.release.status === 'submitted-slipstream') {
       return { label: 'Slipstream Pending', cls: 'warn', settled: false, pending: true };
     }
-    // Absolute-locktime warning (0.7.14): the transaction carries a
+    // Absolute-locktime warning: the transaction carries a
     // locktime that has not passed yet, so the node would reject it as
     // non-final. The card stays active with a warning pill — and the
     // broadcast is not gated on it, the retry fix retakes the
@@ -2026,7 +2066,7 @@
       return { label: 'Timelocked', cls: 'warn', settled: false, pending: false };
     }
     if (dr && dr.error) return { label: 'Node Failure', cls: 'warn', settled: false, pending: false };
-    // Unconfirmed-spend warning (0.7.12, finding 1): another
+    // Unconfirmed-spend warning: another
     // transaction spends an input, but it is not confirmed yet and
     // may still be evicted — so the card stays active with a warning
     // pill, and Broadcast Now / a release run still attempt it. The
@@ -2043,11 +2083,11 @@
         : { label: 'Failed', cls: 'warn', settled: false, pending: false };
     }
     if (dr && dr.unknown) return { label: 'Unverified', cls: 'muted', settled: false, pending: false };
-    // Unarmed (0.7.20): the pill reads just "unarmed" — the label
+    // Unarmed: the pill reads just "unarmed" — the label
     // here is the pill's text, and txPillText returns it plainly
     // for an unarmed tx instead of appending " + unarmed" to it.
     if (!tx.enabled) return { label: 'unarmed', cls: 'muted', settled: false, pending: false };
-    // Grace (0.8.0, extended 0.8.8, unified 0.8.8): while the grace is active, an
+    // Grace: while the grace is active, an
     // armed tx with a price, UTXO, block-height, set-date,
     // fee-market, or check-in rule reads "Grace" on an amber pill —
     // the rule is paused, not ready. Settled/pending txs return
@@ -2077,11 +2117,11 @@
   // not page memory, and no Dry-run all is needed for it to appear.
   // A settled or pending card gets no warning: its fate is already
   // decided. The server-side detection already excludes archived
-  // transactions (round 12); the skip here is belt-and-braces for
+  // transactions; the skip here is belt-and-braces for
   // a settled or pending card. Editing a transaction to spend a
   // different input removes it from the shared set, and the warning
   // clears on the next load.
-  // (0.8.5) Shared with the live tick: patchLive needs the same
+  // Shared with the live tick: patchLive needs the same
   // map to keep the amber pill in step.
   function computeOverlaps() {
     var overlapsByTx = {};
@@ -2091,7 +2131,7 @@
         if (tx && (txStatus(tx).settled || txStatus(tx).pending)) return;
         var others = ov.txIds.filter(function (x) { return x !== tid; }).map(function (x) {
           var t = (S.bitcoin.txs || []).find(function (y) { return y.id === x; });
-          // (0.8.7, round 13) A member is named by its set, never
+          // A member is named by its set, never
           // by its own (absent) label — '"<set label>" - Tx N'.
           return t ? txRefName(t) : x;
         }).join(', ');
@@ -2101,9 +2141,9 @@
     return overlapsByTx;
   }
 
-  // The trigger subcards (0.8.2): one 3-row box per rule,
+  // The trigger subcards: one 3-row box per rule,
   // with the combination line above them for a multi-rule
-  // set. Shared by tx cards and set cards (0.8.7) — `holder`
+  // set. Shared by tx cards and set cards — `holder`
   // is a tx or a set; both carry trigger + triggerState +
   // triggerStatus. Returns the per-rule element refs for
   // the live tick. `parent` is the card the boxes go into.
@@ -2130,7 +2170,7 @@
     var trigHead = document.createElement('span');
     trigHead.className = 'tx-trigger-head';
     trigHead.appendChild(trigK);
-    // (0.8.2 v2) The per-rule state pill in the subcard
+    // The per-rule state pill in the subcard
     // header — Met / Not met / Unknown / Held, or no pill
     // on a manual rule. On every subcard, including a
     // one-rule tx's.
@@ -2155,9 +2195,9 @@
     return ruleEls;
   }
 
-  // One history timeline (0.8.2): the event trail as a <ul>,
+  // One history timeline: the event trail as a <ul>,
   // oldest first. Shared by a tx card (nested inside Details)
-  // and a set card (a plain section above the actions, 0.8.7).
+  // and a set card (a plain section above the actions).
   function buildHistoryList(hist) {
     var tl = document.createElement('ul');
     tl.className = 'timeline';
@@ -2186,8 +2226,7 @@
     return tl;
   }
 
-  // The Details for one transaction (0.8.7, extracted from
-  // renderBitcoin): Inputs/Outputs, fee, TXID, route,
+  // The Details for one transaction: Inputs/Outputs, fee, TXID, route,
   // fallback, locktime, Created, the MARA line, notes, the
   // sent line, and the tx's own History collapsible, nested
   // inside Details — for set members AND standalone cards
@@ -2211,14 +2250,14 @@
   sum.textContent = 'Details';
   details.appendChild(sum);
   var body = details;
-  // The Inputs and Outputs (0.7.18 refinement): a drop-down
+  // The Inputs and Outputs: a drop-down
   // only when there is more than one entry on that side —
   // with exactly one input (or output) there is no drop-down
-  // at all, just the single entry as a normal kv row inline
-  // (round 10). Each drop-down is collapsed by default, its
+  // at all, just the single entry as a normal kv row inline.
+  // Each drop-down is collapsed by default, its
   // summary shows only its count — no BTC amount in a summary
-  // — and expanding one lists every entry as a kv row
-  // (round 8): the label ("Input 1", "Output 1") in the 120px
+  // — and expanding one lists every entry as a kv row:
+  // the label ("Input 1", "Output 1") in the 120px
   // label column, the content on the same line in the value
   // column, left-aligned with every other Details value. The
   // content is truncated to one line and clickable — tapping
@@ -2279,15 +2318,15 @@
     body.appendChild(kvRow('', 'Inputs', String(tx.inputs)));
     body.appendChild(kvRow('', 'Outputs', String(tx.outputs)));
   }
-  // The fee (0.7.18): stored at add time when the node could
+  // The fee: stored at add time when the node could
   // answer the parent lookup. The row hides entirely when the
   // fee is unknown — no "—" fee. The row uses the standard
-  // 120px label column like every other Details row (round 7),
+  // 120px label column like every other Details row,
   // so its value starts exactly where the others' do. The
   // value drops the redundant "sats" — the rate's "sat/vB"
   // carries the unit — so even a 50,000-sat fee fits on one
   // line in the 162px left after the column on a phone.
-  // (0.7.20) The fee verdict rides on the same line as a short
+  // The fee verdict rides on the same line as a short
   // colour-coded suffix — " — Low Risk" / " — Medium Risk" /
   // " — High Risk" — for an ACTIVE tx only (a broadcast or
   // archived tx's fee is moot, and a pending one is already
@@ -2303,7 +2342,7 @@
       fvs.textContent = ' — ' + fv;
       feeRow.children[1].appendChild(fvs);
       feeVerdictEl = fvs;
-      // The Fee line is clickable (0.7.21): tapping it opens
+      // The Fee line is clickable: tapping it opens
       // the fee-risk pop-out, which explains how the verdict
       // was calculated. The pointer cursor and the title say
       // it is clickable, like the TXID value below. Only
@@ -2316,9 +2355,9 @@
     body.appendChild(feeRow);
   }
   // The TXID, truncated — clickable to open a pop-out with the
-  // full 64-hex value (0.7.18 round 8: it used to expand inline,
-  // which grew the card and wrapped the hex under the label;
-  // the pop-out leaves the card exactly as it is). A display
+  // full 64-hex value (expanding inline would grow the card and
+  // wrap the hex under the label; the pop-out leaves the card
+  // exactly as it is). A display
   // action only: it changes nothing about the tx. The pointer
   // cursor and the title say it is clickable.
   var txidRow = document.createElement('div');
@@ -2335,7 +2374,7 @@
   txidRow.appendChild(txidV);
   body.appendChild(txidRow);
   body.appendChild(kvRow('tx-route', 'Broadcast via', tx.broadcastVia === 'slipstream' ? 'Slipstream (MARA)' : 'Public mempool'));
-  // The public fallback (0.7.17): a per-transaction opt-in
+  // The public fallback: a per-transaction opt-in
   // timer, shown only while the route is Slipstream AND a
   // fallback is set — when the route is public the setting is
   // stored but ignored, and when it is Never there is nothing
@@ -2380,7 +2419,7 @@
     body.appendChild(rel);
     if (tx.broadcasted) sentLine = rel;
   }
-  // The History (0.8.2): the tx's own event trail — added,
+  // The History: the tx's own event trail — added,
   // fired, broadcast, confirmed, stale, failed, edited,
   // armed, disarmed — oldest first, in a collapsible of its
   // own nested inside Details, collapsed by default. Only transitions
@@ -2405,7 +2444,7 @@
     return { details: details, feeVerdictEl: feeVerdictEl, maraEl: maraEl, fallbackValueEl: fallbackValueEl, sentLine: sentLine };
   }
 
-  // Trigger sets (0.8.7): one label, one arm/disarm, one rule set
+  // Trigger sets: one label, one arm/disarm, one rule set
   // driving several transactions. A set's members are the txs in
   // its txIds, in the set's own order; a tx in a set has no
   // standalone card (its own trigger is dormant while attached).
@@ -2418,7 +2457,7 @@
       return txs.filter(function (t) { return t.id === id; })[0];
     }).filter(function (t) { return !!t; });
   }
-  // The set's aggregate status (0.8.7): the same three buckets as
+  // The set's aggregate status: the same three buckets as
   // a tx — active, pending, settled — from its members. Only when
   // EVERY member is stale does the set read Stale (archived); one
   // stale member leaves the set live for the rest. All members
@@ -2429,7 +2468,7 @@
     var members = setMembersOf(set);
     if (!members.length) return { label: 'Empty', cls: 'muted', settled: false, pending: false };
     var sts = members.map(function (t) { return txStatus(t); });
-    // (0.8.7, revised) Only when EVERY member is stale does the
+    // Only when EVERY member is stale does the
     // set read Stale (archived). One stale member leaves the set
     // live for the rest — the stale member just carries its own
     // 'stale' pill on its subcard.
@@ -2452,7 +2491,7 @@
     return setMembersOf(set).reduce(function (a, t) { return a + (Number(t.totalOutSats) || 0); }, 0);
   }
 
-  // One transaction subcard (0.8.7 fix, round 3): the blue
+  // One transaction subcard: the blue
   // .tx-item every card carries for each of its transactions —
   // set members AND a standalone transaction alike. Every card
   // is a trigger set, so a standalone tx renders as a set of
@@ -2464,8 +2503,7 @@
   // is the txUiState key for the Details open state;
   // `includeHistory` puts the tx's own History collapsible
   // inside its Details — standalone cards pass true. Set
-  // members pass false (0.8.7, round 9: single history — the
-  // set's ONE shared History is the only trail on a set card;
+  // members pass false (the set's ONE shared History is the only trail on a set card;
   // a member's own history keeps recording in state, it is
   // just never rendered while the tx is attached). Returns the
   // element plus the buildTxDetails refs (fee verdict, MARA
@@ -2479,7 +2517,7 @@
     itemK.className = 'tx-trigger-k rule-k';
     itemK.textContent = 'Tx ' + (idx + 1) + ' — ' + tx.txid.slice(0, 16) + '…';
     itemHead.appendChild(itemK);
-    // (0.8.7, revised) The stale member gets a pill saying
+    // The stale member gets a pill saying
     // 'stale' — the only per-member pill on a subcard. A live
     // member carries no pill: the card's own pill says armed.
     if (st.label === 'Stale') {
@@ -2488,7 +2526,7 @@
       itemPill.textContent = 'stale';
       itemHead.appendChild(itemPill);
     }
-    // (0.8.7 fix, round 5) The BTC amount lives in the head
+    // The BTC amount lives in the head
     // line, right-aligned — no separate amount row below it.
     // The head is flex (space-between), so the amount sits at
     // the right end; the fee stays inside Details.
@@ -2526,7 +2564,7 @@
     return { el: item, detOut: detOut };
   }
 
-  // One set card (0.8.7, mockup v6): it reads as a tx card — a
+  // One set card: it reads as a tx card — a
   // single label in the header with the BTC total in the amount
   // spot, a single arm/disarm in the same spot as a tx card —
   // then the transactions ABOVE the triggers, each as a compact
@@ -2537,8 +2575,7 @@
   // collapsible, collapsed by default (no Created row); then the
   // actions row (Dry-run / Edit / Delete / Broadcast Now), like
   // a tx card. There is no set-level Details dropdown, and no per-card
-  // "staged" pill anywhere — the mockup's muted "staged" pill
-  // was mockup shorthand, not a real pill.
+  // "staged" pill anywhere.
   function renderSetCard(set, overlapsByTx) {
     var members = setMembersOf(set);
     var st = setStatus(set);
@@ -2585,9 +2622,8 @@
     sub.textContent = members.length + (members.length === 1 ? ' transaction' : ' transactions') + ' · ' + ruleCount + (ruleCount === 1 ? ' shared trigger' : ' shared triggers');
     row.appendChild(sub);
     // The transaction subcards, above the triggers. Members
-    // carry no History of their own (0.8.7, round 9: single
-    // history — the set's shared History below is the only
-    // trail on the card).
+    // carry no History of their own (the set's shared History
+    // below is the only trail on the card).
     members.forEach(function (tx, i) {
       var mst = txStatus(tx);
       var built = buildTxItem(tx, mst, 'set:' + set.id + ':' + tx.id, false, i, overlapsByTx);
@@ -2595,10 +2631,9 @@
     });
     // The shared triggers, verbatim trigger subcards.
     var ruleEls = appendTriggerBoxes(row, set);
-    // The ONE shared History, as its own collapsible (0.8.7
-    // fix, round 8) — the history of the entire set, collapsed
-    // by default like the per-tx History, in the same place it
-    // sat as a plain section: above the actions row. There is
+    // The ONE shared History, as its own collapsible — the
+    // history of the entire set, collapsed by default like the
+    // per-tx History, above the actions row. There is
     // still no set-level Details dropdown. The open state is
     // remembered in txUiState under 'set:<id>' like the per-tx
     // histories, so a re-render keeps it open.
@@ -2650,7 +2685,7 @@
     return row;
   }
 
-  // (0.8.8) Secondary on/off: when the secondary is disabled,
+  // Secondary on/off: when the secondary is disabled,
   // only the heading-row toggle shows — the URL box hides, but
   // its value is never cleared, so re-enabling brings it back as
   // saved. The toggle lives in the Secondary node heading row
@@ -2664,7 +2699,7 @@
   function renderBitcoin() {
     $('btc-primary-url').value = S.settings.primaryApiUrl || 'https://mempool.space';
     $('btc-secondary-url').value = S.settings.secondaryApiUrl || '';
-    // (0.8.8) Secondary on/off — missing in old state means
+    // Secondary on/off — missing in old state means
     // enabled. The toggle sits in the secondary heading row and
     // hides the rest of the secondary settings while off,
     // without clearing them (see syncSecondaryEnabled).
@@ -2690,7 +2725,7 @@
     archivedList.innerHTML = '';
     txCardEls = {};
     setCardEls = {};
-    // (0.8.7) Standalone txs and sets share the three lists: a
+    // Standalone txs and sets share the three lists: a
     // set's members have no standalone card, and a set card takes
     // its bucket from its members (see setStatus). Newest first
     // within a bucket, by creation time — the sort is render-time
@@ -2727,18 +2762,18 @@
       }
       var tx = item.tx;
       var row = document.createElement('div');
-      // (0.8.7 fix, round 3) A standalone transaction IS a
+      // A standalone transaction IS a
       // trigger set of one: it renders exactly like a set card
       // — label + total + toggle in the header, then ONE blue
       // tx subcard (its own Details inside it), then its trigger
-      // subcards in orange below. No .tx-single any more: the
-      // blue accent belongs to the tx subcard, and the trigger
+      // subcards in orange below. The blue accent belongs to the tx subcard, and
+      // the trigger
       // subcards keep the orange border on every card.
       row.className = 'tx-card tx-sub';
       var st = txStatus(tx);
       var settled = st.settled;
       var pending = st.pending;
-      // (0.8.5) Element refs for the live tick, filled in below as
+      // Element refs for the live tick, filled in below as
       // the card is built — the tick patches these in place and
       // never rebuilds the card.
       var ruleEls = []; // per rule: { pillEl, condEl, nowEl }
@@ -2758,7 +2793,7 @@
       title.textContent = txDisplayName(tx);
       var pill = document.createElement('span');
       // A warned-about tx keeps its "Ready" label but gets an amber
-      // pill (0.7.16 amendment, owner): the tx is still ready to
+      // pill: the tx is still ready to
       // broadcast, but the warning — a shared input, only one of
       // them can ever be confirmed — deserves attention. Only the
       // green pill changes: Conflict/Timelocked/Node Failure are
@@ -2811,7 +2846,7 @@
       row.appendChild(built.el);
       var detOut = built.detOut;
       feeVerdictEl = detOut.feeVerdictEl; maraEl = detOut.maraEl; fallbackValueEl = detOut.fallbackValueEl; sentLine = detOut.sentLine;
-      // The trigger subcards (0.8.0): the rule(s) that fire this
+      // The trigger subcards: the rule(s) that fire this
       // transaction — an amber-edged box with the trigger type, the
       // condition, and the current state — so the condition is
       // visible without opening Details, on every card (active,
@@ -2824,11 +2859,11 @@
       // current state/value for that trigger. No extra detail and
       // no source breakdown here — the source detail lives in
       // the Exchange Status section and the dry-run notes.
-      // (0.8.2) One subcard per rule. A one-rule set renders
-      // exactly the 0.8.1 subcard ("TRIGGER - <TYPE>", 3 rows);
+      // One subcard per rule. A one-rule set renders
+      // a single subcard ("TRIGGER - <TYPE>", 3 rows);
       // a multi-rule set gets the combination line ("Broadcasts when
       // ANY rule fires" / "Broadcasts when ALL rules hold") and one
-      // 3-row subcard per rule ("Rule N — <Type>"). (0.8.2 v2)
+      // 3-row subcard per rule ("Rule N — <Type>").
       // Every subcard header also carries the per-rule state
       // pill (ruleStatePill) — Met / Not met / Unknown / Held,
       // or no pill on a manual rule — including a one-rule tx's.
@@ -2858,7 +2893,7 @@
         // Standby's record of it, and it can still confirm on the
         // network. Branched on the same txStatus() classification
         // the card itself uses (st is in scope here).
-        // (0.8.7, round 13) The deleted tx is named through
+        // The deleted tx is named through
         // txDisplayName: a label-less standalone reads its short
         // txid, never 'Untitled transaction'.
         var label = txDisplayName(tx);
@@ -2905,7 +2940,7 @@
       else if (settled) bcBtn.title = 'Stale — inputs spent';
       else bcBtn.addEventListener('click', function () { broadcastNow(tx.id); });
       actions.appendChild(dryBtn); actions.appendChild(editBtn); actions.appendChild(delBtn); actions.appendChild(bcBtn);
-      // The escape hatch for a slow MARA tx (0.7.16, Pending card):
+      // The escape hatch for a slow MARA tx:
       // a Slipstream-pending tx can be broadcast publicly instead,
       // by hand. It is NOT part of Broadcast Armed or the release —
       // only this button, after a confirmation that names the
@@ -2950,7 +2985,7 @@
         } catch (e) { setMsg($('btc-msg'), e.message, false); await load(); }
       })();
     }
-    // (0.7.22, scoped 0.8.0) Arming a CHECK-IN rule while the
+    // Arming a CHECK-IN rule while the
     // clock is in the danger zone (the last 25% of the window,
     // including already past due) would let the release fire soon
     // after — warn first and only arm on confirm. The server
@@ -2974,7 +3009,7 @@
     }
   }
 
-  // Arm/disarm a whole set (0.8.7): the set's toggle is the only
+  // Arm/disarm a whole set: the set's toggle is the only
   // arm its members have — a member's own `enabled` is ignored
   // while it is attached. The danger-zone warn is the same as
   // toggleTx's, at set level: arming a set whose shared rules
@@ -3036,7 +3071,7 @@
     var fresh = (moved || []).filter(function (m) { return !before[m.id]; });
     if (!fresh.length) return;
     // `why` is 'broadcast' when the move is a dry-run discovering
-    // the transaction is already out there (0.7.12, finding 1) —
+    // the transaction is already out there —
     // the wording must not say its inputs are spent.
     var broadcast = why === 'broadcast';
     var pend = [], arch = [];
@@ -3065,7 +3100,7 @@
       '<ul class="plain-list">' + fresh.map(function (m) {
         var tx = (S.bitcoin.txs || []).find(function (t) { return t.id === m.id; });
         var dest = tx && txStatus(tx).pending ? 'pending' : 'archived';
-        // (0.8.7, round 13) The moved tx is named through
+        // The moved tx is named through
         // txDisplayName: a member reads '"<set label>" - Tx N',
         // a label-less standalone its short txid.
         var name = tx ? txDisplayName(tx) : (m.label || '');
@@ -3087,7 +3122,7 @@
       } else if (one.verdict === 'broadcast') {
         // A dry-run discovering the tx is already out there moves it
         // to Archived too — with the broadcast wording, not the spent
-        // wording (0.7.12, finding 1).
+        // wording.
         noticeMovedToArchive(before, [{ id: id, label: one.label || '' }], 'broadcast');
       }
     } catch (e) {
@@ -3096,7 +3131,7 @@
     }
   }
 
-  // Dry-run a whole set (0.8.7): every member is checked, armed
+  // Dry-run a whole set: every member is checked, armed
   // or not, and each member's result lands under its own subcard.
   // A member found stale is marked stale on its own (server-side)
   // — the set keeps its other members — so the moved-to-archive
@@ -3135,9 +3170,8 @@
     return st.settled || st.pending;
   }
 
-  // Edit in a popup (0.7.16 amendment): editing used to hijack the
-  // Add-transaction card at the bottom of the tab, which scrolled
-  // the page all the way down on a phone. The popup carries the
+  // Edit in a popup, so editing never scrolls the page down to a
+  // form at the bottom of the tab on a phone. The popup carries the
   // same fields; the Add card stays "Add" only and never switches
   // to edit mode. editingId is the single source of truth for "an
   // edit is open" — the popup's Save button keys off it.
@@ -3150,7 +3184,7 @@
     // The route selector follows the transaction being edited, so
     // saving keeps its route unless the owner changes it.
     $('edit-route').value = tx.broadcastVia === 'slipstream' ? 'slipstream' : 'public';
-    // The fallback select (0.7.17): it follows the transaction's
+    // The fallback select: it follows the transaction's
     // route — shown for Active and Pending txs while the route is
     // Slipstream, hidden for settled/archived txs (it is meaningless
     // there) and while the route is public. Changing the route in
@@ -3160,13 +3194,13 @@
     $('edit-fallback').value = (tx.publicFallbackDays === null || tx.publicFallbackDays === undefined) ? '' : String(tx.publicFallbackDays);
     var stEdit = txStatus(tx);
     $('edit-fallback-row').style.display = (!stEdit.settled && tx.broadcastVia === 'slipstream') ? '' : 'none';
-    // The deadline warning (0.7.17 follow-up): it lives ONLY in
+    // The deadline warning: it lives ONLY in
     // the Edit popup, and ONLY for a Pending tx — the deadline is
     // already running there, counted from when MARA first received
     // the transaction. An Active tx has no deadline yet, and a
     // settled tx has no fallback at all, so neither shows it.
     $('edit-fallback-note').style.display = (stEdit.pending && tx.broadcastVia === 'slipstream') ? '' : 'none';
-    // The rule list (0.8.2) follows the transaction being
+    // The rule list follows the transaction being
     // edited — its op, and its rules, each panel filled from
     // its rule. A locked tx keeps its rules: the list is
     // disabled with the hex and route, since the rules have
@@ -3189,7 +3223,7 @@
     $('edit-form-title').textContent = !locked ? 'Edit trigger set'
       : stEdit.settled ? 'Edit trigger set — label and notes only'
       : 'Edit trigger set — label, notes and fallback only';
-    // (0.8.7 fix, round 6) A fresh Transactions section: the
+    // A fresh Transactions section: the
     // appended entries from any earlier edit are gone, and the
     // original's remove/add state follows the lock.
     var newList = $('edit-new-txs-list');
@@ -3212,7 +3246,7 @@
     $('edit-fallback').value = '';
     $('edit-fallback-row').style.display = 'none';
     $('edit-fallback-note').style.display = 'none';
-    // (0.8.2) Reset the rule list to one default check-in rule.
+    // Reset the rule list to one default check-in rule.
     resetRuleList('edit');
     var newList = $('edit-new-txs-list');
     if (newList) newList.innerHTML = '';
@@ -3227,8 +3261,8 @@
     $('edit-modal').classList.remove('open');
   }
 
-  // The single-transaction edit's working state (0.8.7 fix,
-  // round 6): whether the transaction being edited was removed
+  // The single-transaction edit's working state: whether the transaction
+  // being edited was removed
   // from the card in this modal (it stays standalone, and the
   // new entries form a set on their own), and whether it is
   // locked (broadcast/pending — no add, no remove, hex/route
@@ -3324,11 +3358,11 @@
     syncEditNewTxEntries();
   }
 
-  // ---------- trigger sets (0.8.7) ----------
+  // ---------- trigger sets ----------
   // editingSetId is the single source of truth for "a set edit is
   // open", mirroring editingId for transactions.
   var editingSetId = null;
-  // The set modal's working member list (0.8.7 fix, round 6):
+  // The set modal's working member list:
   // startEditSet copies the set's members here, the member
   // lines render from it, and removing one drops it from this
   // list — the save sends the reduced txIds and the removed
@@ -3350,11 +3384,11 @@
     $('set-label').value = set.label || '';
     $('set-enabled').checked = set.enabled !== false;
     syncSetEnabledText();
-    // (0.8.7 fix, round 5) The Transactions section lists the
+    // The Transactions section lists the
     // current members (one line each: tx number, txid, amount,
     // notes) so the owner can see what the set holds — and the
     // "+ Add transaction" button below appends blank entries
-    // for new transactions, created on save. (Round 6) Each
+    // for new transactions, created on save. Each
     // member line has a remove button; removed members return
     // to standalone on save.
     setEditMembers = setMembersOf(set).slice();
@@ -3367,8 +3401,8 @@
     $('set-label').focus();
   }
 
-  // The set modal's new-transaction entries (0.8.7 fix, round
-  // 5): the same blank entry the Add modal appends (notes +
+  // The set modal's new-transaction entries: the same blank entry the Add
+  // modal appends (notes +
   // hex + per-entry import), numbered after the existing
   // members. Entries are built in JS and held by reference
   // through the list's children — the same walk pattern as
@@ -3404,7 +3438,7 @@
     syncSetNewTxEntries();
   }
 
-  // The set modal's member lines (0.8.7 fix, round 6): one line
+  // The set modal's member lines: one line
   // per member — tx number, txid, amount, notes — with its own
   // remove button. Rendered from setEditMembers so a removal
   // renumbers the lines at once.
@@ -3488,7 +3522,7 @@
   if (btnSetCancel) btnSetCancel.addEventListener('click', function () { cancelSet(); });
   var setEnabledCb = $('set-enabled');
   if (setEnabledCb) setEnabledCb.addEventListener('change', function () { syncSetEnabledText(); });
-  // (0.8.7 fix, round 5) "+ Add transaction" appends a blank
+  // "+ Add transaction" appends a blank
   // entry to the set modal's Transactions section. Guarded
   // like the set rule wiring: a mixed tree has no such button.
   var btnSetAddTx = $('btn-set-add-tx');
@@ -3501,7 +3535,7 @@
     var f = setNewTxEntryFields(entry);
     if (f.hex && f.hex.focus) f.hex.focus();
   });
-  // (0.8.7 fix, round 6) The same pair in the edit modal:
+  // The same pair in the edit modal:
   // "+ Add transaction" appends a blank entry to its
   // Transactions section, and the original transaction's
   // remove button toggles its removal from the card. Guarded
@@ -3524,13 +3558,13 @@
   // (new script, old page) must degrade to a missing X, not a dead
   // page.
   $('btn-edit-cancel').addEventListener('click', function () { cancelEdit(); });
-  // The edit popup's fallback row follows the route selector
-  // (0.7.17): it shows while the route is Slipstream and hides
+  // The edit popup's fallback row follows the route selector:
+  // it shows while the route is Slipstream and hides
   // while it is public — the same rule as the Add form and the card.
   $('edit-route').addEventListener('change', function () {
     $('edit-fallback-row').style.display = $('edit-route').value === 'slipstream' ? '' : 'none';
   });
-  // ---------- rule lists (0.8.2) ----------
+  // ---------- rule lists ----------
   // The Add / Edit forms carry a LIST of rules instead of one
   // trigger picker: a "How the rules combine" section, one boxed
   // panel per rule (each with the same trigger picker and param
@@ -3831,7 +3865,7 @@
     return {};
   }
   // A fresh panel's rule: the first trigger type no other panel
-  // in this form uses yet (0.8.2 v2 — a tx never holds the same
+  // in this form uses yet (a tx never holds the same
   // type twice, so a new panel never opens as a duplicate).
   function defaultRuleFor(prefix) {
     var list = ruleLists[prefix];
@@ -3842,7 +3876,7 @@
     if (!t) t = 'checkin';
     return { type: t, params: defaultRuleParams(t) };
   }
-  // No duplicate trigger types in one tx (0.8.2 v2, picker only):
+  // No duplicate trigger types in one tx:
   // in every panel's type select, the types the OTHER panels use
   // are disabled and labelled "(already used)" — the panel's own
   // type always stays available. Runs on every add, remove, and
@@ -3938,7 +3972,7 @@
   $('edit-op-any').addEventListener('click', function () { ruleLists.edit.op = 'OR'; syncRuleListChrome('edit'); });
   $('edit-op-all').addEventListener('click', function () { ruleLists.edit.op = 'AND'; syncRuleListChrome('edit'); });
   $('edit-add-rule').addEventListener('click', function () { addRulePanel('edit'); });
-  // (0.8.7) The set modal's rule form is the same machinery,
+  // The set modal's rule form is the same machinery,
   // with the prefix 'set'. Guarded: a mixed tree (new script,
   // old page) has no set modal — skip the wiring instead of dying.
   if ($('set-rules-list')) {
@@ -3954,7 +3988,7 @@
   $('edit-modal').addEventListener('click', function (e) {
     if (e.target === $('edit-modal')) cancelEdit();
   });
-  // (0.8.7) The set popup's X and backdrop, guarded like the
+  // The set popup's X and backdrop, guarded like the
   // edit popup's: a mixed tree (new script, old page) must
   // degrade to a missing X, not a dead page.
   var setModalX = $('set-modal-x');
@@ -3996,7 +4030,7 @@
     if (!trig) { setMsg($('edit-msg'), eres.error, false); return; }
     var saveTitle = trig.rules.length > 1 ? 'Save a rule set that is already satisfied?' : 'Save a rule that is already satisfied?';
     var oldTx0 = (S.bitcoin.txs || []).find(function (t) { return t.id === editingId; });
-    // (0.8.0) A price or UTXO rule whose condition is already
+    // A price or UTXO rule whose condition is already
     // satisfied warns first (same guard as the Add form) — but
     // only when the rule set CHANGED: editing a label on a rule
     // that has already fired must not re-warn. A check-in rule
@@ -4053,7 +4087,7 @@
           cancelEdit();
           await load();
         } catch (e) {
-          // (0.8.0) The server's already-satisfied gate (price or
+          // The server's already-satisfied gate (price or
           // UTXO) is the backstop for the pre-check above — a
           // label-only edit on a rule that is already satisfied
           // hits it too, since the save always sends the trigger.
@@ -4074,7 +4108,7 @@
         }
       })();
     }
-    // (0.7.22, scoped 0.8.0) A new tx with a CHECK-IN rule is
+    // A new tx with a CHECK-IN rule is
     // armed by default — adding one while the clock is in the
     // danger zone would let the release fire soon after, so
     // warn first, like the Add form and the set save. Only when
@@ -4105,9 +4139,9 @@
     doSave();
   });
 
-  // Save a trigger set (0.8.7): edit-only (PUT) — the modal
+  // Save a trigger set: edit-only (PUT) — the modal
   // never creates a set (new sets come from "+ Add Tx"). New
-  // transactions appended in the modal (round 5) are created
+  // transactions appended in the modal are created
   // first with the set's shared trigger — dormant while
   // attached, the same as the Add flow — then attached by
   // sending the full txIds list (existing members + new
@@ -4119,7 +4153,7 @@
   // mirrors the Add/Edit transaction saves — a pre-check via
   // /api/triggers/check, with the server's 400 as the
   // backstop. Errors stay in the popup (set-msg).
-  // (0.8.7) Guarded like the set rule wiring: a mixed tree has
+  // Guarded like the set rule wiring: a mixed tree has
   // no set modal.
   var btnSetSave = $('btn-set-save');
   if (btnSetSave) btnSetSave.addEventListener('click', async function () {
@@ -4129,7 +4163,7 @@
     var saveTitle = trig.rules.length > 1 ? 'Save a rule set that is already satisfied?' : 'Save a rule that is already satisfied?';
     var oldSet = (S.bitcoin.sets || []).find(function (s) { return s.id === editingSetId; }) || null;
     var triggerChanged = !oldSet || (JSON.stringify(triggerSetOf(oldSet)) !== JSON.stringify(trig));
-    // (0.8.7 fix, round 5) The new transactions appended in
+    // The new transactions appended in
     // the modal: blank entries are ignored; an entry with
     // notes but no hex blocks the save, like the Add form.
     var collected = collectNewTxEntries(setNewTxEntrySets());
@@ -4154,7 +4188,7 @@
             if (cr.checkinReset) checkinReset = true;
           }
           var body = { label: $('set-label').value, trigger: trig, enabled: $('set-enabled').checked };
-          // (0.8.7 fix, round 6) The kept members plus the new
+          // The kept members plus the new
           // ones — members removed in the modal are left out,
           // so they return to standalone; with nothing added or
           // removed txIds is omitted and the server keeps them.
@@ -4172,7 +4206,7 @@
           cancelSet();
           await load();
         } catch (e) {
-          // (0.8.0) The server's already-satisfied gate is the
+          // The server's already-satisfied gate is the
           // backstop for the pre-check below — but only when
           // nothing was created yet; a failure mid-batch is a
           // partial save, reported as one, and the set itself
@@ -4190,7 +4224,7 @@
         }
       })();
     }
-    // (0.7.22, scoped 0.8.0) A new tx with a CHECK-IN rule is
+    // A new tx with a CHECK-IN rule is
     // armed by default — adding one while the clock is in the
     // danger zone would let the release fire soon after, so
     // warn first, like the Add form. Only when a transaction
@@ -4232,7 +4266,7 @@
     } catch (e) { setMsg($('btc-msg'), e.message, false); }
   }
 
-  // Delete a set (0.8.7): the set goes, its transactions do not —
+  // Delete a set: the set goes, its transactions do not —
   // they return to standalone, each with its own trigger again.
   // The set's shared history goes with it.
   async function deleteSet(id) {
@@ -4248,7 +4282,7 @@
     var s = await api('PUT', '/api/settings', {
       primaryApiUrl: $('btc-primary-url').value,
       secondaryApiUrl: $('btc-secondary-url').value,
-      // (0.8.8) Secondary on/off: the toggle's value rides with
+      // Secondary on/off: the toggle's value rides with
       // the rest of the node settings. The secondary URL is sent
       // as it stands, so turning the node off never clears its
       // saved settings — re-enabling brings it back as saved.
@@ -4276,12 +4310,12 @@
   });
 
 
-  // (0.8.8) Secondary on/off: hiding/showing the secondary
+  // Secondary on/off: hiding/showing the secondary
   // settings is immediate; the value itself is saved with the
   // rest of the node settings (Save nodes).
   $('btc-secondary-enabled').addEventListener('change', syncSecondaryEnabled);
 
-  // The Add form's fallback row (0.7.17): shown only while the route
+  // The Add form's fallback row: shown only while the route
   // is Slipstream — when the route is public the setting is stored
   // but ignored, and the row hides. The note under the select says
   // what the chosen duration means.
@@ -4295,9 +4329,9 @@
   }
   $('btc-route').addEventListener('change', syncAddFallbackRow);
   $('btc-fallback').addEventListener('change', syncAddFallbackRow);
-  // The Add card is add-only now (0.7.16 amendment): editing lives
+  // The Add card is add-only now: editing lives
   // in the popup, so this button always POSTs new transactions.
-  // (0.8.7 fix, round 3) "+ Add Tx" IS "add trigger set": one
+  // "+ Add Tx" IS "add trigger set": one
   // Save creates ALL filled entries (notes + hex each, the
   // shared rules and route below) and then creates a COMPLETE
   // INDEPENDENT new trigger set holding them, with the ONE label
@@ -4378,7 +4412,7 @@
           syncAddFallbackRow();
           await load();
         } catch (e) {
-          // (0.8.0) The server's already-satisfied gate (price or
+          // The server's already-satisfied gate (price or
           // UTXO) is the backstop for the pre-check above — the
           // price can cross, or the pre-check can fail, between
           // the check and the add. A gate 400 offers the same
@@ -4399,7 +4433,7 @@
         }
       })();
     }
-    // (0.7.22, scoped 0.8.0) A new tx with a CHECK-IN rule is
+    // A new tx with a CHECK-IN rule is
     // armed by default — adding one while the clock is in the
     // danger zone (the last 25% of ITS window, including already
     // past due) would let the release fire soon after. Warn
@@ -4422,7 +4456,7 @@
       doAdd();
       return;
     }
-    // (0.8.0, extended 0.8.1) A price, UTXO, block-height,
+    // A price, UTXO, block-height,
     // set-date, or fee-market rule whose condition is ALREADY
     // satisfied would fire on the next evaluation — ask the
     // server once (live, no state change) and warn first, so an
@@ -4508,7 +4542,7 @@
     reader.readAsArrayBuffer(file);
   }
   // The static first entry's import button lives inside that
-  // entry now (round 5) — it records the static hex box as the
+  // entry — it records the static hex box as the
   // target, like every entry's button records its own.
   $('btn-btc-import-file').addEventListener('click', function () {
     pendingImportTarget = { hex: $('btc-hex'), msg: $('btc-msg') };
@@ -4542,7 +4576,7 @@
     $('confirm-proceed').textContent = proceedLabel || 'Proceed';
     $('confirm-cancel').textContent = 'Cancel';
     confirmPending = onProceed;
-    // (0.7.22 fix) A Cancel/close must not leave a flipped control
+    // A Cancel/close must not leave a flipped control
     // stuck on screen: the checkbox has already changed by the time
     // the confirm opens, and nothing re-rendered it. The caller may
     // pass an onCancel (usually a re-render) that runs when the
@@ -4660,7 +4694,7 @@
       'Broadcast — I understand');
   }
 
-  // Broadcast a whole set now (0.8.7): every member, in the
+  // Broadcast a whole set now: every member, in the
   // set's order. The confirm names the stale rule: a stale member
   // is skipped, not sent — the rest still broadcast. Only a set
   // whose every member is stale sends nothing at all.
@@ -4687,7 +4721,7 @@
       'Broadcast — I understand');
   }
 
-  // The manual escape hatch for a slow MARA tx (0.7.16, Pending
+  // The manual escape hatch for a slow MARA tx (Pending
   // card): broadcast a Slipstream-pending transaction publicly
   // instead. MANUAL ONLY — it is not part of Broadcast Armed or the
   // release. The confirm names the privacy cost: the tx is
@@ -4713,8 +4747,7 @@
       'Broadcast publicly — I understand');
   }
 
-  // Broadcast Armed (round 12, revised; the all-transactions button
-  // removed in 0.8.0): one button on the main card — "Broadcast armed" — with
+  // Broadcast Armed: one button on the main card — "Broadcast armed" — with
   // its own confirmation dialog. It sends only the armed
   // unbroadcasted transactions; the unarmed ones are left alone.
   // Cancel sends nothing. The dialog names the count, and once the
@@ -4734,7 +4767,7 @@
   // flag), so a stale or disarmed id in the request is still never
   // broadcast.
   async function broadcastArmed() {
-    // (0.8.7) Set members are never broadcast as standalone txs:
+    // Set members are never broadcast as standalone txs:
     // their arm lives on the set, so they are excluded here and
     // the armed SETS are broadcast through their own endpoint.
     var pending = (S.bitcoin.txs || []).filter(function (t) { return !txStatus(t).settled && !txStatus(t).pending && !setOfTxId(t.id); });
@@ -4764,7 +4797,7 @@
   // The actual Broadcast Armed run: the progress pop-out, the POST
   // (armedOnly: true), the per-transaction results. Nothing is
   // broadcast until the owner confirms in the dialog.
-  // (0.8.7) `setTargets` are armed sets, broadcast one set at a
+  // `setTargets` are armed sets, broadcast one set at a
   // time through their own endpoint; their member results join
   // the same combined summary and pop-out as the tx results.
   async function runBroadcastAll(targets, armedOnly, label, setTargets) {
@@ -4773,7 +4806,7 @@
       setMsg($('btc-all-msg'), 'Nothing to broadcast — no armed transactions to broadcast.', true);
       return;
     }
-    // (0.8.7, round 13) Targets here are standalone txs only
+    // Targets here are standalone txs only
     // (members are excluded above, sets get their own line) —
     // a label-less one reads its short txid.
     var names = targets.map(txDisplayName);
@@ -4808,7 +4841,7 @@
         showDetails(label + ' — ' + (failed ? 'finished with failures' : 'complete'),
           summary,
           '<ul class="plain-list">' + allResults.map(function (x) {
-            // (0.8.7, round 13) Set-member results arrive with
+            // Set-member results arrive with
             // the member's own (empty) label — resolve the tx by
             // id so a member reads '"<set label>" - Tx N' here
             // too, and a label-less standalone its short txid.
@@ -4883,7 +4916,7 @@
           tx.broadcasted.blockHeight = c.blockHeight;
           tx.broadcasted.found = c.found;
           tx.broadcasted.checkedAt = c.checkedAt;
-          // (0.8.7.1) The not-found verdict rides the same refresh:
+          // The not-found verdict rides the same refresh:
           // a null clears a verdict the server cleared (or never set).
           if (c.staleInput) tx.broadcasted.staleInput = c.staleInput; else delete tx.broadcasted.staleInput;
           if (c.conflictInput) tx.broadcasted.conflictInput = c.conflictInput; else delete tx.broadcasted.conflictInput;
@@ -4917,7 +4950,7 @@
   }
   setInterval(refreshConfirmations, 60 * 1000);
 
-  // ---------- live view (0.8.5) ----------
+  // ---------- live view ----------
   // The page updates itself: pills, prices, fees, block height,
   // check-in bars — without a manual reload, and without
   // interrupting anything the owner is doing. Two parts:
@@ -4932,7 +4965,7 @@
   //     a full load(); until then the values still update
   //     behind the popup. Nothing here ever writes into an
   //     input, a select, or a modal subtree.
-  // The refresh interval IS the check cadence (0.8.5): new server
+  // The refresh interval IS the check cadence: new server
   // data only appears once per tick, so polling faster wastes
   // fetches. Read live from settings, so a Settings change takes
   // effect without restarting anything. Clamped to the server's
@@ -4943,7 +4976,7 @@
     c = Math.max(10, Math.min(3600, c));
     return c * 1000;
   }
-  // The structural signature (0.8.5): everything a values-only
+  // The structural signature: everything a values-only
   // patch cannot change — the tx set and each tx's bucket, label,
   // notes, trigger set, broadcast/release state, history length,
   // and the render-relevant details; the shared-input map; the
@@ -4970,7 +5003,7 @@
         bucket: st.settled ? 'settled' : (st.pending ? 'pending' : 'active'),
       };
     });
-    // (0.8.7) Sets are structural too: the set itself and each
+    // Sets are structural too: the set itself and each
     // set's bucket, label, arm, members, trigger set, and history
     // length. A member's bucket is already in sigTxs above.
     var sigSets = ((state.bitcoin && state.bitcoin.sets) || []).map(function (s) {
@@ -5012,7 +5045,7 @@
     if (ae && ae.tagName && /^(INPUT|SELECT|TEXTAREA)$/.test(ae.tagName)) return false;
     return true;
   }
-  // Patch the check-in bars in place (0.8.5): same numbers as
+  // Patch the check-in bars in place: same numbers as
   // renderDashboard builds — matched by tx + rule index, so a
   // bar never moves or rebuilds, only its fill, colour, and
   // caption change.
@@ -5049,18 +5082,18 @@
       if (cap) cap.textContent = daysSince + ' of ' + windowDays + ' days elapsed' + (frozen ? ' — disarmed, frozen' : b.state === 'grace' ? ' — held by grace' : '');
     });
   }
-  // Patch the readiness rows in place (0.8.5): the status pill
+  // Patch the readiness rows in place: the status pill
   // and the fee pill per active tx. A fee pill appears or
   // disappears with the verdict (cold fee data hides it, exactly
   // like a fresh render); the condition line never changes
   // without a trigger change, which is structural.
-  // (0.8.7, round 10) Set rows patch by the same rule as the
+  // Set rows patch by the same rule as the
   // set card — setPillText / setStatus — keyed 'set:' + id.
   // A set row has no fee pill to patch. Rows are rebuilt, never
   // resurrected, by the patch: it only touches entries the
   // render created, so a tick can never bring back a per-member
   // row.
-  // (0.8.7, round 12) A set's member lines carry no pill any
+  // A set's member lines carry no pill any
   // more — the patch keeps their text (number + short txid,
   // amount) in step instead, keyed by tx id. The same rule:
   // only lines the render created are touched, so a tick can
@@ -5110,7 +5143,7 @@
       }
     });
   }
-  // Patch one tx card in place (0.8.5): the header pill, every
+  // Patch one tx card in place: the header pill, every
   // rule pill + state line, the sent line, the fee-verdict
   // suffix, the Slipstream queue line, and the fallback
   // countdown. The label, amount, trigger conditions (a trigger
@@ -5156,7 +5189,7 @@
     }
     if (card.fallbackValueEl) card.fallbackValueEl.textContent = txFallbackText(tx, st);
   }
-  // Patch one set card in place (0.8.7): the header pill and
+  // Patch one set card in place: the header pill and
   // every shared-rule pill + state line — the mirror of
   // patchTxCard, minus the per-tx lines (the set has no fee
   // verdict, MARA line, fallback, or sent line of its own; its
@@ -5180,7 +5213,7 @@
       if (r.nowEl && rule) r.nowEl.textContent = triggerStateLine(rule, ts);
     });
   }
-  // The values-only patch (0.8.5): every live value on the page,
+  // The values-only patch: every live value on the page,
   // updated in place from the freshly fetched state. S and
   // lastStatus are already the new data when this runs. It never
   // rebuilds a list, never writes an input value, and never
@@ -5231,7 +5264,7 @@
     var effLast = last + liveOffsetMs(tx);
     return Math.max(0, Math.floor((nowMs - effLast) / 86400000));
   }
-  // The check-in countdown, ticked locally every second (0.8.5):
+  // The check-in countdown, ticked locally every second:
   // pure clock math, no fetch. The dashboard bars (fill, colour,
   // caption) and the check-in rules' third rows on the tx cards
   // recompute from the cached last check-in — so a day boundary
@@ -5246,7 +5279,7 @@
     if (barsEl) {
       Array.prototype.forEach.call(barsEl.children || [], function (block) {
         if (!(block.className || '').split(' ').includes('ck-tx')) return;
-        // (0.8.7) A bar's id is a tx id or a set id — a set bar
+        // A bar's id is a tx id or a set id — a set bar
         // ticks the same way, off the set's own offset.
         var tx = (S.bitcoin.txs || []).find(function (t) { return t.id === (block.dataset && block.dataset.txId); })
           || (S.bitcoin.sets || []).find(function (s) { return s.id === (block.dataset && block.dataset.txId); });
@@ -5284,7 +5317,7 @@
           : d + ' of ' + w + ' days elapsed';
       });
     });
-    // (0.8.7) The same local tick for a set card's shared
+    // The same local tick for a set card's shared
     // check-in rule lines.
     (S.bitcoin.sets || []).forEach(function (set) {
       var scard = setCardEls[set.id];
@@ -5315,7 +5348,7 @@
     await load();
     if (typeof window !== 'undefined' && typeof window.scrollTo === 'function') window.scrollTo(0, y);
   }
-  // One server refresh (0.8.5): fetch the state, then either
+  // One server refresh: fetch the state, then either
   // patch the values in place (same structure) or, for a
   // structural change, do a full load when it is safe — or defer
   // it and patch the values anyway when it is not. A failed
@@ -5358,7 +5391,7 @@
       liveRefreshInFlight = false;
     }
   }
-  // The 1-second timer (0.8.5): the check-in countdown
+  // The 1-second timer: the check-in countdown
   // updates every second from the clock; a server refresh runs
   // once per check cadence; a deferred structural change
   // re-renders the moment it is safe. Paused while the tab is
@@ -5383,7 +5416,7 @@
       liveTickRunning = false;
     }
   }
-  // Live view (0.8.5): one 1-second timer drives the local
+  // Live view: one 1-second timer drives the local
   // countdown and triggers a server refresh once per check
   // cadence (see liveSecondTick). A single timer (not a cadence
   // interval) so a Settings change to the cadence takes effect
@@ -5400,15 +5433,15 @@
     // disabled while it is checked.
     $('set-vacation-indefinite').checked = !S.settings.vacationUntil;
     $('set-vacation-until').disabled = !S.settings.vacationUntil;
-    // (0.8.0) A new check-in rule defaults to 35 days — but
+    // A new check-in rule defaults to 35 days — but
     // only while the Add form is untouched (no hex pasted yet),
     // so a re-render never clobbers a value the owner is
-    // mid-typing. (0.8.2) The days field lives in the first
+    // mid-typing. The days field lives in the first
     // rule panel now.
     if (!$('btc-hex').value.trim()) {
       if (ruleLists.btc.panels.length) ruleLists.btc.panels[0].f.threshold.value = '35';
     }
-    // BTC price sources (0.8.0): two provider selects, populated
+    // BTC price sources: two provider selects, populated
     // from the provider list the server serves (with a fallback
     // copy so the selects still work against an older server),
     // plus the last fetched price per source, from the cache.
@@ -5438,7 +5471,7 @@
     }
     fillPriceSelect($('set-price-source1'), psrc.source1 || 'coingecko');
     fillPriceSelect($('set-price-source2'), psrc.source2 || 'coinbase');
-    // Custom sources (0.8.1): when a slot holds a custom object,
+    // Custom sources: when a slot holds a custom object,
     // its URL + JSON-path inputs show the saved values; the
     // visibility itself is set by refreshPriceSourceCustom below.
     [1, 2].forEach(function (n) {
@@ -5461,7 +5494,7 @@
     // mean. A changed dropdown never leaves the old name showing.
     refreshPriceSourceRow(1);
     refreshPriceSourceRow(2);
-    // Grace period (0.8.0, toggle 0.8.8): the toggle plus the two
+    // Grace period: the toggle plus the two
     // dropdowns reflect the saved settings — the toggle is the
     // off switch (missing in old state means on), the offline gap
     // that triggers a grace and how long it lasts (null =
@@ -5479,7 +5512,7 @@
     if (gd === 0) gd = 7; // a stored 0 meant off; the toggle says off now
     $('set-grace-duration').value = (gd === null) ? 'indefinite' : String(gd);
     syncGraceEnabled();
-    // User controls (0.8.0): the three number inputs reflect the
+    // User controls: the three number inputs reflect the
     // saved settings — price agreement (%), check cadence
     // (seconds), fee verdict multipliers (× peak). The inputs
     // are set from S.settings, so a re-render never clobbers a
@@ -5497,7 +5530,7 @@
     var fm = (S.settings && typeof S.settings.feeMediumMultiplier === 'number') ? S.settings.feeMediumMultiplier : 1;
     $('set-fee-medium').value = String(fm);
     updateFeeZoneBar();
-    // (0.8.9) The fee-history note under the Broadcast Fee Risk
+    // The fee-history note under the Broadcast Fee Risk
     // card: what the peak actually covers, or that it is still
     // building — the peak appears only after a day of readings
     // (24 hourly observations).
@@ -5512,12 +5545,12 @@
     renderApiKeys();
   }
 
-  // BTC price sources (0.8.0): save the two source choices — a
+  // BTC price sources: save the two source choices — a
   // provider id string, or a Custom { url, path } object. The
   // server rejects an unknown provider, a bad custom URL/path,
   // or two identical sources (400) — the error shows in the
   // message line.
-  // BTC price sources (0.8.0): re-render one source row from
+  // BTC price sources: re-render one source row from
   // the provider its dropdown currently holds. The row shows the
   // provider name with its last price inline next to the status
   // pill — "Kraken $98,200 [OK]" — the same shape as the
@@ -5545,7 +5578,7 @@
   // listeners are attached once, here, like the rest of the
   // app's select listeners (renderSettings runs on every load,
   // so attaching them there would stack a duplicate each time).
-  // Custom price sources (0.8.1): the URL + JSON-path inputs for
+  // Custom price sources: the URL + JSON-path inputs for
   // a row show only while that row's dropdown holds Custom.
   function refreshPriceSourceCustom(n) {
     var sel = $('set-price-source' + n);
@@ -5645,14 +5678,14 @@
       // changed (and not yet tested) had its verdict deleted by
       // its change listener, so the re-render after load() falls
       // back to the cached reading for the saved source.
-      // (Clearing the map used to flip a tested source back to
-      // Not Tested on save, because the re-render found no
+      // (Clearing the map would flip a tested source back to
+      // Not Tested on save, because the re-render would find no
       // cached reading for the newly-saved source yet.)
       await load();
     } catch (e) { setMsg($('price-sources-msg'), e.message, false); }
   });
 
-  // (0.8.8) Grace on/off: the toggle is the first option on the
+  // Grace on/off: the toggle is the first option on the
   // grace card, inline with the heading — off hides the two
   // dropdowns, but their values are never cleared, so
   // re-enabling brings them back as saved. The toggle lives in
@@ -5664,7 +5697,7 @@
     $('grace-enabled-wrap').title = on ? 'Grace period on — triggers pause after an offline gap' : 'Grace period off — triggers fire immediately';
   }
 
-  // Grace period (0.8.0): save the grace settings. The
+  // Grace period: save the grace settings. The
   // server rejects any value the dropdowns do not offer (400)
   // — the error shows in the message line. The toggle rides
   // with the rest of the grace settings, so turning the grace
@@ -5685,12 +5718,12 @@
     } catch (e) { setMsg($('grace-settings-msg'), e.message, false); }
   });
 
-  // (0.8.8) Grace on/off: hiding/showing the grace options is
+  // Grace on/off: hiding/showing the grace options is
   // immediate; the value itself is saved with the rest of the
   // grace settings (Save grace period).
   $('grace-enabled').addEventListener('change', syncGraceEnabled);
 
-  // User controls (0.8.0): each card saves only its own
+  // User controls: each card saves only its own
   // field(s). The server rejects an out-of-range value or a
   // fee pair that breaks Low-above-Medium (400) — the error
   // shows in the message line. parseFloat (not parseInt) so a
@@ -5717,7 +5750,7 @@
     } catch (e) { setMsg($('check-cadence-msg'), e.message, false); }
   });
 
-  // Fee verdict zone bar (0.8.0): always visible under the numbers,
+  // Fee verdict zone bar: always visible under the numbers,
   // showing the three zones as a bar that moves live as you type.
   // The boundaries are the two input values; the scale grows past
   // 3× when Low is set above it so the green zone always has
@@ -5761,7 +5794,7 @@
     } catch (e) { setMsg($('fee-verdict-msg'), e.message, false); }
   });
 
-  // BTC price sources (0.8.0): ONE "Test connection" button
+  // BTC price sources: ONE "Test connection" button
   // tests BOTH sources at once — like the Node Status "Test
   // connection" button tests all nodes. It tests the sources
   // currently selected in the two dropdowns (a provider or
@@ -5779,7 +5812,7 @@
       // The results land on the rows themselves — each row shows
       // its price inline next to its pill ("Kraken $98,200 [OK]"),
       // the same shape as the readiness card's Exchange Status
-      // rows. There is no results line under the button anymore.
+      // rows. There is no results line under the button.
       // The results come back in the order requested, so result i
       // is row i + 1; the verdict is keyed by row, so it survives a
       // save for that row.
@@ -5798,14 +5831,14 @@
 
   $('btn-test-price-sources').addEventListener('click', testPriceSources);
 
-  // Settings "?" help (0.8.0): every Settings card has a "?"
+  // Settings "?" help: every Settings card has a "?"
   // button in its header that opens the shared showDetails
   // pop-out with what the setting is, what it does, and which
   // trigger types it applies to ("Applies to:"). The pop-out
   // closes the same way the other pop-outs do (X / Close /
   // backdrop) — showDetails owns that behaviour.
   //
-  // SINGLE SOURCE OF TRUTH (0.8.0): this registry is the ONE
+  // SINGLE SOURCE OF TRUTH: this registry is the ONE
   // declaration of which trigger types each card applies to.
   // The "?" pop-out renders its "Applies to" line FROM the
   // triggers array (helpAppliesLabel, below), and the Settings
@@ -5863,7 +5896,7 @@
     },
     backup: {
       title: 'Data backup',
-      body: 'Back up or restore everything Standby knows. A backup is a file holding all your staged transactions, triggers, and settings.\n\nRestoring replaces the current state with the backup\u2019s \u2014 a restore counts as a check-in and clears any active grace period.\n\nIt is a plain, unencrypted JSON file \u2014 keep it somewhere safe. It contains the signed hexes, which reveal the destination addresses and amounts, so treat it like the transactions themselves.',
+      body: 'Back up or restore everything Standby knows. A backup is a file holding all your staged transactions, triggers, and settings.\n\nRestoring replaces the current state with the backup\u2019s \u2014 a restore counts as a check-in and clears any active grace period.\n\nDownload it encrypted with a password you choose (recommended) or unencrypted. Encrypted, the file is useless without the password \u2014 and Standby cannot recover a lost password, so write it down somewhere other than this device. Unencrypted, it contains the signed hexes, which anyone can broadcast and which reveal the destination addresses and amounts, so treat it like the transactions themselves.\n\nAn encrypted backup can also be opened without Standby, using tools/decrypt-backup.js from the Standby repository.',
       triggers: ['general'],
     },
     // No title/body: the version card has no "?" button and no
@@ -5917,7 +5950,7 @@
     });
   });
 
-  // Settings filter (0.8.0): a dropdown at the top of the
+  // Settings filter: a dropdown at the top of the
   // Settings tab, so it takes one row instead of two. It reads
   // the SAME triggers array the "?" pop-out renders its
   // "Applies to" line from — no second mapping. "All settings"
@@ -5957,7 +5990,7 @@
     $('set-vacation-until').disabled = $('set-vacation-indefinite').checked;
   });
 
-  // Global Arm/Disarm (0.8.0): one call arms or disarms every
+  // Global Arm/Disarm: one call arms or disarms every
   // staged transaction. The server answers with the updated list.
   async function armAll(enabled) {
     try {
@@ -6079,20 +6112,101 @@
   });
 
   // ---------- data backup ----------
-  $('btn-backup-download').addEventListener('click', async function () {
+  // Download Backup opens a dialog: encrypted with a
+  // password the owner chooses (the default), or unencrypted after a
+  // warning. The server encrypts (POST /api/backup {password}), so the
+  // plain backup never crosses the network when encrypted.
+  function backupMode() { return $('backup-mode-plain').checked ? 'plain' : 'encrypted'; }
+  function syncBackupMode() {
+    var enc = backupMode() === 'encrypted';
+    $('backup-encrypted-fields').style.display = enc ? '' : 'none';
+    $('backup-plain-fields').style.display = enc ? 'none' : '';
+    $('btn-backup-modal-download').textContent = enc ? 'Download encrypted backup' : 'Download unencrypted backup';
+  }
+  function closeBackupModal() {
+    $('backup-modal').classList.remove('open');
+    $('backup-password').value = '';
+    $('backup-password2').value = '';
+    useTypedPassword();
+    setMsg($('backup-modal-msg'), '', true);
+  }
+  // Two ways to set the password: typed twice, or generated. A
+  // generated passphrase replaces the typing fields and is shown once,
+  // in full (it wraps on a phone) — nothing to repeat or confirm.
+  var generatedPassphrase = null;
+  function useTypedPassword() {
+    generatedPassphrase = null;
+    $('backup-generated').textContent = '';
+    $('backup-generated-fields').style.display = 'none';
+    $('backup-typed-fields').style.display = '';
+  }
+  $('btn-backup-own').addEventListener('click', function () {
+    useTypedPassword();
+    setMsg($('backup-modal-msg'), '', true);
+    $('backup-password').focus();
+  });
+  $('backup-mode-encrypted').addEventListener('change', syncBackupMode);
+  $('backup-mode-plain').addEventListener('change', syncBackupMode);
+  $('backup-modal-x').addEventListener('click', closeBackupModal);
+  $('btn-backup-modal-cancel').addEventListener('click', closeBackupModal);
+  $('btn-backup-download').addEventListener('click', function () {
+    $('backup-mode-encrypted').checked = true;
+    syncBackupMode();
+    $('backup-modal').classList.add('open');
+  });
+  // A random passphrase: 6 groups of 5 from an unambiguous alphabet
+  // (no 0/o, 1/l/i) — about 145 bits. Shown in the clear so it can be
+  // written down.
+  $('btn-backup-generate').addEventListener('click', function () {
+    var alphabet = 'abcdefghjkmnpqrstuvwxyz23456789';
+    var bytes = new Uint32Array(30);
+    window.crypto.getRandomValues(bytes);
+    var groups = [];
+    for (var g = 0; g < 6; g++) {
+      var w = '';
+      for (var i = 0; i < 5; i++) w += alphabet[bytes[g * 5 + i] % alphabet.length];
+      groups.push(w);
+    }
+    generatedPassphrase = groups.join('-');
+    $('backup-password').value = '';
+    $('backup-password2').value = '';
+    $('backup-generated').textContent = generatedPassphrase;
+    $('backup-typed-fields').style.display = 'none';
+    $('backup-generated-fields').style.display = '';
+    setMsg($('backup-modal-msg'), 'Write this passphrase down now — it is not stored anywhere.', 'warn');
+  });
+  $('btn-backup-modal-download').addEventListener('click', async function () {
+    var enc = backupMode() === 'encrypted';
+    var body = {};
+    if (enc && generatedPassphrase) {
+      body.password = generatedPassphrase;
+    } else if (enc) {
+      var pw = $('backup-password').value;
+      if (pw.length < 12) { setMsg($('backup-modal-msg'), 'The password must be at least 12 characters.', false); return; }
+      if (pw !== $('backup-password2').value) { setMsg($('backup-modal-msg'), 'The two passwords do not match.', false); return; }
+      body.password = pw;
+    }
+    var btn = $('btn-backup-modal-download');
+    btn.disabled = true;
+    setMsg($('backup-modal-msg'), enc ? 'Encrypting…' : 'Preparing…', true);
     try {
-      var backup = await api('GET', '/api/backup');
+      var backup = await api('POST', '/api/backup', body);
       var blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
       var url = URL.createObjectURL(blob);
       var a = document.createElement('a');
       a.href = url;
-      a.download = 'standby-backup-' + new Date().toISOString().slice(0, 10) + '.json';
+      a.download = 'standby-backup-' + new Date().toISOString().slice(0, 10) + (enc ? '.encrypted' : '') + '.json';
       if (document.body) document.body.appendChild(a);
       a.click();
       if (document.body) document.body.removeChild(a);
       URL.revokeObjectURL(url);
-      setMsg($('backup-msg'), 'Backup downloaded.', true);
-    } catch (e) { setMsg($('backup-msg'), e.message, false); }
+      closeBackupModal();
+      setMsg($('backup-msg'), enc ? 'Encrypted backup downloaded.' : 'Unencrypted backup downloaded — keep it somewhere safe.', enc ? true : 'warn');
+    } catch (e) {
+      setMsg($('backup-modal-msg'), e.message, false);
+    } finally {
+      btn.disabled = false;
+    }
   });
 
   $('btn-backup-restore').addEventListener('click', function () { $('backup-file').click(); });
@@ -6101,21 +6215,17 @@
     var file = $('backup-file').files && $('backup-file').files[0];
     if (!file) return;
     try {
-      var text = await new Promise(function (resolve, reject) {
-        var reader = new FileReader();
-        reader.onload = function () { resolve(reader.result); };
-        reader.onerror = function () { reject(new Error('could not read the backup file')); };
-        reader.readAsText(file);
-      });
-      var backup = JSON.parse(text);
-      var r = await api('POST', '/api/restore', backup);
+      var r = await restoreBackupFile(file);
       setMsg($('backup-msg'), 'Restored ' + r.restoredTxs + ' transaction(s) and settings from the backup.', true);
       $('backup-file').value = '';
       await load();
-    } catch (e) { setMsg($('backup-msg'), e.message, false); }
+    } catch (e) {
+      if (e.message !== 'cancelled') setMsg($('backup-msg'), e.message, false);
+      $('backup-file').value = '';
+    }
   });
 
-  // App version card (0.8.0): the installed version, from /api/health,
+  // App version card: the installed version, from /api/health,
   // shown in the version card at the bottom of General settings.
   // Fetched once at startup — it only changes on an update.
   api('GET', '/api/health').then(function (h) {
@@ -6123,7 +6233,7 @@
     if (v && h && h.version) v.textContent = h.version;
   }).catch(function () { /* leave the placeholder */ });
 
-  // ---------- app login (0.8.11.1) ----------
+  // ---------- app login ----------
   $('login-form').addEventListener('submit', async function (ev) {
     ev.preventDefault();
     var btn = $('btn-login');
@@ -6154,10 +6264,10 @@
   }).catch(function () { /* older server or offline: nothing to show */ });
 
   load().catch(function (e) {
-    // (0.8.11.1) The login screen is already up — no error notice.
+    // The login screen is already up — no error notice.
     if (e.message === 'login required') return;
     if (/state\.json is (corrupt|missing)/.test(e.message)) { showStateError(e.message); return; }
-    // (0.8.10, audit fix 4) The message is error text, not HTML:
+    // The message is error text, not HTML:
     // build the notice with textContent so markup in it renders
     // literally instead of being parsed (insertAdjacentHTML used
     // to splice e.message straight into the page).

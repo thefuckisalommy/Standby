@@ -11,6 +11,8 @@ Standby has its own login (since 0.8.11.1), checked by the app itself on every A
 
 You log in once per browser. The session lasts 30 days, and Settings → Session → Log out signs out every browser at once. The session token is kept in the browser's storage for this one address (host and port), never in a cookie — a cookie on `umbrel.local` would be sent to every other app on `umbrel.local`. Ten wrong passwords in a minute lock the login for the rest of that minute. Scripts can send the password as `Authorization: Bearer <password>`.
 
+Standby does not encrypt its own connection. Over plain `http://`, the password and the session token travel unencrypted, so anyone who can watch that network traffic could capture them and take over the app. Use an encrypted path wherever the network is not fully yours: HTTPS (umbrelOS 2.0 serves apps over HTTPS too), SSH or Tailscale, or your own reverse proxy with HTTPS. The generic Docker install listens on localhost only by default.
+
 ## Requests from other sites are refused
 
 State-changing API requests must come from the app's own page: if the browser sends an Origin, it must match the address the app was reached on, and the request must use a JSON content type. Every API request a browser marks as coming from another site — or from another port on the same host, such as another Umbrel app — is refused too (the `Sec-Fetch-Site` header). So a website you visit, or another app's page, cannot use your browser to read your transactions or trigger a check-in, a pause, or a broadcast. Requests by an unrecognised hostname are refused (421), which stops DNS-rebinding attacks; see the README for adding your own hostnames.
@@ -39,9 +41,33 @@ The check-in connection is plain HTTP: the key travels unencrypted. On the gener
 
 The receiver holds no transaction data: it has two routes (`GET /health`, `POST /checkin`), mounts only the checkin directory, and cannot read, generate, or broadcast anything. It answers every bad key with the same generic 401, so a caller learns nothing about the setup. Each check-in records the caller's address, shown in the Recent check-ins log, so a check-in you didn't make is visible.
 
-## Backups are not encrypted
+## Backups: encrypt them
 
-A backup is a plain JSON file of everything needed to restore the setup: every signed transaction (hex included), your settings, and the check-in clock, plus the check-in and broadcast history and the check-in key hashes. It contains the signed hexes, which reveal the destination addresses and amounts, so treat it like the transactions themselves and keep it somewhere safe.
+A backup holds everything needed to restore the setup: every signed transaction (hex included), your settings and the check-in clock, plus the check-in and broadcast history and the check-in key hashes. Download Backup offers two choices:
+
+- **Encrypted with a password you choose** (the default, recommended). The file is useless without the password. Standby cannot recover a lost password, so write it down somewhere other than the device. The dialog can generate a strong passphrase for you.
+- **Unencrypted.** Anyone who gets the file can broadcast your transactions and see where they send funds. Treat it like the transactions themselves.
+
+Encryption happens on the device, before the backup is sent to your browser, so an encrypted backup never crosses your network unencrypted. Restoring an encrypted backup asks for its password.
+
+**Opening a backup without Standby.** `tools/decrypt-backup.js` in this repository decrypts a backup with nothing but Node.js 18+ — for when the device is gone, or for anyone you have given the file and password to:
+
+```sh
+node decrypt-backup.js standby-backup-2026-11-24.encrypted.json > backup.json
+```
+
+**Format** (version 1), for anyone writing their own decryptor: a JSON file
+
+```json
+{ "format": "standby-backup-encrypted", "version": 1,
+  "kdf":    { "name": "scrypt", "N": 131072, "r": 8, "p": 1, "salt": "<base64>" },
+  "cipher": { "name": "aes-256-gcm", "iv": "<base64, 12 bytes>" },
+  "data":   "<base64: ciphertext followed by the 16-byte GCM tag>" }
+```
+
+The key is scrypt(password as UTF-8, salt, N, r, p), 32 bytes. The GCM additional data is the UTF-8 JSON array `[format, version, kdf.name, kdf.N, kdf.r, kdf.p, kdf.salt, cipher.name, cipher.iv]` (compact, no spaces). The decrypted bytes are a gzipped plain `standby-backup` JSON document.
+
+The copies kept on the device itself (`state.json` and its daily snapshots) are not encrypted: Standby has to read them unattended to broadcast, so the key would have to sit next to them. They are readable by the app's own user only.
 
 ## What leaves the device
 

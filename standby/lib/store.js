@@ -9,7 +9,7 @@ const path = require('path');
 const STATE_FILE = 'state.json';
 const CHECKIN_LOG = 'checkins.jsonl';
 const BROADCAST_LOG = 'broadcast.jsonl';
-// (0.8.10, skip-save) The heartbeat file: the live "I was online"
+// The heartbeat file: the live "I was online"
 // stamp, kept out of state.json so the every-minute tick does not
 // have to rewrite the whole state to record it. A few bytes,
 // tmp+rename for atomicity, NO backup rotation.
@@ -28,21 +28,21 @@ function defaultState() {
     settings: {
       primaryApiUrl: 'https://mempool.space', // the primary node: a mempool API endpoint (any mempool.space-compatible instance — another public one, or your own mempool on the LAN)
       secondaryApiUrl: 'https://blockstream.info/api', // the secondary node, tried only if the primary does not answer; blank = primary runs alone
-      secondaryEnabled: true, // (0.8.8) the secondary node is on by default — off means primary only, no fallback anywhere (see endpointsFor in lib/bitcoin.js); a missing flag in old state means enabled
-      priceSources: { source1: 'coingecko', source2: 'coinbase' }, // the two BTC price feeds for price rules — each a provider id (see PRICE_PROVIDERS in lib/bitcoin.js) or a custom { id: 'custom', url, path } object (0.8.1); a reading is only trusted when the two agree within the configured agreement (Settings: Price agreement), and when they agree the primary source's price is the one that decides
-      // Price agreement (0.8.0): the two BTC price sources must
+      secondaryEnabled: true, // the secondary node is on by default — off means primary only, no fallback anywhere (see endpointsFor in lib/bitcoin.js); a missing flag in old state means enabled
+      priceSources: { source1: 'coingecko', source2: 'coinbase' }, // the two BTC price feeds for price rules — each a provider id (see PRICE_PROVIDERS in lib/bitcoin.js) or a custom { id: 'custom', url, path } object; a reading is only trusted when the two agree within the configured agreement (Settings: Price agreement), and when they agree the primary source's price is the one that decides
+      // Price agreement: the two BTC price sources must
       // agree within this % for a reading to count (Settings:
       // Price agreement; 1–20, default 5). Tighter is safer but
       // the rule waits ("unknown") more during fast moves; looser
       // fires more readily.
       priceAgreementPct: 5,
-      // Check cadence (0.8.0): how often the fast tick evaluates
+      // Check cadence: how often the fast tick evaluates
       // price + UTXO triggers, in seconds (Settings: Check
       // cadence; 10–3600, default 60). Faster catches an
       // unconfirmed spend and brief price spikes sooner; slower
       // means fewer API calls.
       checkCadenceSeconds: 60,
-      // Fee verdict thresholds (0.8.0): the fee pill's Low and
+      // Fee verdict thresholds: the fee pill's Low and
       // Medium Risk thresholds, as multiples of the 90-day peak
       // (Settings: Fee verdict; Low 1–10 default 2, Medium
       // 0.5–5 default 1, Low must stay above Medium). A fee at
@@ -50,14 +50,14 @@ function defaultState() {
       // Risk; below Medium is High Risk. The Critical check (fee
       // below the current economy fee) is separate and unchanged.
       feeLowMultiplier: 2, feeMediumMultiplier: 1,
-      // Grace period (0.8.0, extended 0.8.8, unified 0.8.8): when
+      // Grace period: when
       // the app comes back after being offline longer than
       // graceOfflineDays, ALL triggers — price, UTXO,
       // block-height, set-date, fee-market, and check-in — are
       // paused for graceDurationDays (null = indefinite, until
       // the owner resumes) so they do not fire on conditions
       // that changed while the app was away. There is no
-      // separate check-in hold any more: a check-in rule is
+      // separate check-in hold: a check-in rule is
       // held by the same grace, for the same duration, and its
       // due date is NOT pushed out. graceEnabled is the on/off
       // toggle (Settings grace card, first option): off means no
@@ -67,7 +67,7 @@ function defaultState() {
       // see the loadState migration below.
       graceEnabled: true,
       graceOfflineDays: 7, graceDurationDays: 7,
-      // Vacation mode (0.8.0): while it is on, the check-in
+      // Vacation mode: while it is on, the check-in
       // countdown is FROZEN — the days away never count toward a
       // release — and it applies to check-in rules only (price and
       // UTXO rules keep firing). vacationUntil is the last away
@@ -87,12 +87,12 @@ function defaultState() {
     //     method, broadcastedAt | lastAttemptAt, error?, mara? },
     //   broadcasted: null | { txid, broadcastedAt, method,
     //     confirmations, blockHeight, found, checkedAt } }
-    // history (0.8.2) is the tx's own event trail — [{ ts, type,
+    // history is the tx's own event trail — [{ ts, type,
     // detail }], oldest first, capped at 50 — only transitions
     // (added, fired, broadcast, confirmed, stale, failed, conflict,
     // edited, armed, disarmed, slipstream), never the hourly
     // release checks.
-    // trigger (0.8.2) is the rule SET that fires this transaction —
+    // trigger is the rule SET that fires this transaction —
     // { op: 'AND' | 'OR', rules: [...] } — one rule per entry, each
     // { type, params } (see normalizeTrigger below). triggerState is
     // the per-rule last evaluation — an array parallel to the rules
@@ -101,19 +101,19 @@ function defaultState() {
     // ... } — the fields depend on the type) or null when that rule
     // has never been evaluated; the whole triggerState is null until
     // the release has evaluated any rule once. A one-rule set is
-    // served to the API as its single rule (legacy shape — see
-    // serveTrigger in server.js), so the 0.8.1 frontend keeps
-    // working while the stored form is always the set.
+    // served to the API as its single rule (the single-rule
+    // shape — see serveTrigger below), while the stored form is
+    // always the set.
     // release is the current cycle's record (a check-in clears it);
     // broadcasted is the permanent fact that the tx went out (a
     // check-in never clears it; replacing the hex does).
     // Connection is the last Test-connection result { ok, checkedAt,
     // detail } or { ok: null, ... } if untested. nodeCheckedAt is
     // each endpoint's own last-answered time { primary, secondary }
-    // (0.8.5) — the tick asks the primary every time and the
+    // — the tick asks the primary every time and the
     // secondary only on fallback, so the two stamps diverge; null
     // means that endpoint has never answered.
-    // Shared trigger sets (0.8.7): one trigger set driving several
+    // Shared trigger sets: one trigger set driving several
     // transactions — define the triggers once, attach the txs, and
     // when the set fires every attached tx broadcasts. A set is
     // { id, label, enabled, txIds, trigger, triggerState, history,
@@ -129,22 +129,21 @@ function defaultState() {
     // hand-edited entry, so no version bump is needed.
     bitcoin: { txs: [], sets: [], connection: { ok: null, checkedAt: null, detail: '', nodeCheckedAt: { primary: null, secondary: null } } },
     // The check-in clock: lastCheckinAt is the last recorded
-    // check-in, totalCheckins counts them. lastOnlineAt (0.7.22)
+    // check-in, totalCheckins counts them. lastOnlineAt
     // is the last time the app itself was alive — written on every
     // hourly release tick, so a long gap in it means the device was
-    // off, not that the owner stopped checking in. (0.8.8) The
-    // offline-gap hold (heldUntil) is gone — the grace is the only
-    // outage protection now, and it holds check-in rules like any
+    // off, not that the owner stopped checking in. The grace is the
+    // only outage protection, and it holds check-in rules like any
     // other. A stored heldUntil is translated into a grace on load
     // when unexpired, else pruned (see loadState);
     // both fields are null until first used.
     checkin: { lastCheckinAt: null, totalCheckins: 0, lastOnlineAt: null },
-    // Grace period state (0.8.0): nulls = no grace was ever set
+    // Grace period state: nulls = no grace was ever set
     // (or it was resumed / expired). graceUntil null = an
     // indefinite grace, active until resumed. See server.js
     // graceStatus / applyGrace.
     grace: { graceUntil: null, triggeredAt: null, offlineGapDays: null },
-    // Fee history (0.8.9): the hourly economy-fee observations
+    // Fee history: the hourly economy-fee observations
     // the peak is computed from — [{ t, fee }] — see
     // sanitizeFeeHistory above. Empty until the hourly tick
     // records the first observation; the peak is served only
@@ -169,7 +168,7 @@ function newSetId() {
 }
 
 // ---------------------------------------------------------------------------
-// Triggers (0.8.0, rule sets 0.8.2). Each transaction carries a rule
+// Triggers. Each transaction carries a rule
 // SET — { op: 'AND' | 'OR', rules: [...] } — and the check-in clock
 // is one rule type:
 //   checkin { thresholdDays } — fire when the check-in clock is
@@ -185,14 +184,14 @@ function newSetId() {
 // existing behaviour is unchanged. The price value is bounded (a
 // trigger for $0 or $999,999,999 is a typo, not a rule); the outpoint
 // must be a 64-hex txid, a colon, and an output index.
-// (0.8.2) MAX_RULES_PER_TX caps the rules in one set — a proposed
+// MAX_RULES_PER_TX caps the rules in one set — a proposed
 // cap, not the owner's decision (5 is enough for any real rule set and
 // keeps the combine readable); raise it here if a set ever needs more.
 // ---------------------------------------------------------------------------
 const TRIGGER_TYPES = ['checkin', 'price', 'utxo', 'manual', 'blockheight', 'setdate', 'feemarket'];
 const MAX_RULES_PER_TX = 5;
-// (0.8.2) The per-transaction history event types — the only
-// types a history entry may carry (see server.js pushHistory and
+// The per-transaction history event types — the only
+// types a history entry may carry (see lib/history.js pushHistory and
 // the load-time backfill below). 'slipstream' is the MARA
 // submission; 'conflict' is the dry-run's unconfirmed-spend
 // warning. Only transitions are recorded — never the hourly
@@ -200,8 +199,8 @@ const MAX_RULES_PER_TX = 5;
 const HISTORY_TYPES = new Set(['added', 'fired', 'broadcast', 'slipstream', 'confirmed', 'stale', 'failed', 'conflict', 'edited', 'armed', 'disarmed']);
 const HISTORY_MAX = 50;
 
-// Fee history (0.8.9, accumulated peak): the fee verdict's peak is
-// no longer fetched from a fee-rates endpoint — it is computed from
+// Fee history: the fee verdict's peak is
+// not fetched from a fee-rates endpoint — it is computed from
 // Standby's own record of the economy fee, one observation per
 // hourly tick (see lib/release.js recordFeeHistoryObservation).
 // An observation is { t, fee } — t an ISO timestamp, fee the
@@ -245,7 +244,7 @@ function sanitizeFeeHistory(raw, nowMs) {
   out.sort((a, b) => new Date(a.t).getTime() - new Date(b.t).getTime());
   return out.slice(-FEE_HISTORY_MAX_ENTRIES);
 }
-// (0.8.7, round 13) How a transaction is NAMED in the set
+// How a transaction is NAMED in the set
 // history's member tags — the same rule as the client's
 // txDisplayName (public/app.js): a set member is always named
 // by its set, '"<set label>" - Tx N', N the member's 1-based
@@ -289,7 +288,7 @@ function backfillSetHistory(set, txs) {
     for (const e of (Array.isArray(t.history) ? t.history : [])) {
       const tagged = { ts: e.ts, type: e.type, detail: memberHistoryDetail(set, t, e.detail) };
       const key = tagged.type + '|' + tagged.detail;
-      // (0.8.7, round 13) The tag format changed from the bare
+      // The tag format changed from the bare
       // member label to '"<set label>" - Tx N': an event already
       // on the trail under the OLD tag still counts as the same
       // event, so a load across the format change does not copy
@@ -309,8 +308,8 @@ function backfillSetHistory(set, txs) {
     .sort((a, b) => String(a.ts).localeCompare(String(b.ts)))
     .slice(-HISTORY_MAX);
 }
-// (0.8.0) The check-in fallback: there is no global broadcast
-// threshold any more — each check-in tx carries its own
+// The check-in fallback: there is no global broadcast
+// threshold — each check-in tx carries its own
 // thresholdDays ("Days of silence"). A tx with no usable trigger
 // defaults to check-in at 35 days, and a new check-in tx
 // defaults to 35 days too.
@@ -356,12 +355,11 @@ function normalizeRule(input) {
     case 'utxo': {
       const outpoint = typeof params.outpoint === 'string' ? params.outpoint.trim() : '';
       if (!/^[0-9a-fA-F]{64}:[0-9]+$/.test(outpoint)) return { error: "utxo trigger outpoint must be 'txid:vout' — a 64-hex transaction id, a colon, and an output index" };
-      // (0.8.0) How many confirmations the spending tx needs
+      // How many confirmations the spending tx needs
       // before the rule fires: 0 = fire on an unconfirmed
       // (mempool) spend, N >= 1 = fire once the spend has N
-      // confirmations. Omitted (legacy / migrated) means 1 —
-      // confirmed-only, the 0.8.0 behaviour — so current rules
-      // keep working unchanged.
+      // confirmations. Omitted (older / migrated rules) means 1 —
+      // confirmed-only — so those rules keep their meaning.
       let confirmations = 1;
       if (params.confirmations !== undefined) {
         if (typeof params.confirmations !== 'number' || !Number.isInteger(params.confirmations) || params.confirmations < 0 || params.confirmations > 100) {
@@ -374,7 +372,7 @@ function normalizeRule(input) {
     case 'manual':
       return { trigger: { type: 'manual', params: {} } };
     case 'blockheight': {
-      // (0.8.1) Fire when the chain tip reaches a height. The
+      // Fire when the chain tip reaches a height. The
       // height is a positive integer; a reorg cannot un-fire it
       // (once the tip has reached the height, the rule has fired).
       const h = params.targetHeight;
@@ -384,7 +382,7 @@ function normalizeRule(input) {
       return { trigger: { type: 'blockheight', params: { targetHeight: h } } };
     }
     case 'setdate': {
-      // (0.8.1) Fire at a date/time, regardless of check-ins (a
+      // Fire at a date/time, regardless of check-ins (a
       // pure deadline — the "fire unless I check in" snooze variant
       // is a later addition). Stored normalized as an ISO string.
       const raw = typeof params.fireAt === 'string' ? params.fireAt.trim() : '';
@@ -393,7 +391,7 @@ function normalizeRule(input) {
       return { trigger: { type: 'setdate', params: { fireAt: new Date(ms).toISOString() } } };
     }
     case 'feemarket': {
-      // (0.8.1) Fire when the economy fee rate crosses a threshold
+      // Fire when the economy fee rate crosses a threshold
       // the owner sets (sat/vB), in the direction they choose:
       // 'below' fires when the fee falls to or below it (cheap
       // fees — the original rule), 'above' fires when the fee
@@ -470,12 +468,11 @@ function hasTriggerType(tx, type) {
   return triggerRulesOf(tx).some((r) => r.type === type);
 }
 
-// The rule set as the API serves it (0.8.2, interim dual-shape
-// serving): a one-rule set is served as its single rule (the legacy
-// shape — the 0.8.1 frontend and the 098 suites only ever see that
-// for one-rule txs); a multi-rule set is served as the set. The
-// stored form is always the set. Remove this when the UI build lands
-// (the new frontend normalizes both shapes on read).
+// The rule set as the API serves it (dual-shape serving): a
+// one-rule set is served as its single rule (the single-rule shape
+// clients and tests expect for one-rule txs); a multi-rule set is
+// served as the set. The stored form is always the set. This can go
+// once every client normalizes both shapes on read.
 function serveTrigger(set) {
   if (!set || typeof set !== 'object' || !Array.isArray(set.rules)) return defaultTrigger();
   if (set.rules.length === 1) return set.rules[0];
@@ -529,7 +526,7 @@ function mergeDefaults(def, saved) {
   return out;
 }
 
-// (0.8.11.1) The data directory holds signed transactions, which
+// The data directory holds signed transactions, which
 // are bearer: anyone who can read the hex can broadcast it. So the
 // directory is owner-only (0700) and every file in it is written
 // owner-only (0600) — state.json, its backups, the logs, the
@@ -543,7 +540,7 @@ function ensureDir(dataDir) {
   fs.mkdirSync(dataDir, { recursive: true, mode: DATA_DIR_MODE });
 }
 
-// Startup pass (0.8.11.1): tighten an existing data directory
+// Startup pass: tighten an existing data directory
 // written by an older version (0755 / 0644). Best effort — a file
 // this process does not own cannot be chmod-ed, and the startup
 // writability check reports that separately. Subdirectories are
@@ -569,11 +566,9 @@ function secureDataDir(dataDir) {
 }
 
 // ---------------------------------------------------------------------------
-// State backups (0.8.3). The Nov 19 key incident: the live app's
-// checkinKeys vanished (cause undetermined — the 0.8.1 update or a
-// Settings deletion) and there was NO backup file anywhere in
-// /data to recover from, and no log line saying when it happened.
-// Three files, all plain copies of state.json, in DATA_DIR:
+// State backups — so a bad save, or a slow loss (data that
+// disappears and stays gone through later saves), is recoverable
+// from a file on disk. Three files, all plain copies of state.json, in DATA_DIR:
 //   state.json.bak — the previous version, rotated on every save.
 //     Protects against a bad in-memory state being saved.
 //   state.json.bak.YYYY-MM-DD — a daily snapshot, written on the
@@ -596,7 +591,7 @@ const DAILY_BACKUP_RE = /^state\.json\.bak\.(\d{4}-\d{2}-\d{2})$/;
 // (see recoverStateFromBackup below).
 const CORRUPT_FILE_PREFIX = 'state.json.corrupt.';
 
-// Warnings recorded by the persistence layer (0.8.3) — a state
+// Warnings recorded by the persistence layer — a state
 // recovery, for now. Kept in memory for the life of the process
 // and served on GET /api/state so the UI can show them (a later
 // increment). Cleared only when the state they describe is
@@ -614,7 +609,7 @@ function clearStateWarnings() {
   stateWarnings.length = 0;
 }
 
-// Delete the state file and every local backup (0.8.3, reset):
+// Delete the state file and every local backup:
 // the previous version, the daily snapshots, the pre-migration
 // snapshot, and any preserved corrupt files. Missing files are
 // fine — a reset from the missing-state failure has nothing to
@@ -782,8 +777,8 @@ function recoverMissingState(dataDir) {
     + ' No state file was created — restore a backup manually; the state was NOT reset to defaults.');
 }
 
-// Find the newest backup that still holds check-in keys (0.8.3,
-// for the startup key-store check in server.js): daily snapshots
+// Find the newest backup that still holds check-in keys (for the
+// startup key-store check in lib/checkin.js): daily snapshots
 // newest first, then the previous version. Returns
 // { file, count } or null. A backup that cannot be read or parsed
 // simply does not count — it is skipped, never an error.
@@ -806,7 +801,7 @@ function loadState(dataDir) {
   const file = path.join(dataDir, STATE_FILE);
   let saved;
   if (!fs.existsSync(file)) {
-    // (0.8.3, finding 1) A missing state file is NOT a fresh
+    // A missing state file is NOT a fresh
     // install when backups exist — recover from the newest usable
     // backup, exactly like the corrupt-state path. Only a data
     // directory with no backups at all is a genuine first boot.
@@ -821,7 +816,7 @@ function loadState(dataDir) {
       return state;
     }
   } else {
-    // (0.8.3) A state file that cannot be read no longer crashes
+    // A state file that cannot be read must not crash
     // the app on startup with no fallback: recover from the newest
     // usable backup (previous version, then daily snapshots newest
     // first). A file that parses but is not a Standby state document
@@ -837,13 +832,13 @@ function loadState(dataDir) {
     }
   }
   const state = mergeDefaults(defaultState(), saved);
-  // (0.8.9) The fee history is sanitized on load — a hand-edited
+  // The fee history is sanitized on load — a hand-edited
   // or older state file cannot smuggle a bad entry, a future
   // timestamp, or a series older than the window into the peak.
   // mergeDefaults already keeps a stored array; this pass drops
   // anything malformed and prunes past the 90-day window.
   state.feeHistory = sanitizeFeeHistory(state.feeHistory);
-  // (0.8.10, skip-save) Merge the heartbeat: the live "I was
+  // Merge the heartbeat: the live "I was
   // online" stamp lives in heartbeat.json (written by the tick,
   // throttled to 5 minutes), and state.json's copy is only a
   // fallback, refreshed on real saves. On EVERY load — state is
@@ -863,18 +858,18 @@ function loadState(dataDir) {
   // keeping the fallback copy within ~1 hour (the hourly
   // node-test save).
   mergeHeartbeat(state, dataDir);
-  // (0.8.0) The `paused` setting is gone — Global Arm/Disarm
-  // replaces it. Prune it from older state files so a stale
+  // `paused` is not a setting — Global Arm/Disarm is the
+  // control. Prune it from older state files so a stale
   // `paused: true` can never resurface through /api/state.
   if (state.settings && typeof state.settings === 'object' && 'paused' in state.settings) {
     delete state.settings.paused;
   }
-  // (0.8.0) A legacy vacationUntil of '' means indefinite now —
+  // A legacy vacationUntil of '' means indefinite now —
   // normalize it to null so every reader sees one shape.
   if (state.settings && typeof state.settings === 'object' && state.settings.vacationUntil === '') {
     state.settings.vacationUntil = null;
   }
-  // (0.8.8) Grace on/off toggle replaces the "No grace period"
+  // Grace on/off toggle replaces the "No grace period"
   // duration: old state with graceDurationDays 0 and no
   // graceEnabled field loads as grace OFF, not on — the 0 meant
   // off, and the default (on) must not resurrect it. A saved
@@ -885,17 +880,15 @@ function loadState(dataDir) {
     && !('graceEnabled' in saved.settings) && saved.settings.graceDurationDays === 0) {
     state.settings.graceEnabled = false;
   }
-  // (0.8.8) The check-in offline-gap hold (heldUntil) is gone —
-  // the grace holds check-in rules like any other. A stored
-  // heldUntil (from state written before the unification) is
-  // translated, not just dropped: an UNEXPIRED hold becomes an
-  // active grace ending at the heldUntil (audit finding 1 —
-  // dropping it let an already-due check-in broadcast on the
-  // next tick after an upgrade). An expired hold is dropped as
-  // before, and an already-active grace is never clobbered.
-  // mergeDefaults already excludes heldUntil (it is no longer
-  // in the default shape), and this delete makes the migration
-  // explicit.
+  // There is no separate check-in offline-gap hold (heldUntil):
+  // the grace holds check-in rules like any other. A heldUntil in
+  // older state is translated, not just dropped: an UNEXPIRED hold
+  // becomes an active grace ending at the heldUntil (dropping it
+  // would let an already-due check-in broadcast on the next tick
+  // after an upgrade). An expired hold is dropped, and an
+  // already-active grace is never clobbered. mergeDefaults already
+  // excludes heldUntil (it is not in the default shape), and this
+  // delete makes the migration explicit.
   if (state.checkin && typeof state.checkin === 'object' && 'heldUntil' in state.checkin) {
     const heldRaw = state.checkin.heldUntil;
     const heldMs = (typeof heldRaw === 'string' && heldRaw) ? new Date(heldRaw).getTime() : NaN;
@@ -1009,7 +1002,7 @@ function loadState(dataDir) {
   }
   // 0.8.2 migration: every transaction carries its own event
   // history — [{ ts, type, detail }], oldest first (see
-  // server.js pushHistory). A tx from before 0.8.2 carries none:
+  // lib/history.js pushHistory). A tx from before 0.8.2 carries none:
   // seed it from the facts the state already holds — added at
   // createdAt; broadcast / confirmed from the broadcasted fact;
   // stale from a stale release record — so an old card's history
@@ -1088,7 +1081,7 @@ function loadState(dataDir) {
           && typeof e.detail === 'string').slice(-HISTORY_MAX);
         if (clean.length !== s.history.length) { s.history = clean; setsNormalized = true; }
       }
-      // (0.8.7, round 9) A set created before the single-history
+      // A set created before the single-history
       // change carries only its own creation event — its members'
       // earlier histories are backfilled now, so an old set's
       // trail starts true instead of thin. Idempotent: events
@@ -1108,7 +1101,7 @@ function loadState(dataDir) {
     if (triggerMigrated) console.log('Standby 0.8.2: migrated transactions to rule sets (AND/OR) with per-rule triggerState');
     if (historySeeded) console.log('Standby 0.8.1: seeded per-transaction history');
     if (setsNormalized) console.log('Standby 0.8.7: normalized trigger sets');
-    // (0.8.3) Snapshot the pre-migration file before the
+    // Snapshot the pre-migration file before the
     // migrating save rewrites it.
     snapshotPreMigration(dataDir);
     saveState(dataDir, state);
@@ -1119,7 +1112,7 @@ function loadState(dataDir) {
 function saveState(dataDir, state) {
   ensureDir(dataDir);
   state.updatedAt = new Date().toISOString();
-  // (0.8.10, skip-save) Write only when something MEANINGFUL
+  // Write only when something MEANINGFUL
   // changed: the comparison excludes updatedAt (stamped on every
   // save), checkin.lastOnlineAt (refreshed by the heartbeat merge
   // on every load), and each triggerState slice's lastEvalAt /
@@ -1151,7 +1144,7 @@ function saveState(dataDir, state) {
   // from the previous Resume. So the cache is validated
   // against the file's mtime+size before it is trusted: a
   // mismatch means the file moved under us and the skip must
-  // not fire. (0.8.10, skip-save cache fix.)
+  // not fire.
   const comparable = comparableState(state);
   const file = path.join(dataDir, STATE_FILE);
   const last = lastWritten.get(file);
@@ -1161,7 +1154,7 @@ function saveState(dataDir, state) {
       if (st.mtimeMs === last.mtimeMs && st.size === last.size) return state;
     } catch (e) { /* missing/unreadable: fall through and write */ }
   }
-  // (0.8.3) Rotate the backups while the current state.json is
+  // Rotate the backups while the current state.json is
   // still the previous version — see rotateStateBackups above.
   rotateStateBackups(dataDir);
   writeFileDurable(file, JSON.stringify(state, null, 2) + '\n', DATA_FILE_MODE);
@@ -1173,10 +1166,9 @@ function saveState(dataDir, state) {
 // The last saveState write, per state file: the comparison
 // string plus the file's mtime+size as written, so an
 // out-of-band edit invalidates the cache (see saveState above).
-// (0.8.10, skip-save — see saveState above.)
 const lastWritten = new Map();
 
-// The saveState comparison (0.8.10, skip-save): the state as it
+// The saveState comparison: the state as it
 // would be written, minus the fields that advance on every tick
 // without meaning anything changed. See saveState for why each
 // field is excluded. Values that matter — statuses, reasons,
@@ -1200,7 +1192,7 @@ function comparableState(state) {
 }
 
 // ---------------------------------------------------------------------------
-// Heartbeat (0.8.10, skip-save): the live "I was online" stamp,
+// Heartbeat: the live "I was online" stamp,
 // kept in a tiny file of its own so the tick can record liveness
 // without rewriting the whole state. The tick calls
 // touchHeartbeat (throttled); shutdown calls writeHeartbeat
@@ -1249,10 +1241,10 @@ function touchHeartbeat(dataDir, isoNow) {
 }
 
 function mergeHeartbeat(state, dataDir) {
-  // (0.8.10, skip-save) Read-only merge — see the call site in
+  // Read-only merge — see the call site in
   // loadState. The heartbeat wins when it is newer than the
   // state's own stamp; otherwise the state's stamp stands.
-  // (0.8.10, follow-up) A stamp later than now plus the
+  // A stamp later than now plus the
   // heartbeat interval is a wrong-clock artefact, never a real
   // "I was online" time: a heartbeat written under a forward
   // clock would otherwise suppress a legitimate grace after a
@@ -1285,9 +1277,8 @@ function mergeHeartbeat(state, dataDir) {
 }
 
 // ---------------------------------------------------------------------------
-// Durable writes (0.8.10, fsync durability — the audit's durability
-// finding; the skip-save half is done too, see the saveState dedupe
-// above). A tmp+rename is atomic, so a crash can never leave a torn state
+// Durable writes (see also the saveState dedupe above). A tmp+rename is
+// atomic, so a crash can never leave a torn state
 // file — but without an fsync the *latest* save can still be lost:
 // the rename may never reach the disk, and after a power cut the
 // directory can point at the previous version (or, on some
@@ -1312,7 +1303,7 @@ function fsyncDir(dir) {
   }
 }
 
-// `mode` (0.8.11.1, optional): the file's permission bits. Set on
+// `mode`: the file's permission bits. Set on
 // the tmp file before the content is written, so the final file
 // never exists with looser permissions — even when a leftover .tmp
 // from a crash already existed with other bits.
@@ -1331,19 +1322,40 @@ function writeFileDurable(file, content, mode) {
 }
 
 function appendJsonl(dataDir, file, entry) {
-  // (0.8.10, follow-up) Durable like state.json: open, append,
+  // Durable like state.json: open, append,
   // fsync, close. These are audit logs — a lost line costs
   // history, not correctness (the authoritative check-in and
   // broadcast state lives in the fsynced state.json, and the
   // reader skips a torn line) — but check-ins and broadcasts
   // are rare, so the fsync costs nothing.
   ensureDir(dataDir);
-  const fd = fs.openSync(path.join(dataDir, file), 'a', DATA_FILE_MODE);
+  const full = path.join(dataDir, file);
+  const fd = fs.openSync(full, 'a', DATA_FILE_MODE);
+  let size = 0;
   try {
     fs.writeFileSync(fd, JSON.stringify(entry) + '\n', 'utf8');
     fs.fsyncSync(fd);
+    size = fs.fstatSync(fd).size;
   } finally {
     fs.closeSync(fd);
+  }
+  if (size > LOG_COMPACT_BYTES) compactJsonl(dataDir, file);
+}
+
+// The audit logs are capped: once a file passes LOG_COMPACT_BYTES it
+// is rewritten (durably) with only its newest LOG_KEEP_ENTRIES
+// entries. Every reader wants at most the newest 200 (the Logs page
+// shows 50, a backup carries 200), so nothing the app uses is lost,
+// and a log can no longer grow without bound and be read in full on
+// every request. Compacting only past the size threshold keeps the
+// rewrite rare — roughly once per thousand appends.
+const LOG_KEEP_ENTRIES = 1000;
+const LOG_COMPACT_BYTES = 512 * 1024;
+function compactJsonl(dataDir, file) {
+  try {
+    writeJsonl(dataDir, file, readJsonl(dataDir, file, LOG_KEEP_ENTRIES));
+  } catch (e) {
+    console.error('Standby: could not compact ' + file + ': ' + e.message);
   }
 }
 
@@ -1366,7 +1378,7 @@ function writeBroadcastLog(dataDir, entries) { writeJsonl(dataDir, BROADCAST_LOG
 // restore, which replaces the logs with the backup's copies). An empty
 // array clears the file.
 function writeJsonl(dataDir, file, entries) {
-  // (0.8.10, follow-up) Durable via the same tmp+rename+fsync as
+  // Durable via the same tmp+rename+fsync as
   // state.json — a full rewrite, so the durable helper fits.
   ensureDir(dataDir);
   const lines = (entries || []).map((e) => JSON.stringify(e)).join('\n');
@@ -1374,7 +1386,7 @@ function writeJsonl(dataDir, file, entries) {
 }
 
 module.exports = {
-  loadState, saveState, writeFileDurable, secureDataDir, DATA_DIR_MODE, DATA_FILE_MODE, writeHeartbeat, touchHeartbeat, defaultState, newTxId, newSetId,
+  loadState, saveState, writeFileDurable, secureDataDir, LOG_KEEP_ENTRIES, LOG_COMPACT_BYTES, DATA_DIR_MODE, DATA_FILE_MODE, writeHeartbeat, touchHeartbeat, defaultState, newTxId, newSetId,
   appendCheckin, readCheckins, writeCheckins,
   appendBroadcastLog, readBroadcastLog, writeBroadcastLog,
   normalizeTrigger, normalizeRule, triggerOf, triggerRulesOf, triggerTypesOf, hasTriggerType,
@@ -1383,7 +1395,7 @@ module.exports = {
   TRIGGER_TYPES, HISTORY_TYPES, HISTORY_MAX,
   sanitizeFeeHistory, FEE_HISTORY_WINDOW_DAYS, FEE_HISTORY_MIN_OBSERVATIONS, FEE_HISTORY_MAX_ENTRIES,
   memberHistoryDetail, backfillSetHistory,
-  // (0.8.3) Persistence hardening: backup rotation, corrupt-state
+  // Persistence hardening: backup rotation, corrupt-state
   // recovery warnings, and the backup-with-keys lookup for the
   // startup key-store check.
   getStateWarnings, clearStateWarnings, resetStateFiles, findBackupWithKeys,

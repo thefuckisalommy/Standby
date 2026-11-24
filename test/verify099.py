@@ -249,6 +249,7 @@ the 096 suite (app 3398, receiver 3399, stubs 18185/18186).
 Reuses the 094 helpers (import verify094 — importing does not run
 main()) and never touches the 095 files or the main app/ copy.
 """
+import base64
 import copy
 import http.client
 import json
@@ -362,8 +363,8 @@ SECOND = v.SECOND
 
 GOAL = v.GOAL
 APP = v.app_dir(GOAL)
-DATA = '/tmp/heirloom099'
-CHECKIN_DIR = '/tmp/heirloom099-checkin'
+DATA = '/tmp/standby-test099'
+CHECKIN_DIR = '/tmp/standby-test099-checkin'
 PORT = 3438
 BASE = 'http://127.0.0.1:%d' % PORT
 RECEIVER_PORT = 3439
@@ -390,7 +391,7 @@ RECEIVER_ENV = {'PORT': str(RECEIVER_PORT), 'CHECKIN_DIR': CHECKIN_DIR}
 if os.environ.get('STANDBY_TEST_PROFILE') == 'umbrel':
     RECEIVER_ENV['STANDBY_BIND'] = '0.0.0.0'
     RECEIVER_ENV['STANDBY_ALLOWED_HOSTS'] = 'standby.local'
-LOG = '/tmp/heirloom099-proc.log'
+LOG = '/tmp/standby-test099-proc.log'
 
 # The stub's fixed values: tip height 900000, economy fee 1 sat/vB.
 STUB_TIP = 900000
@@ -647,7 +648,7 @@ def main():
 
         # --- 1. health + version ----------------------------------------
         s, h = req('GET', '/api/health')
-        check('1 health reports version 0.8.11.1', h.get('version') == '0.8.11.1', h)
+        check('1 health reports version 0.8.12', h.get('version') == '0.8.12', h)
 
         # --- 2. block-height trigger --------------------------------------
         # Validation at add: bad heights rejected, good ones accepted.
@@ -3195,8 +3196,8 @@ def main():
         # genuine default state, not an error. A second app
         # instance on its own port + data dir proves first boot
         # still works after the finding-1 change.
-        fresh_data = '/tmp/heirloom099-fresh'
-        fresh_checkin = '/tmp/heirloom099-fresh-checkin'
+        fresh_data = '/tmp/standby-test099-fresh'
+        fresh_checkin = '/tmp/standby-test099-fresh-checkin'
         shutil.rmtree(fresh_data, ignore_errors=True)
         shutil.rmtree(fresh_checkin, ignore_errors=True)
         check('20 fresh: port 3458 free', port_closed(3458))
@@ -4152,7 +4153,7 @@ def main():
         # The probe calls the exported checkOutspends twice
         # concurrently against the primary stub; the counter must
         # move by exactly one.
-        node_probe_26 = '/tmp/heirloom099-batch-inflight.js'
+        node_probe_26 = '/tmp/standby-test099-batch-inflight.js'
         with open(node_probe_26, 'w') as f:
             f.write("const bitcoin = require('" + APP + "/lib/bitcoin.js');\n"
                     "(async () => {\n"
@@ -4960,11 +4961,11 @@ def main():
         # (one observation per restart), so only a seeded second
         # app gives controlled counts. The unit checks prove the
         # pure helpers without a server.
-        lp_dir = '/tmp/heirloom099-accumpeak'
+        lp_dir = '/tmp/standby-test099-accumpeak'
         lp_checkin = lp_dir + '-checkin'
         lp_port = 3440
         lp_base = 'http://127.0.0.1:%d' % lp_port
-        lp_log = '/tmp/heirloom099-accumpeak-proc.log'
+        lp_log = '/tmp/standby-test099-accumpeak-proc.log'
         app_lp = None
 
         def lp_state():
@@ -5440,7 +5441,7 @@ def main():
               s == 400 and body == b'Bad request URL', (s, body))
         s, r = req('GET', '/api/health')
         check('32 crash: app still answers after the malformed request',
-              s == 200 and r.get('version') == '0.8.11.1', (s, r))
+              s == 200 and r.get('version') == '0.8.12', (s, r))
         s, body = raw_get('//[', RBASE)
         check('32 crash: malformed request line to the receiver gets 400',
               s == 400 and body == b'Bad request URL', (s, body))
@@ -5498,8 +5499,8 @@ def main():
         # (§31's port — its instance is stopped by now) with two
         # extra names. The names pass, anything else still 421s,
         # and the IP-literal rule still holds with the var set.
-        extra_data = '/tmp/heirloom099-extra'
-        extra_checkin = '/tmp/heirloom099-extra-checkin'
+        extra_data = '/tmp/standby-test099-extra'
+        extra_checkin = '/tmp/standby-test099-extra-checkin'
         shutil.rmtree(extra_data, ignore_errors=True)
         shutil.rmtree(extra_checkin, ignore_errors=True)
         check('33 hosts: port 3440 free', port_closed(3440))
@@ -5661,8 +5662,8 @@ def main():
         # heartbeat deleted, SIGTERM at once — the next tick is up
         # to 60 s away, so only the flush can recreate the file —
         # and the process must exit 0.
-        sig_data = '/tmp/heirloom099-sigterm'
-        sig_checkin = '/tmp/heirloom099-sigterm-checkin'
+        sig_data = '/tmp/standby-test099-sigterm'
+        sig_checkin = '/tmp/standby-test099-sigterm-checkin'
         shutil.rmtree(sig_data, ignore_errors=True)
         shutil.rmtree(sig_checkin, ignore_errors=True)
         check('34 sigterm: port 3440 free', port_closed(3440))
@@ -5697,7 +5698,7 @@ def main():
         # could not observe the fallback). The dedupe itself is
         # pinned the same way: an identical save skips, a real
         # change writes.
-        hb_dir = '/tmp/heirloom099-heartbeat'
+        hb_dir = '/tmp/standby-test099-heartbeat'
         shutil.rmtree(hb_dir, ignore_errors=True)
         os.makedirs(hb_dir)
         hb_seed = load_state_file()
@@ -5797,7 +5798,7 @@ def main():
         # and both future together cap too — the documented
         # residual, which activates no grace until the heartbeat
         # rewrites correctly.
-        cl_dir = '/tmp/heirloom099-clamp'
+        cl_dir = '/tmp/standby-test099-clamp'
         shutil.rmtree(cl_dir, ignore_errors=True)
         os.makedirs(cl_dir)
         cl_seed = load_state_file()
@@ -5851,7 +5852,7 @@ def main():
                          "now-=10*24*3600*1000;"
                          "const c=s.touchHeartbeat(d,iso(now))?'WROTE':'SKIP';"
                          "Date.now=real;console.log(a+' '+b+' '+c);"
-                         % json.dumps('/tmp/heirloom099-throttle'))
+                         % json.dumps('/tmp/standby-test099-throttle'))
         out, err = node_out(node_throttle)
         check('35 throttle: write, throttled re-touch, backward jump writes again',
               out == 'WROTE SKIP WROTE', out + err)
@@ -5894,7 +5895,7 @@ def main():
                       "const b=s.readCheckins(d,50);"
                       "const tmp=!fs.existsSync(d+'/checkins.jsonl.tmp');"
                       "console.log(a.length===2&&a[1].method==='t2'&&b.length===1&&b[0].method==='w'&&tmp?'OK':'FAIL');"
-                      % json.dumps('/tmp/heirloom099-jsonl'))
+                      % json.dumps('/tmp/standby-test099-jsonl'))
         out, err = node_out(node_jsonl)
         check('35 jsonl: append + rewrite round-trip with no .tmp', out == 'OK', out + err)
         # --- 36. uncaught exception (0.8.10 audit fix) ----------------
@@ -5905,9 +5906,9 @@ def main():
         # with the log line recorded, and their ports must close.
         # (The request-level 400 handling for a malformed URL
         # is untouched — §32 still covers it.)
-        uc_data = '/tmp/heirloom099-uncaught'
-        uc_checkin = '/tmp/heirloom099-uncaught-checkin'
-        uc_log = '/tmp/heirloom099-uncaught.log'
+        uc_data = '/tmp/standby-test099-uncaught'
+        uc_checkin = '/tmp/standby-test099-uncaught-checkin'
+        uc_log = '/tmp/standby-test099-uncaught.log'
         shutil.rmtree(uc_data, ignore_errors=True)
         shutil.rmtree(uc_checkin, ignore_errors=True)
         uc_env = dict(APP_ENV)
@@ -5924,7 +5925,7 @@ def main():
         check('36 uncaught: app log records the exception',
               'uncaught exception:' in _uc_log, _uc_log[-300:] if _uc_log else None)
         check('36 uncaught: scratch app port is closed again', port_closed(3440))
-        rc_log = '/tmp/heirloom099-uncaught-recv.log'
+        rc_log = '/tmp/standby-test099-uncaught-recv.log'
         rc = start(['node', 'server.js'], env={'PORT': '3441', 'CHECKIN_DIR': uc_checkin},
                    cwd=os.path.join(APP, 'checkin-receiver'), log=rc_log)
         check('36 uncaught: scratch receiver starts', wait_up('http://127.0.0.1:3441', path='/health'))
@@ -6182,12 +6183,12 @@ def main():
         # generic Docker install gets an info line instead (its port
         # is host-loopback-mapped). The receiver logs no warning (it
         # is meant for the LAN, and every check-in needs a key).
-        _bind_log = '/tmp/heirloom099-bind.log'
-        _bind_data = '/tmp/heirloom099-bind'
-        _bind_checkin = '/tmp/heirloom099-bind-checkin'
+        _bind_log = '/tmp/standby-test099-bind.log'
+        _bind_data = '/tmp/standby-test099-bind'
+        _bind_checkin = '/tmp/standby-test099-bind-checkin'
         _expected_bind = APP_ENV.get('STANDBY_BIND', '127.0.0.1')
         check('39 bind: main instance listen line names the profile bind',
-              ('Standby 0.8.11.1 listening on %s:%d (data: ' % (_expected_bind, PORT)) in read_log(),
+              ('Standby 0.8.12 listening on %s:%d (data: ' % (_expected_bind, PORT)) in read_log(),
               read_log()[-500:])
 
         def _bind_log_text():
@@ -6300,7 +6301,7 @@ def main():
         _auth_app = _bind_instance({'STANDBY_PASSWORD': _pw})
         check('40 auth: instance comes up', wait_up(_ab))
         s, r = req('GET', '/api/health', base=_ab)
-        check('40 auth: health is public', s == 200 and r.get('version') == '0.8.11.1', (s, r))
+        check('40 auth: health is public', s == 200 and r.get('version') == '0.8.12', (s, r))
         s, r = req('GET', '/api/auth/status', base=_ab)
         check('40 auth: status says required, not authenticated',
               s == 200 and r == {'required': True, 'authenticated': False}, (s, r))
@@ -6350,6 +6351,21 @@ def main():
         check('40 auth: instance restarts', wait_up(_ab))
         s, r = req('GET', '/api/state', base=_ab, headers=_th)
         check('40 auth: the token still works after a restart', s == 200, s)
+        # A password change signs every token out: the token's
+        # signature covers a hash of the password.
+        stop(_auth_app)
+        _e2 = dict(_e, STANDBY_PASSWORD='a different long password')
+        _auth_app = start(['node', 'server.js'], env=_e2, cwd=APP, log=_bind_log)
+        check('40 auth: instance restarts with a new password', wait_up(_ab))
+        s, r = req('GET', '/api/state', base=_ab, headers=_th)
+        check('40 auth: a token from the old password is 401 after the password changes', s == 401, s)
+        s, r = req('GET', '/api/state', base=_ab, headers={'Authorization': 'Bearer ' + _pw})
+        check('40 auth: the old password no longer works as a Bearer token', s == 401, s)
+        stop(_auth_app)
+        _auth_app = start(['node', 'server.js'], env=_e, cwd=APP, log=_bind_log)
+        check('40 auth: instance restarts with the original password', wait_up(_ab))
+        s, r = req('GET', '/api/state', base=_ab, headers=_th)
+        check('40 auth: the original token works again under the original password', s == 200, s)
         # Logout signs every token out.
         s, r = req('POST', '/api/logout', {}, base=_ab, headers=_th)
         check('40 auth: logout is 200', s == 200, (s, r))
@@ -6371,7 +6387,7 @@ def main():
         stop(_auth_app)
         # A data directory that cannot be created: the app refuses to
         # start (exit 1) and names the problem and the fix.
-        _blocker = '/tmp/heirloom099-bind-blocker'
+        _blocker = '/tmp/standby-test099-bind-blocker'
         shutil.rmtree(_blocker, ignore_errors=True)
         open(_blocker, 'w').close()
         _e = dict(os.environ, **APP_ENV)
@@ -6383,6 +6399,75 @@ def main():
               'FATAL: cannot write its files' in _cp.stderr and 'chown -R 1000:1000 data checkin' in _cp.stderr,
               _cp.stderr[-500:])
         os.remove(_blocker)
+
+        # --- 41. encrypted backups (0.8.12) --------------------------
+        # POST /api/backup {password} returns the backup encrypted
+        # (scrypt + AES-256-GCM, lib/backupcrypto.js); restore asks
+        # for the password; tools/decrypt-backup.js opens the file
+        # with no Standby. Plain backups (GET, or POST without a
+        # password) are unchanged.
+        _bpw = 'a long enough backup passphrase'
+        s, r = req('POST', '/api/backup', {'password': 'short'})
+        check('41 backup: a password under 12 characters is 400', s == 400 and '12 characters' in r.get('error', ''), (s, r))
+        s, plain = req('GET', '/api/backup')
+        check('41 backup: GET still returns the plain backup', s == 200 and plain.get('format') == 'standby-backup', s)
+        s, r = req('POST', '/api/backup', {})
+        check('41 backup: POST without a password returns the plain backup', s == 200 and r.get('format') == 'standby-backup', s)
+        s, enc = req('POST', '/api/backup', {'password': _bpw}, timeout=60)
+        check('41 backup: POST with a password returns the encrypted envelope',
+              s == 200 and enc.get('format') == 'standby-backup-encrypted' and enc.get('version') == 1, (s, list(enc)))
+        check('41 backup: nothing but the envelope fields is in the clear',
+              sorted(enc) == ['cipher', 'data', 'format', 'kdf', 'version']
+              and sorted(enc.get('kdf', {})) == ['N', 'name', 'p', 'r', 'salt']
+              and sorted(enc.get('cipher', {})) == ['iv', 'name'], (sorted(enc), enc.get('kdf'), enc.get('cipher')))
+        check('41 backup: scrypt N=2^17 r=8 p=1, AES-256-GCM',
+              enc.get('kdf', {}).get('name') == 'scrypt' and enc['kdf'].get('N') == 2 ** 17
+              and enc['kdf'].get('r') == 8 and enc['kdf'].get('p') == 1
+              and enc.get('cipher', {}).get('name') == 'aes-256-gcm', (enc.get('kdf'), enc.get('cipher')))
+        _txids = sorted(t.get('id') for t in plain['state']['bitcoin']['txs'])
+        if _txids:
+            _hex0 = plain['state']['bitcoin']['txs'][0].get('hex', '')
+            check('41 backup: no signed hex appears in the encrypted file',
+                  _hex0 and _hex0 not in json.dumps(enc), '')
+        # The standalone tool decrypts it to the same backup.
+        _encf = '/tmp/standby-test099-backup.encrypted.json'
+        with open(_encf, 'w') as f:
+            json.dump(enc, f)
+        _tool = os.path.join(APP, '..', 'tools', 'decrypt-backup.js')
+        _cp = subprocess.run(['node', _tool, _encf], env=dict(os.environ, STANDBY_BACKUP_PASSWORD=_bpw),
+                             capture_output=True, text=True, timeout=60)
+        _dec = None
+        try:
+            _dec = json.loads(_cp.stdout)
+        except Exception:
+            pass
+        check('41 tool: decrypt-backup.js opens the file with the right password',
+              _cp.returncode == 0 and isinstance(_dec, dict) and _dec.get('format') == 'standby-backup'
+              and sorted(t.get('id') for t in _dec['state']['bitcoin']['txs']) == _txids,
+              (_cp.returncode, _cp.stderr[-300:]))
+        _cp = subprocess.run(['node', _tool, _encf], env=dict(os.environ, STANDBY_BACKUP_PASSWORD='the wrong passphrase'),
+                             capture_output=True, text=True, timeout=60)
+        check('41 tool: a wrong password exits 1 with a clear message',
+              _cp.returncode == 1 and 'wrong password' in _cp.stderr and not _cp.stdout, (_cp.returncode, _cp.stderr[-200:]))
+        os.remove(_encf)
+        # Restore: missing, wrong, tampered, out-of-range, swapped header, right.
+        s, r = req('POST', '/api/restore', enc, timeout=60)
+        check('41 restore: no password is 400 asking for it', s == 400 and 'enter its password' in r.get('error', ''), (s, r))
+        s, r = req('POST', '/api/restore', dict(enc, password='the wrong passphrase'), timeout=60)
+        check('41 restore: a wrong password is 400', s == 400 and 'wrong password' in r.get('error', ''), (s, r))
+        _raw = bytearray(base64.b64decode(enc['data']))
+        _raw[3] ^= 1
+        s, r = req('POST', '/api/restore', dict(enc, data=base64.b64encode(bytes(_raw)).decode(), password=_bpw), timeout=60)
+        check('41 restore: a tampered file is 400', s == 400 and 'damaged' in r.get('error', ''), (s, r))
+        s, r = req('POST', '/api/restore', dict(enc, kdf=dict(enc['kdf'], N=2 ** 22), password=_bpw), timeout=60)
+        check('41 restore: an out-of-range scrypt N is refused before any work', s == 400 and 'out of range' in r.get('error', ''), (s, r))
+        s, r = req('POST', '/api/restore', dict(enc, kdf=dict(enc['kdf'], N=2 ** 16), password=_bpw), timeout=60)
+        check('41 restore: an altered header (N) fails authentication', s == 400 and 'damaged' in r.get('error', ''), (s, r))
+        s, r = req('POST', '/api/restore', dict(enc, password=_bpw), timeout=60)
+        check('41 restore: the right password restores', s == 200 and r.get('ok') is True, (s, r))
+        s, after = req('GET', '/api/backup')
+        check('41 restore: the restored transactions match the backup',
+              sorted(t.get('id') for t in after['state']['bitcoin']['txs']) == _txids, '')
 
     finally:
         for p in list(v.procs):
