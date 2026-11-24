@@ -49,9 +49,11 @@ No Umbrel needed. Standby is a plain Docker image (`ghcr.io/thefuckisalommy/stan
 ```sh
 mkdir standby && cd standby
 curl -O https://raw.githubusercontent.com/thefuckisalommy/Standby/main/docker-compose.yml
+mkdir -p data checkin && sudo chown 1000:1000 data checkin
 docker compose up -d
 # open http://localhost:3100
 ```
+(The `chown` step matters: the services run as UID 1000, not root, and Docker creates the data directories root-owned if they do not exist — without it the app cannot write `state.json`.)
 
 **What is running:**
 - `web` — the Standby UI and API, on port 3100. It listens on localhost only (`127.0.0.1:3100`) by default.
@@ -59,7 +61,7 @@ docker compose up -d
 
 **Ports:** override with `STANDBY_WEB_PORT` (default 3100) and `STANDBY_CHECKIN_PORT` (default 3101).
 
-**Reaching the UI:** there is no login screen on this path, and the web UI is localhost-only by default. Reach it on the box itself, over SSH (`ssh -L 3100:localhost:3100 <box>`), over Tailscale, or behind your own reverse proxy with auth — a proxy serving it under its own hostname needs that hostname in STANDBY_ALLOWED_HOSTS, or the app answers 421. A Tailscale MagicDNS name (like `name.ts.net`) counts as its own hostname too, so it needs to be listed the same way; a plain Tailscale IP needs nothing. To open it to your LAN, change the web port line in `docker-compose.yml` to `"${STANDBY_WEB_PORT:-3100}:3100"` — only on a network you trust.
+**Reaching the UI:** there is no login screen on this path, and the web UI is localhost-only by default. Reach it on the box itself, over SSH (`ssh -L 3100:localhost:3100 <box>`), over Tailscale, or behind your own reverse proxy with auth — a proxy serving it under its own hostname needs that hostname in STANDBY_ALLOWED_HOSTS, or the app answers 421. A Tailscale MagicDNS name (like `name.ts.net`) counts as its own hostname too, so it needs to be listed the same way; a plain Tailscale IP needs nothing. The same rule covers check-ins: a gadget or bot reaching the receiver at `http://<hostname>:3101` gets a 421 unless that hostname is listed in STANDBY_ALLOWED_HOSTS. On Umbrel the compose file already sets STANDBY_ALLOWED_HOSTS to the app domain — but no Umbrel variable supplies a Tailscale MagicDNS name or a `.onion` address, so those still need a manual edit of the compose file on the Pi. To open it to your LAN, change the web port line in `docker-compose.yml` to `"${STANDBY_WEB_PORT:-3100}:3100"` — only on a network you trust.
 
 **Check-ins:** `curl -X POST http://<box>:3101/checkin -H "Authorization: Bearer <your key>"`. Plain HTTP, protected only by the key — keep it on your trusted LAN or Tailscale network, as in [SECURITY.md](SECURITY.md).
 
@@ -68,16 +70,17 @@ docker compose up -d
 **Without Compose (plain `docker run`):**
 ```sh
 mkdir -p data checkin
-docker run -d --name standby-web --restart on-failure -p 127.0.0.1:3100:3100 -v "$PWD/data:/data" -v "$PWD/checkin:/checkin" ghcr.io/thefuckisalommy/standby:latest
-docker run -d --name standby-checkin --restart on-failure -p 3101:3101 -v "$PWD/checkin:/checkin" -e PORT=3101 -e CHECKIN_DIR=/checkin ghcr.io/thefuckisalommy/standby:latest node checkin-receiver/server.js
+docker run -d --name standby-web --restart on-failure -p 127.0.0.1:3100:3100 -v "$PWD/data:/data" -v "$PWD/checkin:/checkin" -e STANDBY_BIND=0.0.0.0 ghcr.io/thefuckisalommy/standby:latest
+docker run -d --name standby-checkin --restart on-failure -p 3101:3101 -v "$PWD/checkin:/checkin" -e PORT=3101 -e CHECKIN_DIR=/checkin -e STANDBY_BIND=0.0.0.0 ghcr.io/thefuckisalommy/standby:latest node checkin-receiver/server.js
 # open http://localhost:3100
 ```
+(`-e STANDBY_BIND=0.0.0.0` is required here: the app binds localhost by default, and a loopback bind inside a container never receives traffic forwarded to the container's IP.)
 
 **Build it yourself / run from source:**
 ```sh
 git clone https://github.com/thefuckisalommy/Standby.git
 docker build -t standby Standby/standby
-docker run --rm -p 127.0.0.1:3100:3100 -v "$PWD/data:/data" -v "$PWD/checkin:/checkin" standby
+docker run --rm -p 127.0.0.1:3100:3100 -v "$PWD/data:/data" -v "$PWD/checkin:/checkin" -e STANDBY_BIND=0.0.0.0 standby
 # open http://localhost:3100
 ```
 

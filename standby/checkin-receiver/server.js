@@ -30,8 +30,9 @@ const crypto = require('crypto');
 // receiver runs from the same image as the app, so the modules
 // are present; the receiver still mounts only /checkin and holds
 // no transaction data.
-const { hostAllowed, describeAllowedHosts } = require('../lib/http');
+const { hostAllowed, describeAllowedHosts, bindWarning } = require('../lib/http');
 const { writeFileDurable } = require('../lib/store');
+const { BIND } = require('../lib/config');
 
 const PORT = parseInt(process.env.PORT || '3101', 10);
 const CHECKIN_DIR = process.env.CHECKIN_DIR || '/checkin';
@@ -186,7 +187,11 @@ const server = http.createServer((req, res) => {
   return sendJson(res, 404, { error: 'not found' });
 });
 
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`Standby check-in receiver listening on :${PORT} (checkin dir: ${CHECKIN_DIR})`);
+server.listen(PORT, BIND, () => {
+  console.log(`Standby check-in receiver listening on ${BIND}:${PORT} (checkin dir: ${CHECKIN_DIR})`);
   console.log('Standby receiver allowed Hosts: ' + describeAllowedHosts());
+  // (0.8.11, secure defaults) Same startup warning as the app —
+  // see bindWarning in lib/http.js.
+  const w = bindWarning(BIND);
+  if (w) console.warn(w);
 });

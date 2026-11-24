@@ -44,13 +44,13 @@
 // on the hourly tick.
 
 const http = require('http');
-const { PORT, VERSION, DATA_DIR, STARTUP_TICK_MS } = require('./lib/config');
+const { PORT, BIND, VERSION, DATA_DIR, STARTUP_TICK_MS } = require('./lib/config');
 const store = require('./lib/store');
 const { verifyCheckinKeyStore } = require('./lib/checkin');
 const { runFullTick, runHourlyTick, refreshCurrentFeesIfStale, recomputeStoredFees, rearmFullTick } = require('./lib/release');
 const { refreshPriceIfStale } = require('./lib/prices');
 const { handleApi } = require('./lib/api');
-const { serveStatic, sendError, setSecurityHeaders, hostAllowed, describeAllowedHosts } = require('./lib/http');
+const { serveStatic, sendError, setSecurityHeaders, hostAllowed, describeAllowedHosts, bindWarning } = require('./lib/http');
 
 // (0.8.10, audit fix) An uncaught exception is a crash, not a
 // condition to serve through: Node warns that continuing after one
@@ -89,9 +89,9 @@ process.on('SIGINT', flushHeartbeatAndExit);
 
 const server = http.createServer((req, res) => {
   // (0.8.10, audit fix 2) Host allowlist — first, before the URL
-  // parse, routing, and auth: a request whose Host is not one of
-  // the machine's own names (or an IP literal, or a name in
-  // STANDBY_ALLOWED_HOSTS) is a DNS-rebinding probe, not a client.
+  // parse, routing, and auth: a request whose Host is not an IP
+  // literal, localhost, a *.local name, or a name in
+  // STANDBY_ALLOWED_HOSTS is a DNS-rebinding probe, not a client.
   // 421, plain text, and a log line naming the rejected Host so a
   // lockout is diagnosable instead of silent.
   if (!hostAllowed(req.headers.host)) {
@@ -125,9 +125,13 @@ const server = http.createServer((req, res) => {
   catch (e) { console.error(e); if (!res.headersSent) sendError(res, 500, 'static file error'); }
 });
 
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`Standby ${VERSION} listening on :${PORT} (data: ${DATA_DIR})`);
+server.listen(PORT, BIND, () => {
+  console.log(`Standby ${VERSION} listening on ${BIND}:${PORT} (data: ${DATA_DIR})`);
   console.log('Standby allowed Hosts: ' + describeAllowedHosts());
+  // (0.8.11, secure defaults) Warn when bound to a non-loopback
+  // address with no extra Hosts configured — see bindWarning.
+  const w = bindWarning(BIND);
+  if (w) console.warn(w);
   // (0.8.3) Compare the check-in keys in state with the receiver's
   // key list once at startup — see verifyCheckinKeyStore above.
   verifyCheckinKeyStore();

@@ -3,6 +3,14 @@
 const path = require('path');
 
 const PORT = parseInt(process.env.PORT || '3100', 10);
+// (0.8.11, secure defaults) The bind address. Default 127.0.0.1:
+// a bare `node server.js` run listens on loopback only, so the
+// no-login UI is not exposed to the LAN by accident. Docker
+// installs set STANDBY_BIND=0.0.0.0 in their compose file — a
+// loopback bind inside a container would never receive traffic
+// forwarded to the container's IP — and the exposure boundary
+// there is the host-side port mapping / proxy, not the bind.
+const BIND = process.env.STANDBY_BIND || '127.0.0.1';
 // (Optimization O2) The startup-tick delay (the three 5 s
 // setTimeouts below: full tick, hourly tick, fee recompute).
 // Test-only: honored ONLY in test mode (STANDBY_TEST_MODE=1,
@@ -24,7 +32,7 @@ const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 // (last.json). Absent on a plain `node server.js` run — the key
 // feature is dormant then; every file access is guarded.
 const CHECKIN_DIR = process.env.CHECKIN_DIR || '/checkin';
-const VERSION = '0.8.10';
+const VERSION = '0.8.11';
 const MAX_BODY = 1024 * 1024; // 1 MB
 
-module.exports = { PORT, STARTUP_TICK_MS, DATA_DIR, PUBLIC_DIR, CHECKIN_DIR, VERSION, MAX_BODY };
+module.exports = { PORT, BIND, STARTUP_TICK_MS, DATA_DIR, PUBLIC_DIR, CHECKIN_DIR, VERSION, MAX_BODY };

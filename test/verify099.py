@@ -375,6 +375,21 @@ STUB_BASE_S = 'http://127.0.0.1:%d' % STUB_S
 APP_ENV = {'PORT': str(PORT), 'DATA_DIR': DATA, 'CHECKIN_DIR': CHECKIN_DIR,
            'SLIPSTREAM_API_URL': STUB_BASE_P,
            'PRICE_API_URL': STUB_BASE_P}
+# (0.8.11, secure defaults) Profile dimension: the suites run twice —
+# default profile (no STANDBY_BIND, no STANDBY_ALLOWED_HOSTS: the code
+# defaults, loopback bind) and the Umbrel profile (STANDBY_BIND=0.0.0.0
+# plus STANDBY_ALLOWED_HOSTS set, the ${APP_DOMAIN} equivalent).
+# The harness reads STANDBY_TEST_PROFILE from its own environment;
+# CI invokes each suite once per profile (sequential runs — the ports
+# are hardcoded per suite). The receiver spawn below uses the same
+# profile vars, so both servers run the profile.
+if os.environ.get('STANDBY_TEST_PROFILE') == 'umbrel':
+    APP_ENV['STANDBY_BIND'] = '0.0.0.0'
+    APP_ENV['STANDBY_ALLOWED_HOSTS'] = 'standby.local'
+RECEIVER_ENV = {'PORT': str(RECEIVER_PORT), 'CHECKIN_DIR': CHECKIN_DIR}
+if os.environ.get('STANDBY_TEST_PROFILE') == 'umbrel':
+    RECEIVER_ENV['STANDBY_BIND'] = '0.0.0.0'
+    RECEIVER_ENV['STANDBY_ALLOWED_HOSTS'] = 'standby.local'
 LOG = '/tmp/heirloom099-proc.log'
 
 # The stub's fixed values: tip height 900000, economy fee 1 sat/vB.
@@ -610,7 +625,7 @@ def main():
                             env={'SENTINEL_TXID': SENTINEL_TXID, 'STUB_CONFLICT_MODE': 'confirmed',
                                  'STUB_PRICE_USD': '98200'}, log=LOG)
         p_receiver = start(['node', 'checkin-receiver/server.js'],
-                           env={'PORT': str(RECEIVER_PORT), 'CHECKIN_DIR': CHECKIN_DIR},
+                           env=RECEIVER_ENV,
                            cwd=APP, log=LOG)
         # Poll for the stubs instead of a fixed sleep: under parallel
         # startup load a stub can take longer than 0.8 s to listen,
@@ -632,7 +647,7 @@ def main():
 
         # --- 1. health + version ----------------------------------------
         s, h = req('GET', '/api/health')
-        check('1 health reports version 0.8.10', h.get('version') == '0.8.10', h)
+        check('1 health reports version 0.8.11', h.get('version') == '0.8.11', h)
 
         # --- 2. block-height trigger --------------------------------------
         # Validation at add: bad heights rejected, good ones accepted.
@@ -5425,7 +5440,7 @@ def main():
               s == 400 and body == b'Bad request URL', (s, body))
         s, r = req('GET', '/api/health')
         check('32 crash: app still answers after the malformed request',
-              s == 200 and r.get('version') == '0.8.10', (s, r))
+              s == 200 and r.get('version') == '0.8.11', (s, r))
         s, body = raw_get('//[', RBASE)
         check('32 crash: malformed request line to the receiver gets 400',
               s == 400 and body == b'Bad request URL', (s, body))
@@ -5457,9 +5472,10 @@ def main():
         # --- 33. audit fix 2 (Host allowlist) + fsync (0.8.10) -------
         # (fix 2) A foreign Host is a DNS-rebinding probe, not a
         # client: 421 on both servers, before routing or auth. An
-        # IP literal, localhost, a *.local name, and the machine's
-        # own hostname pass with zero configuration; a missing Host
-        # is rejected too.
+        # IP literal, localhost, and a *.local name pass with zero
+        # configuration; a missing Host is rejected too. (0.8.11)
+        # The machine's own hostname no longer passes — it needs
+        # STANDBY_ALLOWED_HOSTS, like any other hostname.
         s, body = raw_req('GET', '/api/health', BASE, host='evil.example')
         check('33 hosts: foreign Host gets 421 on the app',
               s == 421 and body == b'Unrecognised Host header', (s, body))
@@ -5471,11 +5487,12 @@ def main():
         s, body = raw_req('GET', '/api/health', BASE, host='umbrel.local')
         check('33 hosts: umbrel.local passes', s == 200, (s, body))
         s, body = raw_req('GET', '/api/health', BASE, host=os.uname().nodename.lower())
-        check('33 hosts: machine hostname passes', s == 200, (s, body))
+        check('33 hosts: machine hostname is rejected without an allowlist (0.8.11)',
+              s == 421 and body == b'Unrecognised Host header', (s, body))
         check('33 hosts: missing Host header is rejected',
               raw_socket_status(b'GET /api/health HTTP/1.0\r\n\r\n', BASE) == 421)
         check('33 hosts: startup log names the allowed Hosts',
-              'Standby allowed Hosts: any IP literal, localhost, *.local, ' in read_log(),
+              'Standby allowed Hosts: any IP literal, localhost, *.local' in read_log(),
               read_log()[-500:])
         # STANDBY_ALLOWED_HOSTS: a second instance on port 3440
         # (§31's port — its instance is stopped by now) with two
@@ -6149,6 +6166,95 @@ def main():
         s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 60})
         check('38 cleanup: cadence restored to 60 s', s == 200, (s, r))
         check('38 cleanup: app restarted (cold shape record)', restart())
+
+        # --- 39. secure defaults: STANDBY_BIND + startup warning (0.8.11)
+        # The code default is loopback (127.0.0.1): a bare `node
+        # server.js` run is not exposed to the LAN. Both compose
+        # files set STANDBY_BIND=0.0.0.0 (a loopback bind inside a
+        # container would never receive forwarded traffic); the
+        # Umbrel profile runs the main instance that way (see
+        # APP_ENV above), so this section also proves the main
+        # instance's own listen line names the profile bind. The
+        # startup warning fires only when the bind is non-loopback
+        # AND STANDBY_ALLOWED_HOSTS is empty — with an allowlist
+        # set, or on loopback, there is nothing to warn about.
+        # The machine's own hostname no longer passes (see §33).
+        _bind_log = '/tmp/heirloom099-bind.log'
+        _bind_data = '/tmp/heirloom099-bind'
+        _bind_checkin = '/tmp/heirloom099-bind-checkin'
+        _expected_bind = APP_ENV.get('STANDBY_BIND', '127.0.0.1')
+        check('39 bind: main instance listen line names the profile bind',
+              ('Standby 0.8.11 listening on %s:%d (data: ' % (_expected_bind, PORT)) in read_log(),
+              read_log()[-500:])
+
+        def _bind_log_text():
+            try:
+                return open(_bind_log).read()
+            except OSError:
+                return ''
+
+        def _fresh_bind_log():
+            # start() appends — truncate so each instance's warning
+            # (or its absence) is judged on its own log, not on an
+            # earlier instance's lines.
+            open(_bind_log, 'wb').close()
+
+        # (a) 0.0.0.0 with no allowlist: warns, and still answers.
+        shutil.rmtree(_bind_data, ignore_errors=True)
+        shutil.rmtree(_bind_checkin, ignore_errors=True)
+        _fresh_bind_log()
+        _bind_env = dict(APP_ENV)
+        _bind_env.update({'PORT': '3440', 'DATA_DIR': _bind_data, 'CHECKIN_DIR': _bind_checkin,
+                          'STANDBY_BIND': '0.0.0.0'})
+        _bind_env.pop('STANDBY_ALLOWED_HOSTS', None)
+        _bind_app = start(['node', 'server.js'], env=_bind_env, cwd=APP, log=_bind_log)
+        check('39 warn: 0.0.0.0 instance comes up', wait_up('http://127.0.0.1:3440'))
+        s, body = raw_req('GET', '/api/health', 'http://127.0.0.1:3440', host='127.0.0.1:3440')
+        check('39 warn: 0.0.0.0 instance answers on 127.0.0.1', s == 200, (s, body))
+        check('39 warn: 0.0.0.0 with no allowlist logs the startup warning',
+              'WARNING: listening on 0.0.0.0 with STANDBY_ALLOWED_HOSTS unset' in _bind_log_text(),
+              _bind_log_text()[-500:])
+        stop(_bind_app)
+        # (b) 0.0.0.0 with an allowlist: no warning, and the listed name passes.
+        shutil.rmtree(_bind_data, ignore_errors=True)
+        shutil.rmtree(_bind_checkin, ignore_errors=True)
+        _fresh_bind_log()
+        _bind_env2 = dict(APP_ENV)
+        _bind_env2.update({'PORT': '3440', 'DATA_DIR': _bind_data, 'CHECKIN_DIR': _bind_checkin,
+                           'STANDBY_BIND': '0.0.0.0', 'STANDBY_ALLOWED_HOSTS': 'bind.example'})
+        _bind_app2 = start(['node', 'server.js'], env=_bind_env2, cwd=APP, log=_bind_log)
+        check('39 warn: 0.0.0.0 + allowlist instance comes up', wait_up('http://127.0.0.1:3440'))
+        s, body = raw_req('GET', '/api/health', 'http://127.0.0.1:3440', host='bind.example')
+        check('39 warn: allowlisted name passes on the 0.0.0.0 instance', s == 200, (s, body))
+        check('39 warn: 0.0.0.0 with an allowlist logs no startup warning',
+              'WARNING: listening on 0.0.0.0 with STANDBY_ALLOWED_HOSTS unset' not in _bind_log_text(),
+              _bind_log_text()[-500:])
+        stop(_bind_app2)
+        # (c) Loopback bind with no allowlist: no warning.
+        shutil.rmtree(_bind_data, ignore_errors=True)
+        shutil.rmtree(_bind_checkin, ignore_errors=True)
+        _fresh_bind_log()
+        _bind_env3 = dict(APP_ENV)
+        _bind_env3.update({'PORT': '3440', 'DATA_DIR': _bind_data, 'CHECKIN_DIR': _bind_checkin,
+                           'STANDBY_BIND': '127.0.0.1'})
+        _bind_env3.pop('STANDBY_ALLOWED_HOSTS', None)
+        _bind_app3 = start(['node', 'server.js'], env=_bind_env3, cwd=APP, log=_bind_log)
+        check('39 warn: loopback instance comes up', wait_up('http://127.0.0.1:3440'))
+        check('39 warn: loopback bind with no allowlist logs no startup warning',
+              'WARNING: listening on 0.0.0.0 with STANDBY_ALLOWED_HOSTS unset' not in _bind_log_text()
+              and 'listening on 127.0.0.1:3440' in _bind_log_text(),
+              _bind_log_text()[-500:])
+        stop(_bind_app3)
+        # (d) The receiver warns the same way: 0.0.0.0, no allowlist.
+        _fresh_bind_log()
+        _recv_env = {'PORT': '3441', 'CHECKIN_DIR': _bind_checkin,
+                     'STANDBY_BIND': '0.0.0.0'}
+        _recv = start(['node', 'checkin-receiver/server.js'], env=_recv_env, cwd=APP, log=_bind_log)
+        check('39 warn: receiver 0.0.0.0 instance comes up', wait_up('http://127.0.0.1:3441', path='/health'))
+        check('39 warn: receiver 0.0.0.0 with no allowlist logs the startup warning',
+              'WARNING: listening on 0.0.0.0 with STANDBY_ALLOWED_HOSTS unset' in _bind_log_text(),
+              _bind_log_text()[-500:])
+        stop(_recv)
 
     finally:
         for p in list(v.procs):

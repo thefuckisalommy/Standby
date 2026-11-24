@@ -3,7 +3,6 @@
 const store = require('./store');
 const fs = require('fs');
 const net = require('net');
-const os = require('os');
 const path = require('path');
 const { DATA_DIR, PUBLIC_DIR } = require('./config');
 const { sendError } = require('./util');
@@ -110,12 +109,15 @@ function isLoopback(h) {
 // what the browser sent, never the internal container name.
 //   Allowed with zero configuration: any IP literal (an IP Host
 //   cannot be rebound — rebinding sends the attacker's domain),
-//   'localhost', any '*.local' name, and the machine's own
-//   hostname (os.hostname()). In Docker that last one is the
-//   container ID, not the host's name — it helps a bare-metal
-//   install and matches nothing in a container, so it does not
-//   cover a bare http://umbrel (which does not resolve on the
-//   LAN anyway — only umbrel.local does, via mDNS).
+//   'localhost', and any '*.local' name. (0.8.11) The machine's
+//   own hostname (os.hostname()) is NO LONGER in the default
+//   rule: in Docker it was the container ID, not the host's name,
+//   so it helped a bare-metal install only — and a hostname that
+//   passes by default is a hostname an attacker can also reach
+//   the app by. Reach the app by a hostname and list it in
+//   STANDBY_ALLOWED_HOSTS instead; see the README ("Reaching the
+//   UI"). A bare http://umbrel does not resolve on the LAN
+//   anyway — only umbrel.local does, via mDNS.
 //   Escape hatch: STANDBY_ALLOWED_HOSTS, a comma-separated list of
 //   extra hostnames (Tailscale MagicDNS *.ts.net, a custom domain,
 //   a .onion address, a reverse-proxy hostname). On Umbrel there
@@ -140,7 +142,6 @@ function hostAllowed(hostHeader) {
   if (!name) return false;
   if (net.isIP(name)) return true;
   if (name === 'localhost' || name.endsWith('.local')) return true;
-  if (name === os.hostname().toLowerCase()) return true;
   if (extraAllowedHosts().includes(name)) return true;
   return false;
 }
@@ -148,10 +149,25 @@ function hostAllowed(hostHeader) {
 // One line for the startup log, so a lockout is diagnosable at a
 // glance: the default rule plus any names from the env var.
 function describeAllowedHosts() {
-  const parts = ['any IP literal', 'localhost', '*.local', os.hostname().toLowerCase()];
+  const parts = ['any IP literal', 'localhost', '*.local'];
   const extra = extraAllowedHosts();
   if (extra.length) parts.push('STANDBY_ALLOWED_HOSTS: ' + extra.join(', '));
   return parts.join(', ');
+}
+
+// (0.8.11, secure defaults) Startup warning: bound to a
+// non-loopback address with no extra Hosts configured. The
+// allowlist is then the only rebinding defense for a
+// network-reachable server, so say so loudly at startup.
+// (Known wart: in Docker both compose files bind 0.0.0.0 while
+// the generic web port is host-loopback-bound — the code cannot
+// see the host-side mapping, so the warning fires on every
+// generic Docker install. That is noise, not a misconfiguration;
+// the warning is kept as specified rather than scoped by
+// guessing the deployment.) Returns the warning line, or null.
+function bindWarning(bind) {
+  if (isLoopback(bind) || extraAllowedHosts().length) return null;
+  return 'Standby: WARNING: listening on ' + bind + ' with STANDBY_ALLOWED_HOSTS unset — the Host allowlist (IP literals, localhost, *.local) is the only rebinding defense. Set STANDBY_ALLOWED_HOSTS to the hostnames you reach it by.';
 }
 
 function csrfAllowed(req) {
@@ -195,4 +211,4 @@ function saveMutation(mutator) {
   return fresh;
 }
 
-module.exports = { MIME, serveStatic, hostOf, hostnameOf, hostAllowed, describeAllowedHosts, isLoopback, csrfAllowed, saveMutation, setSecurityHeaders, CSP };
+module.exports = { MIME, serveStatic, hostOf, hostnameOf, hostAllowed, describeAllowedHosts, bindWarning, isLoopback, csrfAllowed, saveMutation, setSecurityHeaders, CSP };

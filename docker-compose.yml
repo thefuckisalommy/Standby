@@ -8,14 +8,28 @@
 # Data lives in ./data and ./checkin next to this file — plain files, so a
 # backup is just a copy of those two directories (or the in-app Backup
 # download). See README.md ("Run on any Linux box") and SECURITY.md.
+#
+# (0.8.11, secure defaults) The services run as UID 1000 (the `node` user
+# in the image), not root — so before the first start, make the data
+# directories writable by that user, or the app cannot write state.json:
+#   mkdir -p data checkin && sudo chown 1000:1000 data checkin
+# (Docker creates the directories root-owned if they do not exist.)
+# STANDBY_BIND=0.0.0.0 is required inside the container: a loopback bind
+# would never receive traffic forwarded to the container's IP. The web UI
+# stays localhost-only through the host-side port mapping below
+# (127.0.0.1:...:3100); the receiver stays reachable on the LAN by design
+# (remote check-ins need it), key-protected, with the Host allowlist as
+# its rebinding defense.
 
 services:
   web:
     image: ghcr.io/thefuckisalommy/standby:latest
     restart: on-failure
     stop_grace_period: 1m30s
+    user: "1000"
     environment:
       PORT: 3100
+      STANDBY_BIND: 0.0.0.0
       DATA_DIR: /data
       CHECKIN_DIR: /checkin
     volumes:
@@ -37,8 +51,10 @@ services:
     command: ["node", "checkin-receiver/server.js"]
     restart: on-failure
     stop_grace_period: 1m
+    user: "1000"
     environment:
       PORT: 3101
+      STANDBY_BIND: 0.0.0.0
       CHECKIN_DIR: /checkin
     volumes:
       - ./checkin:/checkin

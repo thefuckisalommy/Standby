@@ -18,6 +18,13 @@ services:
     stop_grace_period: 1m30s
     environment:
       PORT: 3100
+      # (0.8.11, secure defaults) STANDBY_BIND=0.0.0.0: app_proxy
+      # connects to the container IP, so a loopback bind would never
+      # receive its traffic. STANDBY_ALLOWED_HOSTS=${APP_DOMAIN}
+      # covers the custom-domain case (the default, <hostname>.local,
+      # is already covered by *.local).
+      STANDBY_BIND: 0.0.0.0
+      STANDBY_ALLOWED_HOSTS: ${APP_DOMAIN}
       DATA_DIR: /data
       CHECKIN_DIR: /checkin
     volumes:
@@ -41,6 +48,11 @@ services:
     stop_grace_period: 1m
     environment:
       PORT: 3101
+      # (0.8.11, secure defaults) Same bind as the web service, and
+      # the same allowlist — a check-in by hostname (rather than by
+      # LAN IP or umbrel.local) needs the name listed.
+      STANDBY_BIND: 0.0.0.0
+      STANDBY_ALLOWED_HOSTS: ${APP_DOMAIN}
       CHECKIN_DIR: /checkin
     volumes:
       - ${APP_DATA_DIR}/checkin:/checkin
