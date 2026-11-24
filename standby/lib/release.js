@@ -22,7 +22,7 @@ let releaseEvaluationInFlight = false;
 // evaluateReleaseInner). One hour, hard-coded — the retry
 // cadence is a safety property, not a user setting.
 const BROADCAST_BACKOFF_MS = 60 * 60 * 1000;
-// Archived confirmations (0.8.5, Ryan's number): a broadcast
+// Archived confirmations (0.8.5, the owner's number): a broadcast
 // transaction at this many confirmations is done — its count is
 // final, so the hourly confirmation refresh never re-queries it,
 // and the tick never evaluates it (see terminalSkipReason below).
@@ -140,7 +140,7 @@ async function evaluateReleaseInner(automatic) {
   // (0.8.4) Every tx is evaluated — armed or not — so a disarmed
   // tx's triggerStatus stays live for display. Only ARMED txs can
   // enter the firing set below: unarmed means "will not broadcast
-  // even if the conditions are met" (Ryan, Nov 18).
+  // even if the conditions are met" (owner, Nov 18).
   const all = state.bitcoin.txs || [];
   if (!all.length) return { action: 'skipped', reason: 'no transactions', results: [] };
 

@@ -35,13 +35,15 @@ In Umbrel: App Store → Community App Stores → add this repo's URL:
 https://github.com/thefuckisalommy/Standby
 ```
 
-Then install Standby from the store. The app's Docker image is built for arm64 and amd64 by GitHub Actions whenever the app changes on main and published to GHCR, so installing just pulls it.
+Then install Standby from the store. The app's Docker image is built for arm64 and amd64 by GitHub Actions — only after the test suites pass — and published to GHCR tagged with the app version, so installing just pulls it.
+
+**Login:** Standby asks for a password the first time you open it in a browser. On Umbrel it is the password shown on Standby's page in the Umbrel dashboard. (Umbrel's own login guards the way in through the dashboard, but every Umbrel app shares one Docker network — Standby's own login keeps the other apps out of its API.)
 
 After installing, add your first trigger set: sign a transaction in your own wallet, paste the raw signed hex (or import a hex file or a fully-signed PSBT), pick the set's trigger, and arm it. For a check-in set, set its own threshold ("Days of silence", 35 by default) when you add it. Then check in — from the app, or by creating a check-in API key for your gadget, shortcut, bot, or script.
 
 ## Run on any Linux box (Docker)
 
-No Umbrel needed. Standby is a plain Docker image (`ghcr.io/thefuckisalommy/standby:latest`, multi-arch amd64 and arm64) that runs anywhere Docker runs. It is two services from the same image: the web UI, and a check-in receiver that only records check-ins.
+No Umbrel needed. Standby is a plain Docker image (`ghcr.io/thefuckisalommy/standby:<version>`, multi-arch amd64 and arm64) that runs anywhere Docker runs. It is two services from the same image: the web UI, and a check-in receiver that only records check-ins.
 
 **Prerequisites:** Docker Engine and the Compose plugin. If you don't have them, follow the [Docker Engine install docs](https://docs.docker.com/engine/install/) for your distro, then confirm with `docker compose version`.
 
@@ -49,39 +51,63 @@ No Umbrel needed. Standby is a plain Docker image (`ghcr.io/thefuckisalommy/stan
 ```sh
 mkdir standby && cd standby
 curl -O https://raw.githubusercontent.com/thefuckisalommy/Standby/main/docker-compose.yml
+mkdir -p data checkin && sudo chown -R 1000:1000 data checkin
+# optional but recommended — require a password for the UI and API:
+printf 'STANDBY_PASSWORD=%s\n' "$(openssl rand -base64 24)" > .env && chmod 600 .env && cat .env
 docker compose up -d
 # open http://localhost:3100
 ```
+(The `chown` step matters: the services run as UID 1000, not root, and Docker creates the data directories root-owned if they do not exist. If Standby cannot write its files it refuses to start and prints this fix in `docker compose logs web`.)
+
+**Upgrading from 0.8.10 or older:** those versions ran as root, so the files already in `data` and `checkin` are root-owned. Before starting the new version, run `sudo chown -R 1000:1000 data checkin` once (with `-R`: the files inside need it too), and download the new `docker-compose.yml`.
 
 **What is running:**
 - `web` — the Standby UI and API, on port 3100. It listens on localhost only (`127.0.0.1:3100`) by default.
-- `checkin` — the check-in receiver, on port 3101. It runs the same image with `node checkin-receiver/server.js` and mounts only the shared `./checkin` directory, so it can record a check-in but cannot see or change your transactions.
+- `checkin` — the check-in receiver, on port 3101. It runs the same image with `node checkin-receiver/server.js` and mounts only the shared `./checkin` directory, so it can record a check-in but cannot see or change your transactions. It is on its own Docker network, so it cannot reach the web API either.
+
+Both containers run as UID 1000 with a read-only filesystem, no Linux capabilities, `no-new-privileges`, and log rotation (10 MB × 3).
 
 **Ports:** override with `STANDBY_WEB_PORT` (default 3100) and `STANDBY_CHECKIN_PORT` (default 3101).
 
-**Reaching the UI:** there is no login screen on this path, and the web UI is localhost-only by default. Reach it on the box itself, over SSH (`ssh -L 3100:localhost:3100 <box>`), over Tailscale, or behind your own reverse proxy with auth — a proxy serving it under its own hostname needs that hostname in STANDBY_ALLOWED_HOSTS, or the app answers 421. A Tailscale MagicDNS name (like `name.ts.net`) counts as its own hostname too, so it needs to be listed the same way; a plain Tailscale IP needs nothing. To open it to your LAN, change the web port line in `docker-compose.yml` to `"${STANDBY_WEB_PORT:-3100}:3100"` — only on a network you trust.
+**Login:** set `STANDBY_PASSWORD` (in a `.env` file next to `docker-compose.yml`, as above, or in the shell) and the UI asks for it once per browser; scripts can send it as `Authorization: Bearer <password>`. Without it there is no login, and anything that can reach port 3100 controls the app — on this path that means anything running on the box itself, because the port is mapped to localhost only. Use a password if the box has other users, or if you open the port further. Settings → Session → Log out signs out every browser.
+
+**Reaching the UI:** the web UI is localhost-only by default. Reach it on the box itself, over SSH (`ssh -L 3100:localhost:3100 <box>`), over Tailscale, or behind your own reverse proxy — a proxy serving it under its own hostname needs that hostname in STANDBY_ALLOWED_HOSTS, or the app answers 421. A Tailscale MagicDNS name (like `name.ts.net`) counts as its own hostname too, so it needs to be listed the same way; a plain Tailscale IP needs nothing. The same rule covers check-ins: a gadget or bot reaching the receiver at `http://<hostname>:3101` gets a 421 unless that hostname is listed in STANDBY_ALLOWED_HOSTS. On Umbrel the compose file already allows the device's `.local` name and the app's Tor address; a Tailscale MagicDNS name or a custom domain still needs a manual edit of the compose file. To open the UI to your LAN, set `STANDBY_PASSWORD` and change the web port line in `docker-compose.yml` to `"${STANDBY_WEB_PORT:-3100}:3100"` — only on a network you trust.
 
 **Check-ins:** `curl -X POST http://<box>:3101/checkin -H "Authorization: Bearer <your key>"`. Plain HTTP, protected only by the key — keep it on your trusted LAN or Tailscale network, as in [SECURITY.md](SECURITY.md).
 
-**Data:** `./data` (app state) and `./checkin` (receiver state) next to the compose file, as plain files. Back up by copying those two directories, or use the in-app Backup download; restore with the in-app Restore. **Updating:** `docker compose pull && docker compose up -d` — your data is untouched. **Stopping:** `docker compose down` stops both services without deleting data — delete the directories yourself to wipe everything.
+**Data:** `./data` (app state) and `./checkin` (receiver state) next to the compose file, as plain files — the app's files are readable by UID 1000 only. Back up by copying those two directories, or use the in-app Backup download; restore with the in-app Restore. **Updating:** the image is pinned to a version tag. Download the new `docker-compose.yml` (or change the tag in yours to the new version), then `docker compose pull && docker compose up -d` — your data is untouched. **Stopping:** `docker compose down` stops both services without deleting data — delete the directories yourself to wipe everything.
 
 **Without Compose (plain `docker run`):**
 ```sh
-mkdir -p data checkin
-docker run -d --name standby-web --restart on-failure -p 127.0.0.1:3100:3100 -v "$PWD/data:/data" -v "$PWD/checkin:/checkin" ghcr.io/thefuckisalommy/standby:latest
-docker run -d --name standby-checkin --restart on-failure -p 3101:3101 -v "$PWD/checkin:/checkin" -e PORT=3101 -e CHECKIN_DIR=/checkin ghcr.io/thefuckisalommy/standby:latest node checkin-receiver/server.js
+mkdir -p data checkin && sudo chown -R 1000:1000 data checkin
+docker network create standby-web && docker network create standby-checkin
+docker run -d --name standby-web --restart on-failure --network standby-web -p 127.0.0.1:3100:3100 -v "$PWD/data:/data" -v "$PWD/checkin:/checkin" -e STANDBY_BIND=0.0.0.0 -e STANDBY_PASSWORD="<your password>" ghcr.io/thefuckisalommy/standby:0.8.11.1
+docker run -d --name standby-checkin --restart on-failure --network standby-checkin -p 3101:3101 -v "$PWD/checkin:/checkin" -e PORT=3101 -e CHECKIN_DIR=/checkin -e STANDBY_BIND=0.0.0.0 ghcr.io/thefuckisalommy/standby:0.8.11.1 node checkin-receiver/server.js
 # open http://localhost:3100
 ```
+(`-e STANDBY_BIND=0.0.0.0` is required here: the app binds localhost by default, and a loopback bind inside a container never receives traffic forwarded to the container's IP. The image runs as UID 1000, hence the `chown`.)
 
 **Build it yourself / run from source:**
 ```sh
 git clone https://github.com/thefuckisalommy/Standby.git
 docker build -t standby Standby/standby
-docker run --rm -p 127.0.0.1:3100:3100 -v "$PWD/data:/data" -v "$PWD/checkin:/checkin" standby
+mkdir -p data checkin && sudo chown -R 1000:1000 data checkin
+docker run --rm -p 127.0.0.1:3100:3100 -v "$PWD/data:/data" -v "$PWD/checkin:/checkin" -e STANDBY_BIND=0.0.0.0 standby
 # open http://localhost:3100
 ```
 
-Or plain Node 24+ (no Docker): `cd Standby/standby && node server.js` — same port, data in `./data` next to the server.
+Or plain Node 24+ (no Docker): `cd Standby/standby && node server.js` — same port, localhost only, data in `./data` next to the server. Set `STANDBY_PASSWORD` before binding it to anything else with `STANDBY_BIND`.
+
+**Configuration reference** (environment variables, all optional — see `standby/lib/config.js`):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `STANDBY_PASSWORD` | unset (no login) | The app login. On Umbrel it is set from the password shown on the app page. |
+| `STANDBY_BIND` | `127.0.0.1` | Address to listen on. Docker installs set `0.0.0.0` (inside the container). |
+| `STANDBY_ALLOWED_HOSTS` | unset | Extra Host-header names, comma-separated (reverse-proxy hostname, MagicDNS name). IP literals, `localhost` and `*.local` are always allowed. |
+| `STANDBY_DEPLOYMENT` | `bare` (`docker` in the image) | `umbrel`, `docker` or `bare` — tunes startup checks and messages. |
+| `PORT`, `DATA_DIR`, `CHECKIN_DIR` | `3100`, `./data`, `/checkin` | Listen port and data locations. |
+| `MEMPOOL_HOST` / `MEMPOOL_PORT` / `MEMPOOL_PROTOCOL` | unset | Override the primary node set in Settings (logged at startup). |
 
 ## Check-in API keys
 
@@ -115,4 +141,4 @@ Two things to know. First, the fee floor: Slipstream only accepts transactions a
 
 ## Security
 
-Security notes live in [SECURITY.md](SECURITY.md) — read it before arming a transaction. The short version: Standby's web UI and API are protected only by Umbrel's app login (do not disable it), your signed transactions are stored unencrypted and are bearer, and the check-in receiver on port 3101 is plain HTTP, so keep it on your trusted LAN and Tailscale network only. On the generic Docker path there is no login at all — the web UI listens on localhost only by default; see "Run on any Linux box" before exposing it.
+Security notes live in [SECURITY.md](SECURITY.md) — read it before arming a transaction. The short version: Standby has its own login (on Umbrel, the password shown on the app page; on Linux, `STANDBY_PASSWORD`); your signed transactions are stored unencrypted and are bearer, so the data directory is readable by the app's user only; and the check-in receiver on port 3101 is plain HTTP, so keep it on your trusted LAN and Tailscale network only. On the generic Docker path the login is optional and the web UI listens on localhost only by default; see "Run on any Linux box" before exposing it.

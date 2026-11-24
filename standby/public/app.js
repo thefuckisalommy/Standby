@@ -26,13 +26,49 @@
     el.style.color = ok === false ? '#f87171' : ok === 'warn' ? '#fbbf24' : '';
   }
 
+  // App login (0.8.11.1): when the server requires a password, the
+  // session token from POST /api/login is kept in localStorage —
+  // scoped to this exact origin (host AND port), unlike a cookie,
+  // so no other app on the same host can read it — and sent in the
+  // X-Standby-Token header on every API call. Storage access can
+  // throw (private mode, blocked site data); then the token lives
+  // only for this page.
+  var TOKEN_KEY = 'standby.sessionToken';
+  var memToken = null;
+  function getToken() {
+    try { return window.localStorage.getItem(TOKEN_KEY) || memToken; } catch (e) { return memToken; }
+  }
+  function setToken(t) {
+    memToken = t || null;
+    try {
+      if (t) window.localStorage.setItem(TOKEN_KEY, t);
+      else window.localStorage.removeItem(TOKEN_KEY);
+    } catch (e) { /* memory only */ }
+  }
+  function showLogin() {
+    var m = $('login-modal');
+    if (!m || m.classList.contains('open')) return;
+    m.classList.add('open');
+    var pw = $('login-password');
+    if (pw) pw.focus();
+  }
+
   async function api(method, path, body) {
+    var headers = { 'Content-Type': 'application/json' };
+    var token = getToken();
+    if (token) headers['X-Standby-Token'] = token;
     var res = await fetch(path, {
       method: method,
-      headers: { 'Content-Type': 'application/json' },
+      headers: headers,
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     var data = await res.json().catch(function () { return {}; });
+    if (res.status === 401 && data && data.login === true) {
+      // Not logged in, or the session expired / was signed out.
+      setToken(null);
+      showLogin();
+      throw new Error('login required');
+    }
     if (!res.ok) throw new Error(data.error || ('request failed: ' + res.status));
     return data;
   }
@@ -2722,7 +2758,7 @@
       title.textContent = txDisplayName(tx);
       var pill = document.createElement('span');
       // A warned-about tx keeps its "Ready" label but gets an amber
-      // pill (0.7.16 amendment, Ryan): the tx is still ready to
+      // pill (0.7.16 amendment, owner): the tx is still ready to
       // broadcast, but the warning — a shared input, only one of
       // them can ever be confirmed — deserves attention. Only the
       // green pill changes: Conflict/Timelocked/Node Failure are
@@ -6087,7 +6123,39 @@
     if (v && h && h.version) v.textContent = h.version;
   }).catch(function () { /* leave the placeholder */ });
 
+  // ---------- app login (0.8.11.1) ----------
+  $('login-form').addEventListener('submit', async function (ev) {
+    ev.preventDefault();
+    var btn = $('btn-login');
+    btn.disabled = true;
+    setMsg($('login-msg'), 'Checking…', true);
+    try {
+      var r = await api('POST', '/api/login', { password: $('login-password').value });
+      setToken(r.token);
+      $('login-password').value = '';
+      window.location.reload();
+    } catch (e) {
+      setMsg($('login-msg'), e.message, false);
+      btn.disabled = false;
+    }
+  });
+  $('btn-logout').addEventListener('click', async function () {
+    try {
+      await api('POST', '/api/logout');
+      setToken(null);
+      window.location.reload();
+    } catch (e) { setMsg($('logout-msg'), e.message, false); }
+  });
+  api('GET', '/api/auth/status').then(function (st) {
+    if (st && st.required) {
+      $('card-session').style.display = '';
+      if (!st.authenticated) showLogin();
+    }
+  }).catch(function () { /* older server or offline: nothing to show */ });
+
   load().catch(function (e) {
+    // (0.8.11.1) The login screen is already up — no error notice.
+    if (e.message === 'login required') return;
     if (/state\.json is (corrupt|missing)/.test(e.message)) { showStateError(e.message); return; }
     // (0.8.10, audit fix 4) The message is error text, not HTML:
     // build the notice with textContent so markup in it renders

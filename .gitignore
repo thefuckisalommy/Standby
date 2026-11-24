@@ -1,1 +1,9 @@
-standby/data/
+# Local runs write state into standby/data/ (the default DATA_DIR).
+# (0.8.11.1) The Umbrel package needs data/checkin/ committed as an
+# empty directory (the check-in bind mount source), so only its
+# .gitkeep is tracked.
+standby/data/*
+!standby/data/checkin/
+standby/data/checkin/*
+!standby/data/checkin/.gitkeep
+__pycache__/

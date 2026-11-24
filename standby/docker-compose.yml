@@ -1,7 +1,12 @@
 # Standby — Umbrel docker-compose
 # Pattern: Umbrel injects `app_proxy`; the web service is reached via
 # APP_HOST: <app-id>_<service>_1 and APP_PORT (internal port).
-# Do NOT set `user:` on any service (Umbrel guidance).
+#
+# (0.8.11.1) Both services run as UID/GID 1000, the owner Umbrel gives
+# app data — the image's `node` user, not root. Installs from before
+# 0.8.11.1 wrote their files as root; hooks/pre-start sets the ownership
+# (and moves the check-in directory under data/) on every start, before
+# the containers run.
 version: "3.7"
 
 services:
@@ -11,18 +16,43 @@ services:
       APP_PORT: 3100
 
   web:
-    # Prebuilt for arm64 by GitHub Actions (.github/workflows/build-heirloom-image.yml)
-    # on every push — installing the app just pulls it, no build step.
-    image: ghcr.io/thefuckisalommy/standby:latest
+    # Prebuilt for amd64 and arm64 by GitHub Actions
+    # (.github/workflows/build-standby-image.yml), tagged with the app
+    # version — installing the app just pulls it, no build step.
+    image: ghcr.io/thefuckisalommy/standby:0.8.11.1
+    user: "1000:1000"
     restart: on-failure
     stop_grace_period: 1m30s
     environment:
       PORT: 3100
+      # STANDBY_BIND=0.0.0.0: the Umbrel proxy connects to the
+      # container IP, so a loopback bind would never receive its
+      # traffic.
+      STANDBY_BIND: 0.0.0.0
+      STANDBY_DEPLOYMENT: umbrel
+      # (0.8.11.1) The app login. Umbrel's own login only guards
+      # traffic through its proxy; every app shares one Docker
+      # network, so any other app could reach this container's port
+      # directly. APP_PASSWORD is Umbrel's stable per-install
+      # password, shown on the app's page (deterministicPassword in
+      # umbrel-app.yml).
+      STANDBY_PASSWORD: ${APP_PASSWORD}
+      # Extra Host-header names beyond the defaults (IP literals,
+      # localhost, *.local — which already covers APP_DOMAIN, the
+      # device's .local name). APP_HIDDEN_SERVICE is this app's Tor
+      # address, so opening it over Tor works without a manual edit
+      # (it is a placeholder like not-enabled.onion until Tor access
+      # is on — harmless). A Tailscale MagicDNS name or a custom
+      # domain still needs adding here by hand.
+      STANDBY_ALLOWED_HOSTS: ${APP_DOMAIN},${APP_HIDDEN_SERVICE}
       DATA_DIR: /data
       CHECKIN_DIR: /checkin
     volumes:
       - ${APP_DATA_DIR}/data:/data
-      - ${APP_DATA_DIR}/checkin:/checkin
+      # (0.8.11.1) The check-in directory lives under data/ now, so it
+      # moves with the rest of the app data (umbrelOS 2.0 storage
+      # relocation) — hooks/pre-start migrates the old location.
+      - ${APP_DATA_DIR}/data/checkin:/checkin
 
   # Check-in receiver (0.6.6): the check-in-only front door, on the LAN
   # at port 3101 — NOT behind Umbrel's app-auth proxy, because a key
@@ -32,17 +62,27 @@ services:
   # writes (last.json). It never mounts /data, so it cannot see the
   # transactions — even from inside its own container. A key presented
   # here can only record a check-in; it cannot read, broadcast, or
-  # change anything. The main app merges a newer timestamp from
-  # last.json on every status read and on the hourly tick.
+  # change anything. (It shares the Umbrel network with the web
+  # service, as every app does — the app login above is what keeps it,
+  # and every other container, out of the web API.) The main app merges
+  # a newer timestamp from last.json on every status read and on the
+  # hourly tick.
   checkin:
-    image: ghcr.io/thefuckisalommy/standby:latest
+    image: ghcr.io/thefuckisalommy/standby:0.8.11.1
     command: ["node", "checkin-receiver/server.js"]
+    user: "1000:1000"
     restart: on-failure
     stop_grace_period: 1m
     environment:
       PORT: 3101
+      # Same bind and allowlist as the web service — a check-in by
+      # hostname (rather than by LAN IP or umbrel.local) needs the name
+      # listed.
+      STANDBY_BIND: 0.0.0.0
+      STANDBY_DEPLOYMENT: umbrel
+      STANDBY_ALLOWED_HOSTS: ${APP_DOMAIN},${APP_HIDDEN_SERVICE}
       CHECKIN_DIR: /checkin
     volumes:
-      - ${APP_DATA_DIR}/checkin:/checkin
+      - ${APP_DATA_DIR}/data/checkin:/checkin
     ports:
       - "3101:3101"

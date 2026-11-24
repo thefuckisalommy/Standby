@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Launch Standby 0.8.10 (branch-0810-fixes) + mempool stubs with
+"""Launch Standby 0.8.11.1 + mempool stubs with
 seeded trigger data, run dom_check099.js against it, then stop
 everything. Reuses the verify script's helpers (importing it does
 not run its main()).
@@ -51,6 +51,24 @@ RBASE = 'http://127.0.0.1:3479'
 LOG = '/tmp/heirloom099-dom-proc.log'
 FINNEY_OUTPOINT = 'f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16:1'
 
+# (0.8.11, secure defaults) Profile dimension, same as the API and
+# regression suites: STANDBY_TEST_PROFILE=umbrel runs the app and
+# receiver with STANDBY_BIND=0.0.0.0 and STANDBY_ALLOWED_HOSTS set
+# (the ${APP_DOMAIN} equivalent); the default profile runs the code
+# defaults (loopback bind, no allowlist). CI invokes the launcher
+# once per profile.
+
+
+_PROFILE_ENV = {}
+if os.environ.get('STANDBY_TEST_PROFILE') == 'umbrel':
+    _PROFILE_ENV = {'STANDBY_BIND': '0.0.0.0', 'STANDBY_ALLOWED_HOSTS': 'standby.local'}
+
+
+def _with_profile(env):
+    d = dict(env)
+    d.update(_PROFILE_ENV)
+    return d
+
 
 def port_closed(port):
     # True only when nothing answers at all: an HTTP error (even a
@@ -89,18 +107,18 @@ json.dump({'version': 7, 'bitcoin': {'txs': []}, 'feeHistory': _seed_history}, o
 p1 = v.start(['node', v.STUB, '18275'], log=LOG)
 p2 = v.start(['node', v.STUB, '18276'], log=LOG)
 recv = v.start(['node', 'checkin-receiver/server.js'],
-               env={'PORT': '3479', 'CHECKIN_DIR': CHECKIN_DIR}, cwd=BRANCH, log=LOG)
+               env=_with_profile({'PORT': '3479', 'CHECKIN_DIR': CHECKIN_DIR}), cwd=BRANCH, log=LOG)
 app = v.start(['node', 'server.js'],
-              env={'PORT': '3478', 'DATA_DIR': DATA, 'CHECKIN_DIR': CHECKIN_DIR,
+              env=_with_profile({'PORT': '3478', 'DATA_DIR': DATA, 'CHECKIN_DIR': CHECKIN_DIR,
                    'SLIPSTREAM_API_URL': 'http://127.0.0.1:18275',
-                   'PRICE_API_URL': 'http://127.0.0.1:18275'},
+                   'PRICE_API_URL': 'http://127.0.0.1:18275'}),
               cwd=BRANCH, log=LOG)
 rc = 1
 try:
     assert v.wait_up(BASE), 'app did not come up'
     assert v.wait_up(RBASE, path='/health'), 'receiver did not come up'
     s, h = v.req('GET', '/api/health', base=BASE)
-    assert h.get('version') == '0.8.10', h
+    assert h.get('version') == '0.8.11.1', h
     s, r = v.req('PUT', '/api/settings', {'primaryApiUrl': 'http://127.0.0.1:18275',
                                           'secondaryApiUrl': 'http://127.0.0.1:18276'}, base=BASE)
     assert s == 200, r
@@ -167,11 +185,11 @@ try:
     e1 = v.start(['node', v.STUB, '18265'], log=LOG)
     e2 = v.start(['node', v.STUB, '18266'], log=LOG)
     erecv = v.start(['node', 'checkin-receiver/server.js'],
-                    env={'PORT': '3469', 'CHECKIN_DIR': err_checkin}, cwd=BRANCH, log=LOG)
+                    env=_with_profile({'PORT': '3469', 'CHECKIN_DIR': err_checkin}), cwd=BRANCH, log=LOG)
     eapp = v.start(['node', 'server.js'],
-                   env={'PORT': '3468', 'DATA_DIR': err_data, 'CHECKIN_DIR': err_checkin,
+                   env=_with_profile({'PORT': '3468', 'DATA_DIR': err_data, 'CHECKIN_DIR': err_checkin,
                         'SLIPSTREAM_API_URL': 'http://127.0.0.1:18265',
-                        'PRICE_API_URL': 'http://127.0.0.1:18265'},
+                        'PRICE_API_URL': 'http://127.0.0.1:18265'}),
                    cwd=BRANCH, log=LOG)
     try:
         assert v.wait_up('http://127.0.0.1:3468'), 'error-phase app did not come up'

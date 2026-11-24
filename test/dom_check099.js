@@ -68,7 +68,7 @@
 //   - the Getting Started card (0.8.0): an empty-state card at the
 //     very top of the Dashboard, shown only when no transactions
 //     are STAGED (active) — archived and pending do not count —
-//     the first thing a fresh install sees — with Ryan's exact
+//     the first thing a fresh install sees — with the owner's exact
 //     copy and a full-width orange button that opens the Add
 //     transaction popup (it never switches tabs or scrolls); it is
 //     independent of the grace card (which shows whenever a grace
@@ -79,7 +79,7 @@
 //     the "+ Add a pre-signed transaction" button at the bottom of
 //     the Transactions tab, and the oval "+ Add Tx" in the Staged
 //     Transactions header); "Broadcast all" is gone again —
-//     restored Nov 16 at Ryan's word, then removed again the same
+//     restored Nov 16 at the owner's word, then removed again the same
 //     morning: he decided the button sits too close to the
 //     "+ Add Tx" pill. (Broadcast armed stays.)
 //   - the vacation card (0.8.0 redesign): check-in-only
@@ -889,7 +889,7 @@ function check(name, cond, detail) {
     idx.indexOf('id="btc-op-section"') !== -1 && idx.indexOf('id="btc-op-any"') !== -1 && idx.indexOf('id="btc-op-all"') !== -1
     && idx.indexOf('id="btc-op-note"') !== -1 && idx.indexOf('id="btc-rules-list"') !== -1
     && idx.indexOf('id="btc-add-rule"') !== -1 && idx.indexOf('id="btc-rules-cap-note"') !== -1, '');
-  check('add rule list 0.8.2 v2: the combine cards carry Ryan\'s exact descriptions',
+  check('add rule list 0.8.2 v2: the combine cards carry the owner\'s exact descriptions',
     idx.indexOf('Broadcasts when any one rule is met') !== -1 && idx.indexOf('Broadcasts when all rules are simultaneously met') !== -1, '');
   check('add rule list 0.8.2 v2: the static HTML has no once-per-type note (the disabled option says it)',
     idx.indexOf('only once per transaction') === -1, '');
@@ -2707,7 +2707,7 @@ function check(name, cond, detail) {
   // --- 19. Getting Started empty-state card (0.8.0) ---
   // When no transactions are STAGED (active), a "Getting
   // Started" card appears at the very top of the Dashboard —
-  // the first thing a fresh install sees — with Ryan's exact
+  // the first thing a fresh install sees — with the owner's exact
   // copy and a full-width orange button that switches to the
   // Transactions tab and scrolls to the "Add a transaction"
   // form. Archived (settled) and pending transactions do NOT
@@ -3457,8 +3457,8 @@ function check(name, cond, detail) {
     && idx.indexOf('Installed version:') !== -1 && idx.indexOf('id="app-version"') !== -1, '');
   check('app version static: the card has no "?" button and no details (just the version line)',
     idx.indexOf('id="help-version"') === -1, '');
-  check('app version: the installed version reads 0.8.10 (from /api/health)',
-    els['app-version'] && els['app-version'].textContent === '0.8.10',
+  check('app version: the installed version reads 0.8.11.1 (from /api/health)',
+    els['app-version'] && els['app-version'].textContent === '0.8.11.1',
     els['app-version'] && els['app-version'].textContent);
   setFilter('general');
   check('app version: the card is visible under General',
@@ -4145,7 +4145,7 @@ function check(name, cond, detail) {
   // history of the entire set — is its own collapsible,
   // collapsed by default like the per-tx History, above the
   // actions row. It was a plain always-expanded section in
-  // the 0.8.7 base (a v6 mockup choice); Ryan asked for the
+  // the 0.8.7 base (a v6 mockup choice); the owner asked for the
   // collapsible back. (0.8.7 fix, round 9) It is the ONLY
   // History on the card now: member histories (round 7) are
   // gone, and the members' trails are backfilled into this
@@ -4597,7 +4597,7 @@ function check(name, cond, detail) {
   await rerender(appJs);
 
   // --- §28e (0.8.7 fix, round 10): release readiness, one
-  // card per trigger set — Ryan's case. The members were
+  // card per trigger set — the owner's case. The members were
   // created inside the set, so they carry NO label of their
   // own: before this fix the second one showed up on the
   // Dashboard as "Untitled transaction" with an Unknown pill

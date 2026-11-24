@@ -167,8 +167,9 @@ GOAL = os.path.dirname(_TESTDIR)
 STUB = os.path.join(_TESTDIR, 'stubs.js')
 
 
-def app_dir(root, candidates=('branch-0810-fixes', 'branch-local-peak', 'branch-0.8.8-nonrpc', 'branch-0.8.8', 'standby', 'branch-split', 'branch-speedup', 'branch-0.8.7.2', 'branch-0.8.7.1', 'branch-0.8.7', 'branch-0.8.6', 'branch-0.8.5', 'branch-0.8.4', 'branch-0.8.3', 'app')):
-    """The app dir under a root: branch-0810-fixes/ in the goal dir (0.8.10
+def app_dir(root, candidates=('branch-0811-secure-defaults', 'branch-0810-fixes', 'branch-local-peak', 'branch-0.8.8-nonrpc', 'branch-0.8.8', 'standby', 'branch-split', 'branch-speedup', 'branch-0.8.7.2', 'branch-0.8.7.1', 'branch-0.8.7', 'branch-0.8.6', 'branch-0.8.5', 'branch-0.8.4', 'branch-0.8.3', 'app')):
+    """The app dir under a root: branch-0811-secure-defaults/ in the goal dir (0.8.11
+    working copy), branch-0810-fixes/ in the goal dir (0.8.10
     working copy), branch-local-peak/ in the goal dir (0.8.9
     working copy), branch-0.8.8-nonrpc/ in the goal dir (0.8.8
     working copy), standby/ in a repo checkout,
@@ -1386,7 +1387,7 @@ def main():
         # --- 0.6.10: a broadcast the network no longer knows -------
         # A broadcasted transaction the stubs never saw: restore a
         # backup carrying one (its txid was never POSTed, so both
-        # endpoints 404 it — the dropped-from-the-mempool case Ryan
+        # endpoints 404 it — the dropped-from-the-mempool case the owner
         # hit with two transactions sharing an input). The
         # confirmations check must report it not found, persist
         # that verdict, and keep saying so on a second check.
@@ -1987,8 +1988,8 @@ def main():
             check('csrf: an Origin matching Host is allowed',
                   s == 200 and r.get('paused') is True, r)
             s, r = req('POST', '/api/resume', {}, base=cbase,
-                       headers={'Origin': 'http://192.168.1.20',
-                                'X-Forwarded-Host': '192.168.1.20'})
+                       headers={'Origin': 'http://192.0.2.20',
+                                'X-Forwarded-Host': '192.0.2.20'})
             check('csrf: an Origin matching X-Forwarded-Host is allowed (the proxy path)',
                   s == 200 and r.get('paused') is False, r)
             s, r = req('POST', '/api/settings', {'thresholdDays': 35}, base=cbase,

@@ -186,7 +186,7 @@ function newSetId() {
 // trigger for $0 or $999,999,999 is a typo, not a rule); the outpoint
 // must be a 64-hex txid, a colon, and an output index.
 // (0.8.2) MAX_RULES_PER_TX caps the rules in one set — a proposed
-// cap, not Ryan's decision (5 is enough for any real rule set and
+// cap, not the owner's decision (5 is enough for any real rule set and
 // keeps the combine readable); raise it here if a set ever needs more.
 // ---------------------------------------------------------------------------
 const TRIGGER_TYPES = ['checkin', 'price', 'utxo', 'manual', 'blockheight', 'setdate', 'feemarket'];
@@ -529,8 +529,43 @@ function mergeDefaults(def, saved) {
   return out;
 }
 
+// (0.8.11.1) The data directory holds signed transactions, which
+// are bearer: anyone who can read the hex can broadcast it. So the
+// directory is owner-only (0700) and every file in it is written
+// owner-only (0600) — state.json, its backups, the logs, the
+// heartbeat. Other users on the same machine cannot read them.
+// (The check-in directory is NOT covered: it holds only key hashes
+// and a timestamp, and is shared with the receiver process.)
+const DATA_DIR_MODE = 0o700;
+const DATA_FILE_MODE = 0o600;
+
 function ensureDir(dataDir) {
-  fs.mkdirSync(dataDir, { recursive: true });
+  fs.mkdirSync(dataDir, { recursive: true, mode: DATA_DIR_MODE });
+}
+
+// Startup pass (0.8.11.1): tighten an existing data directory
+// written by an older version (0755 / 0644). Best effort — a file
+// this process does not own cannot be chmod-ed, and the startup
+// writability check reports that separately. Subdirectories are
+// left alone (on Umbrel the shared check-in directory lives in
+// here). Returns the number of entries changed.
+function secureDataDir(dataDir) {
+  let changed = 0;
+  try {
+    const st = fs.statSync(dataDir);
+    if ((st.mode & 0o777) !== DATA_DIR_MODE) { fs.chmodSync(dataDir, DATA_DIR_MODE); changed++; }
+  } catch (e) { return changed; }
+  let names = [];
+  try { names = fs.readdirSync(dataDir); } catch (e) { return changed; }
+  for (const name of names) {
+    const file = path.join(dataDir, name);
+    try {
+      const st = fs.lstatSync(file);
+      if (!st.isFile()) continue;
+      if ((st.mode & 0o777) !== DATA_FILE_MODE) { fs.chmodSync(file, DATA_FILE_MODE); changed++; }
+    } catch (e) { /* not ours, or gone — skip */ }
+  }
+  return changed;
 }
 
 // ---------------------------------------------------------------------------
@@ -1129,7 +1164,7 @@ function saveState(dataDir, state) {
   // (0.8.3) Rotate the backups while the current state.json is
   // still the previous version — see rotateStateBackups above.
   rotateStateBackups(dataDir);
-  writeFileDurable(file, JSON.stringify(state, null, 2) + '\n');
+  writeFileDurable(file, JSON.stringify(state, null, 2) + '\n', DATA_FILE_MODE);
   const written = fs.statSync(file);
   lastWritten.set(file, { comparable, mtimeMs: written.mtimeMs, size: written.size });
   return state;
@@ -1195,7 +1230,7 @@ function writeHeartbeat(dataDir, isoNow) {
   // backup rotation — the file is a few bytes and is rewritten
   // every few minutes). Records the write for the throttle.
   ensureDir(dataDir);
-  writeFileDurable(path.join(dataDir, HEARTBEAT_FILE), JSON.stringify({ lastOnlineAt: isoNow }) + '\n');
+  writeFileDurable(path.join(dataDir, HEARTBEAT_FILE), JSON.stringify({ lastOnlineAt: isoNow }) + '\n', DATA_FILE_MODE);
   heartbeatLastWrite.set(dataDir, Date.now());
 }
 
@@ -1277,10 +1312,15 @@ function fsyncDir(dir) {
   }
 }
 
-function writeFileDurable(file, content) {
+// `mode` (0.8.11.1, optional): the file's permission bits. Set on
+// the tmp file before the content is written, so the final file
+// never exists with looser permissions — even when a leftover .tmp
+// from a crash already existed with other bits.
+function writeFileDurable(file, content, mode) {
   const tmp = file + '.tmp';
-  const fd = fs.openSync(tmp, 'w');
+  const fd = mode === undefined ? fs.openSync(tmp, 'w') : fs.openSync(tmp, 'w', mode);
   try {
+    if (mode !== undefined) fs.fchmodSync(fd, mode);
     fs.writeFileSync(fd, content, 'utf8');
     fs.fsyncSync(fd);
   } finally {
@@ -1298,7 +1338,7 @@ function appendJsonl(dataDir, file, entry) {
   // reader skips a torn line) — but check-ins and broadcasts
   // are rare, so the fsync costs nothing.
   ensureDir(dataDir);
-  const fd = fs.openSync(path.join(dataDir, file), 'a');
+  const fd = fs.openSync(path.join(dataDir, file), 'a', DATA_FILE_MODE);
   try {
     fs.writeFileSync(fd, JSON.stringify(entry) + '\n', 'utf8');
     fs.fsyncSync(fd);
@@ -1330,11 +1370,11 @@ function writeJsonl(dataDir, file, entries) {
   // state.json — a full rewrite, so the durable helper fits.
   ensureDir(dataDir);
   const lines = (entries || []).map((e) => JSON.stringify(e)).join('\n');
-  writeFileDurable(path.join(dataDir, file), lines ? lines + '\n' : '');
+  writeFileDurable(path.join(dataDir, file), lines ? lines + '\n' : '', DATA_FILE_MODE);
 }
 
 module.exports = {
-  loadState, saveState, writeFileDurable, writeHeartbeat, touchHeartbeat, defaultState, newTxId, newSetId,
+  loadState, saveState, writeFileDurable, secureDataDir, DATA_DIR_MODE, DATA_FILE_MODE, writeHeartbeat, touchHeartbeat, defaultState, newTxId, newSetId,
   appendCheckin, readCheckins, writeCheckins,
   appendBroadcastLog, readBroadcastLog, writeBroadcastLog,
   normalizeTrigger, normalizeRule, triggerOf, triggerRulesOf, triggerTypesOf, hasTriggerType,

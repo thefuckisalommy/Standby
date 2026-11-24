@@ -23,7 +23,7 @@
 //   default (a different operator, so it is a genuine second path).
 //   Either can be any mempool.space-compatible instance — another public
 //   one, or the owner's own mempool on the LAN
-//   (e.g. http://192.168.1.10:8999). A blank secondary means the
+//   (e.g. http://<lan-ip>:8999). A blank secondary means the
 //   primary runs alone. A completed freshness check is definitive
 //   (a spent input is a chain fact, not a reason to ask the other
 //   endpoint); only a failed check falls through to the next endpoint.
@@ -46,6 +46,7 @@
 const crypto = require('crypto');
 const http = require('http');
 const https = require('https');
+const { MEMPOOL_OVERRIDE, PRICE_API_URL_OVERRIDE, SLIPSTREAM_API_URL_OVERRIDE } = require('./config');
 const { appendBroadcastLog, sanitizeFeeHistory, FEE_HISTORY_WINDOW_DAYS, FEE_HISTORY_MIN_OBSERVATIONS, FEE_HISTORY_MAX_ENTRIES } = require('./store');
 
 const MAX_TX_BYTES = 1000000; // 1 MB, same ceiling as the API body limit
@@ -55,11 +56,11 @@ const NET_TIMEOUT_MS = 15000;
 // Node endpoints — the user chooses them (settings.primaryApiUrl /
 // secondaryApiUrl). Each is a mempool API endpoint: any
 // mempool.space-compatible instance — another public one, or the owner's
-// own mempool on the LAN (e.g. http://192.168.1.10:8999). MEMPOOL_HOST
+// own mempool on the LAN (e.g. http://<lan-ip>:8999). MEMPOOL_HOST
 // / MEMPOOL_PORT / MEMPOOL_PROTOCOL env vars let a self-hoster (or a
 // test) point the app at an instance instead; when set they win over
-// the configured PRIMARY URL. There is no env override for the
-// secondary.
+// the configured PRIMARY URL (parsed in lib/config.js, and logged at
+// startup). There is no env override for the secondary.
 const DEFAULT_PUBLIC_API_URL = 'https://mempool.space';
 const DEFAULT_SECONDARY_API_URL = 'https://blockstream.info/api';
 
@@ -78,11 +79,7 @@ function normalizePublicApiUrl(raw) {
 }
 
 function mempoolBase(settings) {
-  if (process.env.MEMPOOL_HOST) {
-    const proto = process.env.MEMPOOL_PROTOCOL || 'https:';
-    const port = parseInt(process.env.MEMPOOL_PORT || (proto === 'https:' ? '443' : '80'), 10);
-    return proto + '//' + process.env.MEMPOOL_HOST + ':' + port;
-  }
+  if (MEMPOOL_OVERRIDE) return MEMPOOL_OVERRIDE;
   return normalizePublicApiUrl(settings && settings.primaryApiUrl);
 }
 
@@ -1133,7 +1130,7 @@ const DEFAULT_PRICE_API_URL = 'https://api.coingecko.com';
 function priceApiBase() {
   // Legacy single override (0.8.0): the CoinGecko base. Kept so
   // the built-in providers and the existing tests keep working.
-  const v = (process.env.PRICE_API_URL || '').trim();
+  const v = PRICE_API_URL_OVERRIDE;
   if (!v) return DEFAULT_PRICE_API_URL;
   let u;
   try { u = new URL(v); } catch { throw new Error('invalid price URL: ' + v); }
@@ -1141,15 +1138,15 @@ function priceApiBase() {
   return u.protocol + '//' + u.host;
 }
 
-// The base URL one provider fetches from: PRICE_API_URL (when set)
+// The base URL one provider fetches from: PRICE_API_URL (when set —
+// honored in test mode only, see lib/config.js)
 // overrides every BUILT-IN provider to the same base — the test
 // hook, so a stub server can answer all five providers on their
 // own paths. A custom source's URL is explicit (the owner typed
 // it), so the override never redirects it. Otherwise the
 // provider's own default base.
 function priceProviderBase(provider) {
-  const v = (process.env.PRICE_API_URL || '').trim();
-  if (v && provider.id !== 'custom') return priceApiBase();
+  if (PRICE_API_URL_OVERRIDE && provider.id !== 'custom') return priceApiBase();
   return provider.baseUrl;
 }
 
@@ -1294,7 +1291,7 @@ function priceConsensus(readings, agreementPct) {
   return primary.price;
 }
 
-// The verdict itself (Ryan's ladder, Nov 14, extended 0.7.21 with
+// The verdict itself (the owner's ladder, Nov 14, extended 0.7.21 with
 // Critical Risk): first the CURRENT check — a fee below the current
 // economy fee would not confirm within a day right now, so it is
 // Critical Risk whatever the history says. Otherwise the
@@ -1393,7 +1390,7 @@ async function broadcastViaApi(hex, txid, apiBase) {
 const DEFAULT_SLIPSTREAM_API_URL = 'https://slipstream.mara.com';
 
 function slipstreamBase() {
-  const v = (process.env.SLIPSTREAM_API_URL || '').trim();
+  const v = SLIPSTREAM_API_URL_OVERRIDE;
   if (!v) return DEFAULT_SLIPSTREAM_API_URL;
   let u;
   try { u = new URL(v); } catch { throw new Error('invalid Slipstream URL: ' + v); }

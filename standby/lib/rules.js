@@ -275,7 +275,7 @@ async function checkUtxoRule(state, rule, now, ctx) {
 // that counts (the secondary is only a fallback if the primary
 // does not answer; a node a block or two ahead is normal
 // propagation lag). Judged fresh every evaluation, like every
-// other rule (0.8.4: the one-way latch is gone at Ryan's call —
+// other rule (0.8.4: the one-way latch is gone at the owner's call —
 // a reorg that drops the tip below the target un-fires the rule
 // again, so a height reached while disarmed, in backoff, or while
 // an AND set waits on another rule can be missed). A broadcast
@@ -514,7 +514,7 @@ async function evaluateRule(state, tx, ruleIndex, now, utxoBatch) {
 //     ignored — a setdate rule still fires while its sibling price
 //     rule cannot be read.
 //   AND: fire iff EVERY rule is SATISFIED at this same tick —
-//     "all at once" (Ryan, Nov 18), no per-rule latching.
+//     "all at once" (owner, Nov 18), no per-rule latching.
 //     Any UNKNOWN, HELD, or SKIPPED rule blocks it.
 // The combined status is the tx-level word: a one-rule set reads
 // exactly as its single rule did ('on-track', 'grace', 'due',

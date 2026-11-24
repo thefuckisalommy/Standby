@@ -70,6 +70,13 @@ function writeReceiverKeys(state) {
   } catch (e) {
     // No shared directory (a plain `node server.js` run, or the
     // receiver is not installed) — the keys are inert until it is.
+    // (0.8.11.1) But when the directory IS there, a failed write
+    // matters: a revoked key would stay valid at the receiver. Say
+    // so loudly instead of swallowing it.
+    if (fs.existsSync(CHECKIN_DIR)) {
+      console.error('Standby: ERROR: could not update the receiver key list (' + path.join(CHECKIN_DIR, 'keys.json') + '): ' + e.message
+        + ' — a key created or revoked just now is NOT in effect at the receiver until this is fixed.');
+    }
   }
 }
 
