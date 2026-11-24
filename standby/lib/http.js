@@ -23,8 +23,32 @@ function serveStatic(req, res, pathname) {
   if (!resolved.startsWith(PUBLIC_DIR)) { sendError(res, 403, 'forbidden'); return; }
   if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) { sendError(res, 404, 'not found'); return; }
   const ext = path.extname(resolved);
+  setSecurityHeaders(res);
   res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
   fs.createReadStream(resolved).pipe(res);
+}
+
+// ---------------------------------------------------------------------------
+// Security headers (0.8.10, audit fix 3): every response carries
+// X-Frame-Options (the UI is never legitimately framed) and
+// X-Content-Type-Options: nosniff, plus a Content-Security-Policy.
+// The policy is minimal for what this page actually uses: its only
+// script is the external /app.js (script-src 'self' — no inline
+// scripts, no eval), its only stylesheet is /style.css, its only
+// image is /logo.jpg, and it fetches only same-origin /api paths
+// (connect-src 'self'). The page DOES use inline style="..."
+// attributes everywhere, so style-src allows 'unsafe-inline' — a
+// strict style-src would break the UI; scripts stay locked down.
+// frame-ancestors 'self' backs the X-Frame-Options header.
+// sendJson/sendError (lib/util.js) call this too — the same policy
+// on API responses is inert there (CSP governs the page, not a JSON
+// payload), and one code path beats two.
+const CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'self'";
+
+function setSecurityHeaders(res) {
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Content-Security-Policy', CSP);
 }
 
 // ---------------------------------------------------------------------------
@@ -103,4 +127,4 @@ function saveMutation(mutator) {
   return fresh;
 }
 
-module.exports = { MIME, serveStatic, hostOf, isLoopback, csrfAllowed, saveMutation };
+module.exports = { MIME, serveStatic, hostOf, isLoopback, csrfAllowed, saveMutation, setSecurityHeaders, CSP };

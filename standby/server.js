@@ -49,10 +49,32 @@ const { verifyCheckinKeyStore } = require('./lib/checkin');
 const { runFullTick, runHourlyTick, refreshCurrentFeesIfStale, recomputeStoredFees, rearmFullTick } = require('./lib/release');
 const { refreshPriceIfStale } = require('./lib/prices');
 const { handleApi } = require('./lib/api');
-const { serveStatic, sendError } = require('./lib/http');
+const { serveStatic, sendError, setSecurityHeaders } = require('./lib/http');
+
+// (0.8.10, audit fix 1) Backstop for anything that throws outside a
+// guarded handler (e.g. a timer callback): log it and keep serving
+// instead of exiting. The request handler below is guarded, so a bad
+// request can no longer reach this; the process survives an
+// unexpected throw rather than dying on it. State is re-read from
+// disk on every load, so a surviving process does not carry a torn
+// in-memory snapshot from the failed handler.
+process.on('uncaughtException', (e) => {
+  console.error('uncaught exception:', e);
+});
 
 const server = http.createServer((req, res) => {
-  const url = new URL(req.url, 'http://localhost');
+  let url;
+  try {
+    url = new URL(req.url, 'http://localhost');
+  } catch (e) {
+    // (0.8.10, audit fix 1) A malformed request target (e.g.
+    // `GET // [`) used to throw here, uncaught, and kill the
+    // process. Answer 400 and keep serving instead.
+    setSecurityHeaders(res);
+    res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('Bad request URL');
+    return;
+  }
   const pathname = url.pathname;
   if (pathname.startsWith('/api/')) {
     handleApi(req, res, pathname).catch((e) => {

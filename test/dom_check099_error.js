@@ -350,6 +350,14 @@ class El {
     this.id = '';
   }
   appendChild(c) { this.children.push(c); return c; }
+  insertBefore(c, ref) {
+    // (0.8.10, fix 4) The load-failure notice uses insertBefore
+    // (first child of <main>); a null/unknown ref appends, like the
+    // real DOM. The shim's <main> override captures the insert.
+    const i = ref ? this.children.indexOf(ref) : -1;
+    if (i === -1) this.children.push(c); else this.children.splice(i, 0, c);
+    return c;
+  }
   removeChild(c) { this.children = this.children.filter((x) => x !== c); return c; }
   addEventListener(ev, fn) { (this.listeners[ev] = this.listeners[ev] || []).push(fn); }
   setAttribute() {}
@@ -397,7 +405,7 @@ function tabSections() {
 
 global.document = {
   getElementById: (id) => els[id] || (els[id] = Object.assign(new El('div'), { id })),
-  querySelector: (sel) => (sel === 'main' ? Object.assign(new El('main'), { insertAdjacentHTML: (pos, html) => { global.__loadError = html; } }) : new El('div')),
+  querySelector: (sel) => (sel === 'main' ? Object.assign(new El('main'), { insertAdjacentHTML: (pos, html) => { global.__loadError = html; }, insertBefore: (el, ref) => { global.__loadNotice = el; } }) : new El('div')),
   querySelectorAll: (sel) => {
     if (sel === '#tabs button') return tabEls();
     if (sel === 'section.tab') return tabSections();
@@ -598,6 +606,38 @@ function errorCardVisible() {
     document.getElementById('getting-started-card')
       && document.getElementById('getting-started-card').style.display !== 'none',
     document.getElementById('getting-started-card') && document.getElementById('getting-started-card').style.display);
+
+  // --- load-failure notice escapes markup (0.8.10, fix 4) ------------
+  // The generic notice (not the state-error card) fires when load()
+  // fails with an error that is NOT a corrupt/missing state file.
+  // Feed it one whose message is markup: the old insertAdjacentHTML
+  // code would have parsed it as HTML; the textContent code must
+  // render it literally, with no element children.
+  const savedFetch = global.fetch;
+  global.fetch = (path, opts) => {
+    if (path === '/api/state') {
+      return Promise.resolve({ ok: false, status: 500, json: async () => ({ error: '<b>markup</b> & "quotes"' }) });
+    }
+    return savedFetch(path, opts);
+  };
+  global.__loadNotice = undefined;
+  global.__loadError = undefined;
+  await rerender(appJs);
+  check('error: markup load failure takes the generic notice, not the state-error card',
+    !!global.__loadNotice && !errorCardVisible(),
+    global.__loadNotice ? global.__loadNotice.textContent : 'no notice');
+  check('error: the notice text is literal markup, not parsed HTML',
+    !!global.__loadNotice && global.__loadNotice.textContent.indexOf('<b>markup</b>') !== -1,
+    global.__loadNotice ? global.__loadNotice.textContent : 'no notice');
+  check('error: the notice has no element children (nothing was parsed as HTML)',
+    !!global.__loadNotice && global.__loadNotice.children.length === 0,
+    global.__loadNotice ? global.__loadNotice.children.length : 'no notice');
+  check('error: the notice keeps the .notice.bad classes',
+    !!global.__loadNotice && global.__loadNotice.className === 'notice bad',
+    global.__loadNotice ? global.__loadNotice.className : 'no notice');
+  check('error: the old insertAdjacentHTML path was not taken',
+    !global.__loadError, global.__loadError || '');
+  global.fetch = savedFetch;
 
   await stopApp(); // leave nothing running: the launcher stops the receiver + stubs
   console.log('FAILURES: ' + failures.length);

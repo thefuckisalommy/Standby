@@ -3,6 +3,11 @@
 const { MAX_BODY } = require('./config');
 
 function sendJson(res, status, obj) {
+  // (0.8.10, audit fix 3) Security headers live in lib/http.js and
+  // are required lazily: http.js requires this module (for
+  // sendError), so a top-level require here would be a load-time
+  // cycle and capture undefined exports.
+  require('./http').setSecurityHeaders(res);
   const body = JSON.stringify(obj);
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body) });
   res.end(body);

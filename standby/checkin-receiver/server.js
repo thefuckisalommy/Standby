@@ -29,6 +29,11 @@ const CHECKIN_DIR = process.env.CHECKIN_DIR || '/checkin';
 const MAX_KEY_LEN = 256;
 
 function sendJson(res, status, obj) {
+  // (0.8.10, audit fix 3) The receiver serves JSON only: no full
+  // CSP, just nosniff + frame-ancestors, so its responses cannot be
+  // framed or sniffed as another type.
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Content-Security-Policy', "frame-ancestors 'self'");
   const body = JSON.stringify(obj);
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body) });
   res.end(body);
@@ -76,8 +81,27 @@ function writeLastCheckin(keyId, label, sourceIp) {
   return now;
 }
 
+// (0.8.10, audit fix 1) Backstop for anything that throws outside
+// a guarded handler: log it and keep serving instead of exiting —
+// the request handler below is guarded, so a bad request can no
+// longer reach this. A dead receiver would silently stop check-ins
+// while the dead-man's-switch countdown kept running.
+process.on('uncaughtException', (e) => {
+  console.error('uncaught exception:', e);
+});
+
 const server = http.createServer((req, res) => {
-  const url = new URL(req.url, 'http://localhost');
+  let url;
+  try {
+    url = new URL(req.url, 'http://localhost');
+  } catch (e) {
+    // (0.8.10, audit fix 1) A malformed request target (e.g.
+    // `GET // [`) used to throw here, uncaught, and kill the
+    // process. Answer 400 and keep serving instead.
+    res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('Bad request URL');
+    return;
+  }
   const pathname = url.pathname;
 
   if (req.method === 'GET' && pathname === '/health') {

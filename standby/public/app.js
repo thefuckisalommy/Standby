@@ -6087,7 +6087,14 @@
 
   load().catch(function (e) {
     if (/state\.json is (corrupt|missing)/.test(e.message)) { showStateError(e.message); return; }
-    document.querySelector('main').insertAdjacentHTML('afterbegin',
-      '<div class="notice bad">Could not load Standby state: ' + e.message + '</div>');
+    // (0.8.10, audit fix 4) The message is error text, not HTML:
+    // build the notice with textContent so markup in it renders
+    // literally instead of being parsed (insertAdjacentHTML used
+    // to splice e.message straight into the page).
+    var main = document.querySelector('main');
+    var notice = document.createElement('div');
+    notice.className = 'notice bad';
+    notice.textContent = 'Could not load Standby state: ' + e.message;
+    main.insertBefore(notice, main.firstChild);
   });
 })();

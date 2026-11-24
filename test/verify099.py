@@ -7,7 +7,7 @@ Boots the branch-0.8.5 app (port 3438), the check-in receiver
 (both fixed: tip height 900000, economy fee 1 sat/vB, price 98200)
 — and checks the 0.8.1 trigger work:
 
-  1. health reports version 0.8.9.
+  1. health reports version 0.8.10.
   2. Block-height trigger: validation at add (bad heights rejected,
      good ones accepted), checkTriggerNow (a height already reached
      fires + warns, a future height watches), evaluation via the
@@ -185,6 +185,12 @@ Boots the branch-0.8.5 app (port 3438), the check-in receiver
      nothing, and an already-stale tx is never re-checked
      (the stub outspend counters prove zero requests on a
      second hourly tick with no live staged txs left).
+  32. Audit fixes 1/3/4 (0.8.10): a malformed request target gets a
+      400 and the process keeps serving (app server and receiver);
+      security headers (X-Frame-Options, nosniff, CSP) on the page,
+      the API, and the receiver; the load-failure notice renders
+      its message as text, never as HTML (the DOM half of fix 4
+      lives in dom_check099_error.js).
 Ports: app 3438, receiver 3439, stubs 18235/18236 — no collision
 with the 095 suite (app 3388, receiver 3389, stubs 18175/18176) or
 the 096 suite (app 3398, receiver 3399, stubs 18185/18186).
@@ -192,6 +198,7 @@ Reuses the 094 helpers (import verify094 — importing does not run
 main()) and never touches the 095 files or the main app/ copy.
 """
 import copy
+import http.client
 import json
 import os
 import shutil
@@ -199,6 +206,9 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -209,6 +219,40 @@ check = v.check
 
 def req(method, path, body=None, base=None, timeout=20, headers=None):
     return v.req(method, path, body, base=base or BASE, timeout=timeout, headers=headers)
+
+
+# The expected security-header policy (0.8.10, fix 3) — kept in sync
+# with the CSP constant in branch-0810-fixes/lib/http.js. Asserted
+# exactly below: a drifted policy is a real regression, not a
+# cosmetic one.
+CSP_0810 = ("default-src 'self'; script-src 'self'; style-src 'self' "
+            "'unsafe-inline'; img-src 'self'; connect-src 'self'; "
+            "object-src 'none'; base-uri 'self'; frame-ancestors 'self'")
+
+
+def raw_get(path, base):
+    # Sends the request line verbatim (no client-side URL
+    # normalization) and returns (status, body bytes) — so a
+    # malformed target like // [ reaches the server exactly as typed.
+    u = urllib.parse.urlparse(base)
+    conn = http.client.HTTPConnection(u.hostname, u.port, timeout=5)
+    conn.putrequest('GET', path)
+    conn.putheader('Host', '%s:%d' % (u.hostname, u.port))
+    conn.endheaders()
+    r = conn.getresponse()
+    return r.status, r.read()
+
+
+def resp_headers(method, path, base):
+    # (status, {lower-cased header name: value}) for one request —
+    # v.req returns the parsed body only, and the header checks
+    # below need the raw response headers.
+    r = urllib.request.Request(base + path, method=method)
+    try:
+        with urllib.request.urlopen(r, timeout=10) as resp:
+            return resp.status, {k.lower(): vv for k, vv in resp.headers.items()}
+    except urllib.error.HTTPError as e:
+        return e.code, {k.lower(): vv for k, vv in e.headers.items()}
 
 
 craft = v.craft
@@ -482,7 +526,7 @@ def main():
 
         # --- 1. health + version ----------------------------------------
         s, h = req('GET', '/api/health')
-        check('1 health reports version 0.8.9', h.get('version') == '0.8.9', h)
+        check('1 health reports version 0.8.10', h.get('version') == '0.8.10', h)
 
         # --- 2. block-height trigger --------------------------------------
         # Validation at add: bad heights rejected, good ones accepted.
@@ -5242,6 +5286,45 @@ def main():
                 req('POST', '/__test__/fee-estimates-map', {'map': None}, base=STUB_BASE_P)
             except Exception:
                 pass
+
+        # --- 32. audit fixes 1/3/4 (0.8.10) ---------------------------
+        # (fix 1) A malformed request target gets a 400 and the
+        # process keeps serving — the app server and the receiver
+        # alike. (fix 3) Security headers on the page, the API, and
+        # the receiver.
+        s, body = raw_get('//[', BASE)
+        check('32 crash: malformed request line gets 400, not a dead server',
+              s == 400 and body == b'Bad request URL', (s, body))
+        s, r = req('GET', '/api/health')
+        check('32 crash: app still answers after the malformed request',
+              s == 200 and r.get('version') == '0.8.10', (s, r))
+        s, body = raw_get('//[', RBASE)
+        check('32 crash: malformed request line to the receiver gets 400',
+              s == 400 and body == b'Bad request URL', (s, body))
+        check('32 crash: receiver still answers after the malformed request',
+              wait_up(RBASE, path='/health'))
+        s, hdrs = resp_headers('GET', '/', BASE)
+        check('32 headers: / carries X-Frame-Options DENY',
+              hdrs.get('x-frame-options') == 'DENY', hdrs)
+        check('32 headers: / carries nosniff',
+              hdrs.get('x-content-type-options') == 'nosniff', hdrs)
+        check('32 headers: / carries the CSP (script-src self, inline styles allowed)',
+              hdrs.get('content-security-policy') == CSP_0810, hdrs.get('content-security-policy'))
+        s, hdrs = resp_headers('GET', '/api/health', BASE)
+        check('32 headers: /api/health carries X-Frame-Options DENY',
+              hdrs.get('x-frame-options') == 'DENY', hdrs)
+        check('32 headers: /api/health carries nosniff',
+              hdrs.get('x-content-type-options') == 'nosniff', hdrs)
+        check('32 headers: /api/health carries the full CSP',
+              hdrs.get('content-security-policy') == CSP_0810, hdrs.get('content-security-policy'))
+        s, hdrs = resp_headers('GET', '/health', RBASE)
+        check('32 headers: receiver /health carries nosniff',
+              hdrs.get('x-content-type-options') == 'nosniff', hdrs)
+        check('32 headers: receiver /health carries frame-ancestors only (no full CSP)',
+              hdrs.get('content-security-policy') == "frame-ancestors 'self'",
+              hdrs.get('content-security-policy'))
+        check('32 headers: receiver /health carries no X-Frame-Options',
+              'x-frame-options' not in hdrs, hdrs)
 
     finally:
         for p in list(v.procs):

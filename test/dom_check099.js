@@ -580,6 +580,14 @@ class El {
     this.id = '';
   }
   appendChild(c) { this.children.push(c); return c; }
+  insertBefore(c, ref) {
+    // (0.8.10, fix 4) The load-failure notice uses insertBefore
+    // (first child of <main>); a null/unknown ref appends, like the
+    // real DOM. The shim's <main> override captures the insert.
+    const i = ref ? this.children.indexOf(ref) : -1;
+    if (i === -1) this.children.push(c); else this.children.splice(i, 0, c);
+    return c;
+  }
   removeChild(c) { this.children = this.children.filter((x) => x !== c); return c; }
   addEventListener(ev, fn) { (this.listeners[ev] = this.listeners[ev] || []).push(fn); }
   setAttribute() {}
@@ -643,7 +651,7 @@ function tabSections() {
 
 global.document = {
   getElementById: (id) => els[id] || (els[id] = Object.assign(new El('div'), { id })),
-  querySelector: (sel) => (sel === 'main' ? Object.assign(new El('main'), { insertAdjacentHTML: (pos, html) => { global.__loadError = html; } }) : new El('div')),
+  querySelector: (sel) => (sel === 'main' ? Object.assign(new El('main'), { insertAdjacentHTML: (pos, html) => { global.__loadError = html; }, insertBefore: (el, ref) => { global.__loadNotice = el; } }) : new El('div')),
   querySelectorAll: (sel) => {
     if (sel === '#tabs button') return tabEls();
     if (sel === 'section.tab') return tabSections();
@@ -3432,8 +3440,8 @@ function check(name, cond, detail) {
     && idx.indexOf('Installed version:') !== -1 && idx.indexOf('id="app-version"') !== -1, '');
   check('app version static: the card has no "?" button and no details (just the version line)',
     idx.indexOf('id="help-version"') === -1, '');
-  check('app version: the installed version reads 0.8.9 (from /api/health)',
-    els['app-version'] && els['app-version'].textContent === '0.8.9',
+  check('app version: the installed version reads 0.8.10 (from /api/health)',
+    els['app-version'] && els['app-version'].textContent === '0.8.10',
     els['app-version'] && els['app-version'].textContent);
   setFilter('general');
   check('app version: the card is visible under General',
