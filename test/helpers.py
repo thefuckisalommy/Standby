@@ -22,6 +22,8 @@ TMP = tempfile.gettempdir()
 # The repository root; the app lives in its standby/ folder.
 GOAL = os.path.dirname(_TESTDIR)
 STUB = os.path.join(_TESTDIR, 'stubs.js')
+# The app version, from the one place it is defined.
+VERSION = json.load(open(os.path.join(GOAL, 'standby', 'package.json')))['version']
 
 
 def app_dir(root):

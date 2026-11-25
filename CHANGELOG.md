@@ -1,8 +1,12 @@
 # Changelog
 
-What changed in each Standby release, newest first. The same notes appear in the Umbrel app store (`standby/umbrel-app.yml`). Releases before 0.8.1 are recorded in the git history.
+What changed in each Standby release, newest first. The newest few also appear in the Umbrel app store (`standby/umbrel-app.yml`); `node tools/bump-version.js <version>` adds a release to both. Releases before 0.8.1 are recorded in the git history.
 
 Code comments describe how the app works now; the history of why it changed lives here and in git.
+
+## 0.8.18
+
+Maintenance release with no change to how the app works: a one-command version bump for releases (tools/bump-version.js), the tests read the version from package.json, code lint runs in CI, and these release notes keep only the latest few releases (the full history is in CHANGELOG.md).
 
 ## 0.8.17
 

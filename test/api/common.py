@@ -23,6 +23,7 @@ import helpers as v
 
 check = v.check
 TMP = v.TMP
+VERSION = v.VERSION
 
 
 def req(method, path, body=None, base=None, timeout=20, headers=None):

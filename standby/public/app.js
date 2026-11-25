@@ -1315,9 +1315,6 @@
   // press rebuilds every card). Keyed by tx id; set only once the user
   // toggles something, otherwise defaults apply.
   var txUiState = {};
-  // Public fallback durations: the seven the server accepts, plus Never
-  // (null).
-  var FALLBACK_DAYS = [1, 3, 7, 14, 30, 60, 90];
   // The note under the fallback select: what the duration means (Never:
   // MARA holds it until mined or dropped).
   function fallbackAddNote(days) {
@@ -4588,10 +4585,6 @@
         { id: 'custom', label: 'Custom' },
       ];
     var psrc = (S.settings && S.settings.priceSources) || { source1: 'coingecko', source2: 'coinbase' };
-    function providerLabel(id) {
-      for (var i = 0; i < providers.length; i++) if (providers[i].id === id) return providers[i].label;
-      return id;
-    }
     function fillPriceSelect(sel, val) {
       sel.innerHTML = '';
       providers.forEach(function (p) {
@@ -4969,10 +4962,8 @@
 
   // Settings filter: shows cards whose triggers array includes the chosen
   // type; resets to All when the tab opens.
-  var settingsFilter = 'all';
   function applySettingsFilter(name) {
     if (!SETTINGS_HELP) return;
-    settingsFilter = name;
     var sel = $('filter-select');
     if (sel) sel.value = name;
     Object.keys(SETTINGS_HELP).forEach(function (key) {

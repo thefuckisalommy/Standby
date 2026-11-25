@@ -19,7 +19,7 @@ services:
     # Prebuilt for amd64 and arm64 by GitHub Actions
     # (.github/workflows/build-standby-image.yml), tagged with the app
     # version — installing the app just pulls it, no build step.
-    image: ghcr.io/thefuckisalommy/standby:0.8.17
+    image: ghcr.io/thefuckisalommy/standby:0.8.18
     user: "1000:1000"
     restart: on-failure
     stop_grace_period: 1m30s
@@ -81,7 +81,7 @@ services:
   # a newer timestamp from last.json on every status read and on the
   # hourly tick.
   checkin:
-    image: ghcr.io/thefuckisalommy/standby:0.8.17
+    image: ghcr.io/thefuckisalommy/standby:0.8.18
     command: ["node", "checkin-receiver/server.js"]
     user: "1000:1000"
     restart: on-failure
