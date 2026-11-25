@@ -305,6 +305,20 @@ def run():
     s, r = req('GET', '/api/state', base=_ab, headers=_ah)
     check('40b fresh: the login survives start fresh, and setup runs again',
           s == 200 and r.get('setup') == {'done': False} and os.path.exists(_lf), (s, r.get('setup')))
+    # A password sent as a Bearer token shares the login limit: wrong
+    # guesses count, then even the right one is 429 (on both paths); a
+    # session token keeps working.
+    _bearer = [req('GET', '/api/state', base=_ab, headers={'Authorization': 'Bearer guess %d guess' % i})[0] for i in range(10)]
+    # Three wrong passwords above (a change, two start-fresh attempts)
+    # already count: every path shares one limit of ten a minute.
+    check('40b bearer: wrong Bearer passwords are 401 until the shared limit (10 a minute, 3 used above), then 429',
+          _bearer == [401] * 7 + [429] * 3, _bearer)
+    s, r = req('GET', '/api/state', base=_ab, headers={'Authorization': 'Bearer another app password'})
+    check('40b bearer: then even the right Bearer password is 429', s == 429, (s, r))
+    s, r = req('POST', '/api/login', {'password': 'another app password'}, base=_ab)
+    check('40b bearer: the login screen shares the limit (429)', s == 429, (s, r))
+    s, r = req('GET', '/api/state', base=_ab, headers=_ah)
+    check('40b bearer: a session token still works while limited', s == 200, s)
     # --reset-password at start removes it.
     stop(_auth_app)
     _e = dict(APP_ENV)
@@ -332,6 +346,40 @@ def run():
     _cp = subprocess.run(['node', 'server.js'], env=dict(os.environ, **_e), cwd=APP, capture_output=True, text=True, timeout=20)
     check('40b damaged: an unreadable login.json exits 1 and names the fix',
           _cp.returncode == 1 and 'login.json' in _cp.stderr and 'Delete it' in _cp.stderr, (_cp.returncode, _cp.stderr[-300:]))
+    os.remove(_lf)
+    # Every field is checked at start: a file that parses but cannot be
+    # used stops the start too (scrypt would otherwise fall back to its
+    # defaults and refuse the right password forever).
+    import hashlib
+    _salt = os.urandom(16)
+    _good = {'format': 'standby-login', 'version': 1,
+             'kdf': {'name': 'scrypt', 'N': 2 ** 15, 'r': 8, 'p': 1, 'keylen': 32},
+             'salt': base64.b64encode(_salt).decode(),
+             'hash': base64.b64encode(hashlib.scrypt(_apw.encode(), salt=_salt, n=2 ** 15, r=8, p=1, dklen=32, maxmem=2 ** 26)).decode()}
+    _bad_docs = {
+        'an empty kdf': dict(_good, kdf={}),
+        'a kdf that is not scrypt': dict(_good, kdf=dict(_good['kdf'], name='pbkdf2')),
+        'N not a power of two': dict(_good, kdf=dict(_good['kdf'], N=30000)),
+        'N too large': dict(_good, kdf=dict(_good['kdf'], N=2 ** 22)),
+        'r out of range': dict(_good, kdf=dict(_good['kdf'], r=0)),
+        'too much memory': dict(_good, kdf=dict(_good['kdf'], N=2 ** 20, r=16)),
+        'a short salt': dict(_good, salt=base64.b64encode(b'x' * 8).decode()),
+        'a short hash': dict(_good, hash=base64.b64encode(b'x' * 16).decode()),
+        'a hash that is not base64': dict(_good, hash='%' * 44),
+        'a missing hash': {k: v for k, v in _good.items() if k != 'hash'},
+    }
+    for _what, _doc in _bad_docs.items():
+        json.dump(_doc, open(_lf, 'w'))
+        _cp = subprocess.run(['node', 'server.js'], env=dict(os.environ, **_e), cwd=APP, capture_output=True, text=True, timeout=20)
+        check('40b damaged: %s stops the start with the fix' % _what,
+              _cp.returncode == 1 and 'not a usable Standby login file' in _cp.stderr and 'Delete it' in _cp.stderr,
+              (_cp.returncode, _cp.stderr[-300:]))
+    json.dump(_good, open(_lf, 'w'))
+    _auth_app = start(['node', 'server.js'], env=_e, cwd=APP, log=_bind_log)
+    check('40b damaged: a well-formed file (made outside the app) is accepted', wait_up(_ab))
+    s, r = req('POST', '/api/login', {'password': _apw}, base=_ab)
+    check('40b damaged: and its password logs in', s == 200 and str(r.get('token', '')).startswith('v1.'), (s, r))
+    stop(_auth_app)
     os.remove(_lf)
     # An install from before setup existed loads as set up.
     _sf = os.path.join(_bind_data, 'state.json')

@@ -21,7 +21,7 @@ The password guards the app's controls (the web page and API); it does not encry
 
 **Start fresh** (Settings) deletes every transaction, set, log, API key, saved node login and automatic backup in the data folder, after asking for the password and a typed DELETE. The app login is kept.
 
-Sessions last 30 days; Settings → App login → Log out everywhere ends them all. The token is kept in the browser's storage for this address, not in a cookie (a cookie on `umbrel.local` would reach every app there). Ten wrong passwords in a minute lock the login for that minute.
+Sessions last 30 days; Settings → App login → Log out everywhere ends them all. The token is kept in the browser's storage for this address, not in a cookie (a cookie on `umbrel.local` would reach every app there). Ten wrong passwords in a minute, counted together wherever they are sent (the login screen, a password change, Start fresh, or a script's `Authorization: Bearer` header), lock the login for that minute; a browser already logged in keeps working.
 
 Standby does not encrypt its own connection. Over plain `http://` the password and session token can be captured on the network: use HTTPS, SSH or Tailscale where the network is not yours.
 

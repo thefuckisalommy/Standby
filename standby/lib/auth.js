@@ -30,6 +30,8 @@ const LOGIN_FORMAT = 'standby-login';
 const MIN_PASSWORD_LENGTH = 12;
 const MAX_PASSWORD_LENGTH = 1024;
 const KDF = { N: 2 ** 15, r: 8, p: 1, keylen: 32 };
+const SALT_BYTES = 16;
+const SCRYPT_MAXMEM = 256 * 1024 * 1024;
 const TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const TOKEN_SKEW_MS = 5 * 60 * 1000; // a token "issued" further ahead than this is refused
 const LOGIN_WINDOW_MS = 60 * 1000;
@@ -49,17 +51,39 @@ function readAppLogin() {
     // A damaged file must not silently turn the login off.
     throw new Error(LOGIN_FILE + ' in the data folder is unreadable (' + e.message + '). Delete it to remove the app password.');
   }
-  if (!doc || doc.format !== LOGIN_FORMAT || doc.version !== 1 || !doc.kdf || typeof doc.salt !== 'string' || typeof doc.hash !== 'string') {
-    throw new Error(LOGIN_FILE + ' in the data folder is not a Standby login file. Delete it to remove the app password.');
+  const problem = loginDocProblem(doc);
+  if (problem) {
+    throw new Error(LOGIN_FILE + ' in the data folder is not a usable Standby login file (' + problem + '). Delete it to remove the app password.');
   }
-  return { salt: Buffer.from(doc.salt, 'base64'), hash: Buffer.from(doc.hash, 'base64'), kdf: doc.kdf };
+  return { salt: Buffer.from(doc.salt, 'base64'), hash: Buffer.from(doc.hash, 'base64'), kdf: { N: doc.kdf.N, r: doc.kdf.r, p: doc.kdf.p, keylen: doc.kdf.keylen } };
+}
+
+// Why a login document cannot be used, or null. Everything is checked at
+// startup, so a damaged file stops the start instead of failing every
+// login later (scrypt silently falls back to its defaults when a
+// parameter is missing, which would read as "wrong password" forever).
+const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+function loginDocProblem(doc) {
+  if (!doc || typeof doc !== 'object' || doc.format !== LOGIN_FORMAT || doc.version !== 1) return 'not a login file';
+  const k = doc.kdf;
+  if (!k || typeof k !== 'object' || k.name !== 'scrypt') return 'kdf must be scrypt';
+  const isInt = (v, lo, hi) => Number.isInteger(v) && v >= lo && v <= hi;
+  if (!isInt(k.N, 2 ** 14, 2 ** 20) || (k.N & (k.N - 1)) !== 0) return 'scrypt N out of range';
+  if (!isInt(k.r, 1, 16) || !isInt(k.p, 1, 4)) return 'scrypt r or p out of range';
+  if (128 * k.N * k.r * k.p > SCRYPT_MAXMEM) return 'scrypt parameters need too much memory';
+  if (k.keylen !== KDF.keylen) return 'hash length must be ' + KDF.keylen + ' bytes';
+  for (const [name, want] of [['salt', SALT_BYTES], ['hash', KDF.keylen]]) {
+    const v = doc[name];
+    if (typeof v !== 'string' || !BASE64.test(v) || Buffer.from(v, 'base64').length !== want) return name + ' must be ' + want + ' bytes of base64';
+  }
+  return null;
 }
 function appLoginNow() {
   if (appLogin === undefined) appLogin = readAppLogin();
   return appLogin;
 }
 function derive(plain, salt, kdf) {
-  return crypto.scryptSync(plain, salt, kdf.keylen || 32, { N: kdf.N, r: kdf.r, p: kdf.p, maxmem: 256 * 1024 * 1024 });
+  return crypto.scryptSync(plain, salt, kdf.keylen, { N: kdf.N, r: kdf.r, p: kdf.p, maxmem: SCRYPT_MAXMEM });
 }
 
 // Where the login comes from: 'env' (STANDBY_PASSWORD, Umbrel's
@@ -97,7 +121,7 @@ function passwordProblem(plain) {
 // Set or replace the app password. Every session signed with the old one
 // stops working (the token is bound to the password).
 function setAppPassword(plain) {
-  const salt = crypto.randomBytes(16);
+  const salt = crypto.randomBytes(SALT_BYTES);
   const hash = derive(plain, salt, KDF);
   const doc = { format: LOGIN_FORMAT, version: 1, kdf: { name: 'scrypt', N: KDF.N, r: KDF.r, p: KDF.p, keylen: KDF.keylen }, salt: salt.toString('base64'), hash: hash.toString('base64') };
   store.writeFileDurable(loginPath(), JSON.stringify(doc) + '\n', store.DATA_FILE_MODE);
@@ -164,12 +188,22 @@ function tokenValid(token, nowMs) {
   return want.length === got.length && crypto.timingSafeEqual(want, got);
 }
 
+// A password sent as a Bearer token is a guess like one at the login
+// screen: it shares the same limit (wrong ones count; while limited even
+// the right one is refused and req.standbyLoginLimited is set, so the API
+// answers 429).
 function requestAuthorized(req, nowMs) {
   if (!enabled()) return true;
   const token = req.headers['x-standby-token'];
   if (typeof token === 'string' && tokenValid(token, nowMs)) return true;
   const auth = req.headers.authorization;
-  if (typeof auth === 'string' && auth.startsWith('Bearer ')) return passwordMatches(auth.slice(7).trim());
+  if (typeof auth === 'string' && auth.startsWith('Bearer ')) {
+    if (loginLimited(nowMs)) { req.standbyLoginLimited = true; return false; }
+    if (passwordMatches(auth.slice(7).trim())) return true;
+    recordLoginFailure(nowMs);
+    console.warn('Standby: failed login attempt (Bearer)');
+    return false;
+  }
   return false;
 }
 
