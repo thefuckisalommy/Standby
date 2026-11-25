@@ -1,51 +1,9 @@
-// Standby 0.8.0 width check — the price $ amount field and every
-// guard-note in the Add and Edit forms, at 390px (Pixel 7).
-// The price row (op select + $ + number input) pushed the $ amount
-// off the right edge: .inline-unit input { flex: 1 } plus the base
-// input { width: 100% } left the input's min-width: auto (intrinsic
-// size) stopping it shrinking in the flex row. The fix is
-// min-width: 0 on .inline-unit input. This script proves the fix
-// and that no note in either form overflows or is cut off.
-//
-// Runs against the app the dom launcher boots on :3478 (seeded
-// with 4 armed txs). It does NOT start or stop any server — the
-// launcher runs it after dom_check099.js, while the app is up.
-// The Settings tab's BTC price sources card (two provider selects,
-// the 5% note, the per-source last-price lines) is covered at the
-// end, at the same 390px width.
-// The Dashboard tab's readiness rows are covered too: every
-// .readiness-tx-row must be a single line at 390px (label
-// truncated with an ellipsis, status pill never wrapping), and the
-// fee-verdict pill must still be present where it applies.
-// The Settings tab's reworked Vacation mode card and the new
-// Global Arm/Disarm card are covered too: both cards, the date
-// input, the Save / Arm all / Disarm all buttons and their msg
-// lines all fit at 390px.
-// The tab bar is covered too: main's top padding is 0 (no gap
-// above the tabs — the default matches the scrolled height, where
-// the tabs stick at top 60px), nav.tabs is sticky at
-// top 60px with z-index 40 and an opaque background, the appbar
-// stays sticky at top 0 with z-index 50, and scrolled 800px the
-// tabs sit directly below the appbar with no gap or overlap.
-// The "?" help button on every Settings card is covered too:
-// each one fits at 390px, sits in the header row to the right
-// of its heading without overlapping it, and stays a small
-// circle that does not compete with the Save button.
-// The Settings filter dropdown is covered too: one row at the
-// top of the tab, inside the 390px viewport, sitting above the
-// first card with no overlap.
-// The trimmed cards still fit — the existing per-card checks
-// above cover the inputs, buttons and msg lines that remain.
-// The Exchange vs Node status alignment is covered too: the
-// per-exchange rows' pills must share the Node rows' pills'
-// right-edge x position at 390px (one aligned column).
-// Usage (from the launcher, or by hand with the app already up):
-//   node width_check099.js
-// (Playwright resolves from test/node_modules — `npm install
-// playwright` in test/ — and the browsers from
-// PLAYWRIGHT_BROWSERS_PATH or Playwright's default cache.)
-// Exits 0 when every check passes, 1 otherwise. Prints one
-// PASS/FAIL line per check, then FAILURES: N.
+// Width check: Chromium (Playwright) at 390px against the app the DOM
+// launcher runs on :3478. Forms, notes, Settings cards, help buttons and
+// filter must fit; readiness rows stay one line; exchange and node pills
+// share a right edge; the tab bar sticks under the appbar.
+// Exits 0 when every check passes; prints PASS/FAIL per check, then
+// FAILURES: N.
 'use strict';
 const { chromium, devices } = require('playwright');
 
@@ -70,9 +28,8 @@ function check(name, cond, detail) {
   await page.waitForSelector('.tx-card', { timeout: 10000 });
   await page.waitForTimeout(400);
 
-  // A measurement for one element: no overflow inside it
-  // (scrollWidth <= clientWidth) and fully inside the viewport
-  // (right edge <= 390). Returns a short human-readable summary.
+  // No overflow inside the element and fully inside the 390px viewport.
+  // Returns a short summary.
   async function measure(sel) {
     return await page.evaluate((s) => {
       const el = document.querySelector(s);
@@ -92,10 +49,8 @@ function check(name, cond, detail) {
     if (m.right > 390) return { ok: false, why: label + ' cut off at the right edge (right ' + m.right + ' > 390)' };
     return { ok: true, why: label + ' fits (scrollWidth ' + m.sw + ' <= clientWidth ' + m.cw + ', right ' + m.right + ')' };
   }
-  // For inputs/selects: only the bounding box matters. A text
-  // input with a long value (a 67-char outpoint) legitimately has
-  // scrollWidth > clientWidth — its content scrolls inside it — so
-  // the inner-overflow check would be a false failure.
+  // Inputs and selects: only the bounding box matters (a long value
+  // scrolls inside the input).
   function fitsBox(m, label) {
     if (!m) return { ok: false, why: label + ' missing' };
     if (!m.visible) return { ok: false, why: label + ' not visible' };
@@ -117,19 +72,13 @@ function check(name, cond, detail) {
     check(name, sw <= 390, 'document scrollWidth ' + sw);
   }
 
-  // --- Trigger subcards: exactly 3 rows, each on its own line (0.8.0) ---
-  // The owner found rows 2 and 3 running together on the subcards;
-  // the fix is 3 block rows (header / condition / current state)
-  // on EVERY trigger type. Measure each card's subcard: it fits
-  // at 390px, and its 3 rows stack (each row starts below the
-  // previous one).
+  // --- Trigger subcards: three stacked rows ---
+  // Each card's subcard fits at 390px and its rows (header, condition,
+  // state) each start below the previous.
   const subcards = await page.evaluate(() => {
     return [...document.querySelectorAll('.tx-card')].map((card) => {
-      // (0.8.7 fix, round 3) Every card is a trigger set: the
-      // FIRST .tx-trigger on a card is its blue tx subcard
-      // (.tx-item) — the trigger box is the first PLAIN
-      // .tx-trigger. Details lives inside the tx subcard, never
-      // inside a trigger box.
+      // The first .tx-trigger is the blue tx subcard (.tx-item); the
+      // trigger box is the first plain one.
       const box = card.querySelector('.tx-trigger:not(.tx-item)');
       if (!box) return null;
       const rows = [...box.children].filter((el) => !el.classList.contains('tx-details')).map((el) => {
@@ -146,10 +95,8 @@ function check(name, cond, detail) {
   check('width subcards: every tx card has a subcard (at least the 4 seeded)',
     subcards.length >= 4 && subcards.every(Boolean),
     'subcards found: ' + subcards.filter(Boolean).length);
-  // (width-fix) One log line per subcard on failure: check()
-  // slices its detail to 200 chars, so the old single JSON line
-  // was cut off mid-number in the CI log and the culprit subcard
-  // could not be identified. Short lines survive truncation.
+  // One log line per subcard, so a failure survives check()'s 200-char
+  // truncation.
   const fitsOk = subcards.length >= 4 && subcards.every((s) => s && s.visible && s.sw <= s.cw && s.right <= 390);
   if (!fitsOk) {
     subcards.forEach((s, i) => console.log('  width subcards fit: subcard ' + i + ': ' + JSON.stringify(s && { sw: s.sw, cw: s.cw, right: s.right, visible: s.visible })));
@@ -158,12 +105,8 @@ function check(name, cond, detail) {
   check('width subcards: every subcard fits at 390px',
     fitsOk,
     fitsFailing.length ? 'failing subcard(s): ' + fitsFailing.join(', ') : 'fewer than 4 subcards (' + subcards.length + ')');
-  // (width-fix) 1px epsilon on the stacking boundary: this check
-  // exists to catch rows genuinely running together (the 0.8.0
-  // bug, tens of pixels of overlap), and getBoundingClientRect
-  // rounding differs a fraction of a pixel between Chromium builds
-  // (CI 1194 vs local 1187) — 1px forgives rounding only, it
-  // cannot mask a real overlap. The row COUNT stays exact.
+  // A 1px tolerance forgives rounding differences between Chromium builds;
+  // a real overlap is tens of pixels. The row count stays exact.
   function rowsStacked(rows) {
     return rows.length === 3
       && rows[1].top >= rows[0].bottom - 1
@@ -187,9 +130,8 @@ function check(name, cond, detail) {
   // The "+ Add Tx" pill in the Staged Transactions header fits.
   await checkEl('width bitcoin: "+ Add Tx" pill in the Staged header fits', '#btn-btc-add-pill');
 
-  // --- Add form: every trigger type + the fallback row ---
-  // The Add form is a popup now (#add-modal), not an inline card:
-  // open it via the bottom button before measuring its fields.
+  // --- Add form: every trigger type and the fallback row ---
+  // Open the #add-modal popup before measuring.
   await page.click('#btn-btc-add-open');
   await page.waitForSelector('#add-modal.open', { timeout: 5000 });
   await page.waitForTimeout(200);
@@ -247,9 +189,8 @@ function check(name, cond, detail) {
   await checkEl('width add: fallback note fits (90 days)', '#btc-fallback-note');
   await page.selectOption('#btc-route', 'public');
   await page.waitForTimeout(100);
-  // The Add message line, with a long txid in it (the add success
-  // message carries a 64-hex txid — the longest unbreakable string
-  // a note in this form can hold).
+  // The Add message with a 64-hex txid, the longest unbreakable string it
+  // can hold.
   await page.evaluate(() => {
     const el = document.querySelector('#btc-msg');
     if (el) el.textContent = 'Transaction added and armed. TXID ' + 'a'.repeat(64) + ' — use the toggle to unarm it.';
@@ -288,10 +229,8 @@ function check(name, cond, detail) {
   await page.waitForTimeout(100);
   await checkInput('width edit: check-in days input fits', '#edit-rule-0-threshold');
   await checkEl('width edit: check-in row fits', '#edit-rule-0-trigger-checkin-row .inline-unit');
-  // Fallback note in the Edit popup (Pending + Slipstream only, so
-  // reveal its parent row and the note itself — both are
-  // display:none on a non-Pending tx. The note carries its real
-  // static text; the check is that the text wraps at 390px).
+  // The Edit fallback note shows only for Pending + Slipstream; reveal it
+  // and its row, then check it wraps.
   await page.evaluate(() => {
     const row = document.querySelector('#edit-fallback-row');
     if (row) row.style.display = '';
@@ -317,9 +256,8 @@ function check(name, cond, detail) {
   });
   await page.waitForTimeout(200);
 
-  // --- Settings tab: the BTC price sources card (two-source 0.8.0) ---
-  // Switch to the Settings tab and check the two provider selects,
-  // the 5% note, and the per-source last-price lines all fit at 390px.
+  // --- Settings: BTC price sources ---
+  // Both selects, the 5% note and the last-price lines fit at 390px.
   await page.evaluate(() => {
     const b = [...document.querySelectorAll('#tabs button')].find((x) => x.dataset.tab === 'settings');
     if (b) b.click();
@@ -333,16 +271,11 @@ function check(name, cond, detail) {
   await checkEl('width settings: Source 2 row (name + status pill) fits', '#price-source2');
   await checkEl('width settings: Source 1 status pill fits', '#price-source1-status');
   await checkEl('width settings: Source 2 status pill fits', '#price-source2-status');
-  // Test connection (0.8.0): ONE button tests both sources; the
-  // results land on the rows themselves (no results line under
-  // the button any more). The Test button sits to the right of
-  // the Save button (same layout as the node card).
+  // One Test connection button, right of Save; results land on the rows.
   await checkEl('width settings: Save price sources button fits', '#btn-save-price-sources');
   await checkEl('width settings: Test connection button fits', '#btn-test-price-sources');
-  // The rows show name + pill + price ("Binance US (USDT) [OK]
-  // $98,200") — the longest case is the longest provider label
-  // with a price, so give row 1 realistic content first, then
-  // check both full rows fit at 390px.
+  // Rows read name, price and pill; fill row 1 with the longest provider
+  // label and a price, then check both fit.
   await page.evaluate(() => {
     const r = document.querySelector('#price-source1');
     if (r) r.textContent = 'Binance US (USDT)';
@@ -354,11 +287,8 @@ function check(name, cond, detail) {
   await checkEl('width settings: Source 1 row (name + pill + price) fits', '#price-source1-row');
   await checkEl('width settings: Source 2 row (name + pill + price) fits', '#price-source2-row');
 
-  // --- Settings tab: the three user-control cards (0.8.0) ---
-  // Price agreement (% input), Check cadence (seconds input),
-  // Fee verdict (two x peak inputs): each a number input with a
-  // unit shown, an explainer, and its own orange Save button.
-  // All must fit at 390px with no horizontal overflow.
+  // --- Settings: price agreement, check cadence, fee verdict ---
+  // Each card's input, unit, explainer and Save fit at 390px.
   await checkPage('width settings: document has no horizontal overflow (user controls)');
   await checkInput('width settings: price agreement input fits', '#set-price-agreement');
   await checkEl('width settings: price agreement row (input + % unit) fits', '#set-price-agreement-row');
@@ -372,9 +302,7 @@ function check(name, cond, detail) {
   await checkEl('width settings: fee Medium row (input + x peak tx fee unit) fits', '#set-fee-medium-row');
   await checkEl('width settings: fee zone bar fits', '#zone-bar');
   await checkEl('width settings: Save fee verdict button fits', '#btn-save-fee-verdict');
-  // The msg lines are empty until a Save is run, so give them
-  // realistic content first — the longest case is an error —
-  // then check they fit at 390px.
+  // Fill the msg lines with an error (the longest case) before measuring.
   await page.evaluate(() => {
     for (const [id, text] of [
       ['price-agreement-msg', 'priceAgreementPct must be a number between 1 and 20'],
@@ -389,12 +317,8 @@ function check(name, cond, detail) {
   await checkEl('width settings: check cadence msg line fits', '#check-cadence-msg');
   await checkEl('width settings: fee verdict msg line fits', '#fee-verdict-msg');
 
-  // --- Settings tab: the vacation + Global Arm/Disarm cards (0.8.0 redesign) ---
-  // The vacation card carries a check-in-only explainer, a date
-  // input and an indefinite checkbox; the Global Arm/Disarm card
-  // has two buttons side by side and its own explainer. All must
-  // fit at 390px with no horizontal overflow. The cards have no
-  // ids of their own, so measure them by their h2 text.
+  // --- Settings: vacation and Global Arm/Disarm ---
+  // Measured by their h2 text (no ids); everything fits at 390px.
   async function cardByHeading(heading) {
     return await page.evaluate((h) => {
       const card = [...document.querySelectorAll('#tab-settings .card')].find((c) => {
@@ -432,21 +356,9 @@ function check(name, cond, detail) {
   await checkEl('width settings: arm-all msg line fits', '#arm-all-msg');
   await checkPage('width settings: document has no horizontal overflow (vacation + arm/disarm)');
 
-  // --- Tab bar: sticky below the appbar, trimmed space above (0.8.0) ---
-  // The tab menu (Dashboard / Transactions / Settings / Logs)
-  // is sticky below the appbar so it stays visible while
-  // scrolling, and main's top padding is 0 so the tabs sit
-  // directly below the appbar at the top of the page — the same
-  // height as when scrolled (the old 14px padding scrolled away
-  // and made the header look taller at the top). The appbar is
-  // sticky at top 0 with z-index 50 and ~59px tall, so the tabs
-  // stick at top 60px with z-index 40 and an opaque background
-  // (the buttons themselves have background: none, so without it
-  // scrolling content would show through).
-  // Scroll to the very top first: earlier sections scrolled
-  // elements into view, and with the page scrolled the tabs
-  // are already stuck at 60px — the at-top measurement below
-  // needs the tabs in normal flow.
+  // --- Tab bar ---
+  // The tabs sit right under the appbar and stick at 60px when scrolled.
+  // Scroll to the top first.
   await page.evaluate(() => window.scrollTo(0, 0));
   await page.waitForTimeout(300);
   const tabBar = await page.evaluate(() => {
@@ -483,11 +395,7 @@ function check(name, cond, detail) {
   check('width tabs: at the top of the page the tabs sit directly below the appbar (~1px gap, matching the scrolled state)',
     !!tabBar && (tabBar.tabsTopEdge - tabBar.appbarBottom) >= 0 && (tabBar.tabsTopEdge - tabBar.appbarBottom) <= 2,
     tabBar ? 'tabsTop=' + tabBar.tabsTopEdge + ' appbarBottom=' + tabBar.appbarBottom + ' gap=' + Math.round((tabBar.tabsTopEdge - tabBar.appbarBottom) * 10) / 10 : 'no tabs/appbar');
-  // One row, not two: the "Transactions" rename (was "Transaction(s)")
-  // plus 10px side padding on the tab buttons fits all four on one
-  // row at 390px — the bar is ~46px tall instead of ~96px.
-  // Centered, not left-aligned: justify-content: center on nav.tabs
-  // puts equal space on both sides of the button group.
+  // All four tabs fit on one centered row (~46px tall, not ~96px).
   const tabRows = await page.evaluate(() => {
     const btns = [...document.querySelectorAll('nav.tabs button')];
     if (btns.length !== 4) return null;
@@ -507,9 +415,7 @@ function check(name, cond, detail) {
   check('width tabs: the button group is centered (equal gaps on both sides of the bar)',
     !!tabRows && Math.abs(tabRows.leftGap - tabRows.rightGap) <= 2,
     tabRows ? 'leftGap=' + tabRows.leftGap + ' rightGap=' + tabRows.rightGap : 'no tabs');
-  // Scroll down: the tabs must stick at 60px (directly below
-  // the appbar) while the settings content scrolls underneath
-  // them.
+  // Scrolled down, the tabs stick at 60px under the appbar.
   await page.evaluate(() => window.scrollTo(0, 800));
   await page.waitForTimeout(400);
   const tabBarScrolled = await page.evaluate(() => {
@@ -534,10 +440,9 @@ function check(name, cond, detail) {
   await page.evaluate(() => window.scrollTo(0, 0));
   await page.waitForTimeout(200);
 
-  // --- Settings "?" help buttons (0.8.0): one per card, in the
-  // header row at the top right — each must fit at 390px, sit to
-  // the right of its heading without overlapping it, and stay a
-  // small circle (it must not compete with the Save button).
+  // --- Settings "?" buttons ---
+  // One per card at the header's right: fits, does not overlap the
+  // heading, stays a small circle.
   const HELP_KEYS_W = ['vacation', 'arm', 'nodes', 'price-sources', 'grace', 'agreement', 'cadence', 'fee', 'keys', 'backup'];
   for (const k of HELP_KEYS_W) await checkEl('width help: the "?" button fits on the ' + k + ' card', '#help-' + k);
   const helpLayout = await page.evaluate(() => {
@@ -562,10 +467,9 @@ function check(name, cond, detail) {
     helpLayout.length === 0, helpLayout.join('; ') || 'all ten OK');
   await checkPage('width help: document has no horizontal overflow with the "?" buttons');
 
-  // --- Settings filter dropdown (0.8.0): one row at the top of
-  // the tab — the dropdown must fit on a single row at 390px
-  // (no wrapping to two rows) and not overflow horizontally or
-  // overlap the first card.
+  // --- Settings filter ---
+  // One row at the top: fits without wrapping, overflowing or overlapping
+  // the first card.
   await checkEl('width filter: the dropdown fits', '#filter-select');
   await checkEl('width filter: the filter row fits', '#settings-filter');
   const filterLayout = await page.evaluate(() => {
@@ -600,11 +504,9 @@ function check(name, cond, detail) {
     if (b) b.click();
   });
   await page.waitForTimeout(400);
-  // --- Dashboard tab: the Getting Started card (0.8.0) ---
-  // The card is hidden while txs are staged, so reveal it
-  // directly (same pattern as the Edit popup's hidden notes) —
-  // it carries its real static text; the check is that the
-  // centered layout and full-width button fit at 390px.
+  // --- Dashboard: Getting Started ---
+  // Hidden while txs are staged, so reveal it; its centered layout and
+  // button fit at 390px.
   await page.evaluate(() => {
     const el = document.getElementById('getting-started-card');
     if (el) el.style.display = '';
@@ -639,10 +541,9 @@ function check(name, cond, detail) {
     if (el) el.style.display = 'none';
   });
   await page.waitForTimeout(200);
-  // --- Dashboard tab: the Grace period card (0.8.0) ---
-  // The DOM check leaves a finite grace active, so the card is
-  // visible here: title, text, Resume button and muted note all
-  // fit at 390px.
+  // --- Dashboard: Grace period ---
+  // The DOM check leaves a grace active; title, text, button and note fit
+  // at 390px.
   const graceVisible = await page.evaluate(() => {
     const el = document.getElementById('grace-card');
     if (!el) return { visible: false, text: '' };
@@ -654,12 +555,8 @@ function check(name, cond, detail) {
   await checkEl('width dashboard: grace card fits', '#grace-card');
   await checkEl('width dashboard: grace card Resume button fits', '#btn-resume-grace');
   await checkEl('width dashboard: Exchange Status section fits', '#readiness-exchange-item');
-  // (No overall pill next to the header — the status lives only
-  // on each exchange row.)
-  // Per-exchange rows (0.8.0): one row per configured source,
-  // each with its own status pill and last price — the price in a
-  // small muted span to the left of the pill (0.8.2), the pill
-  // pinned to the right edge.
+  // One row per exchange: price in muted text left of the pill, the pill
+  // pinned right.
   await checkEl('width dashboard: Exchange Status CoinGecko row fits', '#readiness-exchange-1');
   await checkEl('width dashboard: Exchange Status Coinbase row fits', '#readiness-exchange-2');
   await checkEl('width dashboard: Node Status primary row checked time fits', '#readiness-primary-checked');
@@ -668,13 +565,8 @@ function check(name, cond, detail) {
   await checkEl('width dashboard: Exchange Status Coinbase row pill fits', '#readiness-exchange-2-status');
   await checkEl('width dashboard: Exchange Status CoinGecko row price fits', '#readiness-exchange-1-price');
   await checkEl('width dashboard: Exchange Status Coinbase row price fits', '#readiness-exchange-2-price');
-  // --- Dashboard tab: Exchange vs Node status alignment (0.8.2) ---
-  // The Exchange Status rows' status pills sit in the same
-  // right-aligned column as the Node Status rows' pills — label
-  // left, price in small muted text, pill pinned to the right
-  // edge — so all four pills share one right-edge x position.
-  // The price span's margin-left: auto is what pins the
-  // price + pill group to the right.
+  // --- Exchange vs Node alignment ---
+  // All four status pills share one right-edge x position.
   const align = await page.evaluate(() => {
     const out = {};
     for (const id of ['readiness-primary-status', 'readiness-secondary-status', 'readiness-exchange-1-status', 'readiness-exchange-1-price', 'readiness-exchange-2-status', 'readiness-exchange-2-price']) {
@@ -703,14 +595,9 @@ function check(name, cond, detail) {
       && align['readiness-exchange-2-price'].right <= align['readiness-exchange-2-status'].left,
     'price right=' + (align['readiness-exchange-2-price'] ? align['readiness-exchange-2-price'].right : 'null') + ' pill left=' + (align['readiness-exchange-2-status'] ? align['readiness-exchange-2-status'].left : 'null'));
 
-  // --- Dashboard tab: readiness rows stay one line (0.8.0) ---
-  // Every .readiness-tx-row is a single line at 390px: the label
-  // truncates with an ellipsis and the status pill never wraps
-  // below it. A wrapped row would be ~2x the height (~46px), so
-  // a 30px ceiling cleanly separates one line from two. The long-
-  // label tx (added by the DOM check's section 13) is the hard
-  // case: its label must actually be truncated (scrollWidth >
-  // clientWidth) with text-overflow: ellipsis.
+  // --- Readiness rows stay one line ---
+  // Under 30px tall (two lines are ~46px); the long label truncates with
+  // an ellipsis.
   const rows = await page.evaluate(() => {
     const out = [];
     document.querySelectorAll('.readiness-tx-row').forEach((row) => {
@@ -745,9 +632,7 @@ function check(name, cond, detail) {
   check('width dashboard: the long-label row is still a single line with its status pill on it',
     !!longRow && longRow.height <= 30 && longRow.pillTopDelta !== null && longRow.pillTopDelta <= 3 && longRow.pillText !== '',
     longRow ? 'height=' + longRow.height + ' pillTopDelta=' + longRow.pillTopDelta + ' pill=' + longRow.pillText : 'no long row');
-  // The fee-verdict pill is still present where it applies (the
-  // seeded Dom Price tx has a fee rate, so its row carries a fee
-  // pill next to the status pill).
+  // The seeded Dom Price row still carries its fee pill.
   const feePills = await page.evaluate(() => document.querySelectorAll('.readiness-tx-row .pill.fee-pill').length);
   check('width dashboard: a fee-verdict pill is still present on a readiness row', feePills >= 1, 'fee pills=' + feePills);
 

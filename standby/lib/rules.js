@@ -8,22 +8,12 @@ const { DATA_DIR } = require('./config');
 const { forwardMemberHistory, noteSetMemberStale, pushHistory, recordRelease, shortTxid } = require('./history');
 const { checkCadenceSecondsOf, fetchNodeFeesCached, fetchPriceCached, fetchTipHeightsCached, priceAgreementPctOf, priceSourcesOf } = require('./prices');
 const { releaseTriggerFor, singleTriggerConditionText, toTriggerSet, triggerConditionText, triggerLabel } = require('./triggers');
-const { days } = require('./util');
 
-// The triggerState shape: tx.triggerState
-// is an array parallel to the rules (index-keyed); every evaluation
-// writes one rule's slice, with all of these fields, null when a
-// field does not apply to the type — so the shape is stable across
-// types and the UI can read it blind.
-//   lastEvalAt — when the rule was last evaluated (ISO)
-//   status / reason — the status word + the human-readable state
-//   lastPrice / lastPriceAt — the last GOOD price reading (price only)
-//   lastOutspend — { spent, confirmed, txid, checkedAt } (UTXO only)
-//   lastError — the last fetch failure, if any (else null)
-// ruleTriggerState(tx, i) reads one slice (null when the rule was
-// never evaluated); setRuleTriggerState(tx, i, slice) writes one,
-// growing the array with nulls when a legacy flat state is being
-// normalized (loadState wraps it first, so this is defensive).
+// tx.triggerState is an array parallel to the rules. Every slice has the
+// same fields (null when not applicable), so the UI can read it blind:
+// lastEvalAt, status, reason, lastPrice/lastPriceAt (last good price),
+// lastOutspend { spent, confirmed, txid, checkedAt }, lastError.
+// ruleTriggerState / setRuleTriggerState read and write one slice.
 function freshTriggerState(now, status, reason) {
   return {
     lastEvalAt: now.toISOString(), status, reason,
@@ -43,16 +33,10 @@ function setRuleTriggerState(tx, i, slice) {
   tx.triggerState[i] = slice;
 }
 
-// The check-in rule: the same clock as checkinStatus, at this
-// rule's own threshold (a rule with a 7-day threshold fires on its
-// own 7-day window, not the global 35). Pure clock math — no
-// vacation handling here (the evaluator holds it; the gate ignores
-// it — see evaluateRule / checkTriggerNow). The clock is measured
-// with the tx's live freeze offset, so a frozen clock is never
-// release-due while inactive. The grace gate sits in
-// evaluateRule, above this: during a grace this function is not
-// called for a release evaluation at all, so a past-due clock
-// here means the rule really is due.
+// Check-in rule: the check-in clock at this rule's own threshold, with the
+// tx's freeze offset (a frozen clock is never due). Pure clock math;
+// vacation and grace are applied in evaluateRule, so a past-due clock here
+// really is due.
 function checkCheckinRule(state, rule, now, ctx) {
   const clock = checkinClock(state, now, rule.params.thresholdDays, ctx && ctx.liveOffsetMs);
   const detail = { daysSince: clock.daysSince, nextDue: clock.nextDue };
@@ -65,33 +49,19 @@ function checkCheckinRule(state, rule, now, ctx) {
   return { fire: false, status: 'on-track', reason: clock.daysSince + ' of ' + clock.windowDays + ' days elapsed', slice: freshTriggerState(now, 'on-track', clock.daysSince + ' of ' + clock.windowDays + ' days elapsed'), detail, warning: null };
 }
 
-// The price trigger. The price is read
-// from TWO providers (Settings: priceSources) and combined by
-// bitcoin.combinePriceReadings: the reading is only trusted when
-// the two agree within the configured agreement (Settings: Price
-// agreement); when they agree, the PRIMARY exchange's price is
-// the one that decides (the secondary is only a fallback); when
-// only one source answers, that price is used alone (no
-// agreement check).
-// Guards, in order:
-//   (a) Immediate fire: the EFFECTIVE price crossing the
-//       threshold (at/above, or at/below) fires at once — no
-//       sustained wait. The protection against a bad reading is
-//       the two-source agreement (below), not a time delay.
-//   (b) Fail-safe: a reading that is not valid — the sources
-//       disagree by more than the configured agreement, or
-//       neither answers — does not fire, marks 'unknown', and
-//       keeps the last good state (lastPrice keeps the last GOOD
-//       reading, so the subcard still shows it).
-// A large move both sources agree on is trusted and fires —
-// there is no range check: the two-source agreement is the
-// only protection.
+// Price rule: two sources combined by combinePriceReadings (agreeing
+// within the configured percentage; the primary's price decides; one
+// answering source is used alone).
+// (a) Crossing the threshold fires at once; the two-source agreement, not
+// a delay, guards against bad readings.
+// (b) An invalid reading (disagreement or no answer) is unknown, never
+// fires, and keeps lastPrice.
+// No range check: a large move both sources agree on fires.
 async function checkPriceRule(state, rule, now, ctx) {
   const p = rule.params;
   const prev = (ctx && ctx.prevSlice && typeof ctx.prevSlice === 'object') ? ctx.prevSlice : {};
-  // The last GOOD state, kept across unknown readings (fail-safe):
-  // a disagreement or outage never fires the rule, and the subcard
-  // keeps showing the last price it could trust.
+  // Keep the last good state across unknown readings: an outage or
+  // disagreement never fires, and the card keeps the last trusted price.
   const keepGood = {
     lastPrice: (typeof prev.lastPrice === 'number' && Number.isFinite(prev.lastPrice)) ? prev.lastPrice : null,
     lastPriceAt: (typeof prev.lastPriceAt === 'string' && prev.lastPriceAt) ? prev.lastPriceAt : null,
@@ -121,12 +91,8 @@ async function checkPriceRule(state, rule, now, ctx) {
   }
   const price = comb.price;
   const holding = p.op === '>=' ? price >= p.value : price <= p.value;
-  // The stored reason is trigger-only — the effective price, no
-  // per-source note (that lives in priceNote as data, and in the
-  // Exchange Status section and dry-run notes for display). The
-  // GATE's reason (gateReason) keeps the note — the /api/triggers/check
-  // answer names the sources it read ("currently $100,000 (Custom
-  // $100,000, Coinbase $98,200)"), as it always has.
+  // The stored reason is trigger-only (the effective price); the gate's
+  // reason (gateReason) also names the sources it read.
   const shown = '$' + price.toLocaleString('en-US');
   const gateShown = 'currently ' + shown + ' (' + comb.note + ')';
   if (!holding) {
@@ -152,33 +118,18 @@ async function checkPriceRule(state, rule, now, ctx) {
   };
 }
 
-// The UTXO trigger. The confirmation mode is per-rule
-// (params.confirmations): 0 = fire on an unconfirmed (mempool)
-// spend; N >= 1 = fire once the spending tx has N confirmations
-// (default 1 — confirmed-only, the original behaviour). Guards:
-//   (a) Unconfirmed mode fires on ANY spend — confirmed or not.
-//       N-confirmation mode only watches an unconfirmed spend
-//       (it may still be evicted or replaced).
-//   (b) Confirmations are counted from the tip (tip - spend
-//       block height + 1). If the tip cannot be fetched, or the
-//       spend's block height is unknown, the trigger is 'unknown'
-//       — it never fires on data it cannot count.
-//   (c) Fail-safe on fetch failure: an outpoint no endpoint can
-//       say about (unknown parent, or no endpoint answering) does
-//       not fire, and is marked 'unknown'.
-//   (d) The already-spent guard at creation is the add-time gate
-//       (see POST /api/bitcoin/txs) and the /api/triggers/check
-//       endpoint — not this evaluator.
+// UTXO rule. params.confirmations: 0 fires on any spend, including
+// mempool; N >= 1 (default 1) once the spender has N confirmations (an
+// unconfirmed spend only watches).
+// Confirmations are tip - spend height + 1; without a tip or height the
+// rule is unknown. An outpoint no endpoint can say about is unknown. The
+// already-spent check at creation is the add gate's job, not this
+// evaluator's.
 async function checkUtxoRule(state, rule, now, ctx) {
   const needConfs = (rule.params.confirmations === 0) ? 0 : (rule.params.confirmations || 1);
   const endpoints = bitcoin.endpointsFor(state.settings);
-  // The outspend lookup is cache-backed (shared outpoint
-  // cache, TTL = the check cadence) and batch-aware: when this
-  // evaluation watches ≥2 outputs of the same funding tx, the
-  // evaluation's batch (ctx.utxoBatch, built by
-  // evaluateReleaseInner) answers them with one /outspends fetch.
-  // Callers without a batch (the single-trigger check endpoint)
-  // take the singular path.
+  // The lookup is cached (TTL = check cadence) and uses the evaluation's
+  // batch (ctx.utxoBatch) when one exists.
   let res;
   try {
     res = await bitcoin.checkOutspend(rule.params.outpoint, endpoints, {
@@ -233,16 +184,13 @@ async function checkUtxoRule(state, rule, now, ctx) {
         : 'This UTXO is already spent (unconfirmed) — it would fire once the spend reaches ' + needConfs + noun + '.',
     };
   }
-  // A confirmed spend: count its confirmations from the tip.
-  // A bare answer (a bitcoind-backed mempool — see resolveBareSpends
-  // in lib/bitcoin.js) proves the spend is confirmed but cannot say
-  // in which block. Then the count runs from the tip height at which
-  // this rule FIRST saw the confirmed spend, carried forward in
-  // lastOutspend.firstSeenConfirmedHeight. That never fires early;
-  // it is exact while the app is watching, and fires late only for a
-  // spend that confirmed before the rule existed or while the app
-  // was offline. A spend that reads unconfirmed again (a reorg)
-  // drops the stamp, so the count restarts.
+  // A confirmed spend: count from the tip. A bare answer (lib/bitcoin.js
+  // resolveBareSpends) proves confirmation but not the block, so the count
+  // runs from the tip when this rule first saw it confirmed
+  // (lastOutspend.firstSeenConfirmedHeight): never early, exact while
+  // watching, late only for spends confirmed before the rule existed or
+  // while offline. A spend reading unconfirmed again (reorg) drops the
+  // stamp.
   const bareCount = res.bare === true
     && (res.blockHeight === null || res.blockHeight === undefined || !Number.isFinite(res.blockHeight));
   if (!bareCount && (res.blockHeight === null || res.blockHeight === undefined || !Number.isFinite(res.blockHeight))) {
@@ -252,10 +200,8 @@ async function checkUtxoRule(state, rule, now, ctx) {
       detail: { spent: true, confirmed: true, txid: res.txid }, warning: null,
     };
   }
-  // The tip comes from the SHARED per-tick tip cache
-  // (fetchTipHeightsCached, same as the block-height rule) — the
-  // old direct getTipHeight call cost a second, uncached tip fetch
-  // on every confirmed-spend evaluation.
+  // The tip comes from the shared per-tick tip cache, like the block-
+  // height rule.
   let tip;
   try {
     const comb = bitcoin.combineTipHeights(await fetchTipHeightsCached(bitcoin.endpointsFor(state.settings), checkCadenceSecondsOf(state.settings)));
@@ -298,22 +244,11 @@ async function checkUtxoRule(state, rule, now, ctx) {
   };
 }
 
-// The block-height trigger. Fires when the chain tip
-// reaches params.targetHeight — the PRIMARY node's tip is the one
-// that counts (the secondary is only a fallback if the primary
-// does not answer; a node a block or two ahead is normal
-// propagation lag). Judged fresh every evaluation, like every
-// other rule, with no one-way latch (the owner's call): a reorg
-// that drops the tip below the target un-fires the rule again, so
-// a height reached while disarmed, in backoff, or while an AND set
-// waits on another rule can be missed. A broadcast
-// that already happened is one-shot and never retracted.
-// Fail-safe: if neither node answers, the trigger is 'unknown' —
-// it never fires on data it cannot read. The grace hold is
-// applied one level up, in evaluateRule — this check still
-// answers the raw condition (a height reached while the app was
-// offline genuinely was reached; the grace only delays firing on
-// it until the pause ends).
+// Block-height rule: fires when the primary's tip reaches
+// params.targetHeight (the secondary only as fallback). Judged fresh every
+// time with no latch, so a reorg below the target un-fires it. Neither
+// node answering is unknown. Grace is applied in evaluateRule; this
+// answers the raw condition.
 async function checkBlockHeightRule(state, rule, now, ctx) {
   const target = rule.params.targetHeight;
   let comb;
@@ -355,16 +290,9 @@ async function checkBlockHeightRule(state, rule, now, ctx) {
   };
 }
 
-// The set-date trigger. Fires when the wall clock
-// reaches params.fireAt — a pure deadline, regardless of
-// check-ins. No network call, so it cannot be 'unknown' except
-// on a malformed date (which validation prevents). The grace
-// hold is applied one level up, in evaluateRule — this check
-// still answers the raw condition (a date passed while the app
-// was offline genuinely passed; the grace only delays firing
-// on it until the pause ends). The
-// "fire unless I check in" snooze variant is a later addition,
-// not this rule.
+// Set-date rule: fires when the clock reaches params.fireAt, regardless of
+// check-ins. No network, so never unknown on a valid date. Grace is
+// applied in evaluateRule.
 function checkSetDateRule(state, rule, now, ctx) {
   const fireMs = Date.parse(rule.params.fireAt);
   if (!Number.isFinite(fireMs)) {
@@ -391,32 +319,15 @@ function checkSetDateRule(state, rule, now, ctx) {
   };
 }
 
-// The fee-market trigger. Fires when the economy fee
-// rate crosses params.maxFeeRate (sat/vB) in the direction the
-// owner chose: 'below' fires when the fee falls to or below it,
-// 'above' fires when it rises to or above it. The threshold is
-// user-set; the tx's own fee rate is not consulted — the rule
-// fires on the market rate alone. The fee comes from BOTH
-// configured nodes (combineFeeReadings) but NO agreement check:
-// the PRIMARY node's fee is the one that counts — the secondary
-// is only a fallback if the primary is down. One node down means
-// the other is used alone, with no agreement check. Fee spikes
-// are real and are exactly what an 'above' rule is for.
-// The fee comes from the cached fetch (TTL = 5 minutes),
-// so the trigger may see a move up to 5 minutes late. Fail-safe: if no
-// usable fee can be read, the trigger is 'unknown' — it never
-// fires on data it cannot read. The grace hold is applied one
-// level up, in evaluateRule — this check still answers the raw
-// condition (a fee move while the app was offline genuinely
-// happened; the grace only delays firing on it until the pause
-// ends).
+// Fee-market rule: the economy fee crossing params.maxFeeRate, 'below' or
+// 'above' (the tx's own fee is not consulted). The primary's fee counts,
+// the secondary is a fallback, no agreement check. Cached up to 5 minutes.
+// No usable fee is unknown. Grace is applied in evaluateRule.
 async function checkFeeMarketRule(state, rule, now, ctx) {
   const maxRate = rule.params.maxFeeRate;
   const dir = rule.params.direction === 'above' ? 'above' : 'below';
   const prev = (ctx && ctx.prevSlice && typeof ctx.prevSlice === 'object') ? ctx.prevSlice : {};
-  // The last GOOD fee, kept across unknown readings (fail-safe):
-  // a disagreement or outage never fires the rule, and the
-  // subcard keeps showing the last fee it could trust.
+  // Keep the last good fee across unknown readings (fail-safe).
   const keepGood = {
     lastEconomyFee: (typeof prev.lastEconomyFee === 'number' && Number.isFinite(prev.lastEconomyFee)) ? prev.lastEconomyFee : null,
   };
@@ -455,10 +366,8 @@ async function checkFeeMarketRule(state, rule, now, ctx) {
   };
 }
 
-// Dispatch by rule type. Returns the check function's result
-// { fire, status, reason, slice, detail, warning } — no state is
-// written here (the caller stores the slice). The manual rule never
-// fires — the owner broadcasts it by hand.
+// Dispatch by rule type; returns the check's result without writing state.
+// Manual never fires.
 async function checkRule(state, rule, now, ctx) {
   switch (rule.type) {
     case 'checkin': return checkCheckinRule(state, rule, now, ctx);
@@ -480,31 +389,14 @@ function checkManualRule(state, rule, now, ctx) {
   };
 }
 
-// Evaluate ONE rule of a tx, applying the evaluator-only holds,
-// and write the rule's triggerState slice when the check produces
-// one. Returns { rule, fire, status, reason, held, slice } — held
-// is null | 'grace' | 'vacation'.
-//   Grace: while it is
-//     active, a price, UTXO, block-height, set-date, fee-market,
-//     or check-in rule is not evaluated at all — it cannot fire,
-//     and its stored slice keeps the last real evaluation (so
-//     the subcard's current-state line still shows the live
-//     condition; only the pill says Grace). No network calls
-//     happen for it during the grace. The release-check result
-//     carries status 'grace' so the hold is named there. Grace
-//     is PER RULE: in an OR set a non-held rule can still fire
-//     during a grace; in an AND set a held rule is not
-//     satisfied, so the set cannot fire. Check-in rules are
-//     held by the same grace as everything else, and the due
-//     date is NOT pushed out (the bar reads the plain clock; the
-//     grace state, not a past-due reading, is what the bar
-//     shows while held — see checkinStatus). Manual rules
-//     never fire anyway.
-//   Vacation: while it is on, a check-in rule does not
-//     fire — its slice records 'vacation', and the release holds
-//     it. Vacation touches check-in rules only; price, UTXO and
-//     the other rules keep firing. Vacation is PER RULE too: an OR
-//     set can still fire via a non-check-in rule while on vacation.
+// Evaluate one rule with the evaluator-only holds and write its slice.
+// Returns { rule, fire, status, reason, held, slice }; held is null,
+// 'grace' or 'vacation'.
+// - Grace: every non-manual rule is held without being evaluated (no
+//   network); its slice keeps the last real evaluation. Per rule: an OR
+//   set can still fire on an unheld rule; a held rule blocks AND. A check-
+//   in's due date is not pushed out.
+// - Vacation: holds check-in rules only, also per rule.
 async function evaluateRule(state, tx, ruleIndex, now, utxoBatch) {
   const set = store.triggerOf(tx);
   const rule = set.rules[ruleIndex];
@@ -526,31 +418,14 @@ async function evaluateRule(state, tx, ruleIndex, now, utxoBatch) {
   return { rule, fire: r.fire, status: r.status, reason: r.reason, held: null, slice: r.slice || null };
 }
 
-// Combine the per-rule outcomes by the set's op. Each outcome is
-// { index, fire, status, reason, held, skipped, cls } — cls is the
-// outcome class: 'satisfied' (the rule fired), 'not' (it did not,
-// and was read), 'unknown' (it could not be read — fail-safe), or
-// 'held' (grace / vacation / offline-hold — read, but held back).
-// `skipped` means the rule was not evaluated this tick. No caller
-// skips today (the full tick evaluates everything); the class is
-// kept as a defensive reading:
-// a skipped rule is not satisfied, so an AND set cannot fire on a
-// tick that did not evaluate all of it, while an OR set only needs
-// one evaluated rule to fire.
-//   OR: fire iff any evaluated rule is SATISFIED; unknowns are
-//     ignored — a setdate rule still fires while its sibling price
-//     rule cannot be read.
-//   AND: fire iff EVERY rule is SATISFIED at this same tick —
-//     "all at once", no per-rule latching (the owner's call).
-//     Any UNKNOWN, HELD, or SKIPPED rule blocks it.
-// The combined status is the tx-level word: a one-rule set reads
-// exactly as its single rule did ('on-track', 'grace', 'due',
-// ...); a multi-rule set reads 'due' | 'unknown' | 'grace' |
-// 'vacation' | 'held' | 'watching' (unknown beats held — a rule
-// that cannot be read is the more urgent fact).
-// Returns { fire, status, reason, firedIndexes } — firedIndexes
-// are the rule indexes that fired, so the history event can name
-// them.
+// Combine rule outcomes ({ index, fire, status, reason, held, skipped, cls
+// }, cls one of satisfied / not / unknown / held) by the set's op:
+// - OR: any satisfied rule fires; unknowns are ignored.
+// - AND: every rule satisfied on this same tick (no latching); any
+//   unknown, held or skipped rule blocks it.
+// A one-rule set reads as its rule; a multi-rule set reads due, unknown,
+// grace, vacation, held or watching (unknown beats held). Returns { fire,
+// status, reason, firedIndexes }.
 function combineOutcomes(set, outcomes) {
   const evaluated = outcomes.filter((o) => !o.skipped);
   const fired = evaluated.filter((o) => o.cls === 'satisfied');
@@ -587,9 +462,7 @@ function combineOutcomes(set, outcomes) {
   return { fire, status, reason, firedIndexes };
 }
 
-// The outcome class of one evaluated rule: 'satisfied' when it
-// fired, 'unknown' when it could not be read, 'held' when a hold
-// kept it from firing, else 'not'.
+// Outcome class of a rule: 'satisfied', 'unknown', 'held' or 'not'.
 function outcomeClass(r) {
   if (r.fire) return 'satisfied';
   if (r.status === 'unknown') return 'unknown';
@@ -597,15 +470,9 @@ function outcomeClass(r) {
   return 'not';
 }
 
-// Evaluate a tx's whole rule set. Returns { fire, status,
-// reason, ruleResults, firedIndexes } and writes each evaluated
-// rule's triggerState slice (the caller saves). Every rule is
-// evaluated, every time — there is no type filter:
-// the full tick judges all types together, so an AND
-// set spanning domains (check-in AND price) fires on the tick,
-// not only on a manual check. That is what "all at once" needs:
-// a tick that did not evaluate a rule cannot claim it held, and
-// now every tick evaluates every rule.
+// Evaluate a whole rule set and write each evaluated slice (the caller
+// saves). Every rule, every time, so an AND set spanning domains fires on
+// the tick.
 async function evaluateTrigger(state, tx, now, utxoBatch) {
   const set = store.triggerOf(tx);
   const ruleResults = [];
@@ -622,13 +489,9 @@ async function evaluateTrigger(state, tx, now, utxoBatch) {
   };
 }
 
-// One rule's UI-facing status, computed from its STORED slice (no
-// network) — except the check-in rule, whose state is live clock
-// math. Returns { type, label, condition, status, reason,
-// ...type-specific fields }. The price's "currently $X" line uses
-// the cached price when one is available (it is fresher than the
-// stored reading). `slice` is the rule's triggerState slice (null
-// when it has never been evaluated).
+// One rule's UI status from its stored slice (no network), except check-in
+// (live clock). The price line prefers the cached price when one is
+// available.
 function ruleStatusFor(state, tx, rule, slice, now) {
   const trg = rule;
   const st = slice;
@@ -639,10 +502,9 @@ function ruleStatusFor(state, tx, rule, slice, now) {
     // Vacation is check-in-only: it freezes this tx's
     // clock and holds its release, and nothing else's.
     if (state.settings.vacationMode) return { ...base, status: 'vacation', reason: 'Vacation mode is on — the countdown is frozen' };
-    // A past-due clock while a grace is active reads
-    // 'grace', not 'release-due' — the rule is held, it cannot
-    // fire; an on-track clock keeps its countdown (the grace
-    // card explains the hold). Mirrors checkinStatus.
+    // Past due during a grace reads 'grace', not 'release-due' (held,
+    // cannot fire); an on-track clock keeps counting. Mirrors
+    // checkinStatus.
     if (isGraceActive(state, now) && clock.state === 'release-due') return { ...base, status: 'grace', reason: 'Grace period active — will evaluate when it ends', daysSince: clock.daysSince, windowDays: clock.windowDays, nextDue: clock.nextDue };
     if (clock.state === 'release-due') return { ...base, status: 'release-due', reason: 'Release due', daysSince: clock.daysSince, windowDays: clock.windowDays, nextDue: clock.nextDue };
     return { ...base, status: 'on-track', reason: clock.daysSince + ' of ' + clock.windowDays + ' days elapsed', daysSince: clock.daysSince, windowDays: clock.windowDays, nextDue: clock.nextDue };
@@ -651,10 +513,8 @@ function ruleStatusFor(state, tx, rule, slice, now) {
     return { ...base, status: 'manual', reason: 'Waiting for manual broadcast' };
   }
   if (trg.type === 'price') {
-    // The cached readings (when they are for the currently
-    // configured sources) give the live effective price + source
-    // note; otherwise the stored last evaluation carries the
-    // price and its note.
+    // Cached readings for the configured sources give the live price;
+    // otherwise the stored evaluation.
     const src = priceSourcesOf(state.settings);
     const cacheOk = caches.price.readings && Object.keys(caches.price.readings).length
       && caches.price.source1Key === bitcoin.priceSourceKey(src.source1) && caches.price.source2Key === bitcoin.priceSourceKey(src.source2);
@@ -663,12 +523,9 @@ function ruleStatusFor(state, tx, rule, slice, now) {
       const comb = bitcoin.combinePriceReadings(caches.price.readings, priceAgreementPctOf(state.settings));
       if (comb.valid) { price = comb.price; note = comb.note; mode = comb.mode; }
       else {
-        // The latest fetch says the reading is not valid (the
-        // sources disagree, or neither answers) — the card shows
-        // unknown, whatever the last evaluation said. The reason
-        // stays generic ('price feed unknown'): the source detail
-        // lives in the Exchange Status section and the dry-run
-        // notes, not on a per-tx line.
+        // The latest fetch is invalid (disagreement or no answer):
+        // unknown, whatever the last evaluation said. The reason stays
+        // generic.
         return { ...base, status: 'unknown', reason: 'price feed unknown', lastPrice: null, priceMode: comb.mode, priceNote: '' };
       }
     }
@@ -681,12 +538,8 @@ function ruleStatusFor(state, tx, rule, slice, now) {
       }
       price = stored; note = storedNote; mode = (st && st.priceMode) || null;
     }
-    // The reason is trigger-only — the effective price, no
-    // per-source note. The source detail lives in the Exchange
-    // Status section (readiness card) and the dry-run notes, not
-    // on a per-tx line. The subcard reads lastPrice directly.
-    // A holding price is due at once — no sustained wait (the
-    // two-source agreement is the protection, not a time delay).
+    // Trigger-only reason (no per-source note). A holding price is due at
+    // once (agreement, not a delay, is the protection).
     const shown = '$' + price.toLocaleString('en-US');
     const holding = trg.params.op === '>=' ? price >= trg.params.value : price <= trg.params.value;
     if (!holding) return { ...base, status: 'watching', reason: 'currently ' + shown, lastPrice: price, priceMode: mode, priceNote: note };
@@ -701,10 +554,8 @@ function ruleStatusFor(state, tx, rule, slice, now) {
     return { ...base, status: st.status || 'watching', reason: st.reason || 'waiting for the height', lastTipHeight: (typeof st.lastTipHeight === 'number' ? st.lastTipHeight : null) };
   }
   if (trg.type === 'setdate') {
-    // Pure clock math — no cache, no network — so a set-date
-    // rule reads live even when never evaluated or disarmed,
-    // like the price rule below. Mirrors checkSetDateRule's
-    // reasons exactly; the stored slice is never consulted.
+    // Set-date is pure clock math, so it reads live even when never
+    // evaluated or disarmed. Same reasons as checkSetDateRule.
     const fireMs = Date.parse(trg.params.fireAt);
     if (!Number.isFinite(fireMs)) return { ...base, status: 'unknown', reason: 'set date is not a valid date — will retry' };
     if (now.getTime() >= fireMs) return { ...base, status: 'due', reason: 'date reached — firing' };
@@ -713,16 +564,9 @@ function ruleStatusFor(state, tx, rule, slice, now) {
     return { ...base, status: 'watching', reason: 'fires on ' + shown };
   }
   if (trg.type === 'feemarket') {
-    // Like price, the fee rule reads the live in-memory
-    // node-fee cache when it is warm (same endpoints) — so the
-    // pill reflects the market even for a tx that was never
-    // evaluated or is disarmed. There is NO age check here, like
-    // price: the last known fee is trusted until a fresh reading
-    // arrives (a cadence-age check would expire the cache after one
-    // tick, so the pill would fall back to Unknown between the
-    // hourly refreshes). Otherwise the stored last evaluation
-    // carries it; with neither, the rule is not-evaluated
-    // (Unknown).
+    // The fee rule reads the warm node-fee cache like price, with no age
+    // check (the last known fee holds until a fresh one arrives);
+    // otherwise the stored evaluation; with neither, not evaluated.
     const maxRate = trg.params.maxFeeRate;
     const dir = trg.params.direction === 'above' ? 'above' : 'below';
     const eps = bitcoin.endpointsFor(state.settings);
@@ -738,9 +582,8 @@ function ruleStatusFor(state, tx, rule, slice, now) {
         const side = dir === 'above' ? 'below ' : 'above ';
         return { ...base, status: 'watching', reason: 'economy fee ' + econ + ' sat/vB (' + side + maxRate + ')', lastEconomyFee: econ, feeMode: comb.mode, feeNote: comb.note };
       }
-      // The latest fetch says no usable reading — the card shows
-      // unknown, whatever the last evaluation said (same fail-safe
-      // as the price branch above).
+      // No usable reading in the latest fetch: unknown (same fail-safe as
+      // price).
       return { ...base, status: 'unknown', reason: comb.reason || 'fee unavailable — will retry', lastEconomyFee: null, feeMode: comb.mode, feeNote: '' };
     }
     if (!st) return { ...base, status: 'not-evaluated', reason: 'Not evaluated yet', lastEconomyFee: null };
@@ -749,13 +592,8 @@ function ruleStatusFor(state, tx, rule, slice, now) {
   return { ...base, status: 'not-evaluated', reason: 'Not evaluated yet' };
 }
 
-// The cached tip height, or null when no usable reading is
-// cached (same endpoint-base match as the price/fee branches
-// in ruleStatusFor; no age check — the last known tip is
-// trusted until a fresh reading arrives, exactly like the
-// price and fee caches). Synchronous, no network: reading the
-// cache must never trigger a fetch, or the grace card would
-// defeat the grace it reports on.
+// The cached tip, or null; no age check. Never fetches: the grace card
+// must not defeat the grace it reports on.
 function tipFromCache(state) {
   const eps = bitcoin.endpointsFor(state.settings);
   const primary = eps[0] ? eps[0].base : null;
@@ -766,32 +604,16 @@ function tipFromCache(state) {
   return comb.valid ? comb.tip : null;
 }
 
-// Whether this tx/set WOULD fire right now if the grace lifted:
-// the raw condition of each
-// rule, judged on the best data available WITHOUT any new
-// network calls — the grace suspends rule evaluation, and this
-// must not defeat that. Per rule:
-//   check-in — the live clock: past due (clock.state
-//     'release-due') means would fire. The served slice reads
-//     'grace' when past due + grace active, so the clock, not
-//     the slice status, is the authority here (the clock also
-//     honours the vacation freeze, via the live offset).
-//   set-date — the live clock: the date has passed (served
-//     status 'due').
-//   price / fee-market — the served status 'due': ruleStatusFor
-//     already judges these on the live caches when warm, else
-//     the stored last evaluation.
-//   block-height — the tip cache when warm (tipFromCache
-//     above), else the stored slice's 'due'.
-//   UTXO — the stored slice's 'due' ONLY: its checks ARE the
-//     rule evaluation, so they go stale during a grace — a
-//     spend that lands while the app is away is not seen until
-//     the rules run again. That staleness is by design; the
-//     number is the last known answer, not a live one.
-//   manual — never. unknown / not-evaluated — never (fail-safe:
-//     a condition that cannot be read cannot be claimed met).
-// Combined by the set's op, exactly like the evaluator:
-// OR fires if any rule is met, AND only if every rule is met.
+// Would this tx or set fire if the grace lifted? Each rule's raw condition
+// without any network call (the grace suspends evaluation):
+// - check-in: the live clock (with the vacation freeze)
+// - set-date: the clock
+// - price, fee-market: served status (warm caches or the stored
+//   evaluation)
+// - block-height: the cached tip, else the stored slice
+// - UTXO: the stored slice only (stale during a grace, by design)
+// - manual, unknown, not evaluated: never
+// Combined by the set's op.
 function wouldFireFor(state, tx, set, statuses, now) {
   const met = set.rules.map((rule, i) => {
     const s = statuses[i];
@@ -811,15 +633,9 @@ function wouldFireFor(state, tx, set, statuses, now) {
   return met.length === set.rules.length && met.every(Boolean);
 }
 
-// The tx-level trigger status for the UI: a one-rule set
-// reads exactly as its single rule did (the object above); a
-// multi-rule set reads the same combine as the evaluator — 'due'
-// when the set would fire, 'unknown' when a rule cannot be read,
-// 'grace' / 'vacation' / 'held' when a hold is the thing stopping
-// it, else 'watching' — with one status object per rule under
-// `rules`, so the card can list them. A rule never evaluated reads
-// 'not-evaluated', which the combine treats as unknown (fail-safe:
-// the set cannot be proven satisfied or not).
+// Tx-level status for the UI: a one-rule set reads as its rule; a multi-
+// rule set uses the evaluator's combine and lists each rule under rules.
+// Never-evaluated rules count as unknown.
 function triggerStatusFor(state, tx, now) {
   const set = store.triggerOf(tx);
   const statuses = set.rules.map((rule, i) => ruleStatusFor(state, tx, rule, ruleTriggerState(tx, i), now));
@@ -842,31 +658,14 @@ function triggerStatusFor(state, tx, now) {
   };
 }
 
-// Evaluate a rule set ONCE, live, without changing any state:
-// the POST /api/triggers/check endpoint
-// (the UI's already-true guard) and the add-time warning use this.
-// `trgSet` is a NORMALIZED rule set (the caller validates first —
-// a single rule is already wrapped as a one-rule set).
-// Returns { valid, fire, status, reason, warning, detail } —
-// `warning` is a human-readable string when the set is already
-// satisfied (it would fire on the next evaluation), else the first
-// per-rule warning (an unconfirmed UTXO spend warns without
-// firing), else null. A price rule reports fire=true when both
-// sources agree the price is already past the threshold — there is
-// no sustained wait and no range check, so a single live sample
-// that both sources agree on proves the condition.
-// The gate answers the RAW condition: no grace, no vacation, no
-// disarm. A price rule that is past its threshold during a grace,
-// or a check-in rule that is due during vacation, still reports
-// fire=true — the hold is temporary and the condition itself is
-// already met, so adding the rule would fire on the next evaluation
-// once the hold lifts. That is the gate's conservative block, and
-// it is deliberate: the evaluator (evaluateRule) is the only path
-// that applies the holds. `ctx` is { liveOffsetMs }: the tx's
-// frozen time for a check-in rule (a txId the caller passes).
-// A one-rule set answers exactly as its single rule did (same status / reason / warning / detail); a multi-rule set
-// answers the combined fire with the per-rule results in
-// detail.rules.
+// Evaluate a rule set once, live, without changing state: the add gate and
+// POST /api/triggers/check. Returns { valid, fire, status, reason,
+// warning, detail }; warning says the set is already satisfied, else the
+// first per-rule warning. It answers the raw condition (no grace, vacation
+// or disarm): a condition met during a hold would still fire once the hold
+// lifts, so the gate blocks it. ctx is { liveOffsetMs } for check-in
+// rules. A one-rule set answers as its rule; a multi-rule set lists per-
+// rule results in detail.rules.
 async function checkTriggerNow(trgSet, state, now, ctx) {
   const set = toTriggerSet(trgSet);
   const liveOff = (ctx && typeof ctx.liveOffsetMs === 'number' && Number.isFinite(ctx.liveOffsetMs)) ? ctx.liveOffsetMs : 0;
@@ -900,24 +699,12 @@ async function checkTriggerNow(trgSet, state, now, ctx) {
   return { valid: true, fire: combined.fire, status: combined.status, reason: combined.reason, warning, detail };
 }
 
-// Re-verify, against freshly loaded state, that a broadcast is still
-// wanted — right before the real broadcast. This closes the race where
-// a check-in, a disable, or a replacement lands while the
-// input check is waiting on the network, and the original evaluation
-// would otherwise broadcast anyway using its stale state. For the
-// automatic release it re-checks the armed toggle, vacation
-// (check-in txs only), and that the clock is still release-due; a
-// manual broadcast (the owner's explicit say-so) ignores the clock,
-// the armed toggle, and vacation, exactly as the endpoints do. Both
-// kinds re-check that the transaction still exists, is still the same
-// hex, and is neither broadcast nor stale. Returns { ok, reason, state,
-// tx } — the fresh state and tx to broadcast from. The broadcast record
-// itself is NOT written to this snapshot: broadcastOne reloads fresh
-// state again after the network call and merges only the record in
-// (see below), so a check-in that lands mid-broadcast survives.
-// The clock is NOT re-checked here: the release decision was made
-// once, above — all-or-none — while the other guards
-// above still apply.
+// Re-verify against fresh state right before a real broadcast, so a check-
+// in, disarm or replacement during the input check stops it. Automatic:
+// re-checks arm and vacation (check-in txs). Manual: ignores clock, arm
+// and vacation. Both: the tx still exists with the same hex, not broadcast
+// or stale. The clock is not re-checked (the release decision is all-or-
+// none). The record is written later, merged into fresh state.
 function preBroadcastCheck(tx, logKind, opts) {
   const fresh = store.loadState(DATA_DIR);
   const ftx = (fresh.bitcoin.txs || []).find((t) => t.id === tx.id);
@@ -925,20 +712,13 @@ function preBroadcastCheck(tx, logKind, opts) {
   if (ftx.hex !== tx.hex) return { ok: false, reason: 'transaction was replaced' };
   if (ftx.broadcasted || (ftx.release && ftx.release.status === 'broadcast')) return { ok: false, reason: 'already broadcast' };
   if (ftx.release && ftx.release.status === 'stale') return { ok: false, reason: 'transaction is stale — replace it to re-arm' };
-  // A transaction already submitted to Slipstream is waiting on
-  // MARA — it is not re-submitted. The hourly MARA-waiting
-  // refresh (refreshMaraWaiting) is what moves it on: to 'broadcast'
-  // once the public nodes see it, or back to 'failed' if MARA drops
-  // it, and only then is it attempted again. The ONE exception is
-  // the manual "Broadcast publicly" escape hatch (opts.forcePublic):
-  // the owner explicitly chose to give up the Slipstream privacy
-  // and put this tx in the public mempool, so the wait is over.
+  // A tx already submitted to Slipstream is not re-submitted;
+  // refreshMaraWaiting moves it on. The exception is the manual "Broadcast
+  // publicly" escape hatch (forcePublic).
   if (ftx.release && ftx.release.status === 'submitted-slipstream' && !(opts && opts.forcePublic)) return { ok: false, reason: 'already submitted to Slipstream — waiting on MARA' };
   if (logKind === 'release') {
-    // A set member broadcasts on the SET's arm, not its
-    // own toggle: the set's enabled gates every member, and a
-    // member's own enabled is ignored while it is attached.
-    // opts.setId names the set the caller is broadcasting for.
+    // A set member broadcasts on the set's arm, not its own (opts.setId
+    // names the set).
     if (opts && opts.setId) {
       const fset = (fresh.bitcoin.sets || []).find((s) => s.id === opts.setId);
       if (!fset || !(fset.txIds || []).includes(tx.id)) return { ok: false, reason: 'transaction is not in its trigger set' };
@@ -946,78 +726,36 @@ function preBroadcastCheck(tx, logKind, opts) {
     } else if (!ftx.enabled) {
       return { ok: false, reason: 'transaction was disabled' };
     }
-    // Vacation is check-in-only: it holds a check-in
-    // tx's automatic release, and nothing else's — a price or
-    // UTXO tx broadcasts on schedule while the owner is away.
-    // Manual broadcasts never enter this branch (logKind
-    // 'broadcast'), so they bypass disarm and vacation entirely.
-    // Only a FIRED check-in rule is held: a set that fired
-    // on a price rule broadcasts during vacation. When the caller
-    // did not name the fired rules (the public-fallback path), a
-    // tx that HAS a check-in rule is held, as before.
+    // Vacation holds only the automatic release of a fired check-in rule
+    // (a set that fired on price still broadcasts); manual broadcasts
+    // bypass it. Without named fired rules (the fallback path), a tx with
+    // any check-in rule is held.
     const firedTypes = (opts && Array.isArray(opts.firedRuleTypes)) ? opts.firedRuleTypes : null;
     const holdsOnCheckin = firedTypes ? firedTypes.includes('checkin') : store.hasTriggerType(ftx, 'checkin');
     if (fresh.settings.vacationMode && holdsOnCheckin) return { ok: false, reason: 'vacation mode' };
-    // All-or-none release: once a release evaluation has
-    // decided the clock is due, the whole armed set broadcasts even
-    // if a check-in lands mid-run. A check-in is still recorded —
-    // the merge-only broadcast write preserves it — and resets the
-    // clock for the next cycle; it just does not stop a release that
-    // already started. So inside a decided release run the clock is
-    // NOT re-checked here; the guards above (disabled, vacation)
-    // still apply, because those are explicit owner actions on the
-    // transaction or the switch, not the clock.
+    // All-or-none: once a release run has decided, a check-in landing mid-
+    // run is recorded (and resets the next cycle) but does not stop it.
+    // Disarm and vacation still apply: they are explicit owner actions.
   }
   return { ok: true, state: fresh, tx: ftx };
 }
 
-// ---------------------------------------------------------------------------
-// Broadcast ONE transaction for real — the shared path the release and
-// the manual buttons (Broadcast Now, Broadcast Armed) both use.
-//   1. Freshness gate: re-check every input right before broadcasting.
-//      A spent input is three things:
-//      our OWN txid as the spender means the transaction is already
-//      out there — record 'broadcast' and do NOT re-broadcast it
-//      (recognition, not a re-send — the same as a node answering
-//      'already in mempool'); a confirmed spend by another tx means
-//      the tx is stale — record 'stale' and do NOT broadcast (a stale
-//      tx can never broadcast); an unconfirmed spend by another tx is
-//      a warning only — it does NOT block the broadcast below, the
-//      node is the arbiter.
-//   2. Broadcast via the transaction's selected route:
-//      'public' broadcasts via the primary node, falling back to
-//      the secondary if the primary does not answer; 'slipstream'
-//      submits to MARA Slipstream ONLY — no fallback to the public
-//      nodes. A successful Slipstream submission records status
-//      'submitted-slipstream' (not 'broadcast') and no broadcasted
-//      fact: the transaction is in MARA's private mempool, invisible
-//      to the public nodes, until refreshMaraWaiting sees it publicly
-//      (then 'broadcast') or MARA drops it (then 'failed', retried
-//      next tick via Slipstream). Success is recorded once per tx
-//      and never repeated, with the endpoint that actually broadcast;
-//      failure is recorded as 'failed' and retried on the next tick
-//      (a transient network failure must not lose the moment).
-// A broadcast records BOTH the cycle release record (tx.release) and
-// the permanent broadcasted fact (tx.broadcasted). A check-in clears
-// the cycle record and starts a new cycle — but the broadcasted fact
-// stays: a broadcast is an on-chain fact, and the card keeps showing
-// it (with its confirmation count) until the transaction is replaced.
-// `logKind` is 'release' for the automatic release and 'broadcast' for
-// a manual broadcast, so the broadcast log distinguishes them.
-// Returns the per-tx result { id, txid, label, action, method?, error? }.
-// Callers skip already-broadcast and stale txs themselves.
-// ---------------------------------------------------------------------------
-// Broadcasts in flight, by transaction id — a manual Broadcast Now /
-// Broadcast Armed and the automatic release must never broadcast the
-// same transaction twice at once. Only the release
-// evaluation has a single-flight lock; the manual endpoints
-// call broadcastOne directly, so a double-click or a manual call
-// landing during a release could overlap it. broadcastOne claims the
-// id for its whole run (freshness gate + network + write); a second
-// attempt for the same id is skipped, not queued. The claim is a
-// check-and-set with no await in between, so it is atomic on Node's
-// single thread, and the finally releases it even if the inner run
-// throws.
+// Broadcast one transaction: the shared path for the release and the
+// manual buttons.
+// 1. Freshness gate, right before sending: our own txid as spender means
+// already out (record broadcast, send nothing); a confirmed foreign spend
+// means stale (never sent); an unconfirmed one is only a warning.
+// 2. Send via the tx's route: 'public' (primary, then secondary) or
+// 'slipstream' (MARA only, no fallback; success records 'submitted-
+// slipstream' without a broadcasted fact until the public nodes see it).
+// Failure records 'failed' and retries next tick.
+// A broadcast records both the cycle record (a check-in clears it) and the
+// permanent broadcasted fact. logKind is 'release' or 'broadcast'. Callers
+// skip already-broadcast and stale txs.
+// In-flight claims: a tx id is claimed for the whole run, so a double
+// click or a manual call during a release can never send it twice; a
+// second attempt is skipped. The check-and-set has no await, so it is
+// atomic.
 const broadcastingTxIds = new Set();
 async function broadcastOne(state, tx, endpoints, now, logKind, opts) {
   if (broadcastingTxIds.has(tx.id)) {
@@ -1035,22 +773,16 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
   const failNote = logKind === 'release'
     ? 'Release check failed before broadcast: '
     : 'Broadcast check failed before broadcast: ';
-  // The trigger type stamped on every release record this
-  // broadcast writes — the rule that fired it (or the tx's current
-  // trigger, for a manual broadcast). The caller names the
-  // fired rules when it knows them (the release path does); a
-  // manual broadcast and the fallback paths name none, so the
-  // record carries all of the tx's rule types.
+  // The trigger types stamped on this broadcast's records: the fired rules
+  // when the caller names them, else all of the tx's types.
   const trigType = releaseTriggerFor(state, tx, opts && opts.firedRuleTypes);
   let check;
   try {
     check = await bitcoin.checkInputsUnspent(bitcoin.parseTx(tx.hex), endpoints, checkCadenceSecondsOf(state.settings) * 1000);
   } catch (e) {
-    // The manual "Broadcast publicly" escape hatch (forcePublic)
-    // does NOT write a 'failed' record: the tx stays
-    // Slipstream-pending if the public attempt cannot even check
-    // its inputs — the failure is surfaced to the owner, and MARA
-    // is still holding the tx.
+    // forcePublic writes no 'failed' record if the inputs cannot be
+    // checked: the tx stays Slipstream-pending and the owner sees the
+    // error.
     if (!(opts && opts.forcePublic)) {
       const record = { status: 'failed', kind: logKind, trigger: trigType, txid: tx.txid, method: 'primary', lastAttemptAt: now.toISOString(), error: 'input check failed: ' + e.message };
       const fresh = store.loadState(DATA_DIR);
@@ -1066,14 +798,8 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
     }
     return { id: tx.id, txid: tx.txid, label: tx.label || '', action: 'failed', error: 'input check failed: ' + e.message };
   }
-  // Our own txid is the spender:
-  // this transaction is already out there — in the mempool or a
-  // block — so there is nothing to send. Record it broadcast and
-  // report broadcast, never stale, never a warning, regardless of
-  // confirmations. The write is merge-only, like the success path
-  // below: the broadcasted fact takes precedence over any cycle
-  // record, and the hourly confirmation refresh fills in the
-  // confirmation count from the block height the outspend reported.
+  // Our own txid is the spender: already out there. Record broadcast
+  // (merge-only) and report it; the hourly refresh fills in confirmations.
   if (check.own && check.own.length) {
     const own = check.own[0];
     const record = { status: 'broadcast', kind: logKind, trigger: trigType, txid: tx.txid, method: check.checkedVia, broadcastedAt: now.toISOString() };
@@ -1101,21 +827,17 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
   }
   if (check.spent.length) {
     const spentDesc = check.spent.map((i) => i.prevTxid.slice(0, 12) + ':' + i.prevVout).join(', ');
-    // The record survives check-ins: spent inputs are a fact about
-    // the transaction, not the cycle (only replacing the hex clears
-    // it — a stale transaction can never broadcast).
+    // A stale record survives check-ins: spent inputs are a fact (only
+    // replacing the hex clears it).
     const record = { status: 'stale', kind: logKind, trigger: trigType, txid: tx.txid, method: check.checkedVia, lastAttemptAt: now.toISOString(), error: 'inputs spent: ' + spentDesc };
-    // Record the stale verdict on the CURRENT transaction only if it
-    // is still the same hex; a replacement in the meantime means the
-    // old tx is gone and there is nothing to mark stale.
+    // Record stale only if the tx still has the same hex (a replaced tx
+    // has nothing to mark).
     const fresh = store.loadState(DATA_DIR);
     const ftx = (fresh.bitcoin.txs || []).find((t) => t.id === tx.id);
     if (ftx && ftx.hex === tx.hex) {
       pushHistory(ftx, 'stale', record.error);
-      // The set-stale rule: a stale member does
-      // NOT archive its set — only itself is marked stale. The
-      // set keeps firing for its non-stale members; the stale
-      // verdict is noted on the set's shared history.
+      // A stale member does not archive its set; the verdict is noted on
+      // the set's history.
       noteSetMemberStale(fresh, ftx, record.error);
       recordRelease(fresh, ftx, record, {
         ts: now.toISOString(), kind: logKind, status: 'stale', method: check.checkedVia, txid: tx.txid,
@@ -1125,28 +847,17 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
     return { id: tx.id, txid: tx.txid, label: tx.label || '', action: 'stale', error: record.error };
   }
 
-  // Broadcast for real — but only after re-verifying against fresh
-  // state (see preBroadcastCheck above): a check-in, disable,
-  // or replacement that landed while the input check was on the
-  // network must stop the broadcast. The route is the transaction's
-  // own broadcastVia: 'public' broadcasts via the mempool
-  // nodes (primary, then secondary); 'slipstream' submits to MARA
-  // Slipstream ONLY. There is no cross-route fallback — if the
-  // selected route fails, the transaction is 'failed' and the next
-  // evaluation retries that same route. The manual "Broadcast
-  // publicly" escape hatch (opts.forcePublic) overrides the route:
-  // it always goes public, whatever the stored route says.
+  // Re-verify against fresh state (preBroadcastCheck), then send via the
+  // tx's own route with no cross-route fallback; a failure retries the
+  // same route. forcePublic (the manual escape hatch) always goes public.
   const pre = preBroadcastCheck(tx, logKind, opts);
   if (!pre.ok) {
     return { id: tx.id, txid: tx.txid, label: tx.label || '', action: 'skipped', reason: pre.reason };
   }
   const via = (opts && opts.forcePublic) ? 'public' : (pre.tx.broadcastVia === 'slipstream' ? 'slipstream' : 'public');
-  // The first Slipstream attempt — success or fail — is the
-  // deadline anchor for a transaction whose submit keeps failing
-  // (case (b) of fallbackDeadline). Record it once, before the
-  // network call, so it is set even if the attempt itself throws;
-  // never overwrite it after. The success and failure branches below
-  // reload fresh state, so this write survives them.
+  // Record the first Slipstream attempt once, before the network call
+  // (fallbackDeadline's anchor for a submit that keeps failing). Later
+  // branches reload fresh state, so it survives.
   if (via === 'slipstream') {
     const fresh0 = store.loadState(DATA_DIR);
     const ftx0 = (fresh0.bitcoin.txs || []).find((t) => t.id === tx.id);
@@ -1155,23 +866,16 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
       store.saveState(DATA_DIR, fresh0);
     }
   }
-  // The public fallback (refreshPublicFallbacks) passes
-  // fallbackDays: its presence means this public broadcast is the
-  // automatic fallback for a Slipstream transaction that ran out its
-  // timer — the broadcast log must say why it went public, so the
-  // note is prefixed onto the broadcast entry broadcastTx writes.
+  // From the public fallback: prefix the broadcast log entry with why it
+  // went public.
   const fallbackNote = (opts && typeof opts.fallbackDays === 'number')
     ? 'Public fallback: this Slipstream transaction was not publicly visible within ' + opts.fallbackDays + (opts.fallbackDays === 1 ? ' day' : ' days') + ', so Standby broadcast it publicly instead.'
     : null;
   try {
     if (via === 'slipstream') {
-      // A successful Slipstream submission is NOT a broadcast yet:
-      // the transaction is in MARA's private mempool, invisible to
-      // the public nodes. It gets its own release status,
-      // 'submitted-slipstream' — a pseudo-pending-but-success state
-      // — and NO broadcasted fact (that fact is written only once
-      // the public nodes see it, by refreshMaraWaiting). The release
-      // is not complete while any transaction is in this state.
+      // A successful Slipstream submission is not a broadcast yet (MARA's
+      // mempool is private): status 'submitted-slipstream', no broadcasted
+      // fact until refreshMaraWaiting sees it publicly.
       const out = await bitcoin.broadcastViaSlipstream(pre.tx.hex, pre.tx.txid);
       const record = { status: 'submitted-slipstream', kind: logKind, trigger: trigType, txid: out.txid, method: 'slipstream', submittedAt: now.toISOString() };
       const fresh = store.loadState(DATA_DIR);
@@ -1190,24 +894,16 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
       return { id: tx.id, txid: out.txid, label: tx.label || '', action: 'submitted-slipstream', method: 'slipstream' };
     }
     const out = await bitcoin.broadcastTx(DATA_DIR, { hex: pre.tx.hex, txid: pre.tx.txid, endpoints, notePrefix: fallbackNote });
-    // Merge-only write: the broadcast itself was
-    // just on the network, and anything may have landed while it was
-    // out there — a check-in, a settings change, a disable. Saving
-    // pre.state here would overwrite those newer changes (and a lost
-    // check-in is exactly how a release could outlive the owner
-    // checking in). So reload FRESH state and write only the
-    // broadcast record onto the matching transaction. If the tx was
-    // deleted or replaced mid-broadcast, there is no record left to
-    // mark — the broadcast already went out on-chain and is in the
-    // broadcast log — and the deleted/replaced record must NOT be
-    // resurrected by saving the old snapshot.
+    // Merge-only write into fresh state: anything may have landed while
+    // the broadcast was out (a lost check-in could let a release outlive
+    // the owner). A tx deleted or replaced meanwhile is not resurrected;
+    // the broadcast is in the log.
     const record = { status: 'broadcast', kind: logKind, trigger: trigType, txid: out.txid, method: out.method, broadcastedAt: now.toISOString() };
     const fresh = store.loadState(DATA_DIR);
     const ftx = (fresh.bitcoin.txs || []).find((t) => t.id === tx.id);
     if (ftx && ftx.hex === tx.hex) {
-      // The escape hatch went public: the stored route follows the
-      // tx — it is a public tx now, and if it ever drops back to
-      // 'release-due' it retries via the public route.
+      // Gone public via the escape hatch: the stored route becomes public,
+      // so any retry uses it.
       if (opts && opts.forcePublic) ftx.broadcastVia = 'public';
       ftx.release = record;
       ftx.broadcasted = {
@@ -1220,17 +916,10 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
     }
     return { id: tx.id, txid: out.txid, label: tx.label || '', action: 'broadcast', method: out.method };
   } catch (e) {
-    // A failed attempt (either route) is 'failed' and retried on
-    // the next evaluation via the SAME selected route. For Slipstream the
-    // error carries Slipstream's own
-    // rejection reason (a fee below the floor, a sanctions
-    // rejection, an invalid tx). The method names the route that
-    // failed: 'slipstream' for Slipstream, 'primary' for the public
-    // route (the first endpoint tried).
-    // EXCEPT the manual "Broadcast publicly" escape hatch
-    // (forcePublic): a failed public attempt does NOT write a
-    // 'failed' record — the tx stays Slipstream-pending, still in
-    // MARA's queue, and the error is surfaced to the owner instead.
+    // A failed attempt is 'failed' and retried via the same route, with
+    // Slipstream's own reason when that route failed; method names the
+    // route. Except forcePublic: no 'failed' record (the tx stays
+    // Slipstream-pending) and the error goes to the owner.
     const record = { status: 'failed', kind: logKind, trigger: trigType, txid: tx.txid, method: via === 'slipstream' ? 'slipstream' : 'primary', lastAttemptAt: now.toISOString(), error: e.message };
     if (!(opts && opts.forcePublic)) {
       const fresh = store.loadState(DATA_DIR);

@@ -1,177 +1,77 @@
 'use strict';
-// Mempool API stub for Standby local verification. Serves the endpoints
-// the app uses: tip height, outspend, tx lookup, tx broadcast.
-//   node stubs.js <port>   (env SENTINEL_TXID)
-// Finney txid: f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16
-//   vout 0 = spent, vout 1 = unspent (the app's dry-run / freshness gate).
-// A second known-unspent input (SECOND, all 0xaa) exists so a demo can
-// hold two transactions with DISTINCT inputs — two crafted Finney
-// spends share an input and the app (correctly) warns about it, which
-// is noise in a store screenshot. Every other prevTxid still 404s.
-// Tip height is fixed at 900000; a broadcast (POSTed) txid — and the
-// sentinel — looks up as confirmed at block 899995 (6 confirmations).
-// POST /api/tx with the sentinel hex answers "already in mempool".
+// Mempool API stub: tip, outspends, tx lookup and broadcast, fees, prices
+// and Slipstream.
+// node stubs.js <port> (env SENTINEL_TXID)
+// FINNEY: vout 0 spent, vout 1 unspent. SECOND ('aa'*32): one unspent
+// output. Other parents 404. Tip 900000; a broadcast txid (and the
+// sentinel) reads confirmed at 899995; re-broadcasting the sentinel
+// answers "already in mempool".
 const http = require('http');
 const crypto = require('crypto');
 const FINNEY = 'f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16';
 const SECOND = 'aa'.repeat(32);
-// Test control (0.8.1, block-height either-node): the tip is
-// settable per stub via POST /__test__/tip { height } so a test can
-// make the two nodes disagree. Default 900000.
+// Tip height, settable per stub via POST /__test__/tip { height } (default
+// 900000).
 let tipHeight = 900000;
 const TIP = 900000;
 const CONFIRMED_HEIGHT = 899995;
 const SENTINEL_TXID = process.env.SENTINEL_TXID || '';
-// Test hook (0.7.6): STUB_OUTSPEND_DELAY_MS holds the outspend answer
-// for that many ms, so a test can land a check-in while a release
-// evaluation is waiting on the network and prove the pre-broadcast
-// re-verification stops the broadcast.
-// Test hook (0.7.8): STUB_TX_LOOKUP_DELAY_MS holds the tx-lookup
-// answer (the confirmations path) for that many ms, so a test can
-// land an edit while a confirmation refresh is on the network and
-// prove the edit is not clobbered by the refresh's save.
-// Test hook (0.7.10): STUB_BROADCAST_DELAY_MS holds the broadcast
-// (POST /api/tx) answer for that many ms, so a test can land a
-// check-in, a disable, or a delete while a broadcast is on the
-// network and prove the broadcast record merges into fresh state
-// instead of overwriting it.
-// Test hook (0.7.11): STUB_BIG_RESPONSE_BYTES makes the outspend
-// answer a body of that many bytes, so a test can prove the app
-// rejects an oversized node reply instead of growing the process.
-// Test hook (0.7.11): STUB_BAD_TXID makes POST /api/tx answer 200
-// with 'not-a-txid', so a test can prove a garbage broadcast reply
-// is treated as a failed broadcast, not recorded as broadcasted.
-// Test hook (0.7.12): STUB_CONFLICT_MODE makes prevTxid 'cc'*32
-// answer as spent by another transaction — 'unconfirmed' (the
-// default, also when the variable is unset) reports the spend as
-// status {confirmed: false}; 'confirmed' reports {confirmed: true,
-// block_height: 899990}; 'unspent' reports {spent: false}. The
-// spending txid is always 'dd'*32. STUB_OWN_SPEND_TXID=<txid> makes
-// prevTxid 'ee'*32 answer as spent by exactly that txid
-// (unconfirmed) — the app recognises its own transaction out there;
-// when the variable is unset 'ee'*32 answers {spent: false}.
+// Env hooks:
+// - STUB_OUTSPEND_DELAY_MS, STUB_TX_LOOKUP_DELAY_MS,
+//   STUB_BROADCAST_DELAY_MS: delay those answers
+// - STUB_BIG_RESPONSE_BYTES: an oversized outspend body
+// - STUB_BAD_TXID: broadcast answers 200 'not-a-txid'
+// - STUB_CONFLICT_MODE: 'cc'*32 spent by 'dd'*32, 'unconfirmed' (default),
+//   'confirmed' (899990) or 'unspent'
+// - STUB_OWN_SPEND_TXID: 'ee'*32 spent (unconfirmed) by that txid; unset,
+//   unspent
 const CONFLICT = 'cc'.repeat(32);
 const CONFLICT_SPENDER = 'dd'.repeat(32);
 const OWN_SPEND = 'ee'.repeat(32);
 const OWN_SPEND_TXID = (process.env.STUB_OWN_SPEND_TXID || '').toLowerCase();
-// Test hook (0.7.14): STUB_REJECT_ONCE_TXID=<txid> makes POST /api/tx
-// reject the FIRST broadcast of that txid with 400 'non-final'
-// (simulating a not-yet-final transaction the node refuses), then
-// accept it on later attempts — so a test can prove a failed
-// broadcast is retried on the next evaluation and succeeds once
-// the rejection lifts. Any other txid is unaffected.
+// STUB_REJECT_ONCE_TXID rejects that txid's first broadcast with 400 'non-
+// final', then accepts it.
 const REJECT_ONCE_TXID = (process.env.STUB_REJECT_ONCE_TXID || '').toLowerCase();
 const rejectedOnce = new Set();
-// Test hook (0.8.2, full-tick backoff): the broadcast-fail flag
-// makes POST /api/tx reject EVERY broadcast with 400 while it is
-// on, and broadcastAttempts counts every REAL broadcast submission
-// — the node-capability test's probe (POST /api/tx with body '00',
-// an invalid hex that never reaches the mempool) is NOT counted,
-// or a startup's capability probe would look like a second
-// broadcast attempt. A test can then prove a failed broadcast is
-// not retried by the tick within the backoff hour, and that a manual
-// broadcast bypasses it. Runtime-settable, per stub process:
-//   POST /__test__/broadcast-fail { fail: true|false } — answers { fail }
-//   GET  /__test__/broadcast-count — answers { count }
 let broadcastFail = false;
 let broadcastAttempts = 0;
-// Test hook (0.8.5, tip fetch): the tip-fail flag makes GET
-// /api/blocks/tip/height answer 500 while it is on, and
-// tipRequests counts every tip-height request this stub has
-// answered. Both are per stub process, runtime-settable via the
-// /__test__/tip-fail and /__test__/tip-count endpoints below.
+// tipFail makes the tip read 500; tipRequests counts tip requests.
 let tipFail = false;
 let tipRequests = 0;
-// Test hook (0.8.0, two-source 0.8.0): the BTC price feeds — one
-// per provider in the app's registry (CoinGecko, Coinbase,
-// Binance, Kraken, Bitstamp), each answering in the real
-// provider's response shape. STUB_PRICE_USD sets the starting
-// price for ALL providers (default 98200 — the measured live
-// price when the trigger was built). The feeds are runtime-
-// settable via POST /__test__/price:
-//   { usd } — sets the price on ALL providers (backward compat:
-//   the 095 suite's set_price helper posts a single price)
-//   { fail: true } — makes ALL providers answer 500
-//   { bad: 'zero'|'huge'|'empty'|null } — a malformed reading on
-//   ALL providers
-//   { provider: '<id>', usd / fail / bad } — the same controls,
-//   but for ONE provider only (so a suite can drive the two
-//   sources apart, or kill one and keep the other).
-// A per-provider control never touches the other providers.
+// Price feeds, one per provider in its real response shape. STUB_PRICE_USD
+// sets the start (default 98200). POST /__test__/price: { usd }, { fail },
+// { bad: 'zero'|'huge'|'empty'|null }, all providers or one via { provider
+// }.
 const PRICE_PROVIDERS = ['coingecko', 'coinbase', 'binance', 'kraken', 'bitstamp'];
 const priceState = {};
-// The economy fee this stub serves (0.8.1): settable via POST
-// /__test__/fees { economyFee }, default 1 sat/vB.
-// Test hook (0.8.9, accumulated peak): the fee mode this stub
-// serves — 'mempool' (default) answers /api/v1/fees/recommended,
-// 'esplora' 404s it, so the app falls back to /api/fee-estimates
-// exactly like a plain Esplora node. Settable per stub via POST
-// /__test__/fee-mode { mode }. Per stub process; restarting the
-// stub clears it.
+// Fee mode: 'mempool' (default) or 'esplora', which 404s
+// /api/v1/fees/recommended so the app falls back to /api/fee-estimates.
 let feeMode = 'mempool';
-// Test hook (0.8.5, fee fetch): feeRequests counts every
-// /api/v1/fees/recommended request this stub has answered —
-// the node fee fetch and the verdict's hourly current-fees
-// fetch both hit this route from the configured node, so a suite
-// reads the count as a delta across a controlled window.
-// Runtime-readable via GET /__test__/fee-count below.
+// Counts /api/v1/fees/recommended requests (GET /__test__/fee-count).
 let feeRequests = 0;
 const feeState = { economyFee: 1 };
-// Test hooks (0.8.9 audit fixes): feeDelayMs delays every fee
-// answer (recommended + estimates) by that many ms — mutable via
-// POST /__test__/fee-delay, so a suite can hold a fee fetch in
-// flight while an edit lands. feeEstimatesMap, when set, replaces
-// the default /fee-estimates map — mutable via POST
-// /__test__/fee-estimates-map {map|null}, so a suite can serve a
-// sparse map and prove a missing 144 yields no reading.
+// feeDelayMs (POST /__test__/fee-delay) holds fee answers; feeEstimatesMap
+// (POST /__test__/fee-estimates-map) replaces the /fee-estimates map.
 let feeDelayMs = 0;
 let feeEstimatesMap = null;
-// Test hook (0.8.6, UTXO cache/batch): outspendRequests counts
-// every singular /api/tx/:txid/outspend/:vout request this stub
-// has answered, outspendsRequests every batch
-// /api/tx/:txid/outspends request — so a suite can prove repeated
-// outpoints cost one request (cache) and shared funding txs cost
-// one batch request. Runtime-readable via GET
-// /__test__/outspend-count and /__test__/outspends-count below.
+// Request counters for the singular and batch outspend routes (GET
+// /__test__/outspend-count, /__test__/outspends-count).
 let outspendRequests = 0;
 let outspendsRequests = 0;
-// Test hook (0.8.6 fold-in): outspendDelayMs delays every
-// outspend answer (singular + batch) by that many ms — mutable
-// via POST /__test__/outspend-delay, default from
-// STUB_OUTSPEND_DELAY_MS; outspendFail makes both outspend
-// routes answer 500 — mutable via POST /__test__/outspend-fail.
-// Both exist so a suite can hold a request in flight, or make
-// one fail, and prove the app dedupes / retries correctly.
+// outspendDelayMs (POST /__test__/outspend-delay) holds outspend answers;
+// outspendFail (POST /__test__/outspend-fail) makes both routes 500.
 let outspendDelayMs = parseInt(process.env.STUB_OUTSPEND_DELAY_MS || '0', 10) || 0;
 let outspendFail = false;
-// Test hook (0.8.10, generic outspend negotiation): outspendMode
-// is which outspend shapes this stub serves — 'both' (default:
-// batch + singular, like mempool.space and Esplora), 'batch'
-// (batch only, like a self-hosted mempool backend v3, whose
-// /api/v1/* has no singular route), 'singular' (singular only),
-// or 'neither' (neither route exists). A missing route 404s,
-// exactly like an unknown parent — the app cannot tell the two
-// apart from the status alone, which is the point: the suite can
-// prove the client negotiates the shape instead of assuming it.
-// Mutable per stub via POST /__test__/outspend-mode {mode};
-// restarting the stub resets it to 'both'.
+// Which outspend routes exist: 'both' (default), 'batch', 'singular' or
+// 'neither'. A missing route 404s.
 let outspendMode = 'both';
-// Test hook (0.8.13, bare spends): outspendStyle is HOW the stub
-// answers outspends — 'full' (default: {spent, txid, vin, status},
-// like Esplora) or 'bitcoind' (like a mempool backed directly by
-// bitcoind, BACKEND=none: the batch answers a bare {spent} with no
-// spender and no status, and the singular route does not exist).
-// POST /api/prevouts (below) answers in both styles, as the real
-// mempool backend does. prevoutsRoute false makes it 404, as an
-// older backend without the route would. Mutable via POST
-// /__test__/outspend-style {style} and /__test__/prevouts-route
-// {enabled}.
+// 'full' (spender and status, like Esplora) or 'bitcoind' (bare {spent} in
+// the batch, no singular route). POST /__test__/prevouts-route { enabled }
+// toggles /api/prevouts.
 let outspendStyle = 'full';
 let prevoutsRoute = true;
-// Test hook (0.8.0, UA fix): the User-Agent each price feed was
-// last fetched with, so a suite can prove the app identifies
-// itself (CoinGecko 403s a missing/non-descriptive UA).
-// GET /__test__/price-ua answers it.
+// The User-Agent each price feed was last fetched with (GET
+// /__test__/price-ua).
 const priceUaSeen = {};
 for (const id of PRICE_PROVIDERS) {
   priceState[id] = {
@@ -211,30 +111,15 @@ function priceBody(id) {
   if (id === 'kraken') return { result: { XXBTZUSD: { c: [String(st.usd)] } } };
   return { last: String(st.usd) };
 }
-// Test hook (0.7.16, Pending card): STUB_UNCONFIRMED_TXID=<txid>
-// makes the public /api/tx lookup report that txid as IN the
-// mempool but UNCONFIRMED (0 confirmations) instead of confirmed
-// at block 899995 — so a test can drive a public broadcast that
-// stays pending (broadcasted, 0 confirmations) instead of jumping
-// straight to confirmed. Any other txid is unaffected.
+// STUB_UNCONFIRMED_TXID: that txid looks in the mempool with 0
+// confirmations instead of confirmed.
 const UNCONFIRMED_TXID = (process.env.STUB_UNCONFIRMED_TXID || '').toLowerCase();
 const seen = new Set();
 if (SENTINEL_TXID) seen.add(SENTINEL_TXID.toLowerCase());
 
-// Test hook (0.7.16): STUB_SLIPSTREAM_REJECT=<reason> makes POST
-// /api/transactions reject every submission with 400
-// {"status":"error","message":"<reason>"} (a fee below the floor, a
-// sanctions rejection) — so a test can prove a Slipstream failure
-// surfaces the reason and keeps the tx 'release-due' for the hourly
-// retry. Unset: submissions succeed.
-// Slipstream state (0.7.16): slipstreamQueued holds the txids
-// submitted to Slipstream and still in MARA's queue; the status
-// endpoint reports them as queued (position 12, not next block) and
-// 404s anything else (dropped / never submitted). The test-only
-// /__test__/slipstream/* endpoints drive the transitions the app
-// must handle: /visible marks a txid as publicly visible (MARA
-// mined it — the public /api/tx lookup finds it), /drop removes it
-// from the queue (MARA dropped it — the status endpoint 404s).
+// Slipstream: STUB_SLIPSTREAM_REJECT=<reason> rejects every submission.
+// Submitted txids queue (position 12) and are not publicly visible;
+// /__test__/slipstream/visible and /drop control that.
 const SLIPSTREAM_REJECT = process.env.STUB_SLIPSTREAM_REJECT || '';
 const slipstreamQueued = new Set();
 
@@ -266,22 +151,12 @@ function txidOf(hex) {
   return crypto.createHash('sha256').update(h1).digest().reverse().toString('hex');
 }
 
-// Test hook (0.8.0, fast tick / catch-up): outspend block-height
-// override — POST /__test__/outspend {txid, vout, blockHeight}
-// makes the outspend for that outpoint answer as a confirmed spend
-// at that block height, so a suite can drive a spend at an exact
-// confirmation count (confs = TIP - blockHeight + 1; TIP is 900000,
-// so blockHeight 899999 is 2 confirmations). POST {txid, vout,
-// clear: true} (or blockHeight: null) removes it. Empty by default,
-// so all existing behaviour is unchanged.
+// POST /__test__/outspend { txid, vout, blockHeight } makes that outpoint
+// a confirmed spend at that height; { clear: true } removes it.
 const outspendOverride = {};
 
-// Test hook (0.8.1, audit finding 2): unknown parents — POST
-// /__test__/unknown-parent {txid} makes this stub answer 404 for
-// that parent's outspends, as a node that has never seen the parent
-// would; {txid, clear: true} removes it. Per-stub-process state, so
-// a suite can make the primary 404 while the secondary answers —
-// the 404-failover case. Empty by default.
+// Parents this stub 404s (POST /__test__/unknown-parent), so a test can
+// make only one node unaware of a parent.
 const unknownParents = new Set();
 
 const server = http.createServer((req, res) => {
@@ -296,15 +171,8 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     return res.end(String(tipHeight));
   }
-  // Current recommended fees (0.7.21): GET /api/v1/fees/recommended
-  // returns a fixed object whose economyFee is 1 sat/vB — the
-  // measured live floor — so an app pointed at a stub always sees
-  // economyFee 1 and a fee below 1 sat/vB reads Critical Risk. The
-  // economy fee is settable per stub via POST /__test__/fees
-  // { economyFee } (0.8.1, two-node fee logic) — a suite can drive
-  // the two nodes' fees apart, or make one implausible. In
-  // 'esplora' fee mode (POST /__test__/fee-mode) this route 404s,
-  // so the app falls back to /api/fee-estimates below.
+  // GET /api/v1/fees/recommended: fixed tiers with economyFee from
+  // /__test__/fees (default 1). 404 in 'esplora' fee mode.
   if (req.method === 'GET' && p === '/api/v1/fees/recommended') {
     feeRequests++;
     const answer = () => {
@@ -318,12 +186,9 @@ const server = http.createServer((req, res) => {
     if (feeDelayMs > 0) return setTimeout(answer, feeDelayMs);
     return answer();
   }
-  // Esplora-style fee estimates (0.8.1): GET /api/fee-estimates
-  // returns a map of confirmation target to fee rate — the shape
-  // a plain Esplora serves instead of /api/v1/fees/recommended.
-  // The node capability test falls back to it when the mempool
-  // fee endpoint 404s. The 144-block rate tracks the settable
-  // economy fee, so the same hook drives it.
+  // Esplora-style fee estimates (target -> rate), the fallback when
+  // /api/v1/fees/recommended 404s. The 144-block rate tracks the economy
+  // fee.
   if (req.method === 'GET' && p === '/api/fee-estimates') {
     const answer = () => {
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -332,9 +197,8 @@ const server = http.createServer((req, res) => {
     if (feeDelayMs > 0) return setTimeout(answer, feeDelayMs);
     return answer();
   }
-  // Test control for the fee (0.8.1): POST /__test__/fees
-  // { economyFee } sets this stub's economy fee (and its
-  // 6-block estimate). Answers the current fee state.
+  // POST /__test__/fees { economyFee } sets the economy fee (and the
+  // 6-block estimate).
   if (req.method === 'POST' && p === '/__test__/fees') {
     let body = '';
     req.on('data', (c) => { body += c; });
@@ -347,9 +211,7 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
-  // Test control (0.8.9, accumulated peak):
-  // POST /__test__/fee-mode { mode: 'mempool'|'esplora' } — see
-  // the feeMode declaration above. Answers the current mode.
+  // POST /__test__/fee-mode { mode }.
   if (req.method === 'POST' && p === '/__test__/fee-mode') {
     let body = '';
     req.on('data', (c) => { body += c; });
@@ -362,13 +224,8 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
-  // Test control (0.8.9 audit fixes): POST /__test__/fee-delay
-  // {ms} delays every fee answer by that many ms — {ms: 0}
-  // clears it — so a suite can hold a fee fetch in flight while
-  // an edit lands. POST /__test__/fee-estimates-map {map}
-  // replaces the /fee-estimates map the stub serves (a sparse map
-  // proves a missing 144 yields no reading); {map: null}
-  // restores the default map.
+  // POST /__test__/fee-delay { ms } and /__test__/fee-estimates-map { map
+  // | null }.
   if (req.method === 'POST' && p === '/__test__/fee-delay') {
     let body = '';
     req.on('data', (c) => { body += c; });
@@ -394,18 +251,6 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
-  // Test hook (0.8.5, tip fetch): the tip-fail flag makes GET
-  // /api/blocks/tip/height answer 500 while it is on (a node
-  // failing the tip read, e.g. rate-limited), and tipRequests
-  // counts every tip-height request this stub has answered — so a
-  // suite can prove a primary-first fetch never asks the secondary
-  // and a per-tick cache fetches once per tick no matter how many
-  // blockheight rules there are. Runtime-settable, per stub process:
-  //   POST /__test__/tip-fail { fail: true|false } — answers { fail }
-  //   GET  /__test__/tip-count — answers { count }
-  // Test control for the tip (0.8.1, block-height either-node):
-  // POST /__test__/tip { height } sets this stub's tip height.
-  // Answers the current tip.
   if (req.method === 'POST' && p === '/__test__/tip') {
     let body = '';
     req.on('data', (c) => { body += c; });
@@ -418,11 +263,8 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
-  // Test controls for broadcast failure (0.8.2, full-tick
-  // backoff): POST /__test__/broadcast-fail { fail } turns the
-  // reject-everything flag on/off; GET /__test__/broadcast-count
-  // answers how many REAL broadcast submissions this stub has
-  // received (the node-capability probe, body '00', is not counted).
+  // POST /__test__/broadcast-fail { fail }; GET /__test__/broadcast-count
+  // (the '00' probe is not counted).
   if (req.method === 'POST' && p === '/__test__/broadcast-fail') {
     let body = '';
     req.on('data', (c) => { body += c; });
@@ -439,10 +281,7 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ ok: true, count: broadcastAttempts }));
   }
-  // Test controls for the tip fetch (0.8.5): POST
-  // /__test__/tip-fail { fail } turns the 500 flag on/off; GET
-  // /__test__/tip-count answers how many tip-height requests
-  // this stub has answered.
+  // POST /__test__/tip-fail { fail }; GET /__test__/tip-count.
   if (req.method === 'POST' && p === '/__test__/tip-fail') {
     let body = '';
     req.on('data', (c) => { body += c; });
@@ -459,17 +298,13 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ ok: true, count: tipRequests }));
   }
-  // Test control for the fee fetch (0.8.5): GET
-  // /__test__/fee-count answers how many recommended-fee
-  // requests this stub has answered.
+  // GET /__test__/fee-count.
   if (req.method === 'GET' && p === '/__test__/fee-count') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ ok: true, count: feeRequests }));
   }
-  // Test controls for the outspend fetch (0.8.6): GET
-  // /__test__/outspend-count answers how many singular outspend
-  // requests this stub has answered; GET
-  // /__test__/outspends-count how many batch outspends requests.
+  // GET /__test__/outspend-count (singular) and /__test__/outspends-count
+  // (batch).
   if (req.method === 'GET' && p === '/__test__/outspend-count') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ ok: true, count: outspendRequests }));
@@ -478,13 +313,8 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ ok: true, count: outspendsRequests }));
   }
-  // Test control (0.8.6 fold-in): POST /__test__/outspend-delay
-  // {ms} delays every outspend answer (singular + batch) by that
-  // many ms — so a suite can hold a request in flight while a
-  // second one starts, proving in-flight dedup; {ms: 0} clears
-  // it. POST /__test__/outspend-fail {fail} makes both routes
-  // answer 500 — so a suite can prove a failed request does not
-  // poison later lookups.
+  // POST /__test__/outspend-delay { ms } and /__test__/outspend-fail {
+  // fail }.
   if (req.method === 'POST' && p === '/__test__/outspend-delay') {
     let body = '';
     req.on('data', (c) => { body += c; });
@@ -509,10 +339,7 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
-  // Test control (0.8.10, generic outspend negotiation):
-  // POST /__test__/outspend-mode { mode: 'both'|'batch'|
-  // 'singular'|'neither' } — see the outspendMode declaration
-  // above. Answers the current mode.
+  // POST /__test__/outspend-mode { mode }.
   if (req.method === 'POST' && (p === '/__test__/outspend-style' || p === '/__test__/prevouts-route')) {
     let raw = '';
     req.on('data', (c) => { raw += c; });
@@ -538,12 +365,9 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
-  // BTC price (0.8.0, two-source 0.8.0): one route per provider,
-  // each in the real provider's shape. state.fail answers 500
-  // (a dead feed); state.bad answers a malformed reading. The
-  // query string is ignored — the stub answers the path. Older
-  // suites never call these routes, so the stub stays
-  // forward-compatible.
+  // BTC price: one route per provider, in its real shape. state.fail
+  // answers 500; state.bad a malformed reading. The query string is
+  // ignored.
   const PRICE_ROUTES = {
     '/api/v3/simple/price': 'coingecko',
     '/v2/prices/BTC-USD/spot': 'coinbase',
@@ -567,13 +391,8 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ ok: true, ua: priceUaSeen }));
   }
-  // Test control for the price feeds (0.8.0, two-source 0.8.0):
-  // POST /__test__/price { usd } sets the price on ALL providers;
-  // { fail: true/false } makes ALL answer 500 or not;
-  // { bad: 'zero'|'huge'|'empty'|null } picks a malformed reading
-  // on ALL or clears it. With { provider: '<id>' } the same
-  // controls apply to ONE provider only. Answers the current
-  // state (all providers, or just the one named).
+  // POST /__test__/price: see the price feed hooks above. Answers the
+  // current state.
   if (req.method === 'POST' && p === '/__test__/price') {
     let body = '';
     req.on('data', (c) => { body += c; });
@@ -594,11 +413,8 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
-  // Test control for the outspend block height (0.8.0): POST
-  // /__test__/outspend {txid, vout, blockHeight} overrides the
-  // spend's block height for that outpoint; {txid, vout, clear:
-  // true} (or blockHeight: null) removes it. Answers the current
-  // overrides.
+  // POST /__test__/outspend { txid, vout, blockHeight } overrides that
+  // spend's height; { clear: true } or blockHeight null removes it.
   if (req.method === 'POST' && p === '/__test__/outspend') {
     let body = '';
     req.on('data', (c) => { body += c; });
@@ -613,10 +429,8 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
-  // Test control for unknown parents (0.8.1, audit finding 2):
-  // POST /__test__/unknown-parent {txid} makes this stub 404 that
-  // parent's outspends; {txid, clear: true} removes it. Answers the
-  // current set.
+  // POST /__test__/unknown-parent { txid } 404s that parent's outspends; {
+  // clear: true } removes it.
   if (req.method === 'POST' && p === '/__test__/unknown-parent') {
     let body = '';
     req.on('data', (c) => { body += c; });
@@ -633,13 +447,8 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
-  // One output's outspend answer (0.8.6): the JSON object for
-  // this outpoint, or null when the stub must 404 (a parent tx it
-  // has never seen, or one flagged unknown via
-  // /__test__/unknown-parent). Shared by the singular route below
-  // and the batch route above it, so both answer identically.
-  // The node-test output-lookup probe asks for FINNEY:0, spent
-  // in the stub as in reality, and reads the answer type from it.
+  // One outpoint's answer, or null to 404. Shared by the singular and
+  // batch routes.
   function outspendEntry(txid, vout) {
     if (txid !== FINNEY && txid !== SECOND && txid !== CONFLICT && txid !== OWN_SPEND) return null;
     if (unknownParents.has(txid)) return null;
@@ -663,11 +472,8 @@ const server = http.createServer((req, res) => {
     }
     return { spent: false };
   }
-  // Batch outspend (0.8.6, Esplora): GET /api/tx/:txid/outspends
-  // answers one entry per output of the funding tx, in vout order
-  // — the shape the real endpoint serves. FINNEY has 2 outputs
-  // (vout 0 spent, vout 1 unspent); the other known parents have 1.
-  // An unknown parent 404s, like the singular route.
+  // Batch outspends (Esplora): one entry per output, in vout order. FINNEY
+  // has 2 outputs; other known parents 1.
   const outs = p.match(/^\/api\/tx\/([0-9a-fA-F]+)\/outspends$/);
   if (req.method === 'GET' && outs) {
     outspendsRequests++;
@@ -685,11 +491,9 @@ const server = http.createServer((req, res) => {
     if (outspendDelayMs > 0) return setTimeout(answer, outspendDelayMs);
     return answer();
   }
-  // POST /api/prevouts (0.8.13): [{txid, vout}] -> one answer per
-  // outpoint, from the CONFIRMED UTXO set only, as the real backend's
-  // gettxout(txid, vout, false): an output with no spend, or only a
-  // mempool spend, is still there (its value); one spent by a
-  // confirmed transaction — or unknown — is null.
+  // POST /api/prevouts: [{txid, vout}] -> one answer per outpoint from the
+  // confirmed UTXO set (like gettxout(txid, vout, false)): unspent or
+  // mempool-spent gives its value; confirmed-spent or unknown gives null.
   if (req.method === 'POST' && p === '/api/prevouts') {
     let raw = '';
     req.on('data', (c) => { raw += c; });
@@ -735,17 +539,8 @@ const server = http.createServer((req, res) => {
     const txid = lookup[1].toLowerCase();
     const delay = parseInt(process.env.STUB_TX_LOOKUP_DELAY_MS || '0', 10);
     const answer = () => {
-      // Parent-tx lookup for the fee (0.7.18): the Finney and
-      // SECOND parents answer with their output values, so the app
-      // can compute a transaction's fee from the node. The values
-      // are in SATOSHIS, as the real mempool /api/tx returns them
-      // (the genesis coinbase pays 5000000000): Finney vout 0 =
-      // 200,000 sats (spent), vout 1 = 150,000 sats (unspent);
-      // SECOND vout 0 = 200,000 sats. A crafted tx spending Finney
-      // vout 1 with 100,000 sats out pays a 50,000-sat fee. The
-      // pre-fix stub spoke BTC decimals (0.002 / 0.0015) — the same
-      // units error as the app's old btcToSats, which is why the
-      // fee tests passed while the live fee was inflated 1e8x.
+      // Parent values in satoshis: FINNEY vout 0 = 200,000, vout 1 =
+      // 150,000; SECOND vout 0 = 200,000.
       if (txid === FINNEY || txid === SECOND) {
         const values = txid === FINNEY ? [200000, 150000] : [200000];
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -779,10 +574,7 @@ const server = http.createServer((req, res) => {
     req.on('end', () => {
       const delay = parseInt(process.env.STUB_BROADCAST_DELAY_MS || '0', 10);
       const answer = () => {
-        // The node-capability probe posts body '00' (an invalid
-        // hex, not a transaction) — it is answered like any other
-        // submission below, but it is not a broadcast attempt and
-        // must not move the counter.
+        // The node-capability probe ('00') is answered but not counted.
         if (body.trim() !== '00') broadcastAttempts++;
         if (broadcastFail) {
           res.writeHead(400, { 'Content-Type': 'text/plain' });
@@ -812,18 +604,8 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
-  // MARA Slipstream (0.7.16). POST /api/transactions submits a
-  // signed tx: success is 200 {"status":"success","message":txid}
-  // and the txid joins the queue (it is NOT publicly visible — the
-  // public /api/tx lookup still 404s it, exactly like the real
-  // Slipstream). With STUB_SLIPSTREAM_REJECT set, every submission
-  // is 400 {"status":"error","message":reason}. GET
-  // /api/transactions/status?tx_id= reports a queued tx as a
-  // TransactionInfo (position 12, not next block) and 404s anything
-  // else (dropped / never submitted). The /__test__/slipstream/*
-  // endpoints let a test drive the transitions: /visible marks a
-  // txid as publicly visible (MARA mined it), /drop removes it from
-  // the queue (MARA dropped it).
+  // Slipstream: POST /api/transactions queues the txid or rejects; GET
+  // /api/transactions/status?tx_id= reports queued txs, 404 otherwise.
   if (req.method === 'POST' && p === '/api/transactions') {
     let body = '';
     req.on('data', (c) => { body += c; });

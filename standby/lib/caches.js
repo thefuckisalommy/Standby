@@ -1,8 +1,6 @@
 'use strict';
-// Standby — shared fetch caches.
-// One holder object whose identity never changes: the fetchers
-// REASSIGN the caches (caches.price = {...}), so destructured imports
-// would go stale. Every reader/writer goes through `caches.*`.
+// Shared fetch caches on one holder object: fetchers reassign its fields,
+// so always go through caches.*, never destructure.
 const bitcoin = require('./bitcoin');
 
 const caches = {

@@ -24,10 +24,8 @@
 </header>
 
 <main>
-  <!-- State-load error: shown in place of the normal UI
-       when the state file cannot be loaded and no backup could be
-       recovered. The app cannot run, but it can still be rescued:
-       restore a backup file, or start fresh. -->
+  <!-- Shown instead of the app when state cannot load and nothing was
+       recovered: restore a backup or start fresh. -->
   <div class="card" id="state-error-card" style="display:none">
     <h2>Standby could not load its data</h2>
     <p>The file holding all transactions, settings, and the check-in clock is missing or damaged, and no backup could be loaded. Nothing was erased — the app stopped instead of starting over empty.</p>
@@ -35,7 +33,6 @@
     <p>
       <button id="btn-state-restore" class="primary">Restore from a backup file</button>
       <button id="btn-state-reset" class="danger">Start fresh</button>
-      <button id="btn-state-continue" class="primary" style="display:none">Continue to Standby</button>
     </p>
     <input type="file" id="state-restore-file" accept="application/json,.json" style="display:none">
     <p id="state-error-msg" class="muted"></p>
@@ -161,14 +158,10 @@
 
   <!-- ============ SETTINGS ============ -->
   <section class="tab" id="tab-settings">
-    <!-- There is no global check-in setting: each check-in
-         transaction carries its own threshold ("Days of silence",
-         set when it is added or edited). -->
-    <!-- Settings filter: a dropdown at the top of the
-         tab, so it takes one row instead of two. The filter reads
-         the same triggers array the "?" pop-out renders its
-         "Applies to" line from (SETTINGS_HELP in app.js) — one
-         declaration per card, no second mapping. -->
+    <!-- No global check-in setting: each check-in rule has its own
+         threshold. -->
+    <!-- Settings filter: reads the same triggers array as the "?" pop-outs
+         (SETTINGS_HELP in app.js). -->
     <div class="settings-filter" id="settings-filter">
       <label for="filter-select">Show:</label>
       <select id="filter-select" aria-label="Filter settings">
@@ -361,10 +354,7 @@
       <div class="inline-unit" id="set-fee-low-row"><input id="set-fee-low" type="number" min="1" max="10" step="0.5" value="2"><span>× peak tx fee</span></div>
       <label for="set-fee-medium">High Risk at or below</label>
       <div class="inline-unit" id="set-fee-medium-row"><input id="set-fee-medium" type="number" min="0.5" max="5" step="0.5" value="1"><span>× peak tx fee</span></div>
-      <!-- Fee verdict zone bar: always visible under the
-           numbers, showing the three zones as a bar that moves
-           live as you type. No ticks or axis label below —
-           the ranges are written inside each zone. -->
+      <!-- Fee verdict zone bar, live as you type. -->
       <div class="zone-bar" id="zone-bar">
         <div class="bar">
           <div class="seg seg-high" id="seg-high"><span class="name">High Risk</span><span class="range" id="range-high">1× and below</span></div>
@@ -422,10 +412,7 @@
       <p id="logout-msg" class="muted"></p>
     </div>
 
-    <!-- App version: a short card at the very bottom of
-         General settings showing the installed version, from
-         /api/health. It only changes on an update. No "?" button
-         and no details pop-out — just the version line. -->
+    <!-- App version from /api/health, at the bottom of General settings. -->
     <div class="card" id="card-version">
       <div class="section-head">
         <h2>App version</h2>
@@ -435,9 +422,36 @@
   </section>
 </main>
 
-<!-- Confirmation dialog (Broadcast Now / Broadcast Armed / Delete) and
-     details pop-out (a broadcast log entry). A native confirm() would
-     work, but this keeps the warning inside the app and testable. -->
+<!-- Confirmation dialog and details pop-out (kept in-app rather than
+     confirm(), so it is testable). -->
+<!-- Restore progress: shown while a restore runs (the node check can
+     take up to a minute), then switches to the result. -->
+<div id="restore-progress-modal" class="modal-overlay">
+  <div class="modal restore-progress" role="dialog" aria-modal="true" aria-labelledby="restore-progress-title" aria-live="polite">
+    <svg class="logo-loader" id="restore-progress-logo" viewBox="17 29 86 58" aria-hidden="true">
+      <g class="waves" fill="none" stroke-width="5" stroke-linecap="round">
+        <path class="wave w1" d="M35 48.3 A14 14 0 0 0 35 67.7"/>
+        <path class="wave w2" d="M27 41 A24 24 0 0 0 27 75"/>
+        <path class="wave w1" d="M85 48.3 A14 14 0 0 1 85 67.7"/>
+        <path class="wave w2" d="M93 41 A24 24 0 0 1 93 75"/>
+      </g>
+      <path class="doc" d="M48 33 H69 L78 42 V80 a4 4 0 0 1 -4 4 H48 a4 4 0 0 1 -4 -4 V37 a4 4 0 0 1 4 -4 Z"/>
+      <path class="fold" d="M69 33 V40 a2 2 0 0 0 2 2 H78 Z"/>
+      <g class="btc">
+        <rect x="55.6" y="40.5" width="2" height="4.5" rx="0.6"/><rect x="59.6" y="40.5" width="2" height="4.5" rx="0.6"/>
+        <rect x="55.6" y="58" width="2" height="4.5" rx="0.6"/><rect x="59.6" y="58" width="2" height="4.5" rx="0.6"/>
+        <text x="59.5" y="59" text-anchor="middle">B</text>
+      </g>
+      <g class="lines"><rect x="50" y="67" width="22" height="2.6" rx="1.3"/><rect x="50" y="72" width="11" height="2.6" rx="1.3"/><rect x="50" y="77" width="8" height="2.6" rx="1.3"/></g>
+      <polyline class="check" points="63,76 66.5,79.5 74,72"/>
+    </svg>
+    <h3 id="restore-progress-title">Restoring backup…</h3>
+    <p id="restore-progress-body" class="muted">Checking each transaction with your node. This can take up to a minute.</p>
+    <ul id="restore-progress-list" class="muted" style="display:none"></ul>
+    <p class="inline-btns" id="restore-progress-actions" style="display:none"><button type="button" class="primary" id="btn-restore-progress-close">Done</button></p>
+  </div>
+</div>
+
 <div id="confirm-modal" class="modal-overlay">
   <div class="modal" role="dialog" aria-modal="true">
     <button id="modal-x" class="modal-x" aria-label="Close">×</button>
@@ -451,9 +465,7 @@
   </div>
 </div>
 
-<!-- Edit-transaction popup: editing happens in a popup, so it
-     never scrolls the page down to a form at the bottom of the tab
-     on a phone. -->
+<!-- Edit popup (no scrolling to a form on a phone). -->
 <div id="edit-modal" class="modal-overlay">
   <div class="modal" role="dialog" aria-modal="true">
     <button id="edit-modal-x" class="modal-x" aria-label="Close">×</button>
@@ -461,13 +473,9 @@
     <p id="edit-locked-note" class="muted" style="display:none">The hex and broadcast route cannot be changed once the transaction has been broadcast.</p>
     <label for="edit-label">Label (optional)</label>
     <input id="edit-label" type="text" placeholder="e.g. Move 0.5 BTC to the heir's wallet">
-    <!-- One construct: every card is a
-         trigger set, so this modal is the same shape as the set
-         modal — a Transactions section (the transaction being
-         edited, as a member entry, plus blank entries appended
-         with "+ Add transaction") above a Triggers section. The
-         label above is the card's label. Saving with new
-         entries promotes the card to a set holding them all. -->
+    <!-- Edit popup: every card is a trigger set, so it mirrors the set
+         popup: the transaction(s) above, the triggers below. Saving with new
+         entries turns the card into a set holding them all. -->
     <div id="edit-txs-section" class="tx-trigger tx-item">
       <span class="tx-trigger-k">Transactions</span>
       <div id="edit-members-list">
@@ -526,15 +534,9 @@
   </div>
 </div>
 
-<!-- Edit trigger-set popup: one label and the ONE
-     rule set that drives the set's transactions. The
-     Transactions section lists the current members — each
-     with a remove button (removed members return to
-     standalone on save) — and "+ Add transaction" appends a
-     blank entry (notes + hex), created on save with the set's
-     shared trigger and attached to the set. The rule form
-     reuses the same machinery as the Add/Edit modals, with
-     the prefix 'set'. -->
+<!-- Set popup: one label and one rule set for its members. Members can be
+     removed (they return to standalone); "+ Add transaction" appends new
+     entries, created on save with the set's trigger. Rule form prefix 'set'. -->
 <div id="set-modal" class="modal-overlay">
   <div class="modal" role="dialog" aria-modal="true">
     <button id="set-modal-x" class="modal-x" aria-label="Close">×</button>
@@ -580,26 +582,16 @@
 </div>
 
 
-<!-- Add-transaction popup. Three buttons open it: the Getting Started button,
-     the "+ Add a pre-signed transaction" button at the bottom
-     of the Transactions tab, and the oval "+ Add Tx" in the
-     Staged Transactions header. The popup never switches tabs
-     or scrolls the page. -->
+<!-- Add popup, opened by Getting Started, the bottom-of-tab button and "+
+     Add Tx"; never switches tabs. -->
 <div id="add-modal" class="modal-overlay">
   <div class="modal" role="dialog" aria-modal="true">
     <button id="add-modal-x" class="modal-x" aria-label="Close">×</button>
     <h3 id="btc-form-title">Add a transaction</h3>
-    <!-- "+ Add Tx" IS "add trigger set":
-         one save creates a COMPLETE INDEPENDENT new trigger
-         set — ONE label for the set, above the transaction
-         inputs; repeatable tx entries (notes + hex each) inside
-         #btc-tx-list, appended with "+ Add another
-         transaction"; then the shared triggers / route below.
-         No set picker: the entries always become a NEW set.
-         The first entry keeps the old static ids (btc-notes,
-         btc-hex) so the import-file path and the untouched-form
-         check keep working; extra entries are built in JS with
-         the same field classes. -->
+    <!-- "+ Add Tx" creates one new trigger set: one label, repeatable
+         entries in #btc-tx-list, shared triggers and route below. The first
+         entry keeps the static ids btc-notes / btc-hex (used by file
+         import); extra entries are built in JS with the same classes. -->
     <label for="btc-set-label">Label (optional)</label>
     <input id="btc-set-label" type="text" placeholder="e.g. Move everything to the heir's wallet">
     <div id="btc-tx-list">
@@ -653,10 +645,8 @@
   </div>
 </div>
 
-<!-- App login: shown only when the server requires a
-     password (STANDBY_PASSWORD; on Umbrel it is the password shown
-     on the app's page). It covers the page until a login succeeds;
-     the page then reloads with the session token in place. -->
+<!-- App login: covers the page until a login succeeds (only when
+     STANDBY_PASSWORD is set). -->
 <div id="login-modal" class="modal-overlay">
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="login-title">
     <h3 id="login-title">Log in to Standby</h3>
@@ -670,9 +660,8 @@
   </div>
 </div>
 
-<!-- Backup download: encrypted with a password the owner
-     chooses (the default), or unencrypted after a warning. The two
-     choices are the app's usual on/off switches. -->
+<!-- Backup download: encrypted (default) or unencrypted, chosen with on/off
+     switches. -->
 <div id="backup-modal" class="modal-overlay">
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="backup-modal-title">
     <button id="backup-modal-x" class="modal-x" aria-label="Close">×</button>
@@ -681,9 +670,7 @@
     <label class="switch green switch-row"><span>Encrypted (recommended)</span>
       <input type="checkbox" id="backup-encrypt" checked><span class="slider"></span></label>
     <div id="backup-encrypted-fields">
-      <!-- Either the owner types a password twice, or Standby
-           generates one: the switch picks which. A generated
-           passphrase is shown once, in full, to be written down. -->
+      <!-- Type a password twice, or generate one (shown once, in full). -->
       <label class="switch green switch-row"><span>Generate a passphrase for me</span>
         <input type="checkbox" id="backup-generate"><span class="slider"></span></label>
       <div id="backup-typed-fields">

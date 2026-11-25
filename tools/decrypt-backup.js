@@ -1,22 +1,15 @@
 #!/usr/bin/env node
 'use strict';
-// Decrypt a Standby encrypted backup WITHOUT Standby.
-//
-// For when the device is gone, or for anyone (an heir, an executor)
-// holding the backup file and its password. Needs only Node.js 18+;
-// no install, no dependencies, nothing else from this repository.
-//
-//   node decrypt-backup.js standby-backup-2026-11-24.encrypted.json > backup.json
-//
-// The password is read from the terminal (not echoed), or from the
-// STANDBY_BACKUP_PASSWORD environment variable. The output is the
-// plain standby-backup JSON: restore it in Standby (Settings → Data
-// backup → Restore), or read the signed transactions from
-// state.bitcoin.txs[].hex and broadcast them with any wallet or
-// block explorer. Treat the output like the transactions themselves.
-//
-// The format is described in SECURITY.md and implemented in
-// standby/lib/backupcrypto.js — keep the two in step.
+// Decrypt a Standby encrypted backup without Standby: for when the device
+// is gone, or for whoever holds the file and its password. Node.js 18+, no
+// dependencies.
+// node decrypt-backup.js standby-backup-2026-11-24.encrypted.json >
+// backup.json
+// The password is read from the terminal (not echoed) or
+// STANDBY_BACKUP_PASSWORD. The output is the plain backup JSON: restore it
+// in Standby, or take the signed hexes from state.bitcoin.txs[].hex and
+// broadcast them with any wallet or explorer. Treat it like the
+// transactions. Format: SECURITY.md and standby/lib/backupcrypto.js.
 const crypto = require('crypto');
 const fs = require('fs');
 const zlib = require('zlib');

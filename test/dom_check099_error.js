@@ -1,23 +1,12 @@
-// dom_check099_error.js — DOM coverage for the 0.8.3 error screen
-// (#state-error-card) and the restore / start-fresh flows.
-//
-// The main DOM suite boots a healthy app, so the broken-state view
-// was never exercised from the client side: the gating regex, the
-// show/hide logic, and the two rescue buttons could all have
-// regressed silently. This script boots its OWN instance (ports
-// 3468/3469, stubs 18265/18266, data /tmp/standby-test099-dom-err) so
-// it can break the state and restart the app without disturbing
-// the main DOM run. dom_launcher099.py boots the instance and seeds
-// one tx, then runs this script after the width check; the script
-// kills and respawns the app itself (by exact PID, never pkill).
-//
-// Exits 0 when every check passes, 1 otherwise. Prints one
-// PASS/FAIL line per check, then FAILURES: N.
-//
-// The harness block below (El shim, document/window/fetch stubs,
-// check(), rerender()) is copied verbatim from dom_check099.js
-// lines 125-530, with only BASE/DATA_FILE made env-driven —
-// keep it in sync when the main shim changes.
+// DOM checks for the state-error screen (#state-error-card) and its
+// restore / start-fresh flows, on its own instance (ports 3468/3469, stubs
+// 18265/18266, data /tmp/standby-test099-dom-err) so it can break the
+// state and restart the app (by exact PID, never pkill).
+// dom_launcher099.py boots it and seeds one tx.
+// Exits 0 when every check passes; prints PASS/FAIL per check, then
+// FAILURES: N.
+// The harness below is copied from dom_check099.js with BASE/DATA_FILE
+// env-driven; keep the two in sync.
 'use strict';
 const { spawn } = require('child_process');
 const path = require('path');
@@ -31,10 +20,8 @@ const BASE = process.env.ERR_BASE || 'http://127.0.0.1:3468';
 const DATA_FILE = (process.env.ERR_DATA || '/tmp/standby-test099-dom-err') + '/state.json';
 const els = {};
 function elText(el) {
-  // The shim stores textContent as a plain property — it does NOT
-  // aggregate from children the way a real browser does. Read the
-  // children's text when the element's own text is empty, so a row
-  // built from a label span + a value span reads "Label: value".
+  // The shim stores textContent per element (no aggregation), so read the
+  // children's text when an element's own is empty.
   if (!el) return '';
   if (el.textContent) return el.textContent;
   return (el.children || []).map(elText).join('');
@@ -66,17 +53,13 @@ function cardDetails(card) {
   for (const c of card.children) { if (c.className === 'tx-details') return c; }
   return null;
 }
-// Simulate a user toggling a <details> open/closed (0.7.18): the
-// shim has no native <details> behaviour, so set .open by hand and
-// fire the toggle listener the app attached, as a real browser
-// would on a summary click.
+// Toggle a <details> by hand and fire its listener (the shim has no native
+// behaviour).
 function toggleDetails(el, open) {
   el.open = open;
   (el.listeners.toggle || []).forEach((f) => f({ target: el }));
 }
-// True when the card's Details element itself holds a direct child
-// with the given class — i.e. the line lives INSIDE the Details
-// rather than below the buttons on the card.
+// True when the card's Details holds a direct child with the given class.
 function detailsContains(card, cls) {
   const d = cardDetails(card);
   return !!d && d.children.some((x) => (x.className || '').split(' ').includes(cls));
@@ -101,10 +84,8 @@ function triggerBox(card) {
   return null;
 }
 function triggerParts(card) {
-  // the subcard's three spans: the type key, the condition, the
-  // live state (" — <reason>"). Null when the subcard is missing
-  // or malformed. (0.8.2 v2) The key + pill read through the
-  // .tx-trigger-head wrapper in the first span.
+  // A subcard's three spans (type with pill, condition, state), or null
+  // when missing.
   const box = triggerBox(card);
   if (!box || box.children.length < 3) return null;
   const head = boxHeadParts(box);
@@ -122,11 +103,8 @@ function triggerParts(card) {
 function cardFaceText(card) {
   return card.children.filter((c) => c.className !== 'tx-details').map(elText).join(' ');
 }
-// The readiness blocks (0.8.0): one .readiness-tx per ACTIVE tx —
-// a .readiness-tx-row (label <b> + trigger-mode pill + status pill
-// + optional fee pill) and a .readiness-tx-state line underneath.
-// The 094 readinessRows() helper does not fit this shape (it read
-// a flat row), so this replaces it for 0.8.0.
+// Readiness blocks: one .readiness-tx per active tx, a row (label, status
+// pill, optional fee pill) and a state line.
 function readinessBlocks() {
   const txs = els['readiness-txs'];
   if (!txs) return null;
@@ -136,9 +114,8 @@ function readinessBlocks() {
       const row = b.children[0] || { children: [] };
       const state = b.children[1];
       return {
-        // (0.8.0) The row is label + status pill (+ fee pill) —
-        // there is NO trigger-type mode pill any more; the state
-        // line is the tx card's condition summary ("Fires when ...").
+        // A row is label, status pill and optional fee pill; the state
+        // line is the condition text.
         label: (row.children[0] || {}).textContent || '',
         status: (row.children[1] || {}).textContent || '',
         statusCls: (row.children[1] || {}).className || '',
@@ -151,10 +128,8 @@ function readinessBlock(label) {
   const blocks = readinessBlocks();
   return blocks && blocks.find((x) => x.label === label);
 }
-// The per-tx check-in bars (0.8.0): one .ck-tx block per active
-// check-in tx inside #checkin-tx-bars — label, bar fill width,
-// "X of N days elapsed" caption, and the block's class (a
-// disarmed tx's bar carries 'frozen').
+// Check-in bars: label, fill width, caption and class ('frozen' when
+// disarmed).
 function checkinBars() {
   const wrap = els['checkin-tx-bars'];
   if (!wrap) return null;
@@ -194,9 +169,7 @@ function selectValues(html, id) {
   const block = html.slice(start, html.indexOf('</select>', start));
   return [...block.matchAll(/value="([^"]+)"/g)].map((m) => m[1]);
 }
-// A minimal 1-in/1-out tx spending Finney vout 1 (the same shape
-// as helpers.craft) — so the DOM test can add transactions via
-// the API without importing the Python helpers.
+// A 1-in/1-out tx spending FINNEY:1 (same shape as helpers.craft).
 function craftHex(vout, value) {
   const FINNEY = 'f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16';
   const prev = Buffer.from(FINNEY, 'hex').reverse();
@@ -213,10 +186,8 @@ function craftHex(vout, value) {
   ]).toString('hex');
 }
 function craftLocktimeHex(vout, locktime, value) {
-  // Same shape as craftHex, but with an explicit locktime and a
-  // non-maxed sequence (0), so the locktime applies. A block-height
-  // locktime above the
-  // stub tip (900000) makes the dry-run verdict 'timelocked'.
+  // Like craftHex with a locktime and sequence 0; above the stub tip
+  // (900000) it dry-runs as timelocked.
   const FINNEY = 'f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16';
   const prev = Buffer.from(FINNEY, 'hex').reverse();
   const voutBuf = Buffer.alloc(4); voutBuf.writeUInt32LE(vout);
@@ -242,10 +213,9 @@ function selectAddTrigger(v) {
   sel.value = v;
   fireChange(sel);
 }
-// --- 0.8.2 rule-list helpers ---
-// The rule panels are built in JS, so they are NOT in the els
-// registry — walk the list container's children instead. A
-// panel's rows and fields are found by id within its subtree.
+// --- rule-list helpers ---
+// Rule panels are built in JS (not in els): walk the list's children and
+// find fields by id within each.
 function rulePanels(prefix) {
   return (els[prefix + '-rules-list'] && els[prefix + '-rules-list'].children) || [];
 }
@@ -267,9 +237,8 @@ function panelSelectValues(panel, selId) {
   if (!sel) return null;
   return (sel.children || []).filter((c) => c.tagName === 'OPTION').map((o) => o.value);
 }
-// One option of a panel's type select, by value — so a check can
-// read its disabled state and label (0.8.2 v2: used types are
-// disabled and labelled "(already used)").
+// One option of a panel's type select (used types are disabled "(already
+// used)").
 function panelOption(panel, value) {
   const sel = panelTypeSelect(panel);
   if (!sel) return null;
@@ -284,9 +253,7 @@ function panelRowVisible(panel, rowId) {
 function triggerBoxes(card) {
   return card.children.filter((c) => c.className === 'tx-trigger');
 }
-// The subcard header (0.8.2 v2): a .tx-trigger-head flex row
-// holding the type key + the per-rule state pill (no pill on a
-// manual rule). k and pill read through the wrapper.
+// The subcard header row: type key plus per-rule pill (none for manual).
 function boxHeadParts(box) {
   const head = box && box.children[0];
   if (!head || !(head.className || '').split(' ').includes('tx-trigger-head')) return { k: '', pill: null, pillCls: null };
@@ -351,9 +318,8 @@ class El {
   }
   appendChild(c) { this.children.push(c); return c; }
   insertBefore(c, ref) {
-    // (0.8.10, fix 4) The load-failure notice uses insertBefore
-    // (first child of <main>); a null/unknown ref appends, like the
-    // real DOM. The shim's <main> override captures the insert.
+    // The load-failure notice uses insertBefore on <main>; the shim
+    // captures it.
     const i = ref ? this.children.indexOf(ref) : -1;
     if (i === -1) this.children.push(c); else this.children.splice(i, 0, c);
     return c;
@@ -464,9 +430,8 @@ let appChild = null; // the currently running app process (spawned here)
 let appPid = process.env.ERR_APP_PID ? Number(process.env.ERR_APP_PID) : null;
 
 async function waitHealth(want) {
-  // Poll /api/health until it answers with the wanted status
-  // (200 healthy, 500 broken) or 15 s pass. Returns the last status
-  // seen, or 0 if the port never answered at all.
+  // Poll /api/health until it answers the wanted status (200 healthy, 500
+  // broken) or 15 s pass. Returns the last status, 0 if nothing answered.
   const t0 = Date.now();
   let last = 0;
   while (Date.now() - t0 < 15000) {
@@ -519,10 +484,8 @@ function corruptState() {
 
 function errorCardVisible() {
   // The shim never parses the static HTML, so the card's inline
-  // style="display:none" is invisible here: style.display starts
-  // undefined, and only showStateError() ever sets it (to '').
-  // Shown therefore means exactly '' — never 'none', never
-  // undefined.
+  // display:none is invisible: only showStateError() sets style.display
+  // (to ''). Shown means exactly ''.
   const card = document.getElementById('state-error-card');
   return !!card && card.style.display === '';
 }
@@ -562,19 +525,17 @@ function errorCardVisible() {
   fileInput.files = [{ __content: backup }];
   fileInput.change();
   await sleep(800);
-  check('error: restore reports the restored transaction',
-    (document.getElementById('state-error-msg').textContent || '').indexOf('Restored 1 transaction') !== -1,
-    document.getElementById('state-error-msg').textContent || '');
-  check('error: restore message says the transactions were checked against the node',
-    (document.getElementById('state-error-msg').textContent || '').indexOf('Checked against the node') !== -1,
-    document.getElementById('state-error-msg').textContent || '');
-  check('error: the card stays up so the restore summary can be read (no reload yet)', global.__reloaded === false, '');
-  check('error: after a restore only Continue is offered',
-    document.getElementById('btn-state-continue').style.display === ''
-    && document.getElementById('btn-state-restore').style.display === 'none'
-    && document.getElementById('btn-state-reset').style.display === 'none', '');
-  document.getElementById('btn-state-continue').click();
-  check('error: Continue reloads the page', global.__reloaded === true, '');
+  const rpTitle = () => document.getElementById('restore-progress-title').textContent || '';
+  const rpItems = () => (document.getElementById('restore-progress-list').children || []).map((li) => li.textContent).join(' | ');
+  check('error: the restore pop-out opens and ends on "Backup restored"',
+    document.getElementById('restore-progress-modal').classList.contains('open') && rpTitle() === 'Backup restored', rpTitle());
+  check('error: the pop-out lists the restored transaction',
+    rpItems().indexOf('1 transaction restored') !== -1, rpItems());
+  check('error: the pop-out offers Done', document.getElementById('restore-progress-actions').style.display === '', '');
+  check('error: no reload until Done is pressed', global.__reloaded === false, '');
+  document.getElementById('btn-restore-progress-close').click();
+  check('error: Done closes the pop-out and reloads the page',
+    !document.getElementById('restore-progress-modal').classList.contains('open') && global.__reloaded === true, '');
   check('error: health 200 again after restore', (await waitHealth(200)) === 200, '');
   const st1 = await (await fetch('/api/state')).json();
   check('error: the seeded tx is back after restore',
@@ -616,12 +577,9 @@ function errorCardVisible() {
       && document.getElementById('getting-started-card').style.display !== 'none',
     document.getElementById('getting-started-card') && document.getElementById('getting-started-card').style.display);
 
-  // --- load-failure notice escapes markup (0.8.10, fix 4) ------------
-  // The generic notice (not the state-error card) fires when load()
-  // fails with an error that is NOT a corrupt/missing state file.
-  // Feed it one whose message is markup: the old insertAdjacentHTML
-  // code would have parsed it as HTML; the textContent code must
-  // render it literally, with no element children.
+  // --- load-failure notice escapes markup ---
+  // A non-state load error whose message is markup must render as text,
+  // with no element children.
   const savedFetch = global.fetch;
   global.fetch = (path, opts) => {
     if (path === '/api/state') {

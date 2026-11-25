@@ -3,10 +3,8 @@
 const { MAX_BODY } = require('./config');
 
 function sendJson(res, status, obj) {
-  // Security headers live in lib/http.js and
-  // are required lazily: http.js requires this module (for
-  // sendError), so a top-level require here would be a load-time
-  // cycle and capture undefined exports.
+  // Required lazily: http.js requires this module, so a top-level require
+  // would be a load cycle.
   require('./http').setSecurityHeaders(res);
   const body = JSON.stringify(obj);
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body) });
@@ -17,10 +15,8 @@ function sendError(res, status, message) {
   sendJson(res, status, { error: message });
 }
 
-// An error that is the CLIENT's fault, safe to show it: the request
-// dispatcher answers it with its own status and message. Any other
-// error is logged in full and answered with a bare 'internal error'
-// — internal details (paths, stack-derived text) stay in the log.
+// A client's own error, safe to show: answered with its status and
+// message. Anything else is logged and answered as 'internal error'.
 function clientError(status, message) {
   const e = new Error(message);
   e.statusCode = status;
@@ -56,61 +52,33 @@ function asStr(v, maxLen) {
   return v.slice(0, maxLen);
 }
 
-// Broadcast route: which network a transaction goes out
-// on. 'public' is the mempool nodes (primary, then secondary);
-// 'slipstream' is MARA Slipstream (direct to MARA Pool's private
-// mempool). Per transaction, chosen when it is added and changeable
-// on its card — the two routes are never a fallback chain: only the
-// selected route is attempted, and the hourly retry re-attempts that
-// same route. Anything else (including a missing value on an older
-// record or backup) is 'public'.
+// Broadcast route per transaction: 'public' (the mempool nodes, primary
+// then secondary) or 'slipstream' (MARA only). Never a fallback chain:
+// retries use the same route. Anything else is 'public'.
 function validBroadcastVia(v) {
   return v === 'slipstream' ? 'slipstream' : 'public';
 }
 
-// Public fallback: a per-transaction OPT-IN timer on a
-// Slipstream-route transaction. If the transaction is not publicly
-// visible within the chosen number of days, Standby broadcasts it
-// publicly instead — the automatic version of the manual "Broadcast
-// publicly" escape hatch, for when nobody is watching. The allowed
-// durations are the seven the UI offers; anything else (including a
-// missing value on an older record or backup) is null — Never, no
-// automatic fallback. The fallback only applies while the route is
-// 'slipstream'; the value is stored (and kept) when the route is
-// 'public', but ignored. It is deliberately lenient, like
-// validBroadcastVia above: an invalid value becomes Never, never a
-// 400.
+// Public fallback: an opt-in timer for a Slipstream tx; if it is not
+// public within the chosen days, Standby broadcasts it publicly. Only the
+// durations the UI offers; anything else is null (Never), never a 400.
+// Stored but ignored while the route is public.
 const PUBLIC_FALLBACK_DAYS = [1, 3, 7, 14, 30, 60, 90];
 function validPublicFallbackDays(v) {
   return (typeof v === 'number' && PUBLIC_FALLBACK_DAYS.includes(v)) ? v : null;
 }
 
-// Grace period: when the app comes back after being
-// offline, price, UTXO, block-height, set-date, and fee-market
-// triggers are paused for a grace period so they do not fire on
-// conditions that changed while the app was away.
-// graceOfflineDays is the offline gap that
-// triggers it; graceDurationDays is how long it lasts, or null
-// = indefinite (until the owner resumes from the dashboard
-// card). A stored 0 still means off (older state may hold it) —
-// the UI never sends 0: the graceEnabled toggle is the off switch. The
-// allowed values are exactly the ones the Settings
-// dropdowns offer; anything else is a 400 at PUT /api/settings
-// — a bad grace setting must not silently become a different
-// one (unlike the lenient per-tx fallback above, where a
-// missing value becomes Never at serve time).
+// Grace settings: graceOfflineDays (the gap that starts one) and
+// graceDurationDays (null = until resumed; a stored 0 still means off).
+// Only the dropdown values are accepted; anything else is a 400, so a bad
+// value never silently becomes another.
 const GRACE_OFFLINE_DAYS = [1, 3, 7, 14, 30];
-// 0 = off, kept for back-compat: the grace is never set, so every
-// trigger evaluates normally. null (indefinite) is separate —
-// it is not in this list because the dropdown sends it as the
-// string 'indefinite', which the save handler maps to null.
+// 0 means off (kept for old state). Indefinite arrives as the string
+// 'indefinite' and is mapped to null.
 const GRACE_DURATION_DAYS = [0, 1, 3, 7, 14, 30];
 
-// User controls: the Settings cards for price agreement,
-// check cadence, and fee verdict. Each is a number input with a
-// min/max bound — anything outside is a 400 at PUT /api/settings
-// and at restore, never a silent clamp (a bad value must not
-// silently become a different one).
+// Bounded number settings: out of range is a 400 (settings and restore),
+// never clamped.
 const PRICE_AGREEMENT_PCT_MIN = 1, PRICE_AGREEMENT_PCT_MAX = 20, PRICE_AGREEMENT_PCT_DEFAULT = 5;
 const CHECK_CADENCE_SECONDS_MIN = 10, CHECK_CADENCE_SECONDS_MAX = 3600, CHECK_CADENCE_SECONDS_DEFAULT = 60;
 const FEE_LOW_MULT_MIN = 1, FEE_LOW_MULT_MAX = 10, FEE_LOW_MULT_DEFAULT = 2;

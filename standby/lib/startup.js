@@ -1,28 +1,17 @@
 'use strict';
-// Standby — startup checks shared by the app and the check-in
-// receiver.
-//
-// Writability: a Standby that cannot write its files is worse than
-// one that is down. Its saves fail one by one (a check-in that
-// records but 500s, a backup rotation that quietly stops, a revoked
-// key that stays valid because keys.json cannot be rewritten) and
-// nothing on screen says why. The usual cause is ownership:
-// versions before 0.8.11 ran as root, so an existing install's
-// files are root-owned, and 0.8.11+ runs as UID 1000. So the
-// process checks at startup and, if anything is not writable,
-// prints exactly what and the fix for this deployment — then exits,
-// so Docker's restart loop and the log make the problem obvious.
+// Startup checks shared by the app and the receiver. Writability: a
+// Standby that cannot write is worse than one that is down (saves fail one
+// by one with nothing on screen). Usually ownership: old installs ran as
+// root, current ones run as UID 1000. So check at startup and, if anything
+// is not writable, print what and the fix for this deployment, then exit.
 const fs = require('fs');
 const path = require('path');
 
 const PROBE = '.standby-write-test';
 
-// Problems with one directory: it cannot be created, a file cannot
-// be created in it, or an existing regular file in it cannot be
-// written. `create` false means a missing directory is fine (the
-// app's check-in directory on a bare run, where the feature is
-// dormant). Returns a list of human-readable problems, empty when
-// all is well.
+// Problems with one directory (cannot create it, create a file in it, or
+// write an existing file). create false allows it to be missing. Returns
+// readable problems, empty when fine.
 function writeProblems(dir, { create, mode }) {
   const problems = [];
   if (!fs.existsSync(dir)) {

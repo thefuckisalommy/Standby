@@ -1,30 +1,16 @@
 'use strict';
-// Standby — encrypted backups.
-//
-// A backup holds every signed transaction, and a signed transaction
-// is bearer: whoever has the file can broadcast it. Unlike the data
-// directory, a backup leaves the device. So the download can be
-// encrypted with a password the owner chooses.
-//
-// Done on the SERVER, not in the browser: on Umbrel the page is
-// served over plain HTTP on the LAN, so browser-side encryption would
-// first send every signed transaction across the network in the
-// clear. Encrypted here, the plaintext backup never leaves the device.
-//
-// Format (a JSON file, documented in SECURITY.md):
-//   {
-//     "format": "standby-backup-encrypted", "version": 1,
-//     "kdf":    { "name": "scrypt", "N": 131072, "r": 8, "p": 1, "salt": <base64, 16 bytes> },
-//     "cipher": { "name": "aes-256-gcm", "iv": <base64, 12 bytes> },
-//     "data":   <base64 of ciphertext || 16-byte GCM tag>
-//   }
-// The plaintext is the ordinary standby-backup JSON, gzipped. The
-// header (everything but `data`) is the GCM additional data, so the
-// KDF settings, salt and IV cannot be altered without detection.
-// Nothing about the contents (labels, counts, dates) is in the clear.
-//
-// tools/decrypt-backup.js (repo root) decrypts this format with no
-// Standby install — keep the two in step.
+// Encrypted backups. A backup leaves the device and holds bearer
+// transactions, so it can be encrypted with a password the owner chooses.
+// Done on the server: the page may be plain HTTP on the LAN, so encrypting
+// in the browser would first send the plaintext across it.
+// Format (documented in SECURITY.md): { format: 'standby-backup-
+// encrypted', version: 1, kdf: { name: 'scrypt', N: 131072, r: 8, p: 1,
+// salt }, cipher: { name: 'aes-256-gcm', iv }, data: base64(ciphertext ||
+// tag) }. The plaintext is the ordinary backup JSON, gzipped; the header
+// is GCM additional data, so it cannot be altered undetected. Nothing
+// about the contents is in the clear.
+// tools/decrypt-backup.js decrypts this format without Standby; keep the
+// two in step.
 const crypto = require('crypto');
 const zlib = require('zlib');
 
@@ -91,9 +77,8 @@ function b64(v, name, wantLen) {
   return buf;
 }
 
-// Validates the envelope, then decrypts. Throws BackupCryptoError
-// with a message fit for the owner; a wrong password and a damaged
-// file are indistinguishable by design (GCM says only "no").
+// Validate the envelope, then decrypt. A wrong password and a damaged file
+// look the same (GCM only says no).
 async function decryptBackup(doc, password) {
   if (!isEncryptedBackup(doc)) throw new BackupCryptoError('not an encrypted Standby backup');
   if (doc.version !== VERSION) throw new BackupCryptoError('unsupported encrypted backup version: ' + doc.version);

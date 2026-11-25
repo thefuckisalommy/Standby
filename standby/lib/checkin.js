@@ -1,47 +1,30 @@
 'use strict';
 // Standby — check-in keys, grace, vacation, check-in clock.
 const store = require('./store');
-const bitcoin = require('./bitcoin');
 const fs = require('fs');
 const crypto = require('crypto');
 const path = require('path');
 const { CHECKIN_DIR, DATA_DIR } = require('./config');
 const { GRACE_DURATION_DAYS, GRACE_OFFLINE_DAYS, days } = require('./util');
 
-// State as served to the UI: a plain deep copy, except the check-in key
-// hashes are stripped — the UI never needs them (the /api/checkin-keys
-// list omits them too). The hashes are SHA-256 of the keys, which cannot
-// be turned back into a key, but there is no reason to send them to the
-// browser on every state read. The BACKUP is the only document that
-// carries the hashes (a restore needs them so the keys keep working) —
-// it takes its own full copy below, not sanitizeState.
+// State as served: a deep copy without the check-in key hashes (the UI
+// never needs them). Only the backup carries them, so restored keys keep
+// working.
 function sanitizeState(state) {
   const copy = JSON.parse(JSON.stringify(state));
   if (Array.isArray(copy.checkinKeys)) copy.checkinKeys = copy.checkinKeys.map(publicCheckinKey);
   return copy;
 }
 
-// ---------------------------------------------------------------------------
-// Check-in API keys. A key is a bearer token that authorizes
-// exactly one thing: recording a check-in, via the check-in receiver.
-// It cannot read state, list transactions, broadcast, or change
-// settings — and the receiver has no route to the transactions at
-// all, so a key holder has no path to them either.
-//   - The plaintext key is generated here, returned ONCE (at creation),
-//     and never stored. Only its SHA-256 hash is kept.
-//   - The hashes are published to the receiver through the shared
-//     CHECKIN_DIR (keys.json, rewritten whenever keys change). The
-//     receiver reads that file fresh on every request, so a revocation
-//     takes effect immediately.
-//   - The receiver writes a check-in as CHECKIN_DIR/last.json
-//     ({ lastCheckinAt, keyId, label, sourceIp }); mergeExternalCheckin()
-//     below folds a newer timestamp into the check-in clock, the same
-//     way POST /api/checkin does (clears the cycle-scoped release
-//     records, never a stale one; logs which key
-//     checked in). Idempotent: the same file merged twice changes
-//     nothing the second time, because its timestamp is no longer
-//     newer than the clock.
-// ---------------------------------------------------------------------------
+// Check-in API keys. A key authorizes exactly one thing: recording a
+// check-in through the receiver, which has no route to the transactions.
+// - The plaintext key is returned once and never stored; only its SHA-256
+//   hash is kept.
+// - Hashes are published to the receiver in CHECKIN_DIR/keys.json, read
+//   fresh per request, so a revocation is immediate.
+// - The receiver writes CHECKIN_DIR/last.json; mergeExternalCheckin folds
+//   a newer timestamp into the clock like POST /api/checkin (clearing
+//   cycle records, never a stale one). Idempotent.
 function hashCheckinKey(plain) {
   return crypto.createHash('sha256').update(plain, 'utf8').digest('hex');
 }
@@ -62,17 +45,13 @@ function writeReceiverKeys(state) {
       keys: (state.checkinKeys || []).map((k) => ({ id: k.id, label: k.label, hash: k.hash })),
     };
     const file = path.join(CHECKIN_DIR, 'keys.json');
-    // Same durable write as state.json:
-    // a lost keys.json write would silently resurrect a revoked key
-    // or lose a new one, and the receiver reads this file fresh on
-    // every check-in.
+    // Durable write: a lost keys.json write could revive a revoked key or
+    // lose a new one.
     store.writeFileDurable(file, JSON.stringify(doc, null, 2) + '\n');
   } catch (e) {
-    // No shared directory (a plain `node server.js` run, or the
-    // receiver is not installed) — the keys are inert until it is.
-    // But when the directory IS there, a failed write
-    // matters: a revoked key would stay valid at the receiver. Say
-    // so loudly instead of swallowing it.
+    // No shared directory (bare run, no receiver): the keys are inert. If
+    // it exists, a failed write would leave a revoked key valid, so say so
+    // loudly.
     if (fs.existsSync(CHECKIN_DIR)) {
       console.error('Standby: ERROR: could not update the receiver key list (' + path.join(CHECKIN_DIR, 'keys.json') + '): ' + e.message
         + ' — a key created or revoked just now is NOT in effect at the receiver until this is fixed.');
@@ -80,11 +59,8 @@ function writeReceiverKeys(state) {
   }
 }
 
-// Read the receiver's key list (CHECKIN_DIR/keys.json) — tri-state,
-// like readExternalCheckin below: 'missing' (no file — no receiver
-// installed), 'ok' (a parsed {keys:[...]} list), 'error'
-// (unreadable or unparseable). Only entries with a string id and
-// hash count; anything else is dropped, never trusted.
+// Read the receiver's keys.json: 'missing', 'ok' or 'error' (like
+// readExternalCheckin). Only entries with a string id and hash count.
 function readReceiverKeys() {
   const file = path.join(CHECKIN_DIR, 'keys.json');
   let raw;
@@ -108,35 +84,22 @@ function readReceiverKeys() {
   }
 }
 
-// Warnings recorded at startup — the check-in key-store
-// verification below. Kept in memory for the life of the process
-// and served on GET /api/state alongside the persistence layer's
-// warnings, so the UI can show them (a later increment). Deduped
-// by code: the check runs once at startup, but a warning is a
-// fact about this run either way.
+// Startup warnings from the key-store check, kept for this process, served
+// on GET /api/state, deduped by code.
 const startupWarnings = [];
 function addStartupWarning(code, message) {
   if (startupWarnings.some((w) => w.code === code)) return;
   startupWarnings.push({ code, message, at: new Date().toISOString() });
 }
 
-// Startup check-in key-store verification. Keys live in two places
-// (state.checkinKeys and the receiver's keys.json), and outside
-// startup the receiver file is only rewritten on create / revoke /
-// restore — so a divergence could otherwise sit unnoticed until a
-// check-in is refused. This runs once at startup and compares the
-// two sides:
-//   state has keys + receiver missing/unreadable/mismatched ->
-//     rewrite the receiver file from state (state is the source
-//     of truth) and log it.
-//   state empty + receiver has keys -> warn only. The receiver is
-//     NOT overwritten (its keys may be the only copies left) and
-//     keys are NOT auto-restored into state — that is a manual
-//     decision by the owner.
-//   state empty + a backup has keys -> warn, naming the backup.
-//     Again, no auto-restore.
-// Limit: when BOTH sides have lost the keys, this check cannot
-// recover them — the daily state backups are what cover that case.
+// Startup key-store check (keys live in state and in the receiver's
+// keys.json):
+// - state has keys, receiver missing or different: rewrite the receiver
+//   file from state and log it
+// - state empty, receiver has keys: warn only (they may be the only
+//   copies; restoring is the owner's call)
+// - state empty, a backup has keys: warn, naming the backup
+// If both sides lost the keys, the daily backups are the recovery.
 function verifyCheckinKeyStore() {
   try {
     const state = store.loadState(DATA_DIR);
@@ -177,18 +140,10 @@ function verifyCheckinKeyStore() {
   }
 }
 
-// Read the receiver's last check-in (CHECKIN_DIR/last.json) —
-// tri-state. Returns { status }:
-//   'missing' — no file. There is no receiver, or it has never
-//     recorded a check-in. Nothing to merge; this is NOT an error.
-//   'ok' — a valid check-in record (plus the record's fields).
-//   'error' — the file exists but cannot be read or parsed. A
-//     check-in may be sitting there that we cannot see, so a
-//     release must NOT go out while this stands (see
-//     evaluateRelease). "Missing" is decided from the read error's
-//     code (ENOENT), never from fs.existsSync — existsSync returns
-//     false on EACCES too, so an unreadable file would otherwise
-//     be mistaken for a missing one.
+// Read the receiver's last check-in: 'missing' (no file: not an error),
+// 'ok', or 'error' (exists but unreadable: a check-in may be hidden there,
+// so no release while it stands). Missing is decided by ENOENT, not
+// existsSync, which is also false on EACCES.
 function readExternalCheckin() {
   const file = path.join(CHECKIN_DIR, 'last.json');
   let raw;
@@ -218,16 +173,10 @@ function readExternalCheckin() {
   }
 }
 
-// Fold a newer receiver check-in into the clock. Returns true when a
-// check-in was applied (and saved + logged), false when there was
-// nothing to apply — a missing file, a timestamp in the future (the
-// receiver writes "now"; anything more than 5 minutes ahead is a
-// skewed clock, not a check-in), or one no newer than the clock —
-// and the string 'error' when the receiver state could not be read
-// (see readExternalCheckin). Callers that decide a release MUST treat
-// 'error' as "do not proceed": an unreadable check-in file is not the
-// same as no check-in. Callers that
-// only display state treat it as "nothing applied".
+// Fold a newer receiver check-in into the clock. true when applied (saved
+// and logged); false for nothing to apply (missing, more than 5 minutes in
+// the future, or not newer); 'error' when unreadable. Release callers must
+// treat 'error' as do not proceed.
 function mergeExternalCheckin(state, now) {
   const ext = readExternalCheckin();
   if (ext.status === 'error') return 'error';
@@ -237,19 +186,14 @@ function mergeExternalCheckin(state, now) {
   if (last && ext.at.getTime() <= last.getTime()) return false;
   state.checkin.lastCheckinAt = ext.raw;
   state.checkin.totalCheckins += 1;
-  // A check-in clears the cycle-scoped release records of
-  // the CHECK-IN rules only — a price or UTXO rule's record belongs
-  // to its own trigger's cycle, not the check-in clock, so a
-  // check-in must not clear it (and must not reset its trigger).
-  // A stale record survives either way, as before.
+  // A check-in clears only the check-in rules' cycle records (price and
+  // UTXO records belong to their own triggers); stale records survive.
   for (const t of (state.bitcoin.txs || [])) {
     if (!store.hasTriggerType(t, 'checkin')) continue;
     if (t.release && t.release.status === 'stale') continue;
     t.release = null;
-    // The clock restarts at this check-in: any frozen time is
-    // wiped, then a tx that is still inactive (disarmed, or on
-    // vacation) is re-marked inactive from now — it stays frozen
-    // at 0 instead of counting while inactive.
+    // The clock restarts here: frozen time is wiped, and a still-inactive
+    // tx is re-marked inactive from now (frozen at 0).
     t.checkinOffsetMs = 0;
     t.checkinInactiveSince = null;
   }
@@ -263,32 +207,13 @@ function mergeExternalCheckin(state, now) {
   return true;
 }
 
-// --- Grace period for all triggers ---
-// state.grace = { graceUntil, triggeredAt, offlineGapDays }.
-// graceUntil is an ISO timestamp, or null for an indefinite
-// grace (until the owner resumes). triggeredAt is when the
-// grace was set; offlineGapDays is how many days the app had
-// been offline when it was set (the dashboard card explains
-// the pause with that number). The grace is app-level state:
-// it is set when the app notices an offline gap longer than
-// settings.graceOfflineDays, or the check-in outage condition
-// in applyGrace below (a short armed check-in threshold can
-// trigger it at a shorter gap) — whatever txs exist at the time.
-// It is NOT set while one is already active (an active grace
-// never re-extends itself), and it is NOT cleared by a
-// check-in — only by expiry (now past graceUntil) or by
-// POST /api/grace/resume. The grace holds ALL trigger
-// types, check-in included: a check-in
-// rule is held by the same grace as everything else, for the
-// same duration, and the due date is NOT pushed out (the bar
-// reads the plain clock; see checkinStatus). The grace holds
-// price, UTXO, block-height, set-date, fee-market, and
-// check-in rules; the graceEnabled toggle is the off
-// switch — off means no grace at all, including no outage
-// protection for check-in. A stored duration of 0
-// (the old off switch) still reads as off, so state that never
-// went through loadState — tests, direct API writes — reads
-// the same way as migrated state (see loadState).
+// Grace period: state.grace = { graceUntil (null = until resumed),
+// triggeredAt, offlineGapDays }. Set on an offline gap past
+// graceOfflineDays, or by the check-in outage leg in applyGrace; never
+// while one is active; cleared only by expiry or POST /api/grace/resume,
+// not by a check-in. It holds every trigger type and does not push check-
+// in due dates out. graceEnabled false (or a stored duration of 0) means
+// no grace at all.
 function graceIsEnabled(settings) {
   const s = settings || {};
   if (s.graceEnabled === false) return false;
@@ -298,13 +223,8 @@ function graceIsEnabled(settings) {
 function graceStatus(state, now) {
   const g = (state && state.grace && typeof state.grace === 'object') ? state.grace : null;
   if (!g || !g.triggeredAt) return null;
-  // Grace off means no grace at all — even a record set
-  // before the toggle went off reads as none, so the rules gate,
-  // the served state, and the dashboard card all agree that
-  // triggers fire immediately. The record itself stays (it
-  // expires on its own); re-enabling before it expires resumes
-  // the pause, like a saved duration change never disturbs an
-  // already-active grace.
+  // Grace off reads as no grace everywhere, even for a record set earlier;
+  // the record stays and resumes if re-enabled before it expires.
   if (!graceIsEnabled(state.settings)) return null;
   if (g.graceUntil && now.getTime() > new Date(g.graceUntil).getTime()) return null;
   return {
@@ -318,18 +238,9 @@ function graceStatus(state, now) {
 function isGraceActive(state, now) {
   return graceStatus(state, now) !== null;
 }
-// The smallest thresholdDays among the
-// ARMED check-in rules that can actually fire — standalone txs'
-// triggers plus sets' triggers. A set member's own trigger is
-// parked while it is attached (it resumes when the tx leaves the
-// set), so it never sets the threshold: the old heldUntil code
-// scanned every tx, parked triggers included, and could grant a
-// hold for a rule that cannot fire. Returns null when no
-// check-in rule is armed — the check-in leg below needs a rule
-// to protect (unlike the old code's 35-day fallback, which was
-// harmless there because a heldUntil with no check-in rule was
-// inert; a unified grace is not inert — it would pause the
-// other rules too).
+// The smallest threshold among armed check-in rules that can fire
+// (standalone txs and sets; a member's parked trigger never counts). null
+// when none: the check-in leg then has nothing to protect.
 function smallestArmedCheckinThresholdDays(state) {
   const txs = state.bitcoin.txs || [];
   const memberIds = new Set();
@@ -346,29 +257,13 @@ function smallestArmedCheckinThresholdDays(state) {
   return thresholds.length ? Math.min.apply(null, thresholds) : null;
 }
 
-// Notice an offline gap and start a grace period for all
-// triggers. Activation is an OR of two conditions: the flat
-// offline threshold — the gap is longer than
-// settings.graceOfflineDays — OR the check-in outage condition:
-// the gap is more than a quarter of
-// the shortest ARMED check-in threshold AND more than half
-// that threshold has passed since the last check-in. The
-// second leg matters for short thresholds: a 1-day check-in
-// rule earns protection after a 6-hour outage, which the flat
-// 7-day threshold alone would not give it. The GRANT is the same
-// either way — the configured graceDurationDays; the due date is
-// never pushed out. Runs in
-// evaluateRelease and on the GET /api/state and /api/status
-// reads, and on the full tick — so a returning app notices
-// the gap promptly, before any held rule can fire.
-// Returns true when it set a grace. (The tick records liveness
-// in heartbeat.json right after this runs — throttled to 5
-// minutes — and loadState merges it back, so the stamp the next
-// read or tick judges on is at most 5 minutes old: an expired
-// grace is not re-set on the same stale stamp, and a fresh gap
-// after the app returns is what sets the next one.) Grace off
-// (the toggle, or a stored duration of 0 kept for back-compat)
-// means no grace is ever set.
+// Start a grace on an offline gap when either the gap exceeds
+// graceOfflineDays, or it exceeds a quarter of the shortest armed check-in
+// threshold with over half of it elapsed since the last check-in (so a
+// 1-day rule is protected after a 6-hour outage). The grant is
+// graceDurationDays either way. Runs on evaluation, on state and status
+// reads and on the full tick, so a returning app notices the gap before
+// anything fires. Returns true when it set one.
 function applyGrace(state, now) {
   if (isGraceActive(state, now)) return false;
   const online = state.checkin && state.checkin.lastOnlineAt ? new Date(state.checkin.lastOnlineAt) : null;
@@ -379,9 +274,7 @@ function applyGrace(state, now) {
   const gapMs = now.getTime() - online.getTime();
   let activates = gapMs > offlineDays * 86400000;
   if (!activates) {
-    // Check-in leg (see above): only when a check-in rule is
-    // armed — with none armed there is no check-in rule to
-    // protect, and the flat leg already covers long gaps.
+    // The check-in leg only applies when a check-in rule is armed.
     const thresholdDays = smallestArmedCheckinThresholdDays(state);
     if (thresholdDays !== null) {
       const thresholdMs = thresholdDays * 86400000;
@@ -403,30 +296,10 @@ function applyGrace(state, now) {
   return true;
 }
 
-// Derived check-in status from state + now. Each armed check-in
-// tx has its own threshold: check in before the soonest runs out
-// and the clock resets; past it, the release is due. There are no
-// warning levels and no grace period shown.
-// Once a release has actually broadcast (a threshold was exceeded
-// and a release went out), the status is 'broadcasted' — a manual
-// broadcast does not count, only a release does (the release record
-// carries kind 'release'). But 'broadcasted' means the release is
-// DONE: every armed transaction has reached a terminal state
-// (broadcasted or stale). A failed attempt is not terminal — an
-// unknown-reason failure (a node rejection, a network error, a
-// not-yet-final timelocked transaction) is retried on the next
-// hourly tick — so while any ARMED transaction still
-// The danger zone: the last 25% of the check-in window —
-// the time remaining until the due date is a quarter of the
-// threshold or less (already past due is inside the zone).
-// Actions that would arm a transaction or shorten the window
-// while the clock is here reset the check-in instead of letting
-// a due release fire. thresholdDays is the threshold to measure
-// against (the check-in tx's own threshold for arming/adding/
-// editing) — never hardcoded. liveOffsetMs is the tx's frozen
-// time: the due is measured from the EFFECTIVE last
-// check-in (last + frozen), so a frozen clock is never in the
-// danger zone for time that never counted.
+// The danger zone: the last 25% of a check-in window (past due included),
+// measured from the effective last check-in (liveOffsetMs is the tx's
+// frozen time). Arming, adding or shortening inside it resets the check-in
+// instead of letting a due release fire.
 function inDangerZone(state, now, thresholdDays, liveOffsetMs) {
   if (!state.checkin.lastCheckinAt || !thresholdDays || thresholdDays <= 0) return false;
   const thresholdMs = thresholdDays * 86400000;
@@ -435,23 +308,17 @@ function inDangerZone(state, now, thresholdDays, liveOffsetMs) {
   return (dueMs - now.getTime()) <= 0.25 * thresholdMs;
 }
 
-// Reset the check-in clock: the owner is present and
-// doing something in the app that would otherwise let a due
-// release fire soon — shortening the threshold into the danger
-// zone, arming a transaction in the danger zone, or adding one
-// in the danger zone. The clock restarts at now (count +1, "I
-// was online" now) and the reset is recorded in the
-// check-in history under the given method, so the displayed last
-// check-in matches. It only touches the clock — never a release
-// record.
+// Reset the check-in clock when the owner is present and about to let a
+// due release fire (arming, adding or shortening into the danger zone).
+// Restarts at now and records it in the check-in history; never touches a
+// release record.
 function resetCheckin(state, now, method) {
   state.checkin.lastCheckinAt = now.toISOString();
   state.checkin.totalCheckins += 1;
   state.checkin.lastOnlineAt = now.toISOString();
-  // The clock restarts at now: any frozen time is wiped (the
-  // effective last check-in is now, so a carried offset would
-  // push it into the future). A tx that is still inactive is
-  // re-marked inactive from now, so it stays frozen at 0.
+  // The clock restarts now: frozen time is wiped (it would push the
+  // effective check-in into the future); a still-inactive tx is re-marked
+  // from now.
   for (const t of (state.bitcoin.txs || [])) {
     if (!store.hasTriggerType(t, 'checkin')) continue;
     t.checkinOffsetMs = 0;
@@ -469,28 +336,14 @@ function resetCheckin(state, now, method) {
   store.appendCheckin(DATA_DIR, { ts: now.toISOString(), method });
 }
 
-// The check-in freeze: inactive time does not count
-// toward the check-in countdown. A check-in tx is INACTIVE when
-// it is disarmed (enabled=false) or vacation mode is on —
-// Global Arm/Disarm sets enabled=false on every tx, so it is
-// covered by the disarmed cause, and there is no separate
-// global-disarm flag. ONE per-tx offset carries all three causes
-// (vacation, global disarm, per-tx disarm): lastCheckinAt is
-// never shifted, so a period where a tx was BOTH disarmed and on
-// vacation is counted once, never twice.
-//   checkinOffsetMs — accumulated inactive milliseconds, frozen
-//     into the clock when an inactive period ends.
-//   checkinInactiveSince — ISO timestamp of when the current
-//     inactive period started, or null while the tx is active.
-// checkinLiveOffsetMs(tx, now) is the total frozen time RIGHT
-// NOW: the banked offset plus the open inactive period, if any.
-// syncCheckinFreeze(tx, state, now) is called on every transition
-// that can change a tx's active/inactive state (arm/disarm,
-// vacation on/off, check-in, vacation expiry, arm-all, reset).
-// The `if (!tx.checkinInactiveSince)` guard is what prevents
-// double-counting: a second cause starting while the tx is
-// already inactive does not restart the period, it just extends
-// the same one.
+// The check-in freeze: inactive time (disarmed, including Global Disarm,
+// or on vacation) does not count. One per-tx offset covers every cause, so
+// overlapping causes count once:
+// - checkinOffsetMs: banked inactive time
+// - checkinInactiveSince: start of the open inactive period, or null
+// checkinLiveOffsetMs is the total right now; syncCheckinFreeze runs on
+// every active/inactive transition, and does not restart an already-open
+// period.
 function checkinLiveOffsetMs(tx, now) {
   const base = (typeof tx.checkinOffsetMs === 'number' && Number.isFinite(tx.checkinOffsetMs) && tx.checkinOffsetMs >= 0) ? tx.checkinOffsetMs : 0;
   if (typeof tx.checkinInactiveSince === 'string' && tx.checkinInactiveSince) {
@@ -513,16 +366,9 @@ function syncCheckinFreeze(tx, state, now) {
   }
 }
 
-// Vacation expiry: a dated vacation ends at the END of
-// vacationUntil — the owner is away THROUGH that date, so the
-// clock resumes at the start of the next day, local time. An
-// indefinite vacation (vacationUntil null) never expires on its
-// own. On expiry the freeze is locked in (syncCheckinFreeze) so
-// the days away never count, and the clock resumes from the
-// frozen count. Returns true when it ended a vacation (caller
-// saves). Called from the hourly tick and from evaluateRelease,
-// so a lapsed vacation ends on the next evaluation of any kind,
-// not only on the next hourly tick.
+// A dated vacation ends after vacationUntil (local time); an indefinite
+// one never expires on its own. On expiry the freeze is banked so the days
+// away never count. Returns true when it ended one.
 function vacationEndMs(vacationUntil) {
   if (typeof vacationUntil !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(vacationUntil)) return null;
   const y = Number(vacationUntil.slice(0, 4));
@@ -543,118 +389,54 @@ function expireVacation(state, now) {
   return true;
 }
 
-// The check-in clock, pure: the due instant for a given
-// threshold and the clock state — ignoring vacation / broadcast
-// records (those are checkinStatus's layer, below). Extracted
-// from checkinStatus so the per-transaction check-in trigger
-// evaluates the same clock at its own threshold instead of
-// duplicating the math.
-//   state: 'not-started' (no check-in yet), 'on-track',
-//     'release-due'.
-//   windowDays: the effective window in whole days — the
-//     threshold — the countdown bar and caption measure
-//     against it.
-//   daysSince: whole days since the last check-in (display only).
-// The release decision compares real timestamps (now vs. the due
-// instant), not the floored day count — otherwise the release
-// lands up to a whole day after the displayed bar.
-// The grace is the only outage protection, and it does NOT
-// push the due out: the
-// due is the plain clock due, and a past-due rule reads as held
-// by the grace (state 'grace') in checkinStatus / ruleStatusFor,
-// never as 'release-due', while the grace is active. heldMs /
-// heldActive stay in the return shape (null / false) so older
-// readers do not break on a missing field.
+// The pure check-in clock at a threshold: state 'not-started', 'on-track'
+// or 'release-due', windowDays and daysSince (display). The decision
+// compares real timestamps, not floored days. The grace never pushes the
+// due out (a held past-due rule reads 'grace' elsewhere); heldMs and
+// heldActive stay in the shape for older readers.
 function checkinClock(state, now, thresholdDays, liveOffsetMs) {
   const last = state.checkin.lastCheckinAt ? new Date(state.checkin.lastCheckinAt) : null;
   if (!last || !thresholdDays || thresholdDays <= 0) {
     return { dueMs: null, heldMs: null, heldActive: false, effectiveDueMs: null, nextDue: null, windowDays: null, daysSince: null, state: 'not-started' };
   }
-  // The freeze: inactive time does not count, so the
-  // clock is measured from the EFFECTIVE last check-in — the
-  // real one plus the frozen time. The due and the window shift
-  // together by the same offset, so the window stays the
-  // threshold on-track and daysSince reads the frozen count.
+  // Measured from the effective last check-in (real plus frozen time); due
+  // and window shift together, so the window stays the threshold.
   const off = (typeof liveOffsetMs === 'number' && Number.isFinite(liveOffsetMs) && liveOffsetMs >= 0) ? liveOffsetMs : 0;
   const effLast = new Date(last.getTime() + off);
   const d = Math.max(0, days(effLast, now));
   const dueMs = effLast.getTime() + thresholdDays * 86400000;
   const nextDue = new Date(dueMs).toISOString();
-  // Window, whole days, for the countdown bar + caption:
-  // last check-in to the due. Measured from the EFFECTIVE last
-  // check-in (see the freeze above), so a frozen bar's window
-  // stays its threshold.
+  // The bar's window in whole days, from the effective last check-in to
+  // the due.
   const windowDays = Math.max(1, Math.round((dueMs - effLast.getTime()) / 86400000));
   const st = now.getTime() < dueMs ? 'on-track' : 'release-due';
   return { dueMs, heldMs: null, heldActive: false, effectiveDueMs: dueMs, nextDue, windowDays, daysSince: d, state: st };
 }
 
-// carries a 'failed' release record, the status stays 'release-due'
-// and the release keeps running. A stale transaction does not keep
-// it due (stale is terminal: skip it), and a transaction that has
-// never been attempted does not either — one added after a release
-// still waits for the next cycle. A check-in clears the
-// cycle-scoped release records — a stale record survives, it is a
-// fact about the inputs — so checking in after a broadcast resets
-// the status to 'on-track'.
-// Derived check-in status: there is no
-// global broadcast threshold — each check-in tx
-// has its own countdown, measured at ITS OWN threshold with
-// checkinClock, and served as checkinTxs (one entry per ACTIVE
-// check-in tx: { id, label, thresholdDays, daysSince,
-// windowDays, nextDue, state, enabled }). A settled or pending tx gets no
-// bar — its fate is decided, so there is nothing to count down
-// to (see txSettledOrPending below, which mirrors the frontend
-// txStatus settled / pending split for the stored-state cases).
-// The bar's window is the tx's own threshold, and the bar
-// counts to the plain due — the grace never pushes the due
-// out. While a grace is active, a bar whose clock is
-// past due reads state 'grace', not 'release-due': nothing can
-// fire while the grace holds it, so a past-due reading would
-// be a lie. An on-track bar keeps counting during the grace
-// (its countdown is still real — the due is when the rule
-// becomes due, and the grace card explains the hold). The
-// top-level state is 'grace' while any ARMED entry is past
-// due and held; the check-in card's pill reads "Grace period".
-// A DISARMED check-in tx keeps its bar, frozen at the day count
-// it was left at (enabled: false, muted in the UI) — inactive
-// time does not count, so its count never advances while it is
-// disarmed or on vacation, and re-arming resumes from the frozen
-// count. The top-level state, nextDue and windowDays come from
-// the ARMED entries only: a disarmed tx cannot fire, so its due
-// date must not drive the overall due and a frozen past-due
-// disarmed tx must not read as 'release-due'. The top-level
-// daysSince is the soonest armed entry's count (or the first
-// disarmed entry's frozen count when nothing is armed).
-// A tx whose fate is decided — broadcasted (settled or pending)
-// or recorded stale / slipstream-pending / broadcast — is done
-// counting down: it gets no check-in bar. This mirrors the
-// frontend txStatus settled / pending split for the stored-state
-// cases (the dry-run-only signals are not visible here).
-// 'failed' and 'conflict' are NOT settled: the tx is still owed
-// a broadcast, so it keeps its bar.
+// A tx whose fate is decided gets no check-in bar: broadcast, or recorded
+// stale, Slipstream-pending or broadcast. Failed and conflict txs are
+// still owed a broadcast and keep theirs.
 function txSettledOrPending(t) {
   if (t.broadcasted) return true;
   const rs = t.release && t.release.status;
   return rs === 'stale' || rs === 'submitted-slipstream' || rs === 'broadcast';
 }
+// The check-in status served to the UI. Each armed check-in rule has its
+// own countdown (checkinTxs: one entry per active check-in rule, with its
+// threshold, days, due and state); a disarmed one keeps a frozen bar. The
+// top-level state, due and window come from armed entries only:
+// 'not-started', 'on-track', 'release-due', 'grace' (past due but held:
+// nothing can fire, and the due is not pushed out) or 'broadcasted' once a
+// release has finished every armed check-in tx (a failed one keeps it due).
+// A check-in clears the cycle records, so it returns to on-track.
 function checkinStatus(state, now) {
   const s = state.settings;
   const last = state.checkin.lastCheckinAt ? new Date(state.checkin.lastCheckinAt) : null;
   const txs = state.bitcoin.txs || [];
   const isCheckinTx = (t) => store.hasTriggerType(t, 'checkin');
-  // One entry PER check-in RULE: a tx with two check-in
-  // rules (different thresholds) appears once per rule, each entry
-  // carrying its ruleIndex — the bar is per rule, the clock is
-  // global, and the smallest threshold is the one that fires
-  // first. The DOM suite and the old frontend read these entries
-  // the same way: a one-rule tx yields exactly one entry, as
-  // before.
-  // A set member's own check-in trigger is dormant while
-  // it is attached — the set's trigger is the one that fires — so
-  // members get no bar of their own; the set gets one per rule,
-  // like a tx, with the set's own label, arm state, and frozen
-  // offset.
+  // One entry per check-in rule (each with its ruleIndex). Set members get
+  // none of their own; the set gets one per rule with its own label, arm
+  // state and offset.
   const setMemberIds = new Set();
   for (const s of (state.bitcoin.sets || [])) for (const id of (s.txIds || [])) setMemberIds.add(id);
   const checkinTxs = txs
@@ -689,10 +471,8 @@ function checkinStatus(state, now) {
       checkinTxs.push({ id: s.id, label: s.label || '', ruleIndex, thresholdDays: th, daysSince: clock.daysSince, windowDays: clock.windowDays, nextDue: clock.nextDue, state: st, enabled: !!s.enabled });
     });
   }
-  // The top level is driven by the ARMED entries only — a
-  // disarmed tx cannot fire (see the comment above). When
-  // nothing is armed the soonest due is null, and daysSince
-  // falls back to the first disarmed entry's frozen count.
+  // The top level comes from armed entries only; with none armed, due is
+  // null and daysSince is the first disarmed entry's frozen count.
   const armedEntries = checkinTxs.filter((c) => c.enabled);
   const nextDue = armedEntries.reduce((acc, c) => (!c.nextDue ? acc : (!acc || c.nextDue < acc ? c.nextDue : acc)), null);
   const soonest = armedEntries.find((c) => c.nextDue === nextDue);
@@ -708,36 +488,18 @@ function checkinStatus(state, now) {
   if (!last) {
     return { ...base, state: 'not-started', label: 'Not started' };
   }
-  // A 'failed' record on an ARMED transaction means the release is
-  // not done: that transaction is still owed a broadcast, and the
-  // next hourly tick retries it. Only armed transactions
-  // count — a disabled transaction's 'failed' record is inert (the
-  // release never attempts a disabled transaction), and a stale one
-  // is terminal, so neither keeps the status 'release-due'. A
-  // transaction that has never been attempted does not keep it due
-  // either — one added after a release still waits for the next cycle.
-  // These checks are about the CHECK-IN trigger only: a
-  // price or UTXO broadcast (or failure) must not move the
-  // check-in card — that rule has its own trigger and its own
-  // state. A tx with no trigger field is a legacy check-in tx
-  // (see triggerOf), so it counts.
+  // An armed check-in tx with a 'failed' record keeps the status release-
+  // due (it is retried); disarmed, stale and never-attempted txs do not.
+  // Only check-in txs count here.
   const anyFailed = txs.some((t) => t.enabled && isCheckinTx(t) && t.release && t.release.status === 'failed');
-  // A transaction waiting on MARA means the release is not
-  // done: it still needs to become visible publicly or be declared
-  // failed, so the status is not 'broadcasted' while one is waiting
-  // — even if another transaction already broadcast. Only armed
-  // transactions count (a disabled one's record is inert, like its
-  // 'failed' record).
+  // A tx waiting on MARA means the release is not done, so the status is
+  // not 'broadcasted' (armed txs only).
   const anyWaitingMara = txs.some((t) => t.enabled && isCheckinTx(t) && t.release && t.release.status === 'submitted-slipstream');
   if (!anyFailed && !anyWaitingMara && txs.some((t) => isCheckinTx(t) && t.release && t.release.status === 'broadcast' && t.release.kind === 'release')) {
     return { ...base, state: 'broadcasted', label: 'Broadcasted' };
   }
-  // Only ARMED check-in txs can make the card
-  // 'release-due' — a disarmed tx frozen past its due cannot fire,
-  // so it must not drive the overall state either.
-  // While a grace is active, a past-due armed entry is
-  // held, not due: the top-level state is 'grace' ("Grace
-  // period"), never 'release-due'.
+  // Only armed check-in txs can make the card release-due; during a grace
+  // a past-due armed entry makes it 'grace'.
   if (armedEntries.some((c) => c.state === 'grace')) return { ...base, state: 'grace', label: 'Grace period' };
   if (armedEntries.some((c) => c.state === 'release-due')) return { ...base, state: 'release-due', label: 'Release due' };
   return { ...base, state: 'on-track', label: 'On track' };

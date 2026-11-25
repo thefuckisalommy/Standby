@@ -1,142 +1,20 @@
-// Standby 0.8.2 DOM checks — block-height, set-date, and fee-market triggers.
-// Runs public/app.js from branch-0.8.8-nonrpc in Node with the
-// minimal DOM shim from dom_check094.js (same El class, same
-// document/window/fetch/setInterval stubs) and verifies the 0.8.0
-// trigger UI only — the 094 suite still owns everything else.
-//   - each tx card renders a .tx-trigger subcard right after the
-//     amount and before Details. Every subcard is exactly 3 rows,
-//     one line each: "TRIGGER - <TYPE>", the condition ("Fires
-//     when ...", or "Never fires — manual only"), and the current
-//     state — for price "BTC price currently $98,200" (the
-//     effective price only, no source note), for check-in "N of
-//     35 days since last check-in", for UTXO "still unspent" (or
-//     spent + confirmations), for manual "Waiting for manual
-//     broadcast". The state comes from tx.triggerStatus
-//   - the readiness card renders one .readiness-tx block per active
-//     trigger set: label + status pill (+ fee pill on a standalone
-//     tx row only) on one line — the label truncates with an
-//     ellipsis so the status never wraps — with the tx card's
-//     condition summary on the line underneath
-//     ("Fires when ..."), and NO trigger-type mode pill
-//   - the per-exchange rows sit in a .node-lines container, the
-//     same class/structure as the Node Status rows, so their
-//     status pills are pinned to the same right edge (the width
-//     check proves the x positions match at 390px)
-//   - the check-in card has no "Liveness trigger" line (removed)
-//   - the check-in card shows one bar per ACTIVE check-in tx
-//     (label + bar + "X of N days elapsed", each at its own
-//     threshold), no big countdown, no "until check-in triggered
-//     transactions are broadcast" line, no "Next check-in due"
-//     row and no total check-ins count; a held clock shows the
-//     longer window on the bar with no "Grace period" text; the
-//     shared Check in button resets every bar to 0 days elapsed;
-//     a DISARMED check-in tx keeps its bar, frozen at the day
-//     count it was left at (muted grey, marked disarmed) —
-//     disarming never hides the card while a check-in tx is
-//     still active
-//   - the global broadcast threshold is gone: no threshold input
-//     on the Settings page and PUT /api/settings with
-//     thresholdDays is a 400 (the API suite owns that check)
-//   - Fee and Broadcast via live inside Details (collapsed) on
-//     every card, NOT on the card face
-//   - the check-in card renders only when a check-in tx uses
-//     the check-in trigger (or there are no txs at all); a
-//     disarmed check-in tx keeps a frozen bar and the card stays
-//     visible — disarming the only check-in tx no longer hides
-//     it (the freeze redesign, 0.8.0)
-//   - the Add form has a trigger picker (checkin/price/utxo/manual)
-//     with one conditional row per type and guard notes naming the
-//     two-source agreement price rule and the confirmed-only UTXO rule
-//   - the status pill reads just "armed" for a healthy armed tx
-//     (green), "Label + armed" for a genuine problem state, and
-//     "unarmed" when disarmed; a shared-input overlap keeps the text
-//     but turns the pill amber
-//   - the grace period (0.8.0, extended 0.8.8, unified 0.8.8): a
-//     "Grace period active" card at the top of the Dashboard
-//     whenever a grace is active — even with nothing held — with
-//     the approved copy ("Grace period has been activated because
-//     the device was offline for X days." / "N transaction(s)
-//     is/are held by grace, M of them would fire now."), a countdown bar
-//     ("Day N of M" / "N days left · until <date>", "less than a
-//     day left" under a day, "until you resume" when indefinite),
-//     a Resume now button with its note to the right; armed held
-//     cards read "Grace" on an amber pill instead of "armed"
-//     (check-in cards included; manual untouched, disarmed still
-//     "unarmed"); the Settings grace card has the toggle + the two
-//     dropdowns (offline days to trigger, how long it lasts, incl.
-//     indefinite) with Save
-//   - the Getting Started card (0.8.0): an empty-state card at the
-//     very top of the Dashboard, shown only when no transactions
-//     are STAGED (active) — archived and pending do not count —
-//     the first thing a fresh install sees — with the owner's exact
-//     copy and a full-width orange button that opens the Add
-//     transaction popup (it never switches tabs or scrolls); it is
-//     independent of the grace card (which shows whenever a grace
-//     is active, even with nothing held)
-//   - the Add form is a popup (0.8.0): the inline "Add a
-//     transaction" card at the bottom of the Transactions tab is
-//     gone — three buttons open the same popup (Getting Started,
-//     the "+ Add a pre-signed transaction" button at the bottom of
-//     the Transactions tab, and the oval "+ Add Tx" in the Staged
-//     Transactions header); "Broadcast all" is gone again —
-//     restored Nov 16 at the owner's word, then removed again the same
-//     morning: he decided the button sits too close to the
-//     "+ Add Tx" pill. (Broadcast armed stays.)
-//   - the vacation card (0.8.0 redesign): check-in-only
-//     language ("applies to check-in rules only", "the check-in
-//     countdown freezes"), an indefinite option ("Until I say I'm
-//     back"), and saving from the UI persists it; the Global
-//     Arm/Disarm card (Arm all / Disarm all) replaces the old
-//     Pause / resume card, which is gone entirely (no pause
-//     button, pill, or 'Paused' state anywhere)
-//   - every Settings card (0.8.0) has a "?" help button in its
-//     header row; clicking it opens the shared showDetails
-//     pop-out with the setting's title, what it does, and an
-//     "Applies to:" line naming the trigger types; the pop-out
-//     closes via the Close button or the X
-//   - the Settings tab (0.8.0) has a filter dropdown at the
-//     top (All settings / General / Check-in Trigger / BTC Price
-//     Trigger / UTXO Trigger) that reads the same triggers array
-//     the "?" pop-out renders its "Applies to" line from — one
-//     declaration per card, no second mapping — and the inline
-//     description paragraphs are trimmed to the essentials
-//     (at most one short hint line per card; the full text
-//     lives in the "?" pop-out)
-//   - a tx with a very long label still renders in the readiness
-//     list (the width check proves the row stays one line with the
-//     label truncated by ellipsis at 390px)
-//   - the Edit popup's trigger picker populates from the tx
-//   - the Settings "Bitcoin price source" card has two provider
-//     selects (all five providers, defaulting to CoinGecko +
-//     Coinbase), a note explaining the 5% agreement rule, the
-//     directional choice and the single-source fallback, and a
-//     per-source last-price display; saving a change persists it
-//     (and the selects re-render with the new values)
-//   - each price source row has a Test button that fetches the
-//     selected provider fresh and shows the result inline
-//     (success or failure)
-//   - the readiness card shows the Exchange Status once (a single
-//     consolidated OK / Degraded / Error pill, like Node Status)
-//     and the per-price-tx readiness lines are trigger-only —
-//     they do not repeat the exchange/source status. No subcard
-//     carries a source note either; the source detail lives in
-//     the Exchange Status section and in a dry run's notes (a
-//     Dry-run on a price tx shows it in its line)
-// The app instance under test is the one on :3478 (launcher data:
-// 4 armed txs, one per trigger type, seeded via the API, one
-// check-in, then one POST /api/release/check so the subcards show
-// live statuses). setInterval is stubbed (captured, not scheduled)
-// so the process can exit.
+// Standby DOM checks: runs public/app.js in Node against a minimal DOM
+// shim (El class, document/window/fetch stubs) and checks the rendered UI:
+// cards and trigger subcards, readiness rows, exchange and node rows,
+// check-in bars, the grace card, Getting Started, the Add popup, status
+// pills, Settings cards, help and filter, history, rule sets, trigger sets
+// and the live view. Runs against the app on :3478, seeded by
+// dom_launcher099.py (armed txs of each trigger type, one check-in, one
+// release check). setInterval is captured, not scheduled, so the process
+// can exit.
 'use strict';
 const fs = require('fs');
 const BASE = 'http://127.0.0.1:3478';
 const DATA_FILE = '/tmp/standby-test099-dom/state.json';
 const els = {};
 function elText(el) {
-  // The shim stores textContent as a plain property — it does NOT
-  // aggregate from children the way a real browser does. Read the
-  // children's text when the element's own text is empty, so a row
-  // built from a label span + a value span reads "Label: value".
+  // The shim stores textContent per element (no aggregation), so read the
+  // children's text when an element's own is empty.
   if (!el) return '';
   if (el.textContent) return el.textContent;
   return (el.children || []).map(elText).join('');
@@ -166,12 +44,8 @@ function cardStatus(card) {
 }
 function cardDetails(card) {
   for (const c of card.children) { if (c.className === 'tx-details') return c; }
-  // (0.8.7 fix, round 3) A standalone tx's Details lives inside
-  // its blue tx subcard now, not at card level and NOT inside a
-  // trigger subcard — so this card-level lookup returns null
-  // for it; use txItemDetails below. A set card has no
-  // card-level Details either (each member's lives in its own
-  // subcard), so this still returns null for sets.
+  // Card-level Details: null for every card now (a tx's Details lives in
+  // its blue tx subcard; see txItemDetails).
   for (const c of card.children) {
     if (c.className === 'tx-trigger') {
       for (const b of c.children) { if (b.className === 'tx-details') return b; }
@@ -179,10 +53,7 @@ function cardDetails(card) {
   }
   return null;
 }
-// (0.8.7 fix, round 3) Every card is a trigger set: the Details
-// of a standalone transaction lives inside its blue .tx-item
-// subcard (the same subcard a set member gets), above the
-// trigger subcards — never inside a trigger subcard.
+// A tx's Details, inside its blue .tx-item subcard.
 function txItemDetails(card) {
   for (const c of card.children) {
     if ((c.className || '').split(' ').includes('tx-item')) {
@@ -191,28 +62,21 @@ function txItemDetails(card) {
   }
   return null;
 }
-// (0.8.7 fix, round 3) Details NEVER lives inside a trigger
-// subcard any more — it lives in the blue tx subcard. This
-// helper now reads null on every card, and the checks below
-// assert exactly that.
+// Details inside a trigger subcard: always null now, and the checks assert
+// that.
 function detailsInTriggerBox(card) {
   const boxes = triggerBoxes(card);
   if (!boxes.length) return null;
   const box = boxes[boxes.length - 1];
   return box.children.find((c) => c.className === 'tx-details') || null;
 }
-// Simulate a user toggling a <details> open/closed (0.7.18): the
-// shim has no native <details> behaviour, so set .open by hand and
-// fire the toggle listener the app attached, as a real browser
-// would on a summary click.
+// Toggle a <details> by hand and fire its listener (the shim has no native
+// behaviour).
 function toggleDetails(el, open) {
   el.open = open;
   (el.listeners.toggle || []).forEach((f) => f({ target: el }));
 }
-// True when the card's Details element itself holds a direct child
-// with the given class — i.e. the line lives INSIDE the Details
-// rather than below the buttons on the card. (0.8.7 fix, round 3)
-// The Details lives in the blue tx subcard, so read it there.
+// True when the tx's Details holds a direct child with the given class.
 function detailsContains(card, cls) {
   const d = txItemDetails(card);
   return !!d && d.children.some((x) => (x.className || '').split(' ').includes(cls));
@@ -222,11 +86,8 @@ function detailsContains(card, cls) {
 function cardChildIndex(card, cls) {
   return card.children.findIndex((x) => (x.className || '').split(' ').includes(cls));
 }
-// (0.8.7 fix, round 3) The index of a direct child with EXACTLY
-// the given class — cardChildIndex's includes() match cannot tell
-// a plain trigger box ('tx-trigger') from the tx subcard
-// ('tx-trigger tx-item'), so a check that needs the first plain
-// trigger box uses this.
+// Index of a direct child with exactly this class (an includes() match
+// cannot tell 'tx-trigger' from 'tx-trigger tx-item').
 function cardChildExactIndex(card, cls) {
   return card.children.findIndex((x) => x.className === cls);
 }
@@ -245,10 +106,8 @@ function triggerBox(card) {
   return null;
 }
 function triggerParts(card) {
-  // the subcard's three spans: the type key, the condition, the
-  // live state (" — <reason>"). Null when the subcard is missing
-  // or malformed. (0.8.2 v2) The key + pill read through the
-  // .tx-trigger-head wrapper in the first span.
+  // A subcard's three spans (type with pill, condition, state), or null
+  // when missing.
   const box = triggerBox(card);
   if (!box || box.children.length < 3) return null;
   const head = boxHeadParts(box);
@@ -266,13 +125,9 @@ function triggerParts(card) {
 function cardFaceText(card) {
   return card.children.filter((c) => c.className !== 'tx-details').map(elText).join(' ');
 }
-// The readiness blocks (0.8.0): one .readiness-tx per ACTIVE
-// trigger set (0.8.7, round 10) — a .readiness-tx-row (label <b>
-// + trigger-mode pill + status pill + optional fee pill on a
-// standalone tx row only) and a .readiness-tx-state line
-// underneath.
-// The 094 readinessRows() helper does not fit this shape (it read
-// a flat row), so this replaces it for 0.8.0.
+// Readiness blocks: one .readiness-tx per active trigger set, a
+// .readiness-tx-row (label, status pill, fee pill on a standalone row)
+// over a .readiness-tx-state line.
 function readinessBlocks() {
   const txs = els['readiness-txs'];
   if (!txs) return null;
@@ -282,9 +137,8 @@ function readinessBlocks() {
       const row = b.children[0] || { children: [] };
       const state = b.children[1];
       return {
-        // (0.8.0) The row is label + status pill (+ fee pill) —
-        // there is NO trigger-type mode pill any more; the state
-        // line is the tx card's condition summary ("Fires when ...").
+        // A row is label, status pill and optional fee pill; the state
+        // line is the condition text.
         label: (row.children[0] || {}).textContent || '',
         status: (row.children[1] || {}).textContent || '',
         statusCls: (row.children[1] || {}).className || '',
@@ -297,11 +151,8 @@ function readinessBlock(label) {
   const blocks = readinessBlocks();
   return blocks && blocks.find((x) => x.label === label);
 }
-// The member lines under a set's readiness header (0.8.7,
-// round 12): children[2+] of the block, each a
-// .readiness-tx-member with the "Tx N — <short txid>…" label
-// span + the amount span pinned right — no pill at all, so
-// exactly 2 children and neither is a .pill.
+// Member lines under a set's header: label and right-pinned amount, no
+// pill.
 function readinessMembers(label) {
   const txs = els['readiness-txs'];
   if (!txs) return null;
@@ -319,11 +170,8 @@ function readinessMembers(label) {
       kids: (c.children || []).length,
     }));
 }
-// The shared-input warnings on a card (0.8.7, round 13): the
-// .tx-warn lines inside each blue .tx-item subcard — one per
-// shared input, in stored order. Returns the line elements
-// themselves (so a tick test can prove the SAME element
-// persists) plus their text.
+// A card's shared-input warning lines, in stored order (elements and text,
+// so a tick test can check identity).
 function warnLines(card) {
   if (!card) return null;
   const out = [];
@@ -336,10 +184,8 @@ function warnLines(card) {
   }
   return out;
 }
-// The per-tx check-in bars (0.8.0): one .ck-tx block per active
-// check-in tx inside #checkin-tx-bars — label, bar fill width,
-// "X of N days elapsed" caption, and the block's class (a
-// disarmed tx's bar carries 'frozen').
+// Check-in bars: label, fill width, caption and class ('frozen' when
+// disarmed).
 function checkinBars() {
   const wrap = els['checkin-tx-bars'];
   if (!wrap) return null;
@@ -357,18 +203,13 @@ function checkinBar(label) {
   const bars = checkinBars();
   return bars && bars.find((x) => x.label === label);
 }
-// How many tx cards read "Grace" on their pill right now — the
-// per-card view of the held set, against which the grace card's
-// held-count line must agree (both derive from the same hold,
-// through different code paths: txStatus vs graceHeldTxCount).
+// How many cards read "Grace": the per-card view the grace card's count
+// must match.
 function gracePillCount() {
   return txCards().filter((c) => { const p = cardStatus(c); return !!p && p.textContent === 'Grace'; }).length;
 }
-// A fingerprint of the whole shim DOM (ids + each element's text,
-// class, display, value, checked state and child count, recursed
-// into children — the shim stores textContent per-element, so the
-// recursion is what sees the rendered rows). Two equal fingerprints
-// 50 ms apart mean the render has settled.
+// A fingerprint of the whole shim DOM; equal 50 ms apart means the render
+// has settled.
 function renderFingerprint() {
   const out = [];
   const walk = (el) => {
@@ -380,14 +221,8 @@ function renderFingerprint() {
   Object.keys(els).sort().forEach((k) => { out.push('#', k, ':'); walk(els[k]); });
   return out.join('');
 }
-// O7: replace the fixed 900 ms post-action wait. Return once no
-// fetch is in flight and the shim DOM has been stable for one
-// 50 ms sample — the same rendered state, waited-for instead of
-// slept-through. The 900 ms deadline is today's value as fallback:
-// on a slow render the wait costs exactly what it used to. (A click
-// handler starts its fetch synchronously, so the count is already
-// up by the time this runs; a DOM-only action renders synchronously
-// and returns after one stability sample.)
+// Wait until no fetch is in flight and the shim DOM is stable for one 50
+// ms sample, up to 900 ms.
 async function waitForRender(deadlineMs = 900) {
   const end = Date.now() + deadlineMs;
   let prev = null;
@@ -420,9 +255,7 @@ function selectValues(html, id) {
   const block = html.slice(start, html.indexOf('</select>', start));
   return [...block.matchAll(/value="([^"]+)"/g)].map((m) => m[1]);
 }
-// A minimal 1-in/1-out tx spending Finney vout 1 (the same shape
-// as helpers.craft) — so the DOM test can add transactions via
-// the API without importing the Python helpers.
+// A 1-in/1-out tx spending FINNEY:1 (same shape as helpers.craft).
 function craftHex(vout, value) {
   const FINNEY = 'f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16';
   const prev = Buffer.from(FINNEY, 'hex').reverse();
@@ -439,10 +272,8 @@ function craftHex(vout, value) {
   ]).toString('hex');
 }
 function craftLocktimeHex(vout, locktime, value) {
-  // Same shape as craftHex, but with an explicit locktime and a
-  // non-maxed sequence (0), so the locktime applies. A block-height
-  // locktime above the
-  // stub tip (900000) makes the dry-run verdict 'timelocked'.
+  // Like craftHex with a locktime and sequence 0; above the stub tip
+  // (900000) it dry-runs as timelocked.
   const FINNEY = 'f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16';
   const prev = Buffer.from(FINNEY, 'hex').reverse();
   const voutBuf = Buffer.alloc(4); voutBuf.writeUInt32LE(vout);
@@ -468,10 +299,9 @@ function selectAddTrigger(v) {
   sel.value = v;
   fireChange(sel);
 }
-// --- 0.8.2 rule-list helpers ---
-// The rule panels are built in JS, so they are NOT in the els
-// registry — walk the list container's children instead. A
-// panel's rows and fields are found by id within its subtree.
+// --- rule-list helpers ---
+// Rule panels are built in JS (not in els): walk the list's children and
+// find fields by id within each.
 function rulePanels(prefix) {
   return (els[prefix + '-rules-list'] && els[prefix + '-rules-list'].children) || [];
 }
@@ -493,9 +323,8 @@ function panelSelectValues(panel, selId) {
   if (!sel) return null;
   return (sel.children || []).filter((c) => c.tagName === 'OPTION').map((o) => o.value);
 }
-// One option of a panel's type select, by value — so a check can
-// read its disabled state and label (0.8.2 v2: used types are
-// disabled and labelled "(already used)").
+// One option of a panel's type select (used types are disabled "(already
+// used)").
 function panelOption(panel, value) {
   const sel = panelTypeSelect(panel);
   if (!sel) return null;
@@ -510,16 +339,11 @@ function panelRowVisible(panel, rowId) {
 function triggerBoxes(card) {
   return card.children.filter((c) => c.className === 'tx-trigger');
 }
-// The subcard header (0.8.2 v2): a .tx-trigger-head flex row
-// holding the type key + the per-rule state pill (no pill on a
-// manual rule). k and pill read through the wrapper.
+// The subcard header row: type key plus per-rule pill (none for manual).
 function boxHeadParts(box) {
   const head = box && box.children[0];
   if (!head || !(head.className || '').split(' ').includes('tx-trigger-head')) return { k: '', pill: null, pillCls: null };
-  // (0.8.7 fix, round 6) The pill is found by class, not by
-  // position: since round 5 the tx-item head also carries the
-  // right-aligned BTC amount (.tx-item-amt), so children[1]
-  // is the amount — not a pill — when the subcard has none.
+  // Find the pill by class: children[1] may be the BTC amount.
   const pillEl = (head.children || []).find((c) => (c.className || '').split(' ').includes('pill'));
   return {
     k: (head.children[0] && head.children[0].textContent) || '',
@@ -581,9 +405,8 @@ class El {
   }
   appendChild(c) { this.children.push(c); return c; }
   insertBefore(c, ref) {
-    // (0.8.10, fix 4) The load-failure notice uses insertBefore
-    // (first child of <main>); a null/unknown ref appends, like the
-    // real DOM. The shim's <main> override captures the insert.
+    // The load-failure notice uses insertBefore on <main>; the shim
+    // captures it.
     const i = ref ? this.children.indexOf(ref) : -1;
     if (i === -1) this.children.push(c); else this.children.splice(i, 0, c);
     return c;
@@ -599,11 +422,8 @@ class El {
   fire(ev) { (this.listeners[ev] || []).forEach((f) => f({ target: this, preventDefault: function () {} })); }
   closest() { return this; }
   querySelectorAll(sel) {
-    // The one element-level selector the app uses:
-    // setTxIdsFromForm reads the checked checkboxes inside the
-    // set modal's checklist. Walk descendants and match inputs
-    // by type, honouring :checked. Anything else stays empty,
-    // as before.
+    // The one selector the app uses: checked checkboxes in the set modal's
+    // checklist.
     const out = [];
     const wantChecked = sel.indexOf(':checked') !== -1;
     const walk = (el) => {
@@ -675,12 +495,7 @@ global.FileReader = class {
   readAsArrayBuffer(f) { const s = (f && f.__content) || ''; this.result = new TextEncoder().encode(s).buffer; if (this.onload) this.onload(); }
 };
 const realFetch = fetch;
-// In-flight fetch count (O7): load() and the click handlers fetch
-// then render; waitForRender below waits for the count to hit 0
-// and the shim DOM to settle, instead of a fixed 900 ms. The
-// counter decrements when the response arrives (headers) — the
-// render that follows is a microtask later, covered by the
-// stability samples in waitForRender.
+// In-flight fetch count, for waitForRender.
 let __inFlightFetches = 0;
 global.fetch = (path, opts) => {
   __inFlightFetches++;
@@ -695,11 +510,8 @@ global.fetch = (path, opts) => {
   p.then(done, done);
   return p;
 };
-// The intervals: capture the callbacks with their delays, do not
-// schedule them (a live interval would keep this process alive
-// after the checks). __pollFn keeps its old meaning (the last
-// registered callback); __intervals lists them all, so a check can
-// fire the 1-second live-view timer (0.8.5) by hand.
+// Intervals are captured, not scheduled; __intervals lets checks fire the
+// 1-second timer by hand.
 global.setInterval = (fn, ms) => { (global.__intervals = global.__intervals || []).push({ fn: fn, ms: ms }); global.__pollFn = fn; return global.__intervals.length - 1; };
 global.clearInterval = () => {};
 
@@ -744,10 +556,8 @@ function check(name, cond, detail) {
   check('check-in card static: no total check-ins count anywhere on the page',
     idx.indexOf('total') === -1, '');
 
-  // --- 1. the trigger subcard on each of the seven cards ---
-  // The condition for the UTXO card comes from the app's
-  // triggerCondition (first 6 of the outpoint + '\u2026' + last 2):
-  // the seeded outpoint is f4184fc5...e16:1, so 'f4184f\u2026:1'.
+  // --- 1. trigger subcard on each of the seven cards ---
+  // The UTXO condition shows the outpoint as 'f4184f…:1'.
   const trigExpect = {
     'Dom Check-in': { k: 'TRIGGER - CHECK-IN', cond: 'Fires when you don\u2019t check in for 35 days', now: 'of 35 days since last check-in' },
     'Dom Price': { k: 'TRIGGER - BTC PRICE', cond: 'Fires when BTC price \u2265 $150,000', now: 'BTC price currently $98,200' },
@@ -777,10 +587,8 @@ function check(name, cond, detail) {
   // --- 2. the readiness card: one block per armed tx ---
   const blocks = readinessBlocks();
   check('readiness 0.8.1: seven .readiness-tx blocks (one per armed tx)', !!blocks && blocks.length === 7, blocks ? blocks.length : 'no readiness list');
-  // There is NO trigger-type mode pill on a readiness row any
-  // more — the state line is the tx card's condition summary
-  // ("Fires when ..."), not a "[Type] Trigger:" line.
-  // (A row is label + status pill + optional fee pill only.)
+  // No trigger-type pill on a readiness row; the state line is the
+  // condition text.
   check('readiness 0.8.0: no trigger-type mode pill on any row (label + status + optional fee only)',
     !!blocks && blocks.every((b) => b.status !== '' && !['Check-in', 'BTC Price', 'UTXO', 'Manual'].includes(b.status)),
     blocks ? blocks.map((b) => b.label + '=' + b.status).join(', ') : '');
@@ -809,11 +617,8 @@ function check(name, cond, detail) {
     check('readiness 0.8.0: "' + label + '" state line reads "' + rbExpect[label] + '"', !!b && b.state.indexOf(rbExpect[label]) !== -1, b ? b.state : 'no block');
   }
 
-  // --- 3. Fee and Broadcast via live inside Details, not the face ---
-  // (0.8.1) The face-text substring check for 'Fee' cannot be used
-  // any more: the shared-input warning lists 'Dom Feemarket', which
-  // contains 'Fee', on every card's face. Check by class instead:
-  // no direct face child (outside Details) carries tx-fee/tx-route.
+  // --- 3. Fee and route live inside Details ---
+  // Checked by class, not text ('Dom Feemarket' contains 'Fee').
   for (const label of Object.keys(trigExpect)) {
     const card = cardByTitle(label);
     const faceKids = card ? card.children.filter((c) => c.className !== 'tx-details') : [];
@@ -831,11 +636,9 @@ function check(name, cond, detail) {
   // --- 4. the check-in strip is visible with an armed check-in tx ---
   check('check-in strip 0.8.0: visible with an armed check-in tx', els['checkin-card'] && els['checkin-card'].style.display !== 'none', els['checkin-card'] && els['checkin-card'].style.display);
 
-  // --- 4b. the per-tx check-in bars (0.8.0) ---
-  // One bar per armed check-in tx: the seeded 'Dom Check-in'
-  // (35 days, checked in just now) reads 0 of 35. A second
-  // check-in tx with a 10-day threshold proves the bars are
-  // per-tx, not one shared window.
+  // --- 4b. per-tx check-in bars ---
+  // The seeded tx reads 0 of 35; a second tx at 10 days proves the bars
+  // are per tx.
   const bar0 = checkinBar('Dom Check-in');
   check('per-tx bars: one bar for the armed check-in tx',
     (checkinBars() || []).length === 1, JSON.stringify(checkinBars()));
@@ -863,10 +666,7 @@ function check(name, cond, detail) {
   const bar35b = checkinBar('Dom Check-in');
   check('per-tx bars: the 35d bar still reads "0 of 35 days elapsed" alongside it',
     !!bar35b && bar35b.caption === '0 of 35 days elapsed', bar35b ? bar35b.caption : 'no bar');
-  // The shim does not model parent/child HTML, so the removed
-  // elements are proven gone a different way: the app never
-  // touches them (no such element exists in the shim DOM), while
-  // the bars container does.
+  // Removed elements are proven gone by the app never touching them.
   check('per-tx bars: the app never touches the removed elements (no #next-due / #checkin-countdown / #checkin-progress / #set-threshold in the DOM)',
     !('next-due' in els) && !('checkin-countdown' in els) && !('checkin-countdown-sub' in els)
     && !('checkin-progress' in els) && !('checkin-progress-fill' in els) && !('checkin-progress-label' in els)
@@ -955,9 +755,9 @@ function check(name, cond, detail) {
   check('add picker 0.8.2: the feemarket row has a sat/vB unit',
     !!findById(rulePanels('btc')[0], 'btc-rule-0-feemarket') && elText(findById(rulePanels('btc')[0], 'btc-rule-0-trigger-feemarket-row')).indexOf('sat/vB') !== -1,
     findById(rulePanels('btc')[0], 'btc-rule-0-trigger-feemarket-row') ? elText(findById(rulePanels('btc')[0], 'btc-rule-0-trigger-feemarket-row')) : 'no row');
-  // --- 5c. fee-market direction: a Direction select in both
-  // Add and Edit panels, 'below' by default; flipping the seeded
-  // rule to 'above' re-renders its condition as "tx fees are >=".
+  // --- 5c. fee-market direction ---
+  // A Direction select in Add and Edit, 'below' by default; 'above'
+  // renders "tx fees are >=".
   check('add picker 0.8.2: the feemarket row has a Direction select with below/above ("Fee falls to or below" / "Fee rises to or above"), below by default',
     JSON.stringify(panelSelectValues(rulePanels('btc')[0], 'btc-rule-0-feemarket-dir')) === JSON.stringify(['below', 'above'])
     && findById(rulePanels('btc')[0], 'btc-rule-0-feemarket-dir').value === 'below'
@@ -982,11 +782,8 @@ function check(name, cond, detail) {
   await rerender(appJs);
   selectAddTrigger('checkin');
 
-  // --- 6. dynamic check-in strip: disarm freezes the bar, re-arm resumes it ---
-  // Two check-in txs are armed now (§4b). Disarming one leaves
-  // its bar FROZEN at its day count (muted, marked disarmed) —
-  // the redesign: a disarmed tx keeps its bar, and the card
-  // stays visible while any check-in tx is still active.
+  // --- 6. disarm freezes a bar, re-arm resumes it ---
+  // The card stays while any check-in tx is active.
   check('dynamic strip 0.8.0: the seeded check-in tx id is known', !!checkinId, 'id=' + checkinId);
   const dis = await fetch('/api/bitcoin/txs/' + checkinId, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: false }) });
   check('dynamic strip 0.8.0: the check-in tx disarms via the API', dis.status === 200, 'status=' + dis.status);
@@ -1034,19 +831,14 @@ function check(name, cond, detail) {
   if (priceEdit) priceEdit.click();
   check('edit picker 0.8.0: opening Edit on the price tx opens the modal',
     els['edit-modal'] && els['edit-modal'].classList.contains('open'), '');
-  // The confirm/details modal must stack above the Edit modal:
-  // a trigger warning opened while editing a tx would otherwise
-  // appear behind the edit card, invisible until the edit card
-  // is closed. The confirm modal carries a higher z-index than
-  // the shared .modal-overlay (which the Edit modal keeps).
+  // The confirm modal stacks above the Edit modal (higher z-index), so a
+  // warning while editing is visible.
   const cssText = await realFetch(BASE + '/style.css').then((r) => r.text());
   const overlayZ = parseInt((cssText.match(/\.modal-overlay\s*\{[^}]*z-index:\s*(\d+)/) || [])[1] || '0', 10);
   const confirmZ = parseInt((cssText.match(/#confirm-modal\s*\{[^}]*z-index:\s*(\d+)/) || [])[1] || '0', 10);
   check('modal stacking: #confirm-modal z-index beats .modal-overlay so a confirm opened while editing is visible',
     confirmZ > overlayZ && overlayZ > 0, 'overlay=' + overlayZ + ' confirm=' + confirmZ);
-  // Both modals can be open at once (the confirm on top): open
-  // the confirm while the edit modal is open and the edit modal
-  // stays open behind it.
+  // Both can be open at once, the confirm on top.
   els['help-vacation'].click();
   check('modal stacking: opening the confirm while the edit modal is open leaves both open',
     els['confirm-modal'] && els['confirm-modal'].classList.contains('open')
@@ -1113,21 +905,16 @@ function check(name, cond, detail) {
   check('utxo modes: the N=6 guard note names 6 confirmations',
     findById(rulePanels('btc')[0], 'btc-rule-0-trigger-utxo-note') && findById(rulePanels('btc')[0], 'btc-rule-0-trigger-utxo-note').textContent.indexOf('6 confirmations') !== -1,
     findById(rulePanels('btc')[0], 'btc-rule-0-trigger-utxo-note') && findById(rulePanels('btc')[0], 'btc-rule-0-trigger-utxo-note').textContent);
-  // Subcard conditions: add one unconfirmed-mode tx and one
-  // 6-confirmation tx via the API (triggerConfirmed: both are
-  // already spent), re-render, and read their subcards.
+  // Add one unconfirmed-mode and one 6-confirmation tx (both already
+  // spent) and read their subcards.
   const CONFLICT = 'cc'.repeat(32);
   const FINNEY = 'f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16';
   const addU = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ txHex: craftHex(1, 200001), label: 'Dom UTXO unconfirmed', trigger: { type: 'utxo', params: { outpoint: CONFLICT + ':0', confirmations: 0 } }, triggerConfirmed: true }) });
   check('utxo modes: the unconfirmed-mode tx adds via the API', addU.status === 201, 'status=' + addU.status);
-  // (0.8.6) The override goes in BEFORE the 6-conf add below: the
-  // outpoint cache serves a fetched answer for one cadence window,
-  // so if the 6-conf add's gate evaluation read the stub's default
-  // FINNEY:0 answer (11 confirmations) first, the 3-conf add's
-  // gate below would read the same cached answer and refuse the
-  // add as already firing. With the override set first, every
-  // FINNEY:0 read in this section sees 2 confirmations.
+  // The override goes in before the 6-confirmation add: the outspend cache
+  // would otherwise serve the stub's default FINNEY:0 answer to the next
+  // add's gate too.
   const ovr = await realFetch('http://127.0.0.1:18275/__test__/outspend', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ txid: FINNEY, vout: 0, blockHeight: 899999 }) });
   check('utxo modes: the outspend override sets FINNEY:0 to 2 confirmations', ovr.status === 200, 'status=' + ovr.status);
@@ -1161,13 +948,8 @@ function check(name, cond, detail) {
     && findById(rulePanels('edit')[0], 'edit-rule-0-trigger-utxo-confs-row') && findById(rulePanels('edit')[0], 'edit-rule-0-trigger-utxo-confs-row').style.display === 'none',
     'mode=' + (findById(rulePanels('edit')[0], 'edit-rule-0-utxo-mode') && findById(rulePanels('edit')[0], 'edit-rule-0-utxo-mode').value) + ' confsRow=' + (findById(rulePanels('edit')[0], 'edit-rule-0-trigger-utxo-confs-row') && findById(rulePanels('edit')[0], 'edit-rule-0-trigger-utxo-confs-row').style.display));
 
-  // Catch-up waiting state (0.8.0, fast tick): a rule whose spend
-  // is first noticed below its N shows the progress reason on its
-  // card. FINNEY:0 is already driven to 2 confirmations by the
-  // stub override above, so add an N=3 rule (below threshold, so
-  // no triggerConfirmed needed), run a release check so the
-  // triggerState picks up the "2 of 3" reason, and read the card's
-  // state line.
+  // Catch-up waiting state: FINNEY:0 sits at 2 confirmations, so an N=3
+  // rule shows "2 of 3" after a release check.
   const add3 = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ txHex: craftHex(1, 200005), label: 'Dom UTXO 2 of 3', trigger: { type: 'utxo', params: { outpoint: FINNEY + ':0', confirmations: 3 } } }) });
   check('utxo modes: the 3-confirmation tx adds via the API (below threshold, no confirm needed)', add3.status === 201, 'status=' + add3.status);
@@ -1188,9 +970,9 @@ function check(name, cond, detail) {
     body: JSON.stringify({ txid: FINNEY, vout: 0, clear: true }) });
   check('utxo modes: the outspend override is cleared', ovrClear.status === 200, 'status=' + ovrClear.status);
 
-  // --- 9. the Bitcoin price source (Settings, two-source 0.8.0) ---
-  // Static HTML: the card, the two (JS-populated) selects, the 5%
-  // note, the per-source display, the save button.
+  // --- 9. price sources (Settings) ---
+  // Static HTML: the card, two selects, the 5% note, per-source display,
+  // Save.
   check('price sources: the Settings card has a "Bitcoin price source" heading (static HTML)',
     idx.indexOf('<h2>Bitcoin price source</h2>') !== -1, '');
   check('price sources: the card has two provider selects (static HTML)',
@@ -1219,11 +1001,8 @@ function check(name, cond, detail) {
     els['set-price-source1'] && els['set-price-source1'].value === 'coingecko', els['set-price-source1'] && els['set-price-source1'].value);
   check('price sources: Secondary price source defaults to Coinbase',
     els['set-price-source2'] && els['set-price-source2'].value === 'coinbase', els['set-price-source2'] && els['set-price-source2'].value);
-  // The per-source rows show the provider name, the status pill,
-  // and the last price in a small muted value span to the RIGHT
-  // of the pill — "CoinGecko [OK] $98,200" — the same shape as
-  // the node rows' values ("Reachable"). The launcher's release
-  // check populated the cache at $98,200 for both sources.
+  // Each row: provider, pill, and the last price in muted text right of
+  // the pill ("CoinGecko [OK] $98,200").
   check('price sources: Primary price source shows its provider name, and its price to the right of the pill (CoinGecko [OK] $98,200)',
     els['price-source1'] && els['price-source1'].textContent.indexOf('CoinGecko') !== -1 && els['price-source1'].textContent.indexOf('$') === -1
     && els['price-source1-price'] && els['price-source1-price'].textContent === '$98,200',
@@ -1245,13 +1024,9 @@ function check(name, cond, detail) {
   // settings (and the re-rendered selects) follow.
   els['set-price-source1'].value = 'kraken';
   els['set-price-source2'].value = 'bitstamp';
-  // Changing a dropdown updates the row label IMMEDIATELY
-  // (before saving) — the label must name the newly selected
-  // provider, never the old one, so the label and the Test
-  // connection button always agree on which provider they mean.
-  // (Setting .value programmatically fires no change event, so
-  // the test fires it with the shim's fireChange, as a real
-  // user change would.)
+  // Changing a dropdown relabels the row at once, so the row and Test
+  // connection always mean the same provider. (Setting .value fires no
+  // change event, so the test fires it.)
   fireChange(els['set-price-source1']);
   fireChange(els['set-price-source2']);
   check('price sources: changing the Primary price source dropdown to Kraken updates the row label to Kraken immediately (before saving)',
@@ -1260,9 +1035,7 @@ function check(name, cond, detail) {
   check('price sources: changing the Secondary price source dropdown to Bitstamp updates the row label to Bitstamp immediately (before saving)',
     els['price-source2'] && els['price-source2'].textContent.indexOf('Bitstamp') !== -1 && els['price-source2'].textContent.indexOf('Coinbase') === -1,
     els['price-source2'] && els['price-source2'].textContent);
-  // Changing a dropdown resets that row's status to Not Tested
-  // — the new provider has not been tested yet — and it never
-  // shows a dash.
+  // A dropdown change resets that row to Not Tested (never a dash).
   check('price sources: changing the Primary price source dropdown resets its status pill to Not Tested',
     els['price-source1-status'] && els['price-source1-status'].textContent === 'Not Tested' && els['price-source1-status'].className === 'pill muted',
     els['price-source1-status'] && els['price-source1-status'].textContent + ' / ' + els['price-source1-status'].className);
@@ -1296,14 +1069,9 @@ function check(name, cond, detail) {
   check('price sources: the defaults are restored (CoinGecko + Coinbase)',
     stRestored.settings && stRestored.settings.priceSources && stRestored.settings.priceSources.source1 === 'coingecko' && stRestored.settings.priceSources.source2 === 'coinbase',
     JSON.stringify(stRestored.settings && stRestored.settings.priceSources));
-  // After restoring, the rows re-derive from the cache again —
-  // both sources have a cached price, so both read OK. But a
-  // background tick landing in the short Kraken + Bitstamp
-  // window above re-keys the cache to those sources, and then
-  // the restore reads Not Tested until something re-fetches for
-  // the restored sources. Clear just the price cache (the fee
-  // peak survives) and run a release check so the rows read the
-  // live CoinGecko + Coinbase prices, deterministically.
+  // After restoring the sources, clear the price cache and run a release
+  // check so the rows read live prices for them (a tick may have re-keyed
+  // the cache meanwhile).
   const ccRestore = await fetch('/api/__test__/clear-caches', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ only: ['price'] }) });
   check('price sources: the price cache is cleared so the rows re-fetch for the restored sources', ccRestore.status === 200, 'status=' + ccRestore.status);
   const relRestore = await fetch('/api/release/check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
@@ -1314,16 +1082,11 @@ function check(name, cond, detail) {
     && els['price-source2-status'] && els['price-source2-status'].textContent === 'OK',
     (els['price-source1-status'] && els['price-source1-status'].textContent) + ' / ' + (els['price-source2-status'] && els['price-source2-status'].textContent));
 
-  // --- 10. the single "Test connection" button + Exchange Status (0.8.0) ---
-  // Static HTML: ONE "Test connection" button tests BOTH
-  // sources at once (like the Node Status button tests all
-  // nodes). There are NO per-source Test buttons and no
-  // per-source result spans — one shared result area instead.
+  // --- 10. Test connection + Exchange Status ---
+  // One Test connection button tests both sources; no per-source buttons.
   check('test button: the Settings card has exactly one "Test connection" button for the exchanges (static HTML)',
     idx.indexOf('id="btn-test-price-sources"') !== -1, '');
-  // Placement: the Test connection button sits immediately to
-  // the right of the Save button in the price sources card —
-  // the same layout as the node card (Save first, Test second).
+  // Test connection sits right of Save, as in the node card.
   check('test button: Test connection sits to the right of Save in the price sources card (static HTML)',
     idx.indexOf('id="btn-save-price-sources"') !== -1 && idx.indexOf('id="btn-test-price-sources"') !== -1
     && idx.indexOf('id="btn-save-price-sources"') < idx.indexOf('id="btn-test-price-sources"'), '');
@@ -1341,9 +1104,8 @@ function check(name, cond, detail) {
     idx.indexOf('id="price-sources-test"') === -1, '');
   check('test button: there are NO per-source result spans (static HTML)',
     idx.indexOf('id="price-source1-test"') === -1 && idx.indexOf('id="price-source2-test"') === -1, '');
-  // Clicking Test connection fetches BOTH selected providers
-  // fresh and shows both prices inline on the rows (the stub
-  // price is $98,200).
+  // It fetches both selected providers fresh and shows the prices on the
+  // rows.
   els['btn-test-price-sources'].click();
   await waitForRender();
   check('test button: Test connection shows BOTH prices to the right of the pills ("CoinGecko [OK] $98,200" and "Coinbase [OK] $98,200")',
@@ -1358,10 +1120,7 @@ function check(name, cond, detail) {
     els['price-source1-status'] && els['price-source1-status'].textContent === 'OK' && els['price-source1-status'].className === 'pill ok'
     && els['price-source2-status'] && els['price-source2-status'].textContent === 'OK' && els['price-source2-status'].className === 'pill ok',
     (els['price-source1-status'] && els['price-source1-status'].textContent) + ' / ' + (els['price-source2-status'] && els['price-source2-status'].textContent));
-  // The button tests the providers the dropdowns currently
-  // hold — the ones the row labels show. Change Primary price source to
-  // Kraken (its label follows, see section 9) and Test
-  // connection must test Kraken, not the saved CoinGecko.
+  // It tests what the dropdowns hold (switch to Kraken: Kraken is tested).
   els['set-price-source1'].value = 'kraken';
   fireChange(els['set-price-source1']);
   els['btn-test-price-sources'].click();
@@ -1371,21 +1130,14 @@ function check(name, cond, detail) {
     && els['price-source1'].textContent.indexOf('CoinGecko') === -1
     && els['price-source1-price'] && els['price-source1-price'].textContent === '$98,200',
     (els['price-source1'] && els['price-source1'].textContent) + ' / ' + (els['price-source1-price'] && els['price-source1-price'].textContent));
-  // The change-then-test flow: switching Primary price source to Kraken
-  // reset its pill to Not Tested, and the test that followed
-  // set it back to OK (Kraken answered with a price).
+  // Kraken went Not Tested on change, then OK after the test.
   check('test button: after testing the switched Primary price source (Kraken) its status pill reads OK',
     els['price-source1-status'] && els['price-source1-status'].textContent === 'OK' && els['price-source1-status'].className === 'pill ok',
     els['price-source1-status'] && els['price-source1-status'].textContent + ' / ' + els['price-source1-status'].className);
   check('test button: the untouched Secondary price source pill still reads OK after the Kraken test',
     els['price-source2-status'] && els['price-source2-status'].textContent === 'OK',
     els['price-source2-status'] && els['price-source2-status'].textContent);
-  // The save bug: a source tested OK must STAY OK after
-  // saving. Change → Test → Save used to flip the row back
-  // to Not Tested (the Save handler cleared the verdict and
-  // the re-render found no cached reading for the newly-saved
-  // source). Save Kraken + Coinbase now — both pills must
-  // stay OK, not flip to Not Tested.
+  // A source tested OK stays OK after Save.
   els['btn-save-price-sources'].click();
   await waitForRender();
   const stSavedKraken = await (await fetch('/api/state')).json();
@@ -1405,9 +1157,7 @@ function check(name, cond, detail) {
   check('price sources: changing the Primary price source dropdown after saving resets its status pill to Not Tested',
     els['price-source1-status'] && els['price-source1-status'].textContent === 'Not Tested' && els['price-source1-status'].className === 'pill muted',
     els['price-source1-status'] && els['price-source1-status'].textContent + ' / ' + els['price-source1-status'].className);
-  // Restore the defaults (CoinGecko + Coinbase) so the rest of
-  // the suite — and the Exchange Status rows below — see the
-  // default sources again.
+  // Restore the default sources for the rest of the suite.
   els['set-price-source1'].value = 'coingecko';
   els['set-price-source2'].value = 'coinbase';
   els['btn-save-price-sources'].click();
@@ -1438,9 +1188,8 @@ function check(name, cond, detail) {
     els['price-source1-status'] && els['price-source1-status'].textContent === 'Not Tested'
     && els['price-source1'] && els['price-source1'].textContent === 'Custom',
     (els['price-source1'] && els['price-source1'].textContent) + ' / ' + (els['price-source1-status'] && els['price-source1-status'].textContent));
-  // The URL + JSON-path inputs are created lazily (app.js only
-  // looks them up once a Custom source is read), so force them
-  // into existence before filling them in.
+  // The custom URL and path inputs are created lazily; create them before
+  // filling.
   const customUrl = document.getElementById('set-price-source1-url');
   const customPath = document.getElementById('set-price-source1-path');
   customUrl.value = 'http://127.0.0.1:18275/api/v3/simple/price?ids=bitcoin&vs_currencies=usd';
@@ -1495,9 +1244,8 @@ function check(name, cond, detail) {
     els['price-source2'] && els['price-source2'].textContent.indexOf('Coinbase') !== -1
     && els['price-source2-price'] && els['price-source2-price'].textContent === '$98,200',
     (els['price-source2'] && els['price-source2'].textContent) + ' / ' + (els['price-source2-price'] && els['price-source2-price'].textContent));
-  // A failing test sets that row's pill to Failed (not a dash,
-  // and not the error text — the row shows the verdict, not the
-  // reason), while the working row keeps its price and stays OK.
+  // A failing test shows Failed (not the error text); the other row stays
+  // OK.
   check('test button: after a failing test the failed row status pill reads Failed',
     els['price-source1-status'] && els['price-source1-status'].textContent === 'Failed' && els['price-source1-status'].className === 'pill bad',
     els['price-source1-status'] && els['price-source1-status'].textContent + ' / ' + els['price-source1-status'].className);
@@ -1511,15 +1259,11 @@ function check(name, cond, detail) {
   const unFailCg = await realFetch('http://127.0.0.1:18275/__test__/price', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ provider: 'coingecko', fail: false }) });
   check('test button: the stub CoinGecko feed is restored', unFailCg.status === 200, 'status=' + unFailCg.status);
-  // Exchange Status: exactly one section on the readiness card,
-  // shown once (not repeated per price tx). The seeded state has
-  // both sources agreeing at $98,200, so it reads OK.
+  // Exactly one Exchange Status section; both sources agree, so OK.
   check('exchange status: the readiness card has exactly one "Exchange Status" section (static HTML)',
     (idx.match(/Exchange Status/g) || []).length === 1, 'count=' + (idx.match(/Exchange Status/g) || []).length);
-  // Alignment: the per-exchange rows sit in a .node-lines
-  // container — the SAME class/structure as the Node Status rows
-  // — so their status pills are pinned to the same right edge
-  // (the width check proves the x positions match at 390px).
+  // Exchange rows use .node-lines like the node rows, so pills align
+  // (proved by the width check).
   const nodeLinesCount = (idx.match(/class="node-lines"/g) || []).length;
   check('exchange status: the per-exchange rows use the same .node-lines container as the Node rows (2 blocks: Node + Exchange)',
     nodeLinesCount === 2, 'count=' + nodeLinesCount);
@@ -1537,18 +1281,9 @@ function check(name, cond, detail) {
     !els['readiness-exchange-status'], els['readiness-exchange-status'] ? 'present' : 'absent');
   check('exchange status: each row has a price value span to the left of the pill (static HTML)',
     idx.indexOf('id="readiness-exchange-1-price" class="node-check-detail"') !== -1 && idx.indexOf('id="readiness-exchange-2-price" class="node-check-detail"') !== -1, '');
-  // Per-exchange rows: one row per configured source, each with
-  // its own status pill and last price — the price in a small
-  // muted span to the LEFT of the pill, the same shape as the
-  // Settings rows (never inside the label span). The pill stays
-  // pinned to the right edge, with the Node pills. There is no
-  // overall pill on the header; the rows carry the status.
-  // (Optimization O6) The price-sources section above switched
-  // the sources to Kraken + Bitstamp and back, so the price cache
-  // is still keyed to those — the rows would read "Not tested"
-  // until a refresh re-warms it for the restored sources. Clear
-  // just the price cache (the fee peak survives) and run a release
-  // check so the rows read the live CoinGecko + Coinbase prices.
+  // Per-exchange rows: each has its own pill and last price (left of the
+  // pill); no overall pill on the header. The cache is still keyed to the
+  // sources used above, so clear it and run a release check first.
   const ccWarm = await fetch('/api/__test__/clear-caches', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ only: ['price'] }) });
   check('exchange status: the price cache is cleared so the rows re-fetch for the restored sources', ccWarm.status === 200, 'status=' + ccWarm.status);
   const relWarm = await fetch('/api/release/check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
@@ -1576,11 +1311,8 @@ function check(name, cond, detail) {
   check('exchange status: the Coinbase row pill uses the ok class',
     els['readiness-exchange-2-status'] && els['readiness-exchange-2-status'].className === 'pill ok',
     els['readiness-exchange-2-status'] && els['readiness-exchange-2-status'].className);
-  // The per-tx price readiness line is trigger-only — it does
-  // NOT repeat the exchange/source status. The price subcard is
-  // exactly 3 rows (header / condition / current price only) and
-  // carries NO source note either — the source detail lives in
-  // the Exchange Status section and the dry-run notes.
+  // The price readiness line and subcard are trigger-only (no source
+  // notes; those are in Exchange Status and dry runs).
   const rbPrice = readinessBlock('Dom Price');
   check('exchange status: the Dom Price readiness line is trigger-only (no source names)',
     !!rbPrice && rbPrice.state.indexOf('CoinGecko') === -1 && rbPrice.state.indexOf('Coinbase') === -1 && rbPrice.state.indexOf('·') === -1,
@@ -1602,9 +1334,7 @@ function check(name, cond, detail) {
     !!partsPrice && partsPrice.now.indexOf('CoinGecko') === -1 && partsPrice.now.indexOf('Coinbase') === -1
     && partsPrice.now.indexOf('(') === -1 && partsPrice.now.indexOf('·') === -1,
     partsPrice ? partsPrice.now : 'no subcard');
-  // A dry run of the price tx surfaces the source detail in its
-  // notes — that is where all dry-run data shows up. Click
-  // Dry-run on the Dom Price card and read the dry-run line.
+  // A dry run of the price tx shows the source detail in its line.
   const priceDry = priceCard2 && cardButton(priceCard2, 'Dry-run');
   check('dry-run source detail: the Dom Price card has a Dry-run button', !!priceDry, '');
   if (priceDry) priceDry.click();
@@ -1612,9 +1342,7 @@ function check(name, cond, detail) {
   const priceCard3 = cardByTitle('Dom Price');
   let dryLine = '';
   if (priceCard3) {
-    // (0.8.7 fix, round 3) The dry-run line lives inside the
-    // blue tx subcard now, under its Details — not at card
-    // level. Look there as well as at card level.
+    // The dry-run line lives inside the blue tx subcard.
     const dryKids = [];
     for (const c of priceCard3.children) {
       dryKids.push(c);
@@ -1628,9 +1356,8 @@ function check(name, cond, detail) {
   }
   check('dry-run source detail: a dry run of the price tx shows the source detail in its notes',
     dryLine.indexOf('Price sources: CoinGecko $98,200 · Coinbase $98,200') !== -1, dryLine || 'no dry-run line');
-  // Degraded: one source down. The price cache is fresh for 1
-  // min, so clear it (test-only endpoint) instead of waiting past
-  // it, then a release check + re-render shows the degraded pill.
+  // Degraded: clear the price cache, then a release check shows one source
+  // down.
   const failCg2 = await realFetch('http://127.0.0.1:18275/__test__/price', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ provider: 'coingecko', fail: true }) });
   check('exchange status: the stub CoinGecko feed is set to fail (degraded)', failCg2.status === 200, 'status=' + failCg2.status);
@@ -1639,13 +1366,8 @@ function check(name, cond, detail) {
   const relDeg = await fetch('/api/release/check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
   check('exchange status: a release check runs after the caches are cleared (degraded)', relDeg.status === 200, 'status=' + relDeg.status);
   await rerender(appJs);
-  // Degraded: one source down. The per-exchange rows carry the
-  // failure (CoinGecko Failed, Coinbase OK) — there is still no
-  // overall pill on the header.
-  // Degraded: the CoinGecko row pill reads Failed and the
-  // Coinbase row stays OK with its price. The readiness row
-  // shows ONLY the status — never the error reason (that detail
-  // lives in the Settings card only).
+  // Degraded: the CoinGecko row reads Failed, Coinbase stays OK; the
+  // readiness row never shows the error reason.
   check('exchange status: the CoinGecko row pill reads Failed when it is down',
     els['readiness-exchange-1-status'] && els['readiness-exchange-1-status'].textContent === 'Failed',
     els['readiness-exchange-1-status'] && els['readiness-exchange-1-status'].textContent);
@@ -1708,24 +1430,18 @@ function check(name, cond, detail) {
   const setBack2 = await realFetch('http://127.0.0.1:18275/__test__/price', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ provider: 'coinbase', usd: 98200 }) });
   check('exchange status: the stub Coinbase is restored to $98,200', setBack2.status === 200, 'status=' + setBack2.status);
-  // Heal the price state the disagree test poisoned: the served
-  // price is derived live from the price cache (ruleStatusFor),
-  // so the disagreeing readings would keep every price line
-  // 'unknown' until something re-fetches. Clear just the price
-  // cache and run a release check — the Dom Price slice heals to
-  // $98,200 here, before §14's held-clock edit triggers the
-  // grace (during a grace the release check cannot
-  // re-fetch prices, so this is the last chance to heal it).
+  // Heal the price state the disagree test left: clear the price cache and
+  // run a release check, before §14 starts a grace (which blocks re-
+  // fetching).
   const ccOk = await fetch('/api/__test__/clear-caches', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ only: ['price'] }) });
   check('exchange status: the price cache is cleared so the release check re-fetches the restored prices', ccOk.status === 200, 'status=' + ccOk.status);
   const relOk = await fetch('/api/release/check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
   check('exchange status: a release check runs after the restore so the price state reads $98,200 again', relOk.status === 200, 'status=' + relOk.status);
   await rerender(appJs);
 
-  // --- 10b. node capability details, variant C: summary row + details on tap (0.8.1) ---
-  // Static HTML: each node is a <details> — the summary is just
-  // the node name + status pill, and the detail holds the four
-  // checks as plain label — value lines (no pills).
+  // --- 10b. node details ---
+  // Each node is a <details>: name and pill in the summary, four
+  // label/value lines inside.
   for (const lbl of ['primary', 'secondary']) {
     check('node checks static: the ' + lbl + ' node is a <details> with a capability block (static HTML)',
       idx.indexOf('<details id="btc-' + lbl + '-details" class="node-details">') !== -1
@@ -1742,12 +1458,9 @@ function check(name, cond, detail) {
   }
   check('node checks static: the capability labels read Broadcast / Fee estimates / Block height / Output lookup (static HTML)',
     (idx.match(/>Broadcast</g) || []).length >= 2 && (idx.match(/>Fee estimates</g) || []).length >= 2 && (idx.match(/>Block height</g) || []).length >= 2 && (idx.match(/>Output lookup</g) || []).length >= 2, '');
-  // Dynamic: the launcher ran a connection test against both
-  // stubs (full mempool-style nodes), so both nodes are OK and
-  // the detail holds the measured values — in the Settings card
-  // and on the Dashboard's Node Status rows. Stub TIP is 900,000
-  // and the stub economy fee is 1 sat/vB. OK nodes stay closed
-  // (only a non-OK node auto-opens after a test).
+  // After the launcher's test both nodes are OK with measured values (tip
+  // 900,000, fee 1 sat/vB), in Settings and on the Dashboard. OK nodes
+  // stay closed.
   await rerender(appJs);
   for (const lbl of ['primary', 'secondary']) {
     check('node checks: the ' + lbl + ' pill reads OK after the connection test',
@@ -1781,10 +1494,7 @@ function check(name, cond, detail) {
   check('node checks: opening the primary details shows the checks', detP.open === true, 'open=' + detP.open);
   toggleDetails(detP, false);
   check('node checks: closing the primary details hides them again', detP.open === false, 'open=' + detP.open);
-  // (0.8.5) Test connection must not collapse manually opened
-  // node details: the button used to force every OK node's
-  // details closed after the test. Open the primary details,
-  // click Test connection, and they stay open.
+  // Test connection must not close node details the owner opened.
   toggleDetails(detP, true);
   check('node checks: the primary details open before the Test connection click', detP.open === true, 'open=' + detP.open);
   els['btn-btc-test-conn'].click();
@@ -1795,19 +1505,10 @@ function check(name, cond, detail) {
     els['btc-primary-status'] && els['btc-primary-status'].textContent);
   toggleDetails(detP, false);
 
-  // --- 10d. Secondary-node toggle (0.8.8) ---
-  // The toggle sits inline with the Secondary node heading,
-  // right-aligned — the same switch as the arm/disarm toggle on
-  // a transaction card — and never hides with the settings it
-  // controls. Off hides the secondary URL box without clearing
-  // its saved value, and the secondary pill reads Disabled —
-  // never Offline, Failed, or a stale timestamp. The Dashboard
-  // readiness row names the slot ("Secondary Node"), not the
-  // provider host — but ONLY while the secondary is disabled,
-  // when there is no real node to name. While enabled the
-  // readiness row shows the node name (the configured host),
-  // as before; Settings still shows the host. Save
-  // round-trips it.
+  // --- 10d. secondary-node toggle ---
+  // Inline with the Secondary node heading; off hides the URL box without
+  // clearing it and the pill reads Disabled. The readiness row reads
+  // "Secondary Node" only while disabled. Save round-trips it.
   check('secondary toggle static: the toggle exists in the HTML',
     idx.indexOf('id="btc-secondary-enabled"') !== -1, '');
   check('secondary toggle static: the toggle is the same switch as the arm/disarm toggle (class "switch green")',
@@ -1901,10 +1602,8 @@ function check(name, cond, detail) {
     els['readiness-secondary'] && els['readiness-secondary'].textContent === '127.0.0.1:18276',
     els['readiness-secondary'] && els['readiness-secondary'].textContent);
 
-  // --- 11. Staged Transactions card (0.8.0) ---
-  // Static HTML: the transactions card is renamed "Staged
-  // Transactions" and is a <details> open by default — the whole
-  // card collapses, like Pending and Archived.
+  // --- 11. Staged Transactions card ---
+  // A <details>, open by default.
   check('staged card: the card is titled "Staged Transactions" (static HTML)',
     idx.indexOf('Staged Transactions') !== -1 && idx.indexOf('id="btc-card"') !== -1, '');
   check('staged card: the old "Pre-signed Bitcoin transactions" title is gone (static HTML)',
@@ -1921,13 +1620,10 @@ function check(name, cond, detail) {
   toggleDetails(btcCard, true);
   check('staged card: expanding reopens it', btcCard.open === true, 'open=' + btcCard.open);
 
-  // --- 11b. Add-transaction popup (0.8.0) ---
-  // The inline "Add a transaction" card at the bottom of the tab is
-  // gone; the form lives in a popup (#add-modal). Three buttons open
-  // it: the Getting Started button, the "+ Add a pre-signed
-  // transaction" button at the bottom of the tab, and the oval
-  // "+ Add Tx" in this card's header. "Broadcast all" is gone
-  // again (removed Nov 16 — too close to the pill).
+  // --- 11b. Add popup ---
+  // The form lives in #add-modal, opened by Getting Started, the button at
+  // the bottom of the tab, and "+ Add Tx". There is no Broadcast all
+  // button.
   check('add popup static: the oval "+ Add Tx" pill is in the Staged header',
     idx.indexOf('id="btn-btc-add-pill"') !== -1 && idx.indexOf('+ Add Tx') !== -1, '');
   check('add popup static: the pill is an oval (add-tx-pill class)',
@@ -1968,15 +1664,10 @@ function check(name, cond, detail) {
     els['add-modal'] && !els['add-modal'].classList.contains('open'),
     els['add-modal'] ? 'open=' + els['add-modal'].classList.contains('open') : 'no add-modal');
 
-  // --- 12. the status pill: "armed", not "Ready + armed" (0.8.0) ---
-  // A healthy armed tx reads just "armed" — "Ready" is redundant,
-  // since a problem state already names itself. A shared-input
-  // overlap keeps the text but turns the pill amber (the warning
-  // lives in the line below, not in the pill). A genuine problem
-  // state reads "Label + armed". Disarmed stays "unarmed".
-  // The seven seeded txs all spend FINNEY:1, so they all share an
-  // input: their CARD pills are amber, while their READINESS pills
-  // stay green (the shared-input tweak is card-only).
+  // --- 12. status pill: "armed", not "Ready + armed" ---
+  // A problem state reads "Label + armed"; disarmed reads "unarmed". A
+  // shared input turns the card pill amber (the seeded txs all spend
+  // FINNEY:1), but readiness pills stay green.
   for (const label of ['Dom Check-in', 'Dom Price', 'Dom UTXO', 'Dom Manual']) {
     const card = cardByTitle(label);
     const pill = card && cardStatus(card);
@@ -2017,10 +1708,8 @@ function check(name, cond, detail) {
   const rearmH = healthyId ? await fetch('/api/bitcoin/txs/' + healthyId, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: true }) }) : null;
   check('pill 0.8.0: re-arming the healthy tx via the API', !!rearmH && rearmH.status === 200, rearmH ? 'status=' + rearmH.status : 'no id');
   await rerender(appJs);
-  // A genuine problem state: a timelocked tx (locktime 950000, tip
-  // 900000) reads "Timelocked + armed" once a dry run names it.
-  // FINNEY:3 is spent by no other tx, so the pill is green until
-  // the dry run — the amber there would be the timelock itself.
+  // A timelocked tx (locktime 950000) reads "Timelocked + armed" after a
+  // dry run.
   const addTl = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ txHex: craftLocktimeHex(3, 950000, 200103), label: 'Dom Pill timelocked', trigger: { type: 'manual', params: {} } }) });
   check('pill 0.8.0: the timelocked tx adds via the API', addTl.status === 201, 'status=' + addTl.status);
@@ -2040,14 +1729,10 @@ function check(name, cond, detail) {
     !!tlRb && tlRb.status === 'Timelocked + armed',
     tlRb ? tlRb.status + ' / ' + tlRb.statusCls : 'no block');
 
-  // --- 13. readiness row layout: a very long label ---
-  // The shim cannot measure layout, so this section only proves
-  // the long-label tx renders in the readiness list (full label
-  // + a correct state line) and stays armed. The width check
-  // (width_check095.js, real Playwright at 390px) proves the row
-  // itself stays one line with the label truncated by ellipsis.
-  // (The server caps labels at 80 chars — asStr(label, 80) — so
-  // the stored/rendered label is the first 80 chars of the input.)
+  // --- 13. a very long label ---
+  // The shim cannot measure layout: this only proves the row renders
+  // (labels are capped at 80 chars); width_check099.js proves it stays one
+  // line at 390px.
   const LONG_LABEL = 'A very long transaction label that must be truncated with an ellipsis on the readiness row, never wrapping the status pill';
   const STORED_LABEL = LONG_LABEL.slice(0, 80);
   const longAdd = await realFetch(BASE + '/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -2063,34 +1748,20 @@ function check(name, cond, detail) {
   check('readiness rows: the long-label row status pill reads "armed"',
     !!longRb && longRb.status === 'armed', longRb ? longRb.status : 'no block');
 
-  // --- 14. held window + shared check-in reset (0.8.0, unified 0.8.8) ---
-  // Backdate the clock 40 days with lastOnlineAt 40 days back
-  // (a direct state.json edit, like the API suite's seed): a
-  // grace sets on the rerender's read (gap 40d > 7d
-  // threshold), and both bars read past due in their OWN
-  // windows — 40 of 35 / 40 of 10 — state 'grace', never
-  // 'release-due': the due date is NOT pushed out by the
-  // grace. The status pill reads "Grace period" and the grace
-  // card shows with its countdown bar. The shared Check in
-  // button then resets both bars to 0 (checking in does NOT
-  // clear the grace — the card stays up).
+  // --- 14. held window + shared check-in reset ---
+  // Backdate the clock and lastOnlineAt 40 days: a grace sets on the read,
+  // both bars read past due in their own windows as 'grace', the pill
+  // reads Grace period, and the card shows. Check in resets both bars to 0
+  // (the grace stays).
   const heldSt = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
   const heldNow = Date.now();
-  // The 30 s margin keeps the floored day count exact: the
-  // backdate is 40 days AND 30 seconds ago, so the elapsed
-  // time is a hair OVER 40 days even after the few hundred ms
-  // of freeze offset banked when the 10d tx was disarmed and
-  // re-armed earlier in the suite (same ms boundary as the
-  // API suite's §16 held leg, where iso_ago(days=40,
-  // seconds=30) does the same thing).
+  // The 30 s margin keeps the floored day count exact despite the freeze
+  // offset banked earlier.
   heldSt.checkin.lastCheckinAt = new Date(heldNow - 40 * 86400000 - 30000).toISOString();
   heldSt.checkin.lastOnlineAt = new Date(heldNow - 40 * 86400000).toISOString();
   fs.writeFileSync(DATA_FILE, JSON.stringify(heldSt, null, 2) + '\n');
-  // (0.8.10, skip-save) Drop the heartbeat cache too: a
-  // test-written state.json defines the world, and the fresh
-  // heartbeat left over from the running app would silently
-  // override the seeded 40-day gap on the rerender's read.
-  // (Same fix as the API and regression suites' seeders.)
+  // Drop the heartbeat too, or the running app's would override the seeded
+  // 40-day gap.
   try { fs.unlinkSync(DATA_FILE.replace('state.json', 'heartbeat.json')); } catch (e) { /* no heartbeat yet */ }
   await rerender(appJs);
   const heldBar35 = checkinBar('Dom Check-in');
@@ -2106,14 +1777,9 @@ function check(name, cond, detail) {
   check('held bars: the status pill reads "Grace period"',
     els['status-pill'] && els['status-pill'].textContent === 'Grace period',
     els['status-pill'] && els['status-pill'].textContent);
-  // The held count is 9, not 7: the 7 trigger txs plus the two
-  // FINNEY:0 txs from §8. (The third extra UTXO tx, the
-  // unconfirmed-mode conflict tx, is NOT held: its rule fired
-  // on the unconfirmed spend and it broadcast already, so it
-  // is pending by now — the §14 comment used to say the
-  // opposite, corrected by the §14 state dump in the
-  // both-numbers build.) The line must agree with the
-  // per-card pills, the independent view of the same held set.
+  // Held count 9: the 7 trigger txs plus the two FINNEY:0 txs from §8 (the
+  // conflict tx already broadcast, so it is pending, not held). It must
+  // match the per-card pills.
   const heldN14 = gracePillCount();
   check('held bars: the grace card shows the 40-day gap and the held txs',
     els['grace-card'] && els['grace-card'].style.display !== 'none'
@@ -2122,16 +1788,8 @@ function check(name, cond, detail) {
     elText(els['grace-text']) + ' / ' + elText(els['grace-held']));
   check('held bars: the held count is 9 (7 trigger txs + the 2 FINNEY:0 txs from §8)',
     heldN14 === 9, 'grace pills: ' + heldN14);
-  // Both-numbers grace card (0.8.8): 2 of the 9 held would fire
-  // now — the two past-due check-ins, judged on the live clock
-  // (40 days past both the 35d and the 10d thresholds). The
-  // rest read 'watching' on their stored slices (price $98,200
-  // < $150,000, tip 900,000 < 950,000, fee 1 > 0.5, set-date in
-  // 2029, FINNEY:1 unspent, both FINNEY:0 txs last read at 2
-  // confirmations, below their N). The conflict tx reads
-  // wouldFire TRUE on its stale 'due' slice but it already
-  // broadcast, so it is not held and does not count toward
-  // the second number.
+  // 2 of the 9 would fire now: the two past-due check-ins. The rest read
+  // watching on their stored slices; the conflict tx is not held.
   const st14 = await (await fetch('/api/state')).json();
   const heldLabels14 = txCards().filter((c) => { const p = cardStatus(c); return !!p && p.textContent === 'Grace'; }).map(cardTitle);
   const wf14 = (st14.bitcoin.txs || []).filter((t) => heldLabels14.includes(t.label) && (t.triggerStatus || {}).wouldFire).map((t) => t.label);
@@ -2163,16 +1821,9 @@ function check(name, cond, detail) {
     els['grace-card'] && els['grace-card'].style.display);
 
   // --- 15. settled / pending check-in txs get no bar ---
-  // (Same rule as the API suite's §16b, proven in the DOM):
-  // a stale, broadcasted (confirmed), pending (broadcast,
-  // unconfirmed) or slipstream-pending check-in tx loses its
-  // bar; a failed or conflict one keeps it. When every armed
-  // check-in tx is archived the card hides; restoring both
-  // brings the bars and the card back. (Direct state.json
-  // edits, like §14's held-clock edit. When the server sends
-  // an empty checkinTxs the frontend re-derives via its
-  // fallback filter — the all-archived case below exercises
-  // that path too, and it must agree: no bars.)
+  // Stale, broadcast, pending and Slipstream-pending txs lose their bar;
+  // failed and conflict keep it. All archived hides the card; restoring
+  // brings it back (also exercises the frontend's fallback filter).
   function setDomTxFate(label, release, broadcasted) {
     const st = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
     for (const t of (st.bitcoin.txs || [])) {
@@ -2222,9 +1873,8 @@ function check(name, cond, detail) {
   check('archived bars: a conflict check-in tx KEEPS its bar (active with a warning)',
     (checkinBars() || []).length === 2 && !!checkinBar('Dom Check-in') && !!checkinBar('Dom Check-in 10d'),
     JSON.stringify(checkinBars()));
-  // Both archived: no bars and the card hides (the empty
-  // server list re-derives via the frontend fallback, which
-  // must agree — no bars from either path).
+  // Both archived: no bars and the card hides (both server and fallback
+  // paths).
   setDomTxFate('Dom Check-in', { status: 'stale', kind: 'release', trigger: 'checkin', txid: domTxid, method: 'mempool.space', lastAttemptAt: domNow, error: 'inputs spent: staged' }, null);
   const domTx10 = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')).bitcoin.txs.find((t) => t.label === 'Dom Check-in 10d') || {};
   setDomTxFate('Dom Check-in 10d', { status: 'stale', kind: 'release', trigger: 'checkin', txid: domTx10.txid || '', method: 'mempool.space', lastAttemptAt: domNow, error: 'inputs spent: staged' }, null);
@@ -2242,51 +1892,25 @@ function check(name, cond, detail) {
     (checkinBars() || []).length === 2 && els['checkin-card'] && els['checkin-card'].style.display !== 'none',
     JSON.stringify(checkinBars()) + ' display=' + (els['checkin-card'] && els['checkin-card'].style.display));
 
-  // --- 18. grace period for ALL triggers (0.8.0, extended 0.8.8, unified 0.8.8) ---
-  // When the app comes back after being offline longer than
-  // settings.graceOfflineDays (default 7), price, UTXO,
-  // block-height, set-date, fee-market, AND check-in triggers
-  // are paused for settings.graceDurationDays (default 7, null
-  // = indefinite until resumed). The grace has an on/off
-  // toggle as the first option on the Settings grace card (in
-  // the heading, like the secondary-node toggle): off hides
-  // the two dropdowns without clearing them, and no grace is
-  // ever set — nor does an already-active grace show or hold
-  // — while it is off. The duration dropdown offers 1/3/7/14/30
-  // days + indefinite only (no 0: the toggle is the off switch
-  // now). The dashboard shows a "Grace period active" card at
-  // the top whenever a grace is active — even with nothing
-  // held — with the approved copy ("Grace period has been
-  // activated because the device was offline for X days." /
-  // "N transaction(s) is/are held by grace, M of them would
-  // fire now."),
-  // a countdown bar ("Day N of M" / "N days left · until
-  // <date>", "less than a day left" under a day, "until you
-  // resume" for an indefinite grace), and a Resume now button
-  // with "Resuming will end the grace period immediately." to
-  // its right; armed held tx cards read "Grace" on an amber
-  // pill instead of "armed" (check-in cards included now);
-  // the Settings grace card has the toggle + the two dropdowns
-  // (offline days to trigger, how long it lasts) with Save.
-  // (Direct state.json edits for the grace, like §14's
-  // held-clock edit and §16b's fate edits. The launcher's
-  // lastOnlineAt is fresh — the app booted minutes ago — so
-  // seeding a grace directly never re-triggers one on the
-  // read.)
+  // --- 18. grace period for all triggers ---
+  // After more than graceOfflineDays offline, every trigger type is paused
+  // for graceDurationDays (null = until resumed). The Settings toggle
+  // turns it off (hiding, not clearing, the dropdowns); durations are
+  // 1/3/7/14/30 days or indefinite. The dashboard card has the approved
+  // copy, a countdown bar and Resume now; held armed cards read Grace.
+  // Seeded directly in state.json.
   function setDomGrace(grace) {
     const st = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
     st.grace = grace;
     fs.writeFileSync(DATA_FILE, JSON.stringify(st, null, 2) + '\n');
   }
   const graceNow = Date.now();
-  // A grace 5 days in, of a 7-day duration (the approved
-  // render): "Day 5 of 7", "2 days left · until <date>", bar
-  // ~71% wide. triggeredAt 5 days ago, graceUntil 2 days out.
+  // A grace 5 days into 7: "Day 5 of 7", "2 days left · until <date>", bar
+  // ~71%.
   const graceUntil = new Date(graceNow + 2 * 86400000).toISOString();
   const graceTriggeredAt = new Date(graceNow - 5 * 86400000).toISOString();
-  // Static HTML: the dashboard grace card (before the check-in
-  // card) and the Settings grace card (after the price sources
-  // card), with the exact copy from the approved mockup.
+  // Static HTML: the dashboard grace card and the Settings grace card,
+  // with the approved copy.
   check('grace card static: the dashboard grace card exists (title, text, held count, countdown bar, Resume button, note)',
     idx.indexOf('id="grace-card"') !== -1 && idx.indexOf('Grace period active') !== -1
     && idx.indexOf('id="grace-text"') !== -1 && idx.indexOf('id="grace-held"') !== -1
@@ -2325,11 +1949,8 @@ function check(name, cond, detail) {
     JSON.stringify(selectValues(idx, 'set-grace-duration')));
   check('grace settings static: the Save button reads "Save grace period" and is orange (primary)',
     idx.indexOf('id="btn-save-grace" class="primary"') !== -1, '');
-  // Section 14 left lastOnlineAt stale (the held-clock seed), so
-  // a grace is active from the read paths by now — the app was
-  // offline 40 days, which is past the 7-day grace threshold.
-  // Restore a fresh stamp and clear the grace for a clean
-  // starting point (the check-in clock is untouched).
+  // §14 left a grace active; reset liveness and clear it for a clean
+  // start.
   const stClean = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
   stClean.checkin.lastOnlineAt = new Date().toISOString();
   stClean.grace = { graceUntil: null, triggeredAt: null, offlineGapDays: null };
@@ -2339,19 +1960,15 @@ function check(name, cond, detail) {
   check('grace card: hidden when no grace is active',
     els['grace-card'] && els['grace-card'].style.display === 'none',
     els['grace-card'] && els['grace-card'].style.display);
-  // Capture the readiness lines before the grace: the grace must
-  // not change them (the rule's condition + current value are
-  // still accurate — only the pill says Grace).
+  // The grace must not change the readiness lines (only the pill says
+  // Grace).
   const priceLineBefore = (readinessBlock('Dom Price') || {}).state || '';
   const utxoLineBefore = (readinessBlock('Dom UTXO') || {}).state || '';
   const bhLineBefore = (readinessBlock('Dom Blockheight') || {}).state || '';
   const sdLineBefore = (readinessBlock('Dom Setdate') || {}).state || '';
   const fmLineBefore = (readinessBlock('Dom Feemarket') || {}).state || '';
   const ckLineBefore = (readinessBlock('Dom Check-in') || {}).state || '';
-  // Seed a finite grace (offline 8 days, 5 days into a 7-day
-  // duration) and re-render: the card shows the approved copy
-  // with the offline days bolded, the held count, and the
-  // countdown bar at "Day 5 of 7" / "2 days left · until <date>".
+  // Seed a finite grace and check the copy, held count and bar.
   setDomGrace({ graceUntil, triggeredAt: graceTriggeredAt, offlineGapDays: 8 });
   await rerender(appJs);
   const graceText = elText(els['grace-text']);
@@ -2374,13 +1991,8 @@ function check(name, cond, detail) {
     graceHeldText === '9 transactions are held by grace, 0 of them would fire now.', graceHeldText);
   check('grace card: the held count is 9 (same inventory as §14)',
     heldN18 === 9, 'grace pills: ' + heldN18);
-  // Both-numbers grace card (0.8.8): 0 of the 9 held would fire
-  // now. The check-in clock is fresh (§14's Check in button
-  // reset it), so both check-ins read false on the live clock;
-  // everything else still reads 'watching' on its stored slice;
-  // the conflict tx still reads wouldFire TRUE on its stale
-  // 'due' slice but it already broadcast, so it is not held
-  // and does not count.
+  // 0 of the 9 would fire now: the check-in clock is fresh after §14's
+  // check-in.
   const st18 = await (await fetch('/api/state')).json();
   const heldLabels18 = txCards().filter((c) => { const p = cardStatus(c); return !!p && p.textContent === 'Grace'; }).map(cardTitle);
   const wf18 = (st18.bitcoin.txs || []).filter((t) => heldLabels18.includes(t.label) && (t.triggerStatus || {}).wouldFire).map((t) => t.label);
@@ -2393,9 +2005,8 @@ function check(name, cond, detail) {
   check('grace card: the countdown bar is ~71% wide (5 of 7 days elapsed)',
     els['grace-bar-fill'] && Math.abs(parseFloat(els['grace-bar-fill'].style.width) - 5 / 7 * 100) < 0.5,
     els['grace-bar-fill'] && els['grace-bar-fill'].style.width);
-  // The Grace pill: armed held cards read "Grace" on
-  // amber; check-in cards are held now too (0.8.8 unification),
-  // manual cards are untouched.
+  // Held armed cards read "Grace" in amber (check-in included); manual
+  // cards are untouched.
   for (const label of ['Dom Price', 'Dom UTXO', 'Dom Blockheight', 'Dom Setdate', 'Dom Feemarket', 'Dom Check-in']) {
     const pill = cardByTitle(label) && cardStatus(cardByTitle(label));
     check('grace pill: "' + label + '" card pill reads "Grace" on amber during the grace',
@@ -2443,10 +2054,8 @@ function check(name, cond, detail) {
   check('grace pill: the re-armed price tx reads "Grace" again',
     !!rearmPill && rearmPill.textContent === 'Grace' && rearmPill.className === 'pill warn',
     rearmPill ? rearmPill.textContent + ' / ' + rearmPill.className : 'no pill');
-  // The card shows even with NOTHING held (0.8.8): disarm every
-  // tx whose pill reads "Grace" (the held set, whatever its
-  // inventory — the 9 Grace pills) and the card stays up with
-  // a 0 count, then re-arm them all and the count comes back.
+  // The card shows even with nothing held: disarm every Grace card (count
+  // 0), then re-arm.
   const heldBefore = elText(els['grace-held']);
   const graceLabels = txCards().map((c) => ({ label: cardTitle(c), pill: cardStatus(c) }))
     .filter((x) => x.label && x.pill && x.pill.textContent === 'Grace').map((x) => x.label);
@@ -2470,15 +2079,9 @@ function check(name, cond, detail) {
   check('grace card: the held count reads "' + heldBefore + '" again after re-arming',
     elText(els['grace-held']) === heldBefore,
     elText(els['grace-held']));
-  // Under a day left: a grace ending ~12h out reads
-  // "less than a day left" instead of "0 days left".
-  // triggeredAt is 6.5 days ago (not 6): with until 12h out
-  // the duration is exactly 7 days, so Math.round lands on 7.
-  // A 6-day trigger puts the duration at exactly 6.5 days —
-  // the rounding boundary — and a 1 ms gap between the seed's
-  // two Date.now() calls flips the render to "Day 6 of 6"
-  // (measured ~0.1% of seeds; a pre-existing flake, not an
-  // app bug — the app only ever creates whole-day durations).
+  // Under a day left reads "less than a day left". triggeredAt is 6.5 days
+  // back so the duration is exactly 7 days (6 days back sits on the
+  // rounding boundary).
   setDomGrace({ graceUntil: new Date(Date.now() + 12 * 3600000).toISOString(), triggeredAt: new Date(Date.now() - 6.5 * 86400000).toISOString(), offlineGapDays: 8 });
   await rerender(appJs);
   check('grace card: under a day left reads "less than a day left" (Day 6 of 7)',
@@ -2517,10 +2120,7 @@ function check(name, cond, detail) {
   check('grace card: Resume now hides the indefinite grace card too',
     els['grace-card'] && els['grace-card'].style.display === 'none',
     els['grace-card'] && els['grace-card'].style.display);
-  // The toggle: off hides the dashboard card even with a grace
-  // seeded active, and held pills read "armed" again — off means
-  // triggers fire immediately. On brings the card back (the
-  // seeded grace record itself survives the toggle).
+  // Toggle off hides the card and pills read "armed"; on brings it back.
   setDomGrace({ graceUntil, triggeredAt: graceTriggeredAt, offlineGapDays: 8 });
   await rerender(appJs);
   check('grace toggle: the card shows again with a seeded grace (toggle on)',
@@ -2582,9 +2182,8 @@ function check(name, cond, detail) {
   check('grace toggle: Resume now hides the card after re-enabling',
     els['grace-card'] && els['grace-card'].style.display === 'none',
     els['grace-card'] && els['grace-card'].style.display);
-  // Settings grace card: the dropdowns reflect the saved
-  // defaults (7 / 7); saving a change persists it and the
-  // selects re-render with the new values; restore the defaults.
+  // Settings grace card: dropdowns show 7 / 7; a saved change persists;
+  // defaults restored.
   check('grace settings: the offline dropdown defaults to 7 days',
     els['set-grace-offline'] && els['set-grace-offline'].value === '7',
     els['set-grace-offline'] && els['set-grace-offline'].value);
@@ -2627,16 +2226,9 @@ function check(name, cond, detail) {
   check('grace card: a finite grace is left active for the width check',
     els['grace-card'] && els['grace-card'].style.display !== 'none',
     els['grace-card'] && els['grace-card'].style.display);
-  // (0.8.8, audit finding 3) Grace counts must ignore a set
-  // member's parked trigger: a member whose own trigger is
-  // check-in, inside a set whose trigger is manual, is NOT
-  // held by the grace — the set's trigger is the one that
-  // fires. The reverse (manual member, check-in set) IS held,
-  // counted through the set. (A live member's subcard carries
-  // no pill at all — only a stale member gets one — so there
-  // is no member "Grace" pill to fix; the count is the bug,
-  // plus the set card's own pill, which must read the set's
-  // trigger, not any member's parked one.)
+  // Grace counts ignore a member's parked trigger: a check-in member of a
+  // manual set is not held; a manual member of a check-in set is, through
+  // the set. The set card's pill reads the set's trigger.
   const addF3M1 = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ txHex: craftHex(1, 210001), label: 'Dom F3 member ck', trigger: { type: 'checkin', params: { thresholdDays: 35 } } }) });
   check('grace counts: the check-in member tx adds', addF3M1.status === 201, 'status=' + addF3M1.status);
@@ -2688,9 +2280,8 @@ function check(name, cond, detail) {
   check('grace counts: the check-in set card pill reads "Grace"',
     !!f3s2Pill && f3s2Pill.textContent === 'Grace' && f3s2Pill.className === 'pill warn',
     f3s2Pill ? f3s2Pill.textContent + ' / ' + f3s2Pill.className : 'no pill');
-  // Clean up: delete both sets (members return to standalone),
-  // then the member txs, so the fixture is back to 9 held for
-  // the sections below. The seeded grace stays active.
+  // Clean up: delete both sets, then their txs (back to 9 held). The grace
+  // stays.
   const delF3S1 = await fetch('/api/bitcoin/sets/' + f3s1Id, { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
   check('grace counts: the manual set deletes', delF3S1.status === 200, 'status=' + delF3S1.status);
   const delF3S2 = await fetch('/api/bitcoin/sets/' + f3s2Id, { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
@@ -2704,19 +2295,10 @@ function check(name, cond, detail) {
     elText(els['grace-held']) === '9 transactions are held by grace, 0 of them would fire now.',
     elText(els['grace-held']));
 
-  // --- 19. Getting Started empty-state card (0.8.0) ---
-  // When no transactions are STAGED (active), a "Getting
-  // Started" card appears at the very top of the Dashboard —
-  // the first thing a fresh install sees — with the owner's exact
-  // copy and a full-width orange button that switches to the
-  // Transactions tab and scrolls to the "Add a transaction"
-  // form. Archived (settled) and pending transactions do NOT
-  // count: the card shows when the only txs are archived or
-  // pending, and hides as soon as the first transaction is
-  // staged. It is independent of the grace card (which needs
-  // armed price/UTXO txs to show).
-  // Static HTML: the card (title, body verbatim, button) at the
-  // top of the dashboard, before the grace card.
+  // --- 19. Getting Started card ---
+  // Shown at the top of the Dashboard while no transaction is staged
+  // (archived and pending do not count), with the exact copy and a button
+  // that opens the Add popup. Static HTML first.
   check('getting started static: the card exists (title, body verbatim, button)',
     idx.indexOf('id="getting-started-card"') !== -1 && idx.indexOf('<h2>Getting Started</h2>') !== -1
     && idx.indexOf('Standby broadcasts presigned transactions based on the trigger criteria you define. Sign a transaction on your wallet, then add it here.') !== -1
@@ -2744,9 +2326,7 @@ function check(name, cond, detail) {
   // Delete all txs via the API: the card shows.
   const st19 = await (await fetch('/api/state')).json();
   for (const t of (st19.bitcoin.txs || [])) {
-    // DELETE is a state-changing request, so the CSRF gate needs
-    // the JSON content type even with no body (the app's own
-    // api() helper sends it; a bare fetch does not).
+    // DELETE needs the JSON content type for the CSRF gate.
     const d = await fetch('/api/bitcoin/txs/' + t.id, { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
     check('getting started: deleting "' + t.label + '" via the API', d.status === 200, 'status=' + d.status);
   }
@@ -2754,9 +2334,7 @@ function check(name, cond, detail) {
   check('getting started: shows when no transactions are staged',
     els['getting-started-card'] && els['getting-started-card'].style.display !== 'none',
     els['getting-started-card'] && els['getting-started-card'].style.display);
-  // The button opens the Add popup: clicking it opens the
-  // #add-modal and does NOT switch tabs (the dashboard stays
-  // active) and never scrolls the page.
+  // The button opens #add-modal without switching tabs or scrolling.
   els['btn-getting-started-add'].click();
   check('getting started button: clicking it opens the Add popup',
     els['add-modal'] && els['add-modal'].classList.contains('open'),
@@ -2773,9 +2351,8 @@ function check(name, cond, detail) {
   check('getting started button: Cancel closes the Add popup',
     els['add-modal'] && !els['add-modal'].classList.contains('open'),
     els['add-modal'] ? 'open=' + els['add-modal'].classList.contains('open') : 'no add-modal');
-  // Add one tx: the card hides again. (Value 300001: a hex no
-  // other section uses — 200001 is the 'Dom UTXO unconfirmed'
-  // tx's hex, so reusing it would be a duplicate once restored.)
+  // Add one tx and the card hides (value 300001, a hex no other section
+  // uses).
   const add19 = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ txHex: craftHex(1, 300001), label: 'GS Check-in' }) });
   check('getting started: adding a tx via the API', add19.status === 201, 'status=' + add19.status);
   await rerender(appJs);
@@ -2804,13 +2381,8 @@ function check(name, cond, detail) {
   check('getting started: shows again after the last tx is deleted',
     els['getting-started-card'] && els['getting-started-card'].style.display !== 'none',
     els['getting-started-card'] && els['getting-started-card'].style.display);
-  // Restore: re-seed the txs the delete removed — the 4 Dom txs
-  // (same hexes/triggers as the launcher) PLUS the extra txs
-  // later sections added ('Dom Check-in 10d', the two pill txs,
-  // the long-label tx). The width check needs at least 7
-  // readiness rows (4 seeded + 2 pill + long-label), so all 8
-  // go back; the §8 UTXO txs are NOT re-added (they broadcast
-  // and left the list, per the width check's own comment).
+  // Re-seed the txs the delete removed (the width check needs at least 7
+  // readiness rows); the §8 UTXO txs stay out.
   const LONG_LABEL19 = 'A very long transaction label that must be truncated with an ellipsis on the readiness row, never wrapping the status pill';
   for (const [hexs, label, trig] of [
     [craftHex(1, 100001), 'Dom Check-in', null],
@@ -2834,9 +2406,8 @@ function check(name, cond, detail) {
   check('getting started restore: hidden again with the txs staged',
     els['getting-started-card'] && els['getting-started-card'].style.display === 'none',
     els['getting-started-card'] && els['getting-started-card'].style.display);
-  // Grace independence: with txs staged and a finite grace
-  // active, the grace card shows AND the Getting Started card
-  // stays hidden (the two cards are independent).
+  // With txs staged and a grace active, the grace card shows and Getting
+  // Started stays hidden.
   setDomGrace({ graceUntil, triggeredAt: graceTriggeredAt, offlineGapDays: 8 });
   await rerender(appJs);
   check('getting started + grace: the grace card shows while txs are staged',
@@ -2847,16 +2418,11 @@ function check(name, cond, detail) {
     els['getting-started-card'] && els['getting-started-card'].style.display);
   // Leave the finite grace active for the width check (as §18 did).
 
-  // --- 20. user controls: price agreement, check cadence, broadcast fee risk (0.8.0) ---
-  // Three Settings cards, each a number input with min/max
-  // bounds, units shown, and its own orange Save button. The
-  // price-sources note carries the agreement as a span so it
-  // tracks the saved setting. The fee pill on a readiness row
-  // flips when the multipliers move: a 4.0 sat/vB fee (peak
-  // 2.0) is Low Fee Risk at the defaults (2x/1x) and Med Fee Risk
-  // at 3x/1.5x.
-  // Static HTML: the three cards exist (title, explainer, inputs
-  // with bounds, units, Save buttons), after the grace card.
+  // --- 20. user controls ---
+  // Price agreement, check cadence and fee verdict cards: bounded inputs
+  // with units and Save. The agreement span tracks the saved setting; the
+  // readiness fee pill flips with the multipliers (4.0 sat/vB over a 2.0
+  // peak: Low at 2x/1x, Med at 3x/1.5x).
   check('user controls static: the Price agreement card exists (title, input, unit, Save; the explainer lives in the "?" pop-out)',
     idx.indexOf('<h2>Price agreement</h2>') !== -1 && idx.indexOf('id="set-price-agreement"') !== -1
     && idx.indexOf('id="btn-save-price-agreement"') !== -1 && idx.indexOf('id="price-agreement-msg"') !== -1
@@ -2868,9 +2434,7 @@ function check(name, cond, detail) {
     idx.indexOf('<h2>Check cadence</h2>') !== -1 && idx.indexOf('id="set-check-cadence"') !== -1
     && idx.indexOf('id="btn-save-check-cadence"') !== -1 && idx.indexOf('id="check-cadence-msg"') !== -1
     && appJs.indexOf('How often every trigger is checked') !== -1, '');
-  // (0.8.2 v2) The cadence card states on the card itself — not
-  // only behind the "?" — that it applies to every trigger,
-  // including check-in.
+  // The cadence card says it applies to every trigger, including check-in.
   check('user controls static: the Check cadence card says on the card that it applies to every trigger, including check-in',
     idx.indexOf('Applies to every trigger, including check-in.') > idx.indexOf('<h2>Check cadence</h2>')
     && idx.indexOf('Applies to every trigger, including check-in.') < idx.indexOf('id="btn-save-check-cadence"'), '');
@@ -2896,9 +2460,7 @@ function check(name, cond, detail) {
     idx.indexOf('id="btn-save-price-agreement" class="primary"') !== -1
     && idx.indexOf('id="btn-save-check-cadence" class="primary"') !== -1
     && idx.indexOf('id="btn-save-fee-verdict" class="primary"') !== -1, '');
-  // The inputs reflect the saved values on load (the defaults
-  // here: agreement 5, cadence 60, fee Low 2 / Medium 1), and
-  // the price-sources note shows the agreement as 5%.
+  // Inputs show the saved values (5, 60, 2 / 1); the note shows 5%.
   check('user controls: the inputs reflect the saved defaults on load (5 / 60 / 2 / 1)',
     els['set-price-agreement'] && els['set-price-agreement'].value === '5'
     && els['set-check-cadence'] && els['set-check-cadence'].value === '60'
@@ -2911,12 +2473,7 @@ function check(name, cond, detail) {
   check('user controls: the price-sources note shows the agreement as 5% by default',
     els['price-sources-agreement'] && els['price-sources-agreement'].textContent === '5%',
     els['price-sources-agreement'] && els['price-sources-agreement'].textContent);
-  // Broadcast Fee Risk zone bar (0.8.0): always visible under the numbers,
-  // showing the three zones as a bar that moves live as you type.
-  // The second input is framed from the High side and the unit
-  // names the 90-day peak tx fee. The bar reflects whatever is
-  // in the inputs, so it is there whether or not you are editing
-  // — no show/hide, no open class.
+  // Fee zone bar: always shown, moves as you type.
   check('fee zone bar static: the second input reads "High Risk at or below" and both units read "× peak tx fee"',
     idx.indexOf('<label for="set-fee-medium">High Risk at or below</label>') !== -1
     && idx.indexOf('<span>× peak tx fee</span>') !== -1, '');
@@ -2959,13 +2516,8 @@ function check(name, cond, detail) {
   els['set-fee-low'].value = '2';
   els['set-fee-medium'].value = '1';
   els['set-fee-low'].fire('input');
-  // The fee pill at the defaults: add a tx whose fee rate is
-  // exactly 4.0 sat/vB (Finney vout 1 is 150,000 sats, the
-  // output is 149,660, so the fee is 340 sats over 85 bytes).
-  // The peak is 2.0 — the launcher seeds 25 hourly observations
-  // at 2.0 spanning a full day, and the startup tick adds nothing
-  // (the latest seed is minutes old) — so 4.0 is Low Risk at the
-  // defaults.
+  // A 4.0 sat/vB tx (340 sats over 85 bytes) against the launcher's seeded
+  // 2.0 peak: Low at the defaults.
   const feeTx = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ txHex: craftHex(1, 149660), label: 'Dom Fee 4', trigger: { type: 'manual', params: {} } }) });
   check('user controls fee pill: adding the 4.0 sat/vB tx (201)', feeTx.status === 201, 'status=' + feeTx.status);
   const stFee = await (await fetch('/api/state')).json();
@@ -2977,9 +2529,8 @@ function check(name, cond, detail) {
   check('user controls fee pill: at the defaults (Low 2 / Medium 1) the readiness fee pill reads Low Fee Risk',
     (readinessBlock('Dom Fee 4') || {}).fee === 'Low Fee Risk',
     'fee pill=' + ((readinessBlock('Dom Fee 4') || {}).fee || '(none)'));
-  // Save the fee multipliers 3 / 1.5 from the UI: the setting
-  // persists, the msg line confirms, and the pill flips to
-  // Medium Risk (4.0 is at least 1.5x but below 3x the peak).
+  // Save 3 / 1.5 from the UI: persists, confirms, and the pill flips to
+  // Medium.
   els['set-fee-low'].value = '3';
   els['set-fee-medium'].value = '1.5';
   els['btn-save-fee-verdict'].click();
@@ -3083,14 +2634,10 @@ function check(name, cond, detail) {
     stCadRestored.settings && stCadRestored.settings.checkCadenceSeconds === 60,
     JSON.stringify(stCadRestored.settings && stCadRestored.settings.checkCadenceSeconds));
 
-  // --- 21. pause/vacation/disarm redesign (0.8.0) ---
-  // The old Pause / resume card is gone entirely; the vacation
-  // card says plainly it is check-in-only and the countdown
-  // freezes, with an indefinite option; the Global Arm/Disarm
-  // card arms or disarms every tx at once. The static checks
-  // read the served markup (the shim auto-creates any id, so
-  // absence can only be proved from the HTML string); the
-  // dynamic checks drive the UI.
+  // --- 21. vacation / disarm redesign ---
+  // No Pause card; the vacation card is check-in-only with an indefinite
+  // option; Global Arm/Disarm acts on every tx. Absence is checked on the
+  // served HTML (the shim invents any id).
   check('redesign static: the old Pause / resume card is gone (no heading, buttons, state pill, or msg line)',
     idx.indexOf('Pause / resume') === -1 && idx.indexOf('id="btn-pause"') === -1
     && idx.indexOf('id="btn-resume"') === -1 && idx.indexOf('id="pause-state"') === -1
@@ -3101,12 +2648,9 @@ function check(name, cond, detail) {
     appJs.indexOf('/api/pause') === -1 && appJs.indexOf('/api/resume') === -1, '');
   const vacIdx = idx.indexOf('<h2>Vacation mode</h2>');
   const vacBlock = vacIdx === -1 ? '' : idx.slice(vacIdx, vacIdx + 900);
-  // The "Applies to" label is DERIVED from the triggers array
-  // at runtime ("Check-in triggers only" is built from
-  // TRIGGER_NAMES, not a literal in the source), so the source
-  // check asserts the pop-out BODY facts; §22 proves the
-  // rendered label. ASCII-safe substrings only: the source
-  // holds \u2019 escapes, not the decoded apostrophe.
+  // The "Applies to" label is built at runtime, so this checks the pop-out
+  // body text (§22 checks the label). ASCII substrings only (the source
+  // has \u2019 escapes).
   check('redesign static: the vacation "?" pop-out says the countdown freezes and the five fast triggers keep firing (check-in-only)',
     appJs.indexOf('Freezes the check-in countdown') !== -1
     && appJs.indexOf('price, UTXO, block-height, set-date, and fee-market triggers keep firing') !== -1,
@@ -3123,9 +2667,8 @@ function check(name, cond, detail) {
     '');
   check('redesign static: the frozen-bar CSS is in the served stylesheet',
     (await realFetch(BASE + '/style.css').then((r) => r.text())).indexOf('.ck-tx.frozen') !== -1, '');
-  // Vacation from the UI, indefinite: the checkbox + save
-  // persist vacationUntil null, the pill reads Vacation mode,
-  // and the status line says the countdown is frozen.
+  // Indefinite vacation from the UI: null vacationUntil, pill Vacation
+  // mode, frozen countdown.
   els['set-vacation'].checked = true;
   els['set-vacation-indefinite'].checked = true;
   fireChange(els['set-vacation-indefinite']);
@@ -3178,9 +2721,7 @@ function check(name, cond, detail) {
   check('redesign vacation UI: the pill is back to "On track" after vacation off',
     els['status-pill'] && els['status-pill'].textContent === 'On track',
     els['status-pill'] && els['status-pill'].textContent);
-  // Global Arm/Disarm from the UI: Disarm all disarms every
-  // tx (the seeded seven plus the 10d one), Arm all re-arms
-  // them; the msg line confirms each way.
+  // Disarm all and Arm all act on every tx; the message confirms each.
   els['btn-disarm-all'].click();
   await waitForRender();
   const stDisAll = await (await fetch('/api/state')).json();
@@ -3212,11 +2753,9 @@ function check(name, cond, detail) {
     && (checkinBars() || []).every((b) => !b.cls.split(' ').includes('frozen')),
     JSON.stringify(checkinBars()));
 
-  // --- §22 (0.8.0): Settings "?" help — every Settings card
-  // has a "?" button in its header; clicking it opens the shared
-  // showDetails pop-out with the setting's title, what it does,
-  // and an "Applies to:" line naming the trigger types; the
-  // pop-out closes via the Close button and via the X.
+  // --- 22. Settings help ---
+  // Every card's "?" opens a pop-out with title, description and "Applies
+  // to"; it closes via Close and X.
   const HELP_KEYS = [
     { key: 'vacation', title: 'Vacation mode', bodyPhrase: 'Freezes the check-in countdown', appliesPhrase: 'Check-in triggers only' },
     { key: 'arm', title: 'Global Arm/Disarm', bodyPhrase: 'Arms or disarms every staged transaction', appliesPhrase: 'General' },
@@ -3229,10 +2768,7 @@ function check(name, cond, detail) {
     { key: 'keys', title: 'Check-in API keys', bodyPhrase: 'The keys that can check in through the API', appliesPhrase: 'Check-in triggers only' },
     { key: 'backup', title: 'Data backup', bodyPhrase: 'Back up or restore everything Standby knows', appliesPhrase: 'General' },
   ];
-  // (The App version card has no "?" button and no details
-  // pop-out — just the version line — so it is not in HELP_KEYS.
-  // It is still in CARD_KEYS and TRUTH: the filter treats it as
-  // General.)
+  // The App version card has no "?"; it is still filtered as General.
   for (const h of HELP_KEYS) {
     check('help static: the ' + h.title + ' card has a "?" button in the served HTML',
       idx.indexOf('id="help-' + h.key + '"') !== -1, h.key);
@@ -3279,21 +2815,14 @@ function check(name, cond, detail) {
   els['modal-x'].click();
   check('help X: the X closes the pop-out',
     !(els['confirm-modal'] && els['confirm-modal'].classList.contains('open')), '');
-  // (0.8.5) The cadence help no longer claims the fee cache
-  // matches the check interval — the fee cache is fixed at
-  // 5 minutes regardless of cadence.
+  // The cadence help no longer says the fee cache follows the cadence (it
+  // is fixed at 5 minutes).
   check('help cadence: the served app.js no longer says the price and fee caches match the interval',
     appJs.indexOf('The price and fee caches match this interval') === -1, '');
 
-  // --- §23 (0.8.0): Settings filter + trimmed card text ---
-  // The filter row at the top of the Settings tab reads the
-  // SAME triggers array the "?" pop-out renders its "Applies
-  // to" line from (SETTINGS_HELP in app.js) — one declaration
-  // per card, no second mapping. The inline description
-  // paragraphs are trimmed to the essentials: the full text
-  // lives in the "?" pop-out, and a card keeps at most one
-  // short hint line where the input would be ambiguous
-  // without it.
+  // --- 23. Settings filter + trimmed card text ---
+  // The filter reads the same triggers array as the "?" pop-out
+  // (SETTINGS_HELP); cards keep at most one short hint line.
   const CARD_KEYS = ['vacation', 'arm', 'nodes', 'price-sources', 'grace', 'agreement', 'cadence', 'fee', 'keys', 'backup', 'version'];
   function visibleCards() {
     return CARD_KEYS.filter((k) => (els['card-' + k] && els['card-' + k].style.display) !== 'none');
@@ -3323,9 +2852,8 @@ function check(name, cond, detail) {
   }
   check('filter static: the served CSS styles the filter dropdown',
     (await realFetch(BASE + '/style.css').then((r) => r.text())).indexOf('.settings-filter select') !== -1, '');
-  // Static (trim): the long description paragraphs are gone
-  // from the served page — no card keeps more than its short
-  // hint line.
+  // Long descriptions are gone from the page; each card keeps at most one
+  // hint.
   const TRIMMED_GONE = [
     'Vacation applies to check-in rules only',
     'Disarming a check-in transaction freezes its countdown',
@@ -3350,10 +2878,8 @@ function check(name, cond, detail) {
     && idx.indexOf('Download an encrypted backup (recommended) or an unencrypted one.') !== -1
     && idx.indexOf('POST /checkin to check in, GET /health to test') !== -1
     && idx.indexOf('A reading is only trusted when the two agree within <span id="price-sources-agreement">5%</span>.') !== -1, '');
-  // The trimmed facts still live in the "?" pop-outs (app.js).
-  // The trimmed facts still live in the "?" pop-outs (app.js).
-  // ASCII-safe substrings only: the source holds \u2019
-  // escapes, not the decoded apostrophe.
+  // The trimmed text lives in the "?" pop-outs (ASCII substrings: the
+  // source has \u2019 escapes).
   check('trim static: the moved facts still live in the "?" pop-outs',
     appJs.indexOf('price, UTXO, block-height, set-date, and fee-market triggers keep firing') !== -1
     && appJs.indexOf('which reveal the destination addresses and amounts') !== -1
@@ -3395,10 +2921,8 @@ function check(name, cond, detail) {
     els['card-vacation'] && els['card-vacation'].style.display === 'none',
     els['card-vacation'] && els['card-vacation'].style.display);
   setFilter('all');
-  // Single source of truth: for one card in each category, the
-  // "Applies to" label its "?" pop-out shows and the filters
-  // under which it is visible must agree — both derive from
-  // the same triggers array, so they cannot drift.
+  // For one card per category, the "Applies to" label and the filter
+  // visibility agree (same array).
   function helpLabel(key) {
     els['help-' + key].click();
     const details = els['modal-details'] && els['modal-details'].innerHTML;
@@ -3414,10 +2938,8 @@ function check(name, cond, detail) {
     { key: 'keys', label: 'Check-in triggers only', visible: ['all', 'checkin'] },
     { key: 'nodes', label: 'General — not tied to a specific trigger', visible: ['all', 'general'] },
   ];
-  // (The App version card is not in TRUTH: it has no "?" button,
-  // so there is no pop-out label to read. Its filter visibility
-  // — visible under All and General, hidden under the trigger
-  // filters — is covered by the checkFilter calls above.)
+  // The App version card has no pop-out; its filter visibility is checked
+  // above.
   for (const t of TRUTH) {
     const label = helpLabel(t.key);
     check('single source: the ' + t.key + ' "?" pop-out label is "' + t.label + '"',
@@ -3432,10 +2954,8 @@ function check(name, cond, detail) {
     }
   }
   setFilter('all');
-  // Bitcoin nodes is general infrastructure, not a UTXO
-  // setting: every trigger type needs the node for the
-  // broadcast step, so the one ['general'] array puts it
-  // under General only — not under UTXO or any trigger filter.
+  // Bitcoin nodes is general (every trigger needs it to broadcast), so it
+  // shows under General only.
   setFilter('general');
   const nodesUnderGeneral = (els['card-nodes'] && els['card-nodes'].style.display) !== 'none';
   setFilter('utxo');
@@ -3445,20 +2965,15 @@ function check(name, cond, detail) {
   check('nodes general-only: the Bitcoin nodes card is visible under General and hidden under UTXO and Check-in',
     nodesUnderGeneral && !nodesUnderUtxo && !nodesUnderCheckin,
     'general=' + nodesUnderGeneral + ' utxo=' + nodesUnderUtxo + ' checkin=' + nodesUnderCheckin);
-  // App version card (0.8.0): a short card at the very bottom of
-  // General settings showing the installed version, from
-  // /api/health. It is the last card in the Settings section
-  // (after Data backup), so it is also last under the General
-  // filter. The version is fetched once at startup; by this
-  // point in the run it has resolved.
+  // App version card: last in General settings, from /api/health.
   check('app version static: the card exists after the backup card, with the version line',
     idx.indexOf('id="card-version"') !== -1 && idx.indexOf('id="card-version"') > idx.indexOf('id="card-backup"')
     && idx.indexOf('<h2>App version</h2>') !== -1
     && idx.indexOf('Installed version:') !== -1 && idx.indexOf('id="app-version"') !== -1, '');
   check('app version static: the card has no "?" button and no details (just the version line)',
     idx.indexOf('id="help-version"') === -1, '');
-  check('app version: the installed version reads 0.8.13 (from /api/health)',
-    els['app-version'] && els['app-version'].textContent === '0.8.13',
+  check('app version: the installed version reads 0.8.13.1 (from /api/health)',
+    els['app-version'] && els['app-version'].textContent === '0.8.13.1',
     els['app-version'] && els['app-version'].textContent);
   setFilter('general');
   check('app version: the card is visible under General',
@@ -3466,13 +2981,10 @@ function check(name, cond, detail) {
     els['card-version'] && els['card-version'].style.display);
   setFilter('all');
 
-  // --- §24 (0.8.2): per-tx History — its own collapsible nested
-  // inside Details, collapsed by default, oldest first. The seeded txs
-  // were added via the API, so each starts with one 'added' event
-  // naming its rule (the server's wording — a straight apostrophe
-  // in "don't", unlike the card subcard's \u2019) — and the §21
-  // arm-all disarm + re-arm logged a 'disarmed' and an 'armed'
-  // event on every one after that.
+  // --- 24. per-tx History ---
+  // Nested in Details, collapsed, oldest first: 'added' naming the rule
+  // (server wording, straight apostrophe), then §21's 'disarmed' and
+  // 'armed'.
   function cardHistory(card) {
     const det = txItemDetails(card);
     if (!det) return null;
@@ -3534,44 +3046,26 @@ function check(name, cond, detail) {
   check('history 0.8.2: toggling History open flips it',
     !!hDet && hDet.open === true, hDet ? 'open=' + hDet.open : 'no history');
 
-  // --- 25. rule sets: per-rule subcards, the combination line,
-  // readiness joins, the check-in bar, and the rule-list
-  // interactions (0.8.2) ---
-  // Two multi-rule txs via the API: an OR set (price >= 150000
-  // OR blockheight 1,000,000) and an AND set (check-in 35d AND
-  // price >= 90000). Neither is already satisfied as a set —
-  // the AND needs both rules at once — so no triggerConfirmed.
+  // --- 25. rule sets ---
+  // An OR set (price >= 150000 or height 1,000,000) and an AND set (check-
+  // in 35d and price >= 90000); neither is already satisfied.
   const addOr = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ txHex: craftHex(1, 200301), label: 'Dom Rules OR', trigger: { op: 'OR', rules: [{ type: 'price', params: { op: '>=', value: 150000 } }, { type: 'blockheight', params: { targetHeight: 1000000 } }] } }) });
   check('rule sets 0.8.2: the 2-rule OR tx adds via the API', addOr.status === 201, 'status=' + addOr.status);
   const addAnd = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ txHex: craftHex(1, 200302), label: 'Dom Rules AND', trigger: { op: 'AND', rules: [{ type: 'checkin', params: { thresholdDays: 35 } }, { type: 'price', params: { op: '>=', value: 90000 } }] } }) });
   check('rule sets 0.8.2: the 2-rule AND tx adds via the API', addAnd.status === 201, 'status=' + addAnd.status);
-  // Two more single-rule txs for the v2 pill states: a UTXO rule
-  // on an outpoint the stubs 404 (unknown — "could not check the
-  // outpoint") and a check-in tx whose slice turns 'vacation'
-  // (Held) once vacation mode goes on at the end of §25.
+  // Two more txs for pill states: a UTXO rule on an outpoint the stubs 404
+  // (Unknown) and a check-in tx that reads Held under vacation.
   const addUnk = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ txHex: craftHex(1, 200303), label: 'Dom Rules Unknown', trigger: { type: 'utxo', params: { outpoint: '0000000000000000000000000000000000000000000000000000000000000000:0', condition: 'spent', confirmations: 1 } } }) });
   check('rule sets 0.8.2 v2: the UTXO-unknown tx adds via the API', addUnk.status === 201, 'status=' + addUnk.status);
   const addHeld = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ txHex: craftHex(1, 200304), label: 'Dom Rules Held', trigger: { type: 'checkin', params: { thresholdDays: 35 } } }) });
   check('rule sets 0.8.2 v2: the check-in Held tx adds via the API', addHeld.status === 201, 'status=' + addHeld.status);
-  // One release check so the per-rule state lines are fresh
-  // (the price/tip readings land in the slices).
-  // (Optimization O6, deviation from the proposal) No cache clear
-  // here: the price cache is already warm with the live $98,200
-  // readings (healed by the release check after the restore in
-  // the exchange-status section above), and the served price is
-  // derived live from that cache — clearing it would drop the
-  // live values. (0.8.8) The grace is resumed first: the
-  // extended grace holds block-height now, so a held release
-  // check could not land the blockheight slice (the OR subcard
-  // would read "Not evaluated yet", and the set-date sets in
-  // §28 would read Grace instead of armed). Resumed, the
-  // blockheight / check-in rule slices land as before. The
-  // finite grace is re-seeded at the end of the script, for the
-  // width check.
+  // Resume the grace first (it holds block-height, so the slices would not
+  // land), then one release check. The price cache is already warm, so it
+  // is not cleared. The grace is re-seeded at the end for the width check.
   const resGrace25 = await fetch('/api/grace/resume', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
   check('rule sets 0.8.2: the grace is resumed so the rules evaluate', resGrace25.status === 200, 'status=' + resGrace25.status);
   const rel25 = await fetch('/api/release/check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
@@ -3605,10 +3099,8 @@ function check(name, cond, detail) {
   check('rule sets 0.8.2: the AND subcard state lines read the live values (check-in 0 of 35, price $98,200)',
     andBoxes.length === 2 && boxParts(andBoxes[0]).now === '0 of 35 days since last check-in' && boxParts(andBoxes[1]).now === 'BTC price currently $98,200',
     andBoxes.map((b) => boxParts(b) && boxParts(b).now).join(' / '));
-  // (0.8.2 v2) The per-rule state pills: the AND card shows one
-  // Not met (check-in, 0 of 35) and one Met (price $98,200 past
-  // $90,000); the OR card shows two Not met (price below
-  // $150,000, tip below 1,000,000). Only "Met" is green.
+  // Per-rule pills: AND shows Not met (check-in) and Met (price); OR shows
+  // two Not met. Only Met is green.
   const pillStr = (boxes) => boxes.map((b) => boxParts(b) && (boxParts(b).pill + '/' + boxParts(b).pillCls)).join(' / ');
   check('rule sets 0.8.2 v2: the AND pills read "Not met" (muted) / "Met" (green)',
     andBoxes.length === 2 && boxParts(andBoxes[0]).pill === 'Not met' && boxParts(andBoxes[0]).pillCls === 'pill muted'
@@ -3704,10 +3196,8 @@ function check(name, cond, detail) {
     && !panelRowVisible(mp, 'btc-rule-1-trigger-checkin-row') && !panelRowVisible(mp, 'btc-rule-1-trigger-price-row')
     && findById(mp, 'btc-rule-1-trigger-manual-note').textContent === 'Never fires \u2014 manual only',
     'manual=' + panelRowVisible(mp, 'btc-rule-1-trigger-manual-row'));
-  // (0.8.2 v2) No duplicate types: the types the other panels
-  // use are disabled in each panel's picker and labelled
-  // "(already used)"; the panel's own type stays available.
-  // Panels now read [check-in, manual, utxo, blockheight].
+  // No duplicate types: types used elsewhere are disabled "(already
+  // used)".
   const dup0 = rulePanels('btc')[0];
   check('rule sets 0.8.2 v2: panel 1 (check-in) greys out manual, utxo and blockheight but keeps check-in and price',
     panelOption(dup0, 'manual') && panelOption(dup0, 'manual').disabled === true && panelOption(dup0, 'manual').textContent === 'Manual only — no trigger (already used)'
@@ -3755,9 +3245,8 @@ function check(name, cond, detail) {
     && panelTypeSelect(rulePanels('edit')[0]).value === 'price' && findById(rulePanels('edit')[0], 'edit-rule-0-value').value === '150000'
     && panelTypeSelect(rulePanels('edit')[1]).value === 'blockheight' && findById(rulePanels('edit')[1], 'edit-rule-1-blockheight').value === '1000000',
     'r1=' + (panelTypeSelect(rulePanels('edit')[0]) && panelTypeSelect(rulePanels('edit')[0]).value) + ' r2=' + (rulePanels('edit')[1] && panelTypeSelect(rulePanels('edit')[1]).value));
-  // (0.8.2 v2) Held: vacation mode freezes the check-in clock,
-  // so the Held tx's slice turns 'vacation' — an amber "Held"
-  // pill. Restored immediately after, so nothing else sees it.
+  // Vacation turns the check-in slice 'vacation' (amber Held); turned off
+  // again at once.
   const vacOn = await fetch('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ vacationMode: true, vacationUntil: null }) });
   check('rule sets 0.8.2 v2: vacation mode turns on for the Held check', vacOn.status === 200, 'status=' + vacOn.status);
   await rerender(appJs);
@@ -3769,23 +3258,16 @@ function check(name, cond, detail) {
   check('rule sets 0.8.2 v2: vacation mode turns back off', vacOff.status === 200, 'status=' + vacOff.status);
   await rerender(appJs);
 
-  // --- §26 (0.8.5): live view — in-place refresh at the check cadence ---
-  // One 1-second timer updates the check-in countdown from the
-  // clock, and triggers a server refresh once
-  // per check cadence; the server refresh patches changed values
-  // in place (same card elements, new text) and only re-renders
-  // structure when no popup is open and no field is focused. The
-  // intervals are stubbed (captured, not scheduled), so the checks
-  // fire the 1-second timer by hand.
+  // --- 26. live view ---
+  // The 1-second timer updates the countdown and refreshes once per
+  // cadence; values patch in place, structure re-renders only with no
+  // popup open or field focused. Timers are fired by hand.
   function sleep26(ms) { return new Promise((r) => setTimeout(r, ms)); }
   function liveTickFn() {
     const ivs = (global.__intervals || []).filter((x) => x.ms === 1000);
     return ivs.length ? ivs[ivs.length - 1].fn : null;
   }
-  // The server tick is every 60s and the price cache TTL is the
-  // cadence, so a stub price change takes up to a tick to reach
-  // the slices: poll the state until the Dom Price slice shows
-  // the new price.
+  // Poll until the price slice shows the new stub price (up to a tick).
   async function waitPriceSlice26(label, want, timeoutMs) {
     const t0 = Date.now();
     for (;;) {
@@ -3809,19 +3291,9 @@ function check(name, cond, detail) {
   // broadcast it (it would fire the moment the slice updates).
   const disP26 = await fetch('/api/bitcoin/txs/' + domPrice26.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: false }) });
   check('live view: Dom Price disarms before the price move', disP26.status === 200, 'status=' + disP26.status);
-  // Disarm Dom Rules OR: its price rule (>= $150,000) would fire
-  // while the stub sits at $160,000. Its blockheight rule is NOT
-  // why it disarms any more: the tip fetch is primary-first now
-  // (0.8.5), and a disarmed tx is still evaluated, so OR's
-  // blockheight rule is itself the primary-only call the stamp
-  // check needs — no fee tx has to be added for it (§19 deleted
-  // the seeded Dom Feemarket and never restored it, and the old
-  // stamp check added one for exactly this). Dom UTXO needs no
-  // disarm either: its outspend check answers on the primary
-  // (FINNEY:1 is unspent there), so the secondary is never
-  // asked. OR re-arms at the end of (d), once the stub price is
-  // back to $98,200 — its price rule would trip the enable gate
-  // while the stub price sits at $160,000.
+  // Disarm Dom Rules OR while the stub price is $160,000 (its price rule
+  // would fire); its block-height rule still provides the primary-only
+  // call the stamp check needs. It is re-armed once the price is back.
   const disOr26 = await fetch('/api/bitcoin/txs/' + domOr26.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: false }) });
   check('live view: Dom Rules OR disarms (its price rule would fire at $160,000)', disOr26.status === 200, 'status=' + disOr26.status);
   await rerender(appJs);
@@ -3872,24 +3344,9 @@ function check(name, cond, detail) {
   const nodeChecked26b = els['readiness-secondary-checked'] ? els['readiness-secondary-checked'].textContent : '';
   check('live view: each node row carries its own checked time left of the pill',
     /^checked /.test(nodeChecked26a) && /^checked /.test(nodeChecked26b), nodeChecked26a + ' / ' + nodeChecked26b);
-  // (0.8.5, restated 0.8.8) Per-node stamps: the tick asks the
-  // primary every time (the blockheight rule's tip fetch,
-  // primary-first and cached once per tick) — but the old
-  // assertion, that the primary stamp ends up NEWER than the
-  // secondary's, was false. This suite's `Dom Rules Unknown`
-  // watches a nonexistent outpoint, so its outspend check 404s
-  // on the primary and falls through to the secondary on
-  // null/404 (404s are never cached); every tick asks BOTH
-  // nodes, the secondary ~1ms after the primary, so the
-  // primary is newer only in a ~10ms window per tick and the
-  // 60s poll essentially never lands in it — a phase lottery,
-  // not a real failure. The restated check asserts the
-  // primary stamp ADVANCES during the poll instead: capture
-  // it once, then poll until a later reading is newer. The
-  // tip cache TTL equals the tick cadence, so a tick can
-  // occasionally find the cache still warm and skip the
-  // fetch — poll until a tick actually fetches (the next tick
-  // always does: the cache is then ~2x the TTL old).
+  // Per-node stamps: a watched nonexistent outpoint makes every tick ask
+  // both nodes ~1 ms apart, so ordering is a lottery. Instead, check the
+  // primary stamp advances: poll until a later reading is newer.
   async function waitNodeStamps26(timeoutMs) {
     const t0 = Date.now();
     // Baseline: the primary stamp as it stands when the poll
@@ -3913,13 +3370,11 @@ function check(name, cond, detail) {
   const nc26 = await waitNodeStamps26(60000);
   check('live view: the primary node stamp advances during the poll (tick asks primary)',
     !!(nc26.start && nc26.end && nc26.end > nc26.start), JSON.stringify(nc26));
-  // Dom Rules OR stays disarmed until the end of (d): its price
-  // rule (>= $150,000) would trip the enable gate while the
-  // stub price sits at $160,000.
+  // Dom Rules OR stays disarmed until the end of (d) (its price rule would
+  // trip the gate at $160,000).
 
-  // (b) The refresh RUNS while the Add popup is open, and the
-  // typed input survives; a structural change waits until the
-  // popup closes.
+  // (b) The refresh runs while the Add popup is open and typing survives;
+  // structure waits.
   els['btn-btc-add-open'].click();
   check('live view: the Add popup opens for the modal test',
     !!(els['add-modal'] && els['add-modal'].classList.contains('open')), '');
@@ -3988,13 +3443,9 @@ function check(name, cond, detail) {
   check('live view: the re-armed check-in bar is live again (0 of 35 days elapsed)',
     !!liveBar && liveBar.caption === '0 of 35 days elapsed', liveBar ? liveBar.caption : 'no bar');
 
-  // --- §27 (0.8.5): an archived tx renders its settled state ---
-  // A tx broadcast by hand and confirmed (the stub reports a
-  // broadcast txid as confirmed at 899995 — 6 confirmations)
-  // renders in the Archived Transactions card with a Broadcasted
-  // pill, and leaves the staged list. Its trigger slice is frozen
-  // by the server (the API suite owns that check); the card reads
-  // its settled state from the broadcasted fact, not the slice.
+  // --- 27. archived tx renders its settled state ---
+  // A hand-broadcast tx confirmed at 899,995 shows in Archived with a
+  // Broadcasted pill, read from the broadcasted fact.
   const addArch27 = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ txHex: craftHex(1, 300010), label: 'Dom Archived', trigger: { type: 'manual', params: {} } }) });
   check('archived row: the tx adds', addArch27.status === 201, 'status=' + addArch27.status);
@@ -4020,19 +3471,11 @@ function check(name, cond, detail) {
   }
   await rerender(appJs);
 
-  // --- §28 (0.8.7): a shared trigger set renders as one card ---
-  // One label, the BTC total up top, one arm/disarm, the
-  // transactions ABOVE the triggers as blue-edged subcards
-  // (.tx-item) each with its own Details + per-tx note, the
-  // trigger subcards verbatim, ONE shared History as its own
-  // collapsible (collapsed by default), and the actions row —
-  // like a tx card. Members have no standalone card. A standalone tx
-  // renders alongside, exactly as before. The release check
-  // here is safe for the §26 fixtures: Dom Price and Dom
-  // Rules OR are disarmed until the restore block below, and
-  // the check-in clock reads 0 days elapsed.
-  // (0.8.7 fix, round 10) Baseline for the readiness delta
-  // below: the set and the solo add two rows, not three.
+  // --- 28. a trigger set renders as one card ---
+  // Label and total, one toggle, blue tx subcards (each with Details and
+  // note), the trigger subcards, one collapsed shared History, then
+  // actions. Members have no card of their own. The set and the solo tx
+  // add two readiness rows.
   const rbBefore28 = (readinessBlocks() || []).length;
   const addSetM1 = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ txHex: craftHex(1, 140001), label: 'Dom Set M1', notes: 'M1 note', trigger: { type: 'setdate', params: { fireAt: '2020-01-01T00:00:00.000Z' } }, triggerConfirmed: true }) });
@@ -4059,11 +3502,7 @@ function check(name, cond, detail) {
   const rel28 = await fetch('/api/release/check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
   check('set card: the release check runs (evaluates the set trigger)', rel28.status === 200, 'status=' + rel28.status);
   await rerender(appJs);
-  // (0.8.7 fix, round 10) Release readiness: ONE card per
-  // trigger set, headed by the set's label with the set's pill
-  // — not one row per member. A member's frozen triggerState
-  // used to read Unknown, and a label-less member rendered as
-  // "Untitled transaction".
+  // Readiness: one card per set, with the set's label and pill.
   const rbDomSet = readinessBlock('Dom Set');
   check('readiness set: exactly ONE row headed by the set label', !!rbDomSet, (readinessBlocks() || []).map((b) => b.label).join(','));
   check('readiness set: the set row pill matches the set card (armed)',
@@ -4116,11 +3555,7 @@ function check(name, cond, detail) {
     items28.length ? items28[0].children.map((x) => x.className).join(',') : 'no items');
   check('set card: member 1 Details holds the Fee row',
     detailsContains(setCard28, 'tx-fee'), '');
-  // (0.8.7 fix, round 9) Single history: a set card shows ONE
-  // History — the set's. Member subcards carry NO History of
-  // their own (round 7's member History is reverted); the
-  // member's trail lives on the set's History instead, tagged
-  // with the member's label.
+  // One History per set card (the set's); member subcards have none.
   const itemHist28 = itemDet28 ? itemDet28.children.find((x) => x.className === 'tx-history') : null;
   check('set card: member 1 Details carries NO History (single history — the set own)',
     !itemHist28, itemDet28 ? 'children=' + itemDet28.children.map((x) => x.className).join(',') : 'no details');
@@ -4141,15 +3576,9 @@ function check(name, cond, detail) {
     !!trigParts28 && trigParts28.k.indexOf('SET DATE') !== -1, trigParts28 ? trigParts28.k : 'no box');
   check('set card: the trigger pill reads Not met (future date)',
     !!trigParts28 && trigParts28.pill === 'Not met', trigParts28 ? trigParts28.pill : 'no box');
-  // (0.8.7 fix, round 8) The set's shared History — the
-  // history of the entire set — is its own collapsible,
-  // collapsed by default like the per-tx History, above the
-  // actions row. It was a plain always-expanded section in
-  // the 0.8.7 base (a v6 mockup choice); the owner asked for the
-  // collapsible back. (0.8.7 fix, round 9) It is the ONLY
-  // History on the card now: member histories (round 7) are
-  // gone, and the members' trails are backfilled into this
-  // one, tagged with the member's label.
+  // The set's shared History is its own collapsible above the actions, and
+  // the only History on the card: members' trails are backfilled into it,
+  // tagged with the member.
   const hist28 = setCard28 ? setCard28.children.find((x) => x.className === 'tx-history') : null;
   check('set card: ONE shared History as its own collapsible', !!hist28, '');
   check('set card: the shared History is collapsed by default',
@@ -4198,10 +3627,9 @@ function check(name, cond, detail) {
   }
   await rerender(appJs);
 
-  // --- §28b (0.8.7, revised stale rule): a stale member gets a
-  // 'stale' pill on its subcard, and the set stays live for its
-  // non-stale members. A dry-run marks the spent member stale —
-  // no trigger is evaluated, so nothing can fire here.
+  // --- 28b. a stale member ---
+  // A dry run marks the spent member stale (its own pill); the set stays
+  // live.
   const addStaleM1 = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ txHex: craftHex(0, 440004), label: 'Dom Stale M1', trigger: { type: 'manual', params: {} } }) });
   check('set stale pill: the spent member adds (FINNEY:0)', addStaleM1.status === 201, 'status=' + addStaleM1.status);
@@ -4248,24 +3676,11 @@ function check(name, cond, detail) {
   }
   await rerender(appJs);
 
-  // --- §28c (0.8.7 fix, round 3): "+ Add Tx" IS "add trigger
-  // set" — one save creates a COMPLETE INDEPENDENT new trigger
-  // set. ONE label sits above the tx inputs (the set's label —
-  // no per-entry label, no set picker); repeatable entries
-  // (notes + hex each), "+ Add another transaction" appends
-  // one; then the shared triggers / route below. Saving renders
-  // a set card with N blue tx subcards (each holding its own
-  // Details) and M orange trigger subcards. A standalone one-tx
-  // card renders the same shape — a set of one — with its blue
-  // tx subcard and Details inside it, never inside a trigger
-  // subcard. The set modal gained a Transactions section in
-  // round 5 (Edit can add a transaction); the modal shading
-  // stays as rounds 1–2 built it.
-  // The one label's element is reached through
-  // getElementById, not els[...] — the app only touches it in
-  // the save/reset paths, so els['btc-set-label'] is undefined
-  // until something calls getElementById on it (reading .value
-  // off undefined throws and kills the whole DOM run).
+  // --- 28c. "+ Add Tx" creates one trigger set ---
+  // One label over repeatable entries and shared triggers; saving renders
+  // a set card. A standalone card is the same shape with one tx. The label
+  // element is reached via getElementById (els[...] is undefined until the
+  // app touches it).
   const setLabelEl28c = () => document.getElementById('btc-set-label');
   check('add trigger set: the Add modal has ONE label above the tx inputs (static HTML)',
     idx.indexOf('id="btc-set-label"') !== -1 && idx.indexOf('id="btc-tx-list"') !== -1
@@ -4294,10 +3709,8 @@ function check(name, cond, detail) {
     && idx.indexOf('id="edit-triggers-section" class="tx-trigger"') !== -1, '');
   check('add trigger set: no standalone accent class left in the CSS (blue belongs to the tx subcard)',
     css.indexOf('.tx-card.tx-single') === -1 && css.indexOf('.tx-trigger.tx-item { border-left-color: #60a5fa; }') !== -1, '');
-  // The Add form's rule list is whatever §25 left (up to three
-  // panels) — narrow it to the one default check-in rule, so
-  // the new txs get the 35-day check-in trigger (dormant in
-  // the set) and no confirm can appear (0 days elapsed).
+  // Narrow the Add form to one default check-in rule (0 days elapsed, so
+  // no confirm).
   while (rulePanels('btc').length > 1) panelRemoveBtn(rulePanels('btc')[rulePanels('btc').length - 1]).click();
   selectAddTrigger('checkin');
   check('add trigger set: the Add form is back to one check-in rule', rulePanels('btc').length === 1
@@ -4305,10 +3718,8 @@ function check(name, cond, detail) {
   els['btn-btc-add-open'].click();
   check('add trigger set: the Add popup opens', els['add-modal'] && els['add-modal'].classList.contains('open'), '');
   check('add trigger set: the one label starts blank', setLabelEl28c().value === '', 'value=' + setLabelEl28c().value);
-  // The static first entry is not modelled as a child in the
-  // shim — its fields are the standalone btc-* els — while
-  // JS-built entries hang off #btc-tx-list. Appending twice
-  // then removing one proves the repeatable entries work.
+  // The shim does not model the static first entry as a child; append
+  // twice, remove one.
   const entryField28c = (entry, cls) => {
     let found = null;
     const walk = (el) => { (el.children || []).forEach((c) => { if ((c.className || '').split(' ').indexOf(cls) !== -1) found = c; walk(c); }); };
@@ -4360,11 +3771,7 @@ function check(name, cond, detail) {
   check('add trigger set: one orange trigger subcard below them, holding no Details',
     !!addCard28c && triggerBoxes(addCard28c).length === 1 && !detailsInTriggerBox(addCard28c),
     addCard28c ? 'boxes=' + triggerBoxes(addCard28c).length : 'no card');
-  // (0.8.7 fix, round 5) The set modal's Edit can add a
-  // transaction: its Transactions section lists the members
-  // and "+ Add transaction" appends a blank entry (numbered
-  // after the members) with its own import button. Cancel
-  // closes without saving anything.
+  // The set popup's Edit can add a transaction; Cancel saves nothing.
   const editBtn28c = addCard28c ? cardButton(addCard28c, 'Edit') : null;
   if (editBtn28c) editBtn28c.click();
   check('add trigger set: Edit opens the set modal',
@@ -4405,10 +3812,8 @@ function check(name, cond, detail) {
     check('add trigger set: the set deletes', delAddSet.status === 200, 'status=' + delAddSet.status);
   }
   await rerender(appJs);
-  // A freed member is a set of one: the same card shape, with
-  // its own blue tx subcard (Details inside it) above its
-  // orange trigger subcard — no .tx-single, no Details inside
-  // a trigger box.
+  // A freed member is a set of one: blue tx subcard (Details inside) above
+  // its trigger.
   const solo28c = m2prefix28c ? listCards('btc-active-list').find((c) => cardFaceText(c).indexOf(m2prefix28c) !== -1) : null;
   check('add trigger set: the freed member renders standalone again', !!solo28c, '');
   check('add trigger set: the standalone card is titled with its short txid (no per-tx label, never "Untitled transaction")',
@@ -4421,9 +3826,7 @@ function check(name, cond, detail) {
     soloItems28c.length === 1 && !!txItemDetails(solo28c), '');
   check('add trigger set: the standalone trigger subcard holds no Details',
     !!solo28c && triggerBoxes(solo28c).length === 1 && !detailsInTriggerBox(solo28c), '');
-  // Editing the standalone tx opens the set-shaped edit: its
-  // own fields (notes, hex) in the Transactions section, its
-  // own rules in the Triggers section.
+  // Editing it opens the set-shaped edit popup.
   const soloEdit28c = solo28c && cardButton(solo28c, 'Edit');
   check('add trigger set: the standalone card has an Edit button', !!soloEdit28c, '');
   if (soloEdit28c) soloEdit28c.click();
@@ -4439,12 +3842,9 @@ function check(name, cond, detail) {
   check('add trigger set: cancelling the edit closes the modal',
     els['edit-modal'] && !els['edit-modal'].classList.contains('open'), '');
 
-  // --- §28d (0.8.7 fix, round 6): one construct — the
-  // single-transaction edit can add transactions (promoting
-  // the card to a set), and both edit modals can remove
-  // members, never the last one. Same Transactions section
-  // (member list + add + remove + import) above the same
-  // Triggers section, same wording — no "single" vs "set".
+  // --- 28d. one construct ---
+  // The single-tx edit can add transactions (making a set); both edit
+  // popups can remove members but never the last.
   check('one construct: the edit modal is titled "Edit trigger set" (static HTML)',
     idx.indexOf('id="edit-form-title">Edit trigger set<') !== -1, '');
   check('one construct: no "Edit transaction" wording left in the page (static HTML)',
@@ -4560,9 +3960,8 @@ function check(name, cond, detail) {
   check('one construct: the removed transaction is standalone again (in no set)',
     !!m2after28d && !(st28d2.bitcoin.sets || []).some((x) => (x.txIds || []).indexOf(m2after28d.id) !== -1), '');
   await rerender(appJs);
-  // The last-member guard: with one member left, its remove
-  // is disabled, and clicking it anyway leaves the set
-  // untouched with a message.
+  // With one member left, its remove is disabled; clicking anyway changes
+  // nothing.
   const one28d = listCards('btc-active-list').find((c) => cardTitle(c) === 'Untitled set');
   const oneEdit28d = one28d && cardButton(one28d, 'Edit');
   if (oneEdit28d) oneEdit28d.click();
@@ -4596,15 +3995,10 @@ function check(name, cond, detail) {
   }
   await rerender(appJs);
 
-  // --- §28e (0.8.7 fix, round 10): release readiness, one
-  // card per trigger set — the owner's case. The members were
-  // created inside the set, so they carry NO label of their
-  // own: before this fix the second one showed up on the
-  // Dashboard as "Untitled transaction" with an Unknown pill
-  // from its frozen triggerState, and the set itself got no
-  // row at all. The cadence is still 10s here (the restore
-  // block below puts it back to 60), so an 11s sleep opens
-  // the tick's server-refresh gate.
+  // --- 28e. readiness: one row per trigger set ---
+  // Label-less members must not show as "Untitled transaction"; the set
+  // gets its row. Cadence is 10 s here, so an 11 s sleep opens the refresh
+  // gate.
   check('readiness set: no "Untitled transaction" row before the fixtures',
     !(readinessBlocks() || []).some((b) => b.label === 'Untitled transaction'),
     (readinessBlocks() || []).map((b) => b.label).join(','));
@@ -4635,9 +4029,7 @@ function check(name, cond, detail) {
   check('readiness set: NO "Untitled transaction" row for the label-less members',
     !(readinessBlocks() || []).some((b) => b.label === 'Untitled transaction'),
     (readinessBlocks() || []).map((b) => b.label).join(','));
-  // The live tick patches the set row's pill in place: disarm
-  // the set behind an open modal, so the changed signature
-  // takes the values-only patch path instead of a re-render.
+  // Disarm behind an open modal so the tick patches the set row in place.
   const rdyRowEl = (els['readiness-txs'].children || []).find((c) => c.dataset && c.dataset.setId === rdySetId);
   check('readiness set: the set row element exists', !!rdyRowEl, '');
   els['btn-btc-add-pill'].click();
@@ -4675,16 +4067,9 @@ function check(name, cond, detail) {
   await rerender(appJs);
   check('readiness set: the set row is gone after the delete', !readinessBlock('Dom Ready Set'), '');
 
-  // --- §28f (0.8.7 fix, round 12): release readiness lists
-  // each member tx under its set's main label as "Tx N —
-  // <first 16 of the txid>… <amount> BTC", amount right-aligned,
-  // pill only on the set header. Two label-less members with
-  // distinct amounts (0.001 / 0.0025 BTC), grouped into 'Dom
-  // Ready Members', plus a standalone 'Dom Ready Solo' (0.0005
-  // BTC) that keeps its own single row. The cadence is still
-  // 10s here (the restore block below puts it back to 60), so
-  // an 11s sleep opens the tick's server-refresh gate, as in
-  // §28e.
+  // --- 28f. member lines under the set ---
+  // "Tx N — <txid prefix>… <amount> BTC", pill on the set header only; a
+  // standalone keeps its row. 11 s sleep as in §28e.
   const addRdyM1f = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ txHex: craftHex(6, 100000), trigger: { type: 'manual', params: {} } }) });
   check('readiness members: label-less member 1 adds', addRdyM1f.status === 201, 'status=' + addRdyM1f.status);
@@ -4741,9 +4126,7 @@ function check(name, cond, detail) {
   check('readiness members: the left span is the label class, the right span the amount class',
     !!rdyLines && rdyLines.every((l) => l.leftCls === 'readiness-tx-member-label' && l.amtCls === 'readiness-tx-member-amt'),
     rdyLines ? rdyLines.map((l) => l.leftCls + '/' + l.amtCls).join(',') : 'no lines');
-  // Right alignment is a CSS fact, not a DOM one: the amount
-  // span is pinned to the right edge by flex-shrink: 0 after
-  // the label span takes the free space (flex: 1 1 auto).
+  // Right alignment is CSS (flex-shrink: 0 after a flexible label).
   const cssRdyF = await realFetch(BASE + '/style.css').then((r) => r.text());
   check('readiness members: the amount span is pinned right (flex-shrink: 0 in its CSS rule)',
     /\.readiness-tx-member-amt\s*\{[^}]*flex-shrink:\s*0/.test(cssRdyF), '');
@@ -4756,10 +4139,8 @@ function check(name, cond, detail) {
   const rbSolo = readinessBlock('Dom Ready Solo');
   check('readiness members: the standalone tx keeps its own single row',
     !!rbSolo && rbSolo.status === 'armed', rbSolo ? rbSolo.status : 'no block');
-  // The live tick patches the header in place and keeps the
-  // member lines' text in step: disarm the set behind an open
-  // modal, so the changed signature takes the values-only
-  // patch path instead of a re-render.
+  // Disarm behind an open modal: the tick patches the header and member
+  // lines in place.
   const rdyFRowEl = (els['readiness-txs'].children || []).find((c) => c.dataset && c.dataset.setId === rdySetFId);
   check('readiness members: the set row element exists', !!rdyFRowEl, '');
   const rdyFLineEls = (rdyFRowEl ? rdyFRowEl.children : []).filter((c) => (c.className || '').split(' ').includes('readiness-tx-member'));
@@ -4810,10 +4191,7 @@ function check(name, cond, detail) {
   }
   await rerender(appJs);
   check('readiness members: the set row is gone after the delete', !readinessBlock('Dom Ready Members'), '');
-  // A set whose members are ALL stale gets no readiness card
-  // at all (round 10 behavior): both members spend FINNEY:0,
-  // confirmed spent, so a set dry-run marks them both stale —
-  // no trigger is evaluated, so nothing can fire here.
+  // A set with every member stale gets no readiness card.
   const addStaleR1 = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ txHex: craftHex(0, 440008), trigger: { type: 'manual', params: {} } }) });
   check('readiness members: all-stale member 1 adds (FINNEY:0)', addStaleR1.status === 201, 'status=' + addStaleR1.status);
@@ -4845,14 +4223,9 @@ function check(name, cond, detail) {
   }
   await rerender(appJs);
 
-  // --- §28g (0.8.7 fix, round 13): warnings name a set member
-  // as '"<set label>" - Tx #', never "Untitled transaction".
-  // Two label-less members + one labeled standalone, all
-  // spending FINNEY:9 (a fresh vout — the seeded txs share
-  // FINNEY:1), grouped into 'Dom Warn Set'. The cadence is
-  // still 10s here (the restore block below puts it back to
-  // 60), so an 11s sleep opens the tick's server-refresh gate,
-  // as in §28e/§28f.
+  // --- 28g. warnings name a member as '"<set label>" - Tx #' ---
+  // Two members and a labelled standalone sharing FINNEY:9. 11 s sleep as
+  // in §28e.
   const addWarnM1 = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ txHex: craftHex(9, 100000), trigger: { type: 'manual', params: {} } }) });
   check('warnings name members: label-less member 1 adds', addWarnM1.status === 201, 'status=' + addWarnM1.status);
@@ -4894,9 +4267,7 @@ function check(name, cond, detail) {
     !!warnSetLines && !!warnSoloLines
     && warnSetLines.concat(warnSoloLines).every((l) => l.text.indexOf('Untitled') === -1 && l.text.indexOf('Unknown') === -1),
     warnSetLines ? warnSetLines.map((l) => l.text).join(' | ') : 'no lines');
-  // The live tick leaves the warnings alone: disarm the set
-  // behind an open modal, so the changed signature takes the
-  // values-only patch path instead of a re-render.
+  // The tick patch leaves the warnings alone.
   const warnCardBefore = cardByTitle('Dom Warn Set');
   const warnElsBefore = warnLines(warnCardBefore);
   els['btn-btc-add-pill'].click();
@@ -4923,9 +4294,7 @@ function check(name, cond, detail) {
   check('warnings name members: the Add modal closes',
     els['add-modal'] && !els['add-modal'].classList.contains('open'),
     els['add-modal'] ? 'open=' + els['add-modal'].classList.contains('open') : 'no add-modal');
-  // (Round 13 sweep) A label-less standalone is named by its
-  // short txid everywhere it is shown — card title, readiness
-  // row, check-in bar — never "Untitled transaction".
+  // A label-less standalone shows its short txid everywhere.
   const addWarnPlain = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ txHex: craftHex(10, 60000), trigger: { type: 'manual', params: {} } }) });
   check('warnings sweep: label-less standalone adds', addWarnPlain.status === 201, 'status=' + addWarnPlain.status);
@@ -4966,16 +4335,10 @@ function check(name, cond, detail) {
   await rerender(appJs);
   check('warnings name members: the set card is gone after the delete', !cardByTitle('Dom Warn Set'), '');
 
-  // --- §28h (0.8.7.1): the broadcast line follows the verdict ---
-  // Four manual txs on fresh FINNEY vouts (20–23, no shared-input
-  // warnings), each seeded broadcast via the state file like §15:
-  // stale (not found, input spent-confirmed), dropped (not found,
-  // no verdict), unconfirmed (0 confirmations), confirmed (3).
-  // The line's class is green only for confirmed, amber for
-  // unconfirmed, red for not-found/stale — and the stale line
-  // names the spending transaction instead of saying the tx "may
-  // have been dropped". The pill is untouched by this change: the
-  // stale card still reads Failed.
+  // --- 28h. the broadcast line follows the verdict ---
+  // Four txs seeded broadcast: stale, dropped, unconfirmed, confirmed (3).
+  // Green only for confirmed, amber for unconfirmed, red otherwise; the
+  // stale line names the spender.
   function sentLineOf28h(card) {
     if (!card) return null;
     const stack = [card];
@@ -5051,14 +4414,9 @@ function check(name, cond, detail) {
   }
   await rerender(appJs);
 
-  // --- §28i (0.8.7.2): an archived broadcast line shows the derived count ---
-  // A broadcast tx past 6 confirmations is never re-queried per-tx,
-  // but its line no longer freezes at the stored snapshot: the
-  // confirmations poll derives it from the settled block height +
-  // the current stub tip (900,000 - 899,993 + 1 = 8), while the
-  // stored snapshot stays 7. The line first renders the stored 7
-  // from state, then the load's confirmations poll corrects it —
-  // so wait for the derived count instead of reading once.
+  // --- 28i. archived line shows the derived count ---
+  // Past 6 confirmations the count is derived (900,000 - 899,993 + 1 = 8)
+  // while the stored snapshot stays 7; wait for the poll to correct it.
   const addD28i = await fetch('/api/bitcoin/txs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ txHex: craftHex(24, 113004), label: 'Dom Line Derived', trigger: { type: 'manual', params: {} } }) });
   check('broadcast line: Dom Line Derived adds', addD28i.status === 201, 'status=' + addD28i.status);

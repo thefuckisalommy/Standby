@@ -19,9 +19,8 @@ const MIME = {
 
 function serveStatic(req, res, pathname) {
   let file = pathname === '/' ? 'index.html' : pathname.slice(1);
-  // Prevent path traversal. Compare against the
-  // directory WITH a trailing separator: a bare prefix check would
-  // also accept a sibling like ".../public-old/x".
+  // No path traversal: compare against the directory with a trailing
+  // separator (a bare prefix would also match "public-old").
   const resolved = path.resolve(PUBLIC_DIR, file);
   if (!resolved.startsWith(PUBLIC_DIR + path.sep)) { sendError(res, 403, 'forbidden'); return; }
   if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) { sendError(res, 404, 'not found'); return; }
@@ -31,21 +30,11 @@ function serveStatic(req, res, pathname) {
   fs.createReadStream(resolved).pipe(res);
 }
 
-// ---------------------------------------------------------------------------
-// Security headers: every response carries
-// X-Frame-Options (the UI is never legitimately framed) and
-// X-Content-Type-Options: nosniff, plus a Content-Security-Policy.
-// The policy is minimal for what this page actually uses: its only
-// script is the external /app.js (script-src 'self' — no inline
-// scripts, no eval), its only stylesheet is /style.css, its only
-// image is /logo.jpg, and it fetches only same-origin /api paths
-// (connect-src 'self'). The page DOES use inline style="..."
-// attributes everywhere, so style-src allows 'unsafe-inline' — a
-// strict style-src would break the UI; scripts stay locked down.
-// frame-ancestors 'self' backs the X-Frame-Options header.
-// sendJson/sendError (lib/util.js) call this too — the same policy
-// on API responses is inert there (CSP governs the page, not a JSON
-// payload), and one code path beats two.
+// Security headers on every response: X-Frame-Options, nosniff and a
+// minimal CSP. Scripts only from 'self' (the page's one script is /app.js,
+// no inline or eval); inline style attributes are used throughout, so
+// style-src allows 'unsafe-inline'. Also sent on API responses, where it
+// is inert.
 const CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'self'";
 
 function setSecurityHeaders(res) {
@@ -54,31 +43,11 @@ function setSecurityHeaders(res) {
   res.setHeader('Content-Security-Policy', CSP);
 }
 
-// ---------------------------------------------------------------------------
-// CSRF protection. The UI is the only
-// browser client: it fetches this API from the same origin, and api()
-// in public/app.js sends Content-Type: application/json on every call
-// (verified — the file has a single fetch, with that header always
-// set). A cross-origin page cannot read the responses (no CORS headers
-// are ever sent), but a plain form POST, or a no-cors fetch, could
-// still reach a state-changing endpoint with the owner's Umbrel
-// app-auth cookie attached. So a state-changing /api request must
-// pass both checks:
-//   (a) a present Origin must match the host the request reached (the
-//       Host header) — or both sides must be loopback. A missing Origin
-//       (curl, a script, the DOM test shim — Node's fetch sends none)
-//       is still allowed. This is the same rule Umbrel's own Murmur app
-//       uses behind the app proxy, which preserves Host.
-//       X-Forwarded-Host is NOT trusted here:
-//       Umbrel's proxy sets it to the browser's Host, so behind the
-//       proxy it can never add information the Host header does not
-//       already carry — and a direct request can forge it freely,
-//       which would let a spoofed Host+Origin pair pass.
-//   (b) the Content-Type must be application/json — a cross-origin
-//       HTML form can only send urlencoded / multipart / text, and a
-//       no-cors fetch cannot set a JSON content type without a CORS
-//       preflight this server never answers.
-// GETs are reads and are not gated.
+// CSRF: a state-changing /api request must (a) carry no Origin, or one
+// matching the Host it reached (or both loopback), and (b) be
+// application/json, which a cross-origin form or no-cors fetch cannot
+// send. X-Forwarded-Host is not trusted (Umbrel's proxy keeps Host; a
+// direct request could forge it). GETs are not gated.
 function hostOf(h) {
   h = (h || '').trim();
   if (h.startsWith('[')) {
@@ -86,10 +55,8 @@ function hostOf(h) {
     return (close === -1 ? h.slice(1) : h.slice(1, close)).toLowerCase();
   }
   let name = h.split(':')[0].toLowerCase();
-  // A trailing dot marks a fully-qualified
-  // name in DNS — "localhost." IS localhost — so strip one after
-  // the port is split off. A bare "." becomes "" and is still
-  // rejected (hostAllowed requires a non-empty name).
+  // Strip one trailing DNS dot ("localhost." is localhost); a bare "."
+  // becomes "" and is rejected.
   if (name.endsWith('.')) name = name.slice(0, -1);
   return name;
 }
@@ -98,41 +65,14 @@ function isLoopback(h) {
   return h === 'localhost' || h === '127.0.0.1' || h === '::1';
 }
 
-// ---------------------------------------------------------------------------
-// Host allowlist: a DNS-rebinding page cannot
-// reach this server through the browser's own Host header — the page
-// is served from the attacker's domain, so its requests arrive with
-// the attacker's Host — but a direct fetch to a LAN IP, or a
-// same-origin request from a page the owner opened some other way,
-// still carries a legitimate Host. The allowlist keys off the
-// browser-facing names, which is safe because Umbrel's auth proxy
-// forwards Host verbatim (changeOrigin: false on both proxy layers
-// in umbreld) — the container sees exactly
-// what the browser sent, never the internal container name.
-//   Allowed with zero configuration: any IP literal (an IP Host
-//   cannot be rebound — rebinding sends the attacker's domain),
-//   'localhost', and any '*.local' name. The machine's own
-//   hostname (os.hostname()) is deliberately not in the default
-//   rule: in Docker it is the container ID, not the host's name.
-//   Reach the app by a hostname and list it in
-//   STANDBY_ALLOWED_HOSTS instead; see the README ("Reaching the
-//   UI"). A bare http://umbrel does not resolve on the LAN
-//   anyway — only umbrel.local does, via mDNS.
-//   Note what this check does and does not stop: it
-//   stops DNS rebinding (an attacker's domain in the Host header).
-//   It does NOT stop a client that connects by IP — on Umbrel that
-//   includes every other app on the shared Docker network. That is
-//   what the app login (STANDBY_PASSWORD, lib/auth.js) is for.
-//   Escape hatch: STANDBY_ALLOWED_HOSTS, a comma-separated list of
-//   extra hostnames (Tailscale MagicDNS *.ts.net, a custom domain,
-//   a .onion address, a reverse-proxy hostname). On Umbrel there
-//   is no UI for adding an env var, so that means editing a file
-//   on the Pi — the default rule covers the common access paths
-//   (LAN IP, umbrel.local, Tailscale IP, localhost) with nothing
-//   to configure, and the Umbrel compose file adds the app's Tor
-//   address (APP_HIDDEN_SERVICE). A missing Host header is rejected:
-//   HTTP/1.1 clients always send one, and accepting a request
-//   with no Host would defeat the check.
+// Host allowlist against DNS rebinding (a rebinding page's requests carry
+// the attacker's Host; Umbrel's proxy forwards Host unchanged). Allowed
+// with no configuration: IP literals, 'localhost' and '*.local'. Other
+// names (Tailscale, a custom domain, .onion, a reverse proxy) go in
+// STANDBY_ALLOWED_HOSTS; the machine's own hostname is not trusted (in
+// Docker it is the container ID). A missing Host is rejected. This does
+// not stop clients that connect by IP, such as other Umbrel apps: that is
+// the app login's job.
 function hostnameOf(hostHeader) {
   return hostOf(hostHeader);
 }
@@ -159,20 +99,12 @@ function describeAllowedHosts() {
   return parts.join(', ');
 }
 
-// Startup security notes. They deliberately ignore
-// STANDBY_ALLOWED_HOSTS: that setting WIDENS access, so setting it
-// must never silence a warning. The question they answer is: can something
-// other than the owner reach this API without a
-// login? Returns { warnings: [...], info: [...] } — warnings are
-// logged with console.warn, info with console.log.
-//   - Umbrel with no password: other apps on the shared Docker
-//     network reach the container directly, past Umbrel's login.
-//   - A non-loopback bind with no password, outside Docker: the
-//     API is open to the network.
-//   - Generic Docker with no password: not a warning — the compose
-//     file maps the port to 127.0.0.1 on the host — but say that
-//     the host-side mapping is the only boundary.
-//   - A password shorter than 12 characters.
+// Startup security notes: can something other than the owner reach the API
+// without a login? Warnings for Umbrel without a password and a non-
+// loopback bind outside Docker without one; info for generic Docker (the
+// host-side 127.0.0.1 mapping is the boundary); a warning for a password
+// under 12 characters. STANDBY_ALLOWED_HOSTS only widens access, so it
+// never silences a warning.
 const MIN_PASSWORD_LENGTH = 12;
 function startupSecurityNotes({ bind, deployment, password }) {
   const warnings = [];
@@ -191,18 +123,10 @@ function startupSecurityNotes({ bind, deployment, password }) {
   return { warnings, info };
 }
 
-// Fetch-metadata check, for EVERY /api request (reads
-// included): a browser marks each request with Sec-Fetch-Site.
-// 'same-origin' is the app's own page; 'none' is the owner typing
-// the URL or opening a bookmark. 'same-site' is another port on
-// the same host — on Umbrel, every other app at umbrel.local:<port>
-// — and 'cross-site' is any other website: neither is ever the
-// app's own page, so both are refused. A request without the
-// header (curl, scripts, older browsers) is judged by the other
-// checks alone. The Origin check below compares hostnames only,
-// so without this a page on another Umbrel app's port would pass
-// it (the JSON content-type rule still blocked it — this is
-// defence in depth).
+// Fetch metadata, for every /api request: 'same-origin' (the app) and
+// 'none' (typed URL, bookmark) pass; 'same-site' (another port on the
+// host, i.e. another Umbrel app) and 'cross-site' are refused. Requests
+// without the header rely on the other checks.
 function fetchSiteAllowed(req) {
   const site = req.headers['sec-fetch-site'];
   if (site === undefined) return true;
@@ -222,26 +146,11 @@ function csrfAllowed(req) {
   return true;
 }
 
-// The release-record statuses the app itself writes (see recordRelease
-// / broadcastOne): 'stale', 'failed', 'broadcast', 'conflict' — the
-// last is an input spent by another transaction that is NOT confirmed
-// yet: a warning, not a verdict —
-// the transaction stays active and a broadcast is still attempted.
-// A backup carrying any other status is not a real record.
-// A mutating API handler loads state once at
-// the top of handleApi, then awaits the network (fee lookups, trigger
-// checks, node tests) — or just the request body — before saving. A
-// second request, or the tick, may have saved newer state in between,
-// and saving this stale snapshot would clobber it — a lost check-in,
-// a lost disarm, a lost edit. So a handler NEVER saves its own
-// snapshot after an await: it applies its change to FRESH state,
-// synchronously, through saveMutation. The load, the mutation, and
-// the save run with no await between them, so no other writer can
-// interleave — the same pattern the background refreshes already use
-// (see refreshConfirmations). The mutator gets the fresh state and
-// returns false to decline the save (the tx or key it named is gone,
-// or a fresh-state validation failed); anything else means save.
-// Returns the fresh state, or null when the mutator declined.
+// Handlers never save the snapshot they loaded before awaiting something:
+// another request or the tick may have saved meanwhile. saveMutation loads
+// fresh state, applies the change and saves with no await in between. The
+// mutator returns false to skip the save. Returns the fresh state, or null
+// when skipped.
 function saveMutation(mutator) {
   const fresh = store.loadState(DATA_DIR);
   if (mutator(fresh) === false) return null;
