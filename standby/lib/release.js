@@ -4,13 +4,13 @@ const store = require('./store');
 const bitcoin = require('./bitcoin');
 const { caches } = require('./caches');
 const { applyGrace, expireVacation, mergeExternalCheckin } = require('./checkin');
-const { DATA_DIR } = require('./config');
+const { DATA_DIR, OFFLINE_REFRESH_MS } = require('./config');
 const { firedDetail, forwardMemberHistory, noteSetMemberStale, pushHistory, shortTxid } = require('./history');
 const { checkCadenceSecondsOf, fetchTipHeightsCached, refreshPriceIfStale } = require('./prices');
 const rules = require('./rules');
 const { fallbackDeadline, releaseTriggerFor, setMembers, triggerTypesLabel } = require('./triggers');
 const { validPublicFallbackDays } = require('./util');
-const { findingFor, recordFindings } = require('./verdicts');
+const { dryRunAndRecord, findingFor, recordFindings } = require('./verdicts');
 
 // Single flight: only one release evaluation runs at a time (the tick and
 // the manual check could otherwise broadcast the same tx twice); a second
@@ -756,6 +756,7 @@ async function runFullTick() {
     mergeNodeStamps(st0);
     store.saveState(DATA_DIR, st0);
   } catch (e) { console.error('grace / lastOnlineAt update failed:', e); }
+  try { await runOfflineRefresh(now); } catch (e) { console.error('offline refresh failed:', e); }
   // Merge a receiver check-in before evaluating, and refresh prices first
   // so the "currently $X" line stays fresh even under a grace.
   try {
@@ -781,6 +782,8 @@ async function runHourlyTick() {
   try {
     await testNodes();
   } catch (e) { console.error('node check failed:', e); }
+  // At startup this is the first node answer after a silence.
+  try { await runOfflineRefresh(new Date()); } catch (e) { console.error('offline refresh failed:', e); }
   try {
     const st = store.loadState(DATA_DIR);
     await refreshConfirmations(st, 0);
@@ -813,8 +816,19 @@ async function runHourlyTick() {
 // Fold the per-endpoint last-answered stamps into the stored connection
 // before a save (the secondary is only asked on fallback). A stamp not yet
 // seen keeps its stored value. Never saves by itself.
+// Set when a node answers again after OFFLINE_REFRESH_MS of silence; the
+// next full tick then re-checks every card once.
+let offlineRefreshDue = false;
+function lastNodeContactMs(conn) {
+  const at = conn && conn.nodeCheckedAt;
+  if (!at || typeof at !== 'object') return null;
+  const ms = [at.primary, at.secondary].map((x) => Date.parse(x || '')).filter(Number.isFinite);
+  return ms.length ? Math.max(...ms) : null;
+}
+
 function mergeNodeStamps(state) {
   if (!state.bitcoin || typeof state.bitcoin !== 'object') state.bitcoin = {};
+  const before = lastNodeContactMs(state.bitcoin.connection);
   if (!state.bitcoin.connection || typeof state.bitcoin.connection !== 'object') {
     state.bitcoin.connection = { ok: null, checkedAt: null, detail: '' };
   }
@@ -829,6 +843,21 @@ function mergeNodeStamps(state) {
     const at = stamps[ep.base];
     if (at) conn.nodeCheckedAt[ep.label] = at;
   }
+  const after = lastNodeContactMs(conn);
+  if (before !== null && after !== null && after - before > OFFLINE_REFRESH_MS) offlineRefreshDue = true;
+}
+
+// Back after a long silence: dry-run every card that could still
+// broadcast, so stale, broadcast and conflict statuses are current again.
+// Nothing is broadcast.
+async function runOfflineRefresh(now) {
+  if (!offlineRefreshDue) return;
+  offlineRefreshDue = false;
+  const st = store.loadState(DATA_DIR);
+  const txs = st.bitcoin.txs || [];
+  if (!txs.length) return;
+  const results = await dryRunAndRecord(st, txs, now);
+  console.log('back online after a silence: re-checked', results.length, 'transaction(s)');
 }
 
 // Test both nodes and save each result with its endpoint; the Dashboard

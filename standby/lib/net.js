@@ -4,7 +4,10 @@ const http = require('http');
 const https = require('https');
 
 const MAX_RESPONSE_BYTES = 1024 * 1024; // node and price replies are small; anything bigger is a faulty endpoint
-const NET_TIMEOUT_MS = 15000;
+// Reads give up after 8 s, so a hung node fails over to the secondary
+// quickly; a broadcast waits longer (cutting one short only forces a retry).
+const NET_TIMEOUT_MS = 8000;
+const BROADCAST_TIMEOUT_MS = 15000;
 
 // A wall-clock deadline guards every call: the
 // socket timeout does not fire during a stalled TLS handshake, and a hung
@@ -58,4 +61,4 @@ function requestText({ protocol, hostname, port, path: p, method, headers, body,
   });
 }
 
-module.exports = { requestText, NET_TIMEOUT_MS };
+module.exports = { requestText, NET_TIMEOUT_MS, BROADCAST_TIMEOUT_MS };

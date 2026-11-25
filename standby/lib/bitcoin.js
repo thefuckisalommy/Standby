@@ -13,7 +13,7 @@
 
 const crypto = require('crypto');
 const { MEMPOOL_OVERRIDE, PRICE_API_URL_OVERRIDE, SLIPSTREAM_API_URL_OVERRIDE } = require('./config');
-const { requestText, NET_TIMEOUT_MS } = require('./net');
+const { requestText, NET_TIMEOUT_MS, BROADCAST_TIMEOUT_MS } = require('./net');
 const rpc = require('./rpc');
 const { appendBroadcastLog, sanitizeFeeHistory, FEE_HISTORY_WINDOW_DAYS, FEE_HISTORY_MIN_OBSERVATIONS, FEE_HISTORY_MAX_ENTRIES } = require('./store');
 
@@ -1040,7 +1040,7 @@ function isAlreadyOut(err) {
 async function broadcastViaApi(hex, txid, apiBase) {
   let res;
   try {
-    res = await mempoolReq('/api/tx', 'POST', hex, apiBase);
+    res = await mempoolReq('/api/tx', 'POST', hex, apiBase, BROADCAST_TIMEOUT_MS);
   } catch (e) {
     throw new Error('could not reach ' + mempoolHostLabel(apiBase) + ': ' + e.message);
   }
@@ -1078,7 +1078,7 @@ function slipstreamBase() {
   return u.protocol + '//' + u.host;
 }
 
-function slipstreamReq(path, method, body) {
+function slipstreamReq(path, method, body, timeoutMs) {
   const base = slipstreamBase();
   const u = new URL(base);
   return requestText({
@@ -1089,6 +1089,7 @@ function slipstreamReq(path, method, body) {
     method: method || 'GET',
     headers: body !== undefined ? { 'Content-Type': 'application/json' } : {},
     body,
+    timeoutMs,
   });
 }
 
@@ -1098,7 +1099,7 @@ function slipstreamReq(path, method, body) {
 async function broadcastViaSlipstream(hex, txid) {
   let res;
   try {
-    res = await slipstreamReq('/api/transactions', 'POST', JSON.stringify({ tx_hex: hex }));
+    res = await slipstreamReq('/api/transactions', 'POST', JSON.stringify({ tx_hex: hex }), BROADCAST_TIMEOUT_MS);
   } catch (e) {
     throw new Error('could not reach Slipstream: ' + e.message);
   }
