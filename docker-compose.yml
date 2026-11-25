@@ -9,10 +9,11 @@
 # backup is just a copy of those two directories (or the in-app Backup
 # download). See README.md ("Run on any Linux box") and SECURITY.md.
 #
-# App login: set STANDBY_PASSWORD — in a `.env` file
-# next to this one (`STANDBY_PASSWORD=...`, chmod 600) or in the shell —
-# and the UI and API require it. Recommended whenever anything other than
-# you can reach port 3100 on this machine (other users, a LAN mapping).
+# App login: on first open, setup asks you to choose a password (or set
+# one later in Settings → App login). To manage it here instead, put
+# `STANDBY_PASSWORD=...` in a `.env` file next to this one (chmod 600).
+# Recommended whenever anything other than you can reach port 3100 on this
+# machine (other users, a LAN mapping).
 #
 # Runs as UID 1000 (the image's `node` user), not root: the data
 # directories must be owned by UID 1000 — the chown above. Upgrading from

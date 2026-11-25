@@ -904,12 +904,13 @@
     var anyStaged = (S.bitcoin.txs || []).some(function (t) { return !txStatus(t).settled && !txStatus(t).pending; });
     var gsCard = $('getting-started-card');
     if (gsCard) gsCard.style.display = anyStaged ? 'none' : '';
-    // The check-in card shows when an active tx has a check-in rule (armed
-    // or disarmed: a disarmed one keeps a frozen bar), or on a fresh
-    // install with no transactions, so the clock can be started first.
+    // The check-in card shows only when an active tx has a check-in rule
+    // (armed or disarmed: a disarmed one keeps a frozen bar). A check-in
+    // rule never fires before the first check-in, so its clock is started
+    // from the card once such a tx exists.
     var anyCheckinActive = (S.bitcoin.txs || []).some(function (t) { return hasRuleType(t, 'checkin') && !txStatus(t).settled && !txStatus(t).pending && !setOfTxId(t.id); })
       || (S.bitcoin.sets || []).some(function (s) { return hasRuleType(s, 'checkin') && !setStatus(s).settled && !setStatus(s).pending; });
-    var showCheckin = anyCheckinActive || !(S.bitcoin.txs || []).length;
+    var showCheckin = anyCheckinActive;
     $('checkin-card').style.display = showCheckin ? '' : 'none';
     renderStatusHead(status);
     // Per-tx check-in bars, each against its own threshold
@@ -4387,7 +4388,7 @@
     if (gsCard) gsCard.style.display = anyStaged ? 'none' : '';
     var anyCheckinActive = (S.bitcoin.txs || []).some(function (t) { return hasRuleType(t, 'checkin') && !txStatus(t).settled && !txStatus(t).pending && !setOfTxId(t.id); })
       || (S.bitcoin.sets || []).some(function (s) { return hasRuleType(s, 'checkin') && !setStatus(s).settled && !setStatus(s).pending; });
-    var showCheckin = anyCheckinActive || !(S.bitcoin.txs || []).length;
+    var showCheckin = anyCheckinActive;
     $('checkin-card').style.display = showCheckin ? '' : 'none';
     patchCheckinBars(status);
     patchReadinessRows();
@@ -5249,15 +5250,21 @@
   var authKnown = false;
   var MIN_APP_PASSWORD = 12;
 
+  // Where a password set outside the app (auth source 'env') is found:
+  // Umbrel shows it; Docker keeps it in .env; otherwise the environment.
+  function envPasswordWhere() {
+    if (authInfo.deployment === 'umbrel') return "It is Umbrel's app password for Standby: Umbrel shows it on Standby's page in the Umbrel dashboard.";
+    if (authInfo.deployment === 'docker') return 'It is the STANDBY_PASSWORD line in the .env file in the folder where Standby was installed (next to docker-compose.yml).';
+    return 'It is the STANDBY_PASSWORD setting Standby was started with.';
+  }
+
   function renderLoginCard() {
     var src = authInfo.source;
     $('login-card-none').style.display = src === 'none' ? '' : 'none';
     $('login-card-app').style.display = src === 'app' ? '' : 'none';
     var env = $('login-card-env');
     env.style.display = src === 'env' ? '' : 'none';
-    env.textContent = authInfo.deployment === 'umbrel'
-      ? "The password is Umbrel's app password, shown on Standby's page in the Umbrel dashboard. It cannot be changed here."
-      : 'The password is set by STANDBY_PASSWORD where Standby is started. Change it there.';
+    env.textContent = 'A password is set. ' + envPasswordWhere() + ' It is changed there, not here.';
     $('logout-row').style.display = authInfo.required ? '' : 'none';
   }
 
@@ -5267,12 +5274,14 @@
     var body = $('login-forgot-body');
     if (authInfo.source === 'app') {
       body.innerHTML = '<p>It cannot be shown or reset from this page. On the computer running Standby:</p>'
-        + '<ol><li>Close Standby.</li><li>Start it again with <code>--reset-password</code>, or delete <code>login.json</code> from the Standby data folder.</li><li>Open Standby and set a new password.</li></ol>'
+        + '<ol><li>Close Standby.</li><li>Start it again with <code>--reset-password</code>, or delete <code>login.json</code> from the Standby data folder'
+        + (authInfo.deployment === 'docker' ? ' (<code>data</code>, next to <code>docker-compose.yml</code>)' : '') + '.</li><li>Open Standby and set a new password.</li></ol>'
         + '<p>Your transactions, triggers and settings are kept.</p>';
-    } else if (authInfo.deployment === 'umbrel') {
-      body.innerHTML = "<p>On Umbrel the password is Umbrel's app password: open Standby's page in the Umbrel dashboard to see it.</p>";
     } else {
-      body.innerHTML = '<p>The password is set by <code>STANDBY_PASSWORD</code> where Standby is started (with Docker, the <code>.env</code> file next to <code>docker-compose.yml</code>). Look it up or change it there, then restart Standby.</p>';
+      body.innerHTML = '';
+      var para = document.createElement('p');
+      para.textContent = envPasswordWhere() + (authInfo.deployment === 'umbrel' ? '' : ' To change it, edit it there and restart Standby.');
+      body.appendChild(para);
     }
     $('login-hint').textContent = authInfo.deployment === 'umbrel'
       ? "Enter the Standby password. On Umbrel it is shown on the app's page in the Umbrel dashboard."
@@ -5342,9 +5351,7 @@
   var setup = { open: false, steps: [], i: 0, nodesOwn: false, pricesOwn: false, nodesTested: false, pricesTested: false, homes: {}, afterSkip: null };
 
   function setupSteps() {
-    var steps = ['welcome'];
-    if (authInfo.source !== 'env') steps.push('password');
-    return steps.concat(['nodes', 'prices', 'checkin', 'tx', 'done']);
+    return ['welcome', 'password', 'nodes', 'prices', 'checkin', 'tx', 'done'];
   }
   function nodesAreDefault() {
     var st = (S && S.settings) || {};
@@ -5419,7 +5426,6 @@
     if (name === 'nodes') renderSetupNodes();
     if (name === 'prices') renderSetupPrices();
     if (name === 'tx') renderSetupTx();
-    if (name === 'done') renderSetupSummary();
     if (window.scrollTo) window.scrollTo(0, 0);
   }
   function setupGo(delta) {
@@ -5453,10 +5459,18 @@
   });
 
   // Step: app password (skipping asks first).
+  // Set outside the app (Umbrel's app password, or STANDBY_PASSWORD): the
+  // page says so — it is the password just used to log in — and never
+  // shows it.
+  function envPasswordText() {
+    return 'Standby is protected by a password: the one you just logged in with. ' + envPasswordWhere();
+  }
   function renderSetupPassword() {
-    var set = authInfo.source === 'app';
-    $('setup-password-form').style.display = set ? 'none' : '';
-    $('setup-password-done').style.display = set ? '' : 'none';
+    var src = authInfo.source;
+    $('setup-password-form').style.display = src === 'none' ? '' : 'none';
+    $('setup-password-done').style.display = src === 'app' ? '' : 'none';
+    $('setup-password-env').style.display = src === 'env' ? '' : 'none';
+    $('setup-password-env-text').textContent = envPasswordText();
   }
   var skipBack = null;
   function openSkipWarning(onSkip, onBack) {
@@ -5490,6 +5504,7 @@
     openSkipWarning(function () { setupGo(1); });
   });
   $('btn-setup-pw-next').addEventListener('click', function () { setupGo(1); });
+  $('btn-setup-pw-env-next').addEventListener('click', function () { setupGo(1); });
 
   // Step: Bitcoin nodes.
   function renderSetupNodes() {
@@ -5610,30 +5625,6 @@
   });
   $('btn-setup-tx-skip').addEventListener('click', function () { setupGo(1); });
 
-  // Done: what was chosen.
-  function renderSetupSummary() {
-    var st = (S && S.settings) || {};
-    var bases = (S && S.bitcoin && S.bitcoin.nodeBases) || {};
-    var nodes = [bases.primary, bases.secondary].filter(Boolean).map(hostLabel).join(', ') || '—';
-    var ps = st.priceSources || {};
-    var n = ((S && S.bitcoin && S.bitcoin.txs) || []).length;
-    var pw = authInfo.source === 'app' ? 'Set'
-      : authInfo.source === 'env' ? (authInfo.deployment === 'umbrel' ? "Umbrel's app password" : 'Set by STANDBY_PASSWORD')
-        : 'Not set';
-    var ul = $('setup-summary');
-    ul.innerHTML = '';
-    [['App password', pw], ['Bitcoin nodes', nodes], ['Price sources', priceLabel(ps.source1) + ', ' + priceLabel(ps.source2)],
-      ['Transactions', n ? n + ' added' : 'None yet']].forEach(function (row) {
-      var li = document.createElement('li');
-      var b = document.createElement('b');
-      b.textContent = row[0];
-      var v = document.createElement('span');
-      v.textContent = row[1];
-      li.appendChild(b);
-      li.appendChild(v);
-      ul.appendChild(li);
-    });
-  }
   $('btn-setup-finish').addEventListener('click', function () { finishSetup($('setup-done-msg')); });
   $('btn-setup-rerun').addEventListener('click', async function () {
     try {

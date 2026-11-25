@@ -22,7 +22,8 @@ function check(name, cond, detail) {
     await p.goto(BASE); await p.waitForTimeout(1200);
     check('welcome shows on a fresh install, tabs hidden', await vis('#setup-welcome') && !(await vis('#tabs')));
     await p.click('#btn-setup-start'); await p.waitForTimeout(150);
-    check('step 1 is the app password', await vis('#setup-pw1'), await p.textContent('#setup-stepno'));
+    check('step 1 is the app password (choose one: none is set)', await vis('#setup-pw1') && !(await vis('#setup-password-env'))
+      && (await p.textContent('#setup-stepno')) === 'Step 1 of 6', await p.textContent('#setup-stepno'));
     await p.fill('#setup-pw1', 'short'); await p.fill('#setup-pw2', 'short'); await p.click('#btn-setup-pw-set'); await p.waitForTimeout(150);
     check('a short password is refused', /at least 12/.test(await p.textContent('#setup-password-msg')));
     await p.click('#btn-setup-pw-skip'); await p.waitForTimeout(150);
@@ -50,10 +51,12 @@ function check(name, cond, detail) {
     check('Add opens the add form over setup', await vis('#add-modal .modal'));
     await p.click('#btn-btc-add-cancel'); await p.waitForTimeout(300);
     await p.click('#btn-setup-tx-skip'); await p.waitForTimeout(200);
-    const sum = await p.textContent('#setup-summary');
-    check('done: the summary shows the choices', /Not set/.test(sum) && /Kraken/.test(sum) && /127\.0\.0\.1:18255/.test(sum), sum);
+    check('done: the last page has the logo, the backup note and no summary rows',
+      await vis('#setup-done .setup-done-logo img') && /encrypted backup/.test(await p.textContent('#setup-done'))
+        && !(await p.$('#setup-summary')), await p.textContent('#setup-done'));
     await p.click('#btn-setup-finish'); await p.waitForTimeout(800);
     check('the dashboard after setup', await vis('#tabs') && !(await vis('#setup-card')));
+    check('no check-in card without a check-in transaction', !(await vis('#checkin-card')));
     await p.reload(); await p.waitForTimeout(1000);
     check('setup does not return after a reload', !(await vis('#setup-card')));
 

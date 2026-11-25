@@ -654,12 +654,16 @@ body.setup-open #tabs, body.setup-open main section.tab, body.setup-open .burger
 .setup-actions .primary { font-weight: 600; }
 .setup-back { background: none; border: 0; color: var(--muted); padding: 10px 0 0; font-size: 14px; }
 .linkish { background: none; border: 0; color: var(--muted); text-decoration: underline; padding: 6px 0; font-size: 14px; }
-.setup-check { font-size: 40px; text-align: center; margin: 6px 0 4px; }
-.setup-summary { list-style: none; padding: 0; margin: 10px 0; }
-.setup-summary li { padding: 8px 0; border-top: 1px solid var(--line); display: flex; justify-content: space-between; gap: 10px; }
-.setup-summary li:first-child { border-top: 0; }
-.setup-summary li b { white-space: nowrap; font-weight: 600; }
-.setup-summary li span { color: var(--muted); text-align: right; overflow-wrap: anywhere; }
+/* Setup's last page: the logo with two broadcast rings pulsing out. */
+.setup-done-logo { position: relative; width: 84px; height: 84px; margin: 18px auto 16px; }
+.setup-done-logo img { position: relative; z-index: 1; width: 84px; height: 84px; border-radius: 18px; display: block; }
+.setup-done-logo::before, .setup-done-logo::after {
+  content: ''; position: absolute; inset: 0; border-radius: 18px; border: 2px solid var(--accent);
+  animation: setup-pulse 2.4s ease-out infinite; opacity: 0;
+}
+.setup-done-logo::after { animation-delay: 1.2s; }
+@keyframes setup-pulse { 0% { transform: scale(1); opacity: 0.7; } 100% { transform: scale(1.6); opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .setup-done-logo::before, .setup-done-logo::after { animation: none; } }
 /* A Settings card moved into setup ("Choose own"): no second frame or title. */
 .setup-card .card { border: 0; background: none; padding: 0; margin: 8px 0 0; box-shadow: none; }
 .setup-card .card > .section-head { display: none; }

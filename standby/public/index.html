@@ -66,6 +66,10 @@
       <p class="muted">At least 12 characters. It is never shown again; if you forget it, you can reset it on this computer.</p>
       <div class="setup-actions"><button class="primary" id="btn-setup-pw-set">Set password and continue</button><button id="btn-setup-pw-skip">Skip</button></div>
       </div>
+      <div id="setup-password-env" style="display:none">
+        <p class="lead" id="setup-password-env-text"></p>
+        <div class="setup-actions"><button class="primary" id="btn-setup-pw-env-next">Continue</button></div>
+      </div>
       <div id="setup-password-done" style="display:none">
         <p class="lead">A password is set. You can change or remove it any time in Settings → App login.</p>
         <div class="setup-actions"><button class="primary" id="btn-setup-pw-next">Continue</button></div>
@@ -125,11 +129,10 @@
     </div>
 
     <div class="setup-step" id="setup-done">
-      <div class="setup-check">✓</div>
+      <div class="setup-done-logo"><img src="/logo.jpg" alt=""></div>
       <h2 class="center">You're set up</h2>
-      <ul class="setup-summary" id="setup-summary"></ul>
       <p class="notice">After adding transactions, download an encrypted backup (Settings → Data backup). It is the only way to get them back if this device fails.</p>
-      <p class="muted">The grace period, check cadence, fee risk and price agreement keep their defaults. Change anything in Settings, or run setup again from there.</p>
+      <p class="muted center">Nodes, price sources, the grace period, check cadence and more can be changed any time in Settings, where you can also run this setup again.</p>
       <div class="setup-actions"><button class="primary" id="btn-setup-finish">Go to the dashboard</button></div>
       <p id="setup-done-msg" class="muted"></p>
     </div>

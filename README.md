@@ -36,9 +36,8 @@ On first open, a short setup walks through the app password (skippable, with a w
 mkdir standby && cd standby
 curl -O https://raw.githubusercontent.com/thefuckisalommy/Standby/main/docker-compose.yml
 mkdir -p data checkin && sudo chown -R 1000:1000 data checkin
-printf 'STANDBY_PASSWORD=%s\n' "$(openssl rand -base64 24)" > .env && chmod 600 .env && cat .env
 docker compose up -d
-# open http://localhost:3100
+# open http://localhost:3100 — setup asks you to choose a password
 ```
 
 The containers run as UID 1000, so the data directories must belong to it; Standby refuses to start and says so if it cannot write. Upgrading from 0.8.10 or older (which ran as root): run the `chown` once before starting.
@@ -62,7 +61,7 @@ All optional; see `standby/lib/config.js`.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `STANDBY_PASSWORD` | unset | The app login. Set from the app password on Umbrel. Unset, a password can be set in the app instead (Settings → App login). |
+| `STANDBY_PASSWORD` | unset | The app login, for setups that manage it outside the app (Umbrel sets it from its app password; with Docker, a `STANDBY_PASSWORD=` line in `.env`). Unset, you choose a password in the app (setup, or Settings → App login). |
 | `STANDBY_BIND` | `127.0.0.1` | Listen address. Docker sets `0.0.0.0` inside the container. |
 | `STANDBY_ALLOWED_HOSTS` | unset | Extra hostnames, comma-separated. |
 | `STANDBY_WEB_PORT`, `STANDBY_CHECKIN_PORT` | `3100`, `3101` | Host ports in `docker-compose.yml`. |
