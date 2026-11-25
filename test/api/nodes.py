@@ -729,9 +729,9 @@ def run():
     delete_all_txs()
     # (c) Two concurrent checkOutspends calls against the primary must
     # move the counter by exactly one.
-    node_probe_26 = '/tmp/standby-test099-batch-inflight.js'
+    node_probe_26 = TMP + '/standby-test099-batch-inflight.js'
     with open(node_probe_26, 'w') as f:
-        f.write("const bitcoin = require('" + APP + "/lib/bitcoin.js');\n"
+        f.write("const bitcoin = require(" + json.dumps(APP + '/lib/bitcoin.js') + ");\n"
                 "(async () => {\n"
                 "  const eps = [{ label: 'primary', base: process.argv[2] }];\n"
                 "  const [a, b] = await Promise.all([\n"

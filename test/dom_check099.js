@@ -10,7 +10,7 @@
 'use strict';
 const fs = require('fs');
 const BASE = 'http://127.0.0.1:3478';
-const DATA_FILE = '/tmp/standby-test099-dom/state.json';
+const DATA_FILE = require('os').tmpdir() + '/standby-test099-dom/state.json';
 const els = {};
 function elText(el) {
   // The shim stores textContent per element (no aggregation), so read the

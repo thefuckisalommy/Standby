@@ -53,7 +53,9 @@ function ownershipHint(deployment) {
     return 'Fix: restart Standby from the Umbrel dashboard — its pre-start hook sets the ownership of the app data to UID 1000. If this message persists, run on the Umbrel:\n'
       + '  sudo chown -R 1000:1000 ~/umbrel/app-data/standby/data';
   }
-  return 'Fix: make these paths writable by the user running `node server.js` (for example with chown).';
+  return process.platform === 'win32'
+    ? 'Fix: make these folders writable by the Windows user running `node server.js`, or set DATA_DIR to a folder in your user profile.'
+    : 'Fix: make these paths writable by the user running `node server.js` (for example with chown).';
 }
 
 // Check every directory; on any problem, log them all with the fix

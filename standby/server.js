@@ -50,6 +50,8 @@ function flushHeartbeatAndExit() {
 }
 process.on('SIGTERM', flushHeartbeatAndExit);
 process.on('SIGINT', flushHeartbeatAndExit);
+// Windows sends no SIGTERM; Ctrl+Break arrives as SIGBREAK.
+if (process.platform === 'win32') process.on('SIGBREAK', flushHeartbeatAndExit);
 
 const server = http.createServer((req, res) => {
   // Host allowlist first, before parsing, routing or auth: anything but an

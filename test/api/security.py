@@ -247,7 +247,7 @@ def run():
     stop(_auth_app)
     # A data directory that cannot be created: the app refuses to
     # start (exit 1) and names the problem and the fix.
-    _blocker = '/tmp/standby-test099-bind-blocker'
+    _blocker = TMP + '/standby-test099-bind-blocker'
     shutil.rmtree(_blocker, ignore_errors=True)
     open(_blocker, 'w').close()
     _e = dict(os.environ, **APP_ENV)
@@ -289,7 +289,7 @@ def run():
         check('41 backup: no signed hex appears in the encrypted file',
               _hex0 and _hex0 not in json.dumps(enc), '')
     # The standalone tool decrypts it to the same backup.
-    _encf = '/tmp/standby-test099-backup.encrypted.json'
+    _encf = TMP + '/standby-test099-backup.encrypted.json'
     with open(_encf, 'w') as f:
         json.dump(enc, f)
     _tool = os.path.join(APP, '..', 'tools', 'decrypt-backup.js')

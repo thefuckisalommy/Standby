@@ -58,11 +58,11 @@ def run():
     # over a full day. Esplora is exact-target-or-nothing and floored
     # at 1 sat/vB. A second app on port 3440 gives controlled counts;
     # unit checks cover the pure helpers.
-    lp_dir = '/tmp/standby-test099-accumpeak'
+    lp_dir = TMP + '/standby-test099-accumpeak'
     lp_checkin = lp_dir + '-checkin'
     lp_port = 3440
     lp_base = 'http://127.0.0.1:%d' % lp_port
-    lp_log = '/tmp/standby-test099-accumpeak-proc.log'
+    lp_log = TMP + '/standby-test099-accumpeak-proc.log'
     app_lp = None
 
     def lp_state():

@@ -381,6 +381,9 @@ function mergeDefaults(def, saved) {
 // and is shared with the receiver.
 const DATA_DIR_MODE = 0o700;
 const DATA_FILE_MODE = 0o600;
+// Windows has no POSIX modes (only a read-only bit) and cannot fsync a
+// directory; its folder permissions come from the user profile.
+const IS_WINDOWS = process.platform === 'win32';
 
 function ensureDir(dataDir) {
   fs.mkdirSync(dataDir, { recursive: true, mode: DATA_DIR_MODE });
@@ -392,6 +395,7 @@ function ensureDir(dataDir) {
 // changed.
 function secureDataDir(dataDir) {
   let changed = 0;
+  if (IS_WINDOWS) return changed;
   try {
     const st = fs.statSync(dataDir);
     if ((st.mode & 0o777) !== DATA_DIR_MODE) { fs.chmodSync(dataDir, DATA_DIR_MODE); changed++; }
@@ -550,7 +554,7 @@ function recoverStateFromBackup(dataDir, file, err) {
   if (found) {
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     const preserved = file + '.corrupt.' + stamp;
-    try { fs.renameSync(file, preserved); }
+    try { renameReplacing(file, preserved); }
     catch (e) { console.error('Standby: could not preserve corrupt state file:', e.message); }
     const msg = 'Standby: state.json was corrupt (' + err.message + '); recovered from ' + found.file
       + ' — the corrupt file was preserved as ' + path.basename(preserved);
@@ -958,6 +962,7 @@ function mergeHeartbeat(state, dataDir) {
 // directory, so a power cut cannot lose the latest save. A failed file
 // fsync fails the save; the directory fsync is best-effort.
 function fsyncDir(dir) {
+  if (IS_WINDOWS) return; // NTFS commits the rename itself; a directory cannot be opened for fsync
   let fd;
   try {
     fd = fs.openSync(dir, 'r');
@@ -981,8 +986,19 @@ function writeFileDurable(file, content, mode) {
   } finally {
     fs.closeSync(fd);
   }
-  fs.renameSync(tmp, file);
+  renameReplacing(tmp, file);
   fsyncDir(path.dirname(file));
+}
+
+// Windows refuses to replace a file another process has open for a moment
+// (an antivirus scan, the receiver reading keys.json): retry briefly.
+function renameReplacing(from, to) {
+  for (let attempt = 0; ; attempt++) {
+    try { return fs.renameSync(from, to); } catch (e) {
+      if (!IS_WINDOWS || attempt >= 20 || !['EPERM', 'EACCES', 'EBUSY'].includes(e.code)) throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    }
+  }
 }
 
 function appendJsonl(dataDir, file, entry) {

@@ -29,8 +29,9 @@ const STARTUP_TICK_MS = (() => {
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 // The directory shared with the check-in receiver (keys.json out,
-// last.json in). Absent on a bare run, where keys are dormant.
-const CHECKIN_DIR = process.env.CHECKIN_DIR || '/checkin';
+// last.json in). Docker and Umbrel set it; a bare run (Linux, macOS or
+// Windows) uses the checkin folder inside the data directory.
+const CHECKIN_DIR = process.env.CHECKIN_DIR || path.join(DATA_DIR, 'checkin');
 // One source of truth for the version: package.json.
 const VERSION = require('../package.json').version;
 const MAX_BODY = 1024 * 1024; // 1 MB

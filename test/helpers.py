@@ -5,11 +5,14 @@ import hashlib
 import json
 import os
 import subprocess
+import tempfile
 import time
 import urllib.error
 import urllib.request
 
 _TESTDIR = os.path.dirname(os.path.abspath(__file__))
+# The system temp folder (/tmp on Linux, %TEMP% on Windows).
+TMP = tempfile.gettempdir()
 # The repository root; the app lives in its standby/ folder.
 GOAL = os.path.dirname(_TESTDIR)
 STUB = os.path.join(_TESTDIR, 'stubs.js')
@@ -85,8 +88,9 @@ SENTINEL_TXID = txid_of(SENTINEL_HEX)
 procs = []
 
 
-def start(cmd, env=None, cwd=None, log='/tmp/standby-test-proc.log'):
+def start(cmd, env=None, cwd=None, log=None):
     """Start a process the suite stops at the end (see procs)."""
+    log = log or os.path.join(TMP, 'standby-test-proc.log')
     e = dict(os.environ)
     if env:
         e.update(env)

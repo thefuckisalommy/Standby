@@ -212,8 +212,8 @@ def run():
           ('check-in key revoked: ' + str(log_id)) in read_log())
     # (b2) No state and no backups: a genuine first boot (a second
     # instance proves it).
-    fresh_data = '/tmp/standby-test099-fresh'
-    fresh_checkin = '/tmp/standby-test099-fresh-checkin'
+    fresh_data = TMP + '/standby-test099-fresh'
+    fresh_checkin = TMP + '/standby-test099-fresh-checkin'
     shutil.rmtree(fresh_data, ignore_errors=True)
     shutil.rmtree(fresh_checkin, ignore_errors=True)
     check('20 fresh: port 3458 free', port_closed(3458))
@@ -475,8 +475,8 @@ def run():
           read_log()[-500:])
     # STANDBY_ALLOWED_HOSTS: a second instance with two extra names.
     # They pass, others still 421, IP literals still pass.
-    extra_data = '/tmp/standby-test099-extra'
-    extra_checkin = '/tmp/standby-test099-extra-checkin'
+    extra_data = TMP + '/standby-test099-extra'
+    extra_checkin = TMP + '/standby-test099-extra-checkin'
     shutil.rmtree(extra_data, ignore_errors=True)
     shutil.rmtree(extra_checkin, ignore_errors=True)
     check('33 hosts: port 3440 free', port_closed(3440))
@@ -623,8 +623,8 @@ def run():
     delete_all_txs()
     # (d) SIGTERM flush: a fresh instance with its heartbeat deleted
     # must recreate it on SIGTERM and exit 0.
-    sig_data = '/tmp/standby-test099-sigterm'
-    sig_checkin = '/tmp/standby-test099-sigterm-checkin'
+    sig_data = TMP + '/standby-test099-sigterm'
+    sig_checkin = TMP + '/standby-test099-sigterm-checkin'
     shutil.rmtree(sig_data, ignore_errors=True)
     shutil.rmtree(sig_checkin, ignore_errors=True)
     check('34 sigterm: port 3440 free', port_closed(3440))
@@ -655,7 +655,7 @@ def run():
     # (e) A missing or corrupt heartbeat falls back to the state's
     # lastOnlineAt; tested directly against lib/store.js (a running
     # server rewrites the heartbeat). Also the save dedupe.
-    hb_dir = '/tmp/standby-test099-heartbeat'
+    hb_dir = TMP + '/standby-test099-heartbeat'
     shutil.rmtree(hb_dir, ignore_errors=True)
     os.makedirs(hb_dir)
     hb_seed = load_state_file()
@@ -744,7 +744,7 @@ def run():
     delete_all_txs()
     # (b) The clamp, on lib/store.js directly: a future heartbeat is
     # ignored, a future state stamp capped, both together capped.
-    cl_dir = '/tmp/standby-test099-clamp'
+    cl_dir = TMP + '/standby-test099-clamp'
     shutil.rmtree(cl_dir, ignore_errors=True)
     os.makedirs(cl_dir)
     cl_seed = load_state_file()
@@ -795,7 +795,7 @@ def run():
                      "now-=10*24*3600*1000;"
                      "const c=s.touchHeartbeat(d,iso(now))?'WROTE':'SKIP';"
                      "Date.now=real;console.log(a+' '+b+' '+c);"
-                     % json.dumps('/tmp/standby-test099-throttle'))
+                     % json.dumps(TMP + '/standby-test099-throttle'))
     out, err = node_out(node_throttle)
     check('35 throttle: write, throttled re-touch, backward jump writes again',
           out == 'WROTE SKIP WROTE', out + err)
@@ -834,15 +834,15 @@ def run():
                   "const b=s.readCheckins(d,50);"
                   "const tmp=!fs.existsSync(d+'/checkins.jsonl.tmp');"
                   "console.log(a.length===2&&a[1].method==='t2'&&b.length===1&&b[0].method==='w'&&tmp?'OK':'FAIL');"
-                  % json.dumps('/tmp/standby-test099-jsonl'))
+                  % json.dumps(TMP + '/standby-test099-jsonl'))
     out, err = node_out(node_jsonl)
     check('35 jsonl: append + rewrite round-trip with no .tmp', out == 'OK', out + err)
     # --- 36. uncaught exception ---
     # The app and the receiver must exit nonzero on an uncaught
     # exception (test-only throw hook), log it, and close their ports.
-    uc_data = '/tmp/standby-test099-uncaught'
-    uc_checkin = '/tmp/standby-test099-uncaught-checkin'
-    uc_log = '/tmp/standby-test099-uncaught.log'
+    uc_data = TMP + '/standby-test099-uncaught'
+    uc_checkin = TMP + '/standby-test099-uncaught-checkin'
+    uc_log = TMP + '/standby-test099-uncaught.log'
     shutil.rmtree(uc_data, ignore_errors=True)
     shutil.rmtree(uc_checkin, ignore_errors=True)
     uc_env = dict(APP_ENV)
@@ -859,7 +859,7 @@ def run():
     check('36 uncaught: app log records the exception',
           'uncaught exception:' in _uc_log, _uc_log[-300:] if _uc_log else None)
     check('36 uncaught: scratch app port is closed again', port_closed(3440))
-    rc_log = '/tmp/standby-test099-uncaught-recv.log'
+    rc_log = TMP + '/standby-test099-uncaught-recv.log'
     rc = start(['node', 'server.js'], env={'PORT': '3441', 'CHECKIN_DIR': uc_checkin},
                cwd=os.path.join(APP, 'checkin-receiver'), log=rc_log)
     check('36 uncaught: scratch receiver starts', wait_up('http://127.0.0.1:3441', path='/health'))

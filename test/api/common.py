@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as v
 
 check = v.check
+TMP = v.TMP
 
 
 def req(method, path, body=None, base=None, timeout=20, headers=None):
@@ -104,8 +105,8 @@ SECOND = v.SECOND
 
 GOAL = v.GOAL
 APP = v.app_dir(GOAL)
-DATA = '/tmp/standby-test099'
-CHECKIN_DIR = '/tmp/standby-test099-checkin'
+DATA = TMP + '/standby-test099'
+CHECKIN_DIR = TMP + '/standby-test099-checkin'
 PORT = 3438
 BASE = 'http://127.0.0.1:%d' % PORT
 RECEIVER_PORT = 3439
@@ -128,7 +129,7 @@ RECEIVER_ENV = {'PORT': str(RECEIVER_PORT), 'CHECKIN_DIR': CHECKIN_DIR}
 if os.environ.get('STANDBY_TEST_PROFILE') == 'umbrel':
     RECEIVER_ENV['STANDBY_BIND'] = '0.0.0.0'
     RECEIVER_ENV['STANDBY_ALLOWED_HOSTS'] = 'standby.local'
-LOG = '/tmp/standby-test099-proc.log'
+LOG = TMP + '/standby-test099-proc.log'
 
 # The stub's fixed values: tip height 900000, economy fee 1 sat/vB.
 STUB_TIP = 900000
@@ -247,9 +248,9 @@ def add_tx(label, trigger, value, trigger_confirmed=False):
 app = None
 p_primary = p_secondary = p_receiver = None
 # Paths for the sections that start their own instances.
-_bind_log = '/tmp/standby-test099-bind.log'
-_bind_data = '/tmp/standby-test099-bind'
-_bind_checkin = '/tmp/standby-test099-bind-checkin'
+_bind_log = TMP + '/standby-test099-bind.log'
+_bind_data = TMP + '/standby-test099-bind'
+_bind_checkin = TMP + '/standby-test099-bind-checkin'
 # Every port a group may use, for the end-of-run check.
 ALL_PORTS = (PORT, RECEIVER_PORT, STUB_P, STUB_S, 18190, 18191, 18197, 18198, 3440, 3441)
 

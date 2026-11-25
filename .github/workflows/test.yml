@@ -87,6 +87,34 @@ jobs:
       - name: Run API suite (${{ matrix.group }})
         run: python3 test/verify099.py --only ${{ matrix.group }}
 
+  # The same API groups and regression suite on Windows (plain Node, no
+  # Docker), so a Windows-only break shows up here.
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [triggers, restore, nodes, sets, persistence, fees, security, core, regression]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '26'
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.11'
+      - name: Run ${{ matrix.suite }} on Windows
+        run: |
+          if [ "${{ matrix.suite }}" = regression ]; then
+            python test/verify099-regress.py
+          else
+            python test/verify099.py --only ${{ matrix.suite }}
+          fi
+
   regression:
     runs-on: ubuntu-latest
     timeout-minutes: 15
