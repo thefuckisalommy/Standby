@@ -3048,8 +3048,9 @@ function check(name, cond, detail) {
     && idx.indexOf('Installed version:') !== -1 && idx.indexOf('id="app-version"') !== -1, '');
   check('app version static: the card has no "?" button and no details (just the version line)',
     idx.indexOf('id="help-version"') === -1, '');
-  check('app version: the installed version reads 0.8.17 (from /api/health)',
-    els['app-version'] && els['app-version'].textContent === '0.8.17',
+  const APP_VERSION = require('../standby/package.json').version;
+  check('app version: the installed version reads ' + APP_VERSION + ' (from /api/health)',
+    els['app-version'] && els['app-version'].textContent === APP_VERSION,
     els['app-version'] && els['app-version'].textContent);
   setFilter('general');
   check('app version: the card is visible under General',

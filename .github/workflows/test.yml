@@ -15,6 +15,8 @@
 #   - Image job:        bash test/smoke_compose.sh            (~3 min)
 #     (builds the image and runs both install paths for real — see
 #     the script — after shellcheck on the shell scripts)
+#   - Lint job:         npx eslint@9.17.0                     (~30 s)
+#     (eslint.config.js at the repo root; nothing is added to the app)
 #
 # Runner needs:
 #   - ubuntu-latest, Node 26 (the version the image ships and
@@ -55,6 +57,8 @@ on:
     paths:
       - 'standby/**'
       - 'test/**'
+      - 'tools/**'
+      - 'eslint.config.js'
       # Workflow-only PRs (e.g. Dependabot's action updates) must be
       # tested too.
       - '.github/workflows/**'
@@ -65,6 +69,17 @@ permissions:
   contents: read
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '26'
+      - name: ESLint
+        run: npx --yes eslint@9.17.0 .
+
   api:
     runs-on: ubuntu-latest
     timeout-minutes: 15

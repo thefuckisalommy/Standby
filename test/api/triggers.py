@@ -6,7 +6,7 @@ from api.common import _bind_checkin, _bind_data, _bind_log  # noqa: F401
 def run():
     # --- 1. health + version ----------------------------------------
     s, h = req('GET', '/api/health')
-    check('1 health reports version 0.8.17', h.get('version') == '0.8.17', h)
+    check('1 health reports version ' + VERSION, h.get('version') == VERSION, h)
 
     # --- 2. block-height trigger --------------------------------------
     # Validation at add: bad heights rejected, good ones accepted.
