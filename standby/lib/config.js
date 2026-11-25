@@ -66,6 +66,13 @@ const MEMPOOL_OVERRIDE = (() => {
 // all of them) — outside tests that would quietly collapse the
 // two-source price agreement into one source, so it is honored
 // only in test mode. SLIPSTREAM_API_URL likewise.
+// How long a restore waits for its node check of the restored
+// transactions; any not checked by then are reported unchecked. Tests
+// shorten it with STANDBY_TEST_RESTORE_CHECK_MS (test mode only).
+const RESTORE_CHECK_MS = (() => {
+  const ms = TEST_MODE ? parseInt(process.env.STANDBY_TEST_RESTORE_CHECK_MS || '', 10) : NaN;
+  return Number.isFinite(ms) && ms > 0 ? ms : 60000;
+})();
 const PRICE_API_URL_OVERRIDE = TEST_MODE ? (process.env.PRICE_API_URL || '').trim() : '';
 const SLIPSTREAM_API_URL_OVERRIDE = TEST_MODE ? (process.env.SLIPSTREAM_API_URL || '').trim() : '';
 // Ignored-in-production overrides, named for the startup log.
@@ -78,7 +85,7 @@ const ALLOWED_HOSTS_EXTRA = (process.env.STANDBY_ALLOWED_HOSTS || '').split(',')
   .filter(Boolean);
 
 module.exports = {
-  PORT, BIND, DEPLOYMENT, DEPLOYMENTS, PASSWORD, TEST_MODE, STARTUP_TICK_MS, DATA_DIR, PUBLIC_DIR,
+  PORT, BIND, DEPLOYMENT, DEPLOYMENTS, PASSWORD, TEST_MODE, STARTUP_TICK_MS, RESTORE_CHECK_MS, DATA_DIR, PUBLIC_DIR,
   CHECKIN_DIR, VERSION, MAX_BODY, MEMPOOL_OVERRIDE, PRICE_API_URL_OVERRIDE,
   SLIPSTREAM_API_URL_OVERRIDE, IGNORED_TEST_OVERRIDES, ALLOWED_HOSTS_EXTRA,
 };

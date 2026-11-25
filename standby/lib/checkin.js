@@ -1,7 +1,6 @@
 'use strict';
 // Standby — check-in keys, grace, vacation, check-in clock.
 const store = require('./store');
-const bitcoin = require('./bitcoin');
 const fs = require('fs');
 const crypto = require('crypto');
 const path = require('path');

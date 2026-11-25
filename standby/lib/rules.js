@@ -8,7 +8,6 @@ const { DATA_DIR } = require('./config');
 const { forwardMemberHistory, noteSetMemberStale, pushHistory, recordRelease, shortTxid } = require('./history');
 const { checkCadenceSecondsOf, fetchNodeFeesCached, fetchPriceCached, fetchTipHeightsCached, priceAgreementPctOf, priceSourcesOf } = require('./prices');
 const { releaseTriggerFor, singleTriggerConditionText, toTriggerSet, triggerConditionText, triggerLabel } = require('./triggers');
-const { days } = require('./util');
 
 // The triggerState shape: tx.triggerState
 // is an array parallel to the rules (index-keyed); every evaluation

@@ -1,0 +1,553 @@
+'use strict';
+const store = require('../store');
+const bitcoin = require('../bitcoin');
+const { sanitizeState, startupWarnings, syncCheckinFreeze, writeReceiverKeys } = require('../checkin');
+const { DATA_DIR, RESTORE_CHECK_MS } = require('../config');
+const backupcrypto = require('../backupcrypto');
+const { HISTORY_MAX } = require('../history');
+const { priceSourceError } = require('../prices');
+const { rearmFullTick } = require('../release');
+const { dryRunAndRecord } = require('../verdicts');
+const { serveSets, serveTxs } = require('../triggers');
+const { CHECK_CADENCE_SECONDS_DEFAULT, CHECK_CADENCE_SECONDS_MAX, CHECK_CADENCE_SECONDS_MIN, FEE_LOW_MULT_DEFAULT, FEE_LOW_MULT_MAX, FEE_LOW_MULT_MIN, FEE_MED_MULT_DEFAULT, FEE_MED_MULT_MAX, FEE_MED_MULT_MIN, GRACE_DURATION_DAYS, GRACE_OFFLINE_DAYS, PRICE_AGREEMENT_PCT_DEFAULT, PRICE_AGREEMENT_PCT_MAX, PRICE_AGREEMENT_PCT_MIN, asStr, clampInt, readBody, sendError, sendJson, validBroadcastVia, validPublicFallbackDays } = require('../util');
+const { NEXT } = require('./shared');
+
+const RELEASE_STATUSES = new Set(['stale', 'failed', 'broadcast', 'conflict', 'submitted-slipstream']);
+// The kinds a release record may carry — 'release' for the automatic
+// release, 'broadcast' for a manual broadcast, 'dryrun' for a
+// dry-run verdict. Used by the restore validation.
+const RELEASE_KINDS = new Set(['release', 'broadcast', 'dryrun']);
+
+module.exports = async function backupRoutes(ctx) {
+  const { req, res, pathname, now } = ctx;
+  let state = ctx.state;
+
+  // POST /api/backup — the whole setup as one JSON document: settings,
+  // every signed transaction (hex included), the check-in clock, and
+  // the recent check-in + broadcast history. Restoring it (POST
+  // /api/restore) puts the app back exactly where the backup was taken.
+  // The file contains the signed hexes, which reveal the destination
+  // addresses and amounts — treat it like the transactions themselves.
+  // It also carries the check-in key hashes (not the keys — those were
+  // never stored), so a restored setup keeps its keys working.
+  // POST /api/backup {password?} — the plain backup document, or,
+  // with a password, encrypted with it (lib/backupcrypto.js). POST
+  // only, so a password never appears in a URL; there is no GET
+  // route, so the plain backup is never one link away.
+  const buildBackup = () => {
+    // The backup carries the SERVED form of each tx (a
+    // one-rule set as its single rule) — restore accepts both
+    // shapes, and the backup is compared against the served
+    // triggers after a restore, so the backup must match what
+    // the UI sees.
+    const backupState = JSON.parse(JSON.stringify(state));
+    backupState.bitcoin.txs = serveTxs(backupState.bitcoin.txs || []);
+    backupState.bitcoin.sets = serveSets(backupState.bitcoin.sets || []);
+    return {
+      format: 'standby-backup',
+      version: 1,
+      app: 'standby',
+      exportedAt: now.toISOString(),
+      state: backupState,
+      checkins: store.readCheckins(DATA_DIR, 200),
+      broadcastLog: store.readBroadcastLog(DATA_DIR, 200),
+    };
+  };
+  if (req.method === 'POST' && pathname === '/api/backup') {
+    const body = await readBody(req);
+    const password = body && body.password;
+    if (password === undefined || password === null || password === '') return sendJson(res, 200, buildBackup());
+    const problem = backupcrypto.passwordProblem(password);
+    if (problem) return sendError(res, 400, problem);
+    return sendJson(res, 200, await backupcrypto.encryptBackup(buildBackup(), password));
+  }
+
+  // POST /api/restore — restore a backup document (the parsed JSON from
+  // a downloaded backup). Validates before touching anything: the
+  // format and version, the settings, and every transaction's hex
+  // (each hex is re-parsed and all derived fields are recomputed from
+  // it, so a corrupt or hand-edited backup cannot store a bad tx).
+  // Replaces the state wholesale; the logs are replaced too when the
+  // backup carries them. Returns the restored transaction count.
+  if (req.method === 'POST' && pathname === '/api/restore') {
+    let body = await readBody(req);
+    // An encrypted backup is decrypted first — the UI sends
+    // the file's JSON with the password added as `password` — then
+    // validated exactly like a plain one.
+    if (backupcrypto.isEncryptedBackup(body)) {
+      try {
+        body = await backupcrypto.decryptBackup(body, body.password);
+      } catch (e) {
+        if (e instanceof backupcrypto.BackupCryptoError) return sendError(res, 400, e.message);
+        throw e;
+      }
+    }
+    if (!body || typeof body !== 'object' || body.format !== 'standby-backup') {
+      return sendError(res, 400, 'not a Standby backup file (format must be standby-backup)');
+    }
+    if (body.version !== 1) return sendError(res, 400, 'unsupported backup version: ' + body.version);
+    const bs = body.state;
+    if (!bs || typeof bs !== 'object' || !bs.settings || typeof bs.settings !== 'object'
+        || !bs.bitcoin || typeof bs.bitcoin !== 'object' || !Array.isArray(bs.bitcoin.txs)) {
+      return sendError(res, 400, 'backup is missing the state (settings + transactions)');
+    }
+    const bsSettings = bs.settings;
+    const settings = {
+      primaryApiUrl: bitcoin.DEFAULT_PUBLIC_API_URL,
+      secondaryApiUrl: '',
+      // `paused` is not a setting — a backup carrying it restores
+      // WITHOUT it (ignored, not an error). vacationUntil is null
+      // for indefinite, a 'YYYY-MM-DD' date otherwise; anything
+      // else (including a legacy '') restores as null.
+      vacationMode: !!bsSettings.vacationMode,
+      vacationUntil: (typeof bsSettings.vacationUntil === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(bsSettings.vacationUntil))
+        ? bsSettings.vacationUntil : null,
+    };
+    if (typeof bsSettings.primaryApiUrl === 'string' && bsSettings.primaryApiUrl.trim()) {
+      try { settings.primaryApiUrl = bitcoin.normalizePublicApiUrl(bsSettings.primaryApiUrl); }
+      catch (e) { return sendError(res, 400, 'backup primary node URL: ' + e.message); }
+    }
+    if (typeof bsSettings.secondaryApiUrl === 'string' && bsSettings.secondaryApiUrl.trim()) {
+      try { settings.secondaryApiUrl = bitcoin.normalizePublicApiUrl(bsSettings.secondaryApiUrl); }
+      catch (e) { return sendError(res, 400, 'backup secondary node URL: ' + e.message); }
+    }
+    // The secondary-enabled toggle rides along: a backup
+    // from before 0.8.8 carries none, which restores as enabled
+    // (the default); a present but non-boolean value rejects the
+    // whole restore, like a bad node URL.
+    if (bsSettings.secondaryEnabled !== undefined && bsSettings.secondaryEnabled !== null) {
+      if (typeof bsSettings.secondaryEnabled !== 'boolean') return sendError(res, 400, 'backup secondaryEnabled must be true or false');
+      settings.secondaryEnabled = bsSettings.secondaryEnabled;
+    } else {
+      settings.secondaryEnabled = true;
+    }
+    // The price sources ride along: a backup from before
+    // 0.8.0 carries none, which restores as the defaults; a present
+    // but invalid pair rejects the whole restore, like a bad node URL.
+    if (bsSettings.priceSources !== undefined && bsSettings.priceSources !== null) {
+      const ps = bsSettings.priceSources;
+      if (!ps || typeof ps !== 'object') return sendError(res, 400, 'backup priceSources must be {source1, source2}');
+      const s1 = bitcoin.normalizePriceSourceValue(ps.source1);
+      const s2 = bitcoin.normalizePriceSourceValue(ps.source2);
+      if (s1 === null) return sendError(res, 400, 'backup ' + priceSourceError(ps.source1));
+      if (s2 === null) return sendError(res, 400, 'backup ' + priceSourceError(ps.source2));
+      if (bitcoin.priceSourceKey(s1) === bitcoin.priceSourceKey(s2)) return sendError(res, 400, 'backup price sources must be different');
+      settings.priceSources = { source1: s1, source2: s2 };
+    } else {
+      settings.priceSources = { source1: 'coingecko', source2: 'coinbase' };
+    }
+    // The grace settings ride along the same way: a backup
+    // from before 0.8.0 carries none, which restores as the defaults
+    // (7 days offline to trigger, 7-day grace); a present but invalid
+    // value rejects the whole restore, like a bad node URL. The active
+    // grace itself does NOT ride along — a restore counts as a check-in
+    // (the owner is present), so the grace is cleared. The
+    // toggle rides along too:
+    // a backup from before the toggle carries no flag, which restores
+    // as on — except a stored duration of 0, which meant off, so it
+    // restores as off.
+    if (bsSettings.graceEnabled !== undefined) {
+      if (typeof bsSettings.graceEnabled !== 'boolean') {
+        return sendError(res, 400, 'backup graceEnabled must be a boolean');
+      }
+      settings.graceEnabled = bsSettings.graceEnabled;
+    } else {
+      settings.graceEnabled = (bsSettings.graceDurationDays === 0) ? false : true;
+    }
+    if (bsSettings.graceOfflineDays !== undefined && bsSettings.graceOfflineDays !== null) {
+      if (typeof bsSettings.graceOfflineDays !== 'number' || !GRACE_OFFLINE_DAYS.includes(bsSettings.graceOfflineDays)) {
+        return sendError(res, 400, 'backup graceOfflineDays must be one of ' + GRACE_OFFLINE_DAYS.join(', ') + ' days');
+      }
+      settings.graceOfflineDays = bsSettings.graceOfflineDays;
+    } else {
+      settings.graceOfflineDays = 7;
+    }
+    if (bsSettings.graceDurationDays !== undefined) {
+      if (bsSettings.graceDurationDays !== null && (typeof bsSettings.graceDurationDays !== 'number' || !GRACE_DURATION_DAYS.includes(bsSettings.graceDurationDays))) {
+        return sendError(res, 400, 'backup graceDurationDays must be one of ' + GRACE_DURATION_DAYS.join(', ') + ' days (0 = off, kept for back-compat), or null for indefinite');
+      }
+      settings.graceDurationDays = bsSettings.graceDurationDays;
+    } else {
+      settings.graceDurationDays = 7;
+    }
+    // The price-agreement, check-cadence, and fee-verdict
+    // settings ride along the same way: a backup from before
+    // 0.8.0 carries none, which restores as the defaults; a
+    // present but invalid value rejects the whole restore, like a
+    // bad node URL. The fee pair is validated together (using
+    // the backup's value where present, the default otherwise)
+    // so a partial pair cannot break the Low-above-Medium
+    // invariant.
+    if (bsSettings.priceAgreementPct !== undefined && bsSettings.priceAgreementPct !== null) {
+      if (typeof bsSettings.priceAgreementPct !== 'number' || !Number.isFinite(bsSettings.priceAgreementPct) || bsSettings.priceAgreementPct < PRICE_AGREEMENT_PCT_MIN || bsSettings.priceAgreementPct > PRICE_AGREEMENT_PCT_MAX) {
+        return sendError(res, 400, 'backup priceAgreementPct must be a number from ' + PRICE_AGREEMENT_PCT_MIN + ' to ' + PRICE_AGREEMENT_PCT_MAX + ' (%)');
+      }
+      settings.priceAgreementPct = bsSettings.priceAgreementPct;
+    } else {
+      settings.priceAgreementPct = PRICE_AGREEMENT_PCT_DEFAULT;
+    }
+    if (bsSettings.checkCadenceSeconds !== undefined && bsSettings.checkCadenceSeconds !== null) {
+      if (typeof bsSettings.checkCadenceSeconds !== 'number' || !Number.isFinite(bsSettings.checkCadenceSeconds) || bsSettings.checkCadenceSeconds < CHECK_CADENCE_SECONDS_MIN || bsSettings.checkCadenceSeconds > CHECK_CADENCE_SECONDS_MAX) {
+        return sendError(res, 400, 'backup checkCadenceSeconds must be a number from ' + CHECK_CADENCE_SECONDS_MIN + ' to ' + CHECK_CADENCE_SECONDS_MAX + ' (seconds)');
+      }
+      settings.checkCadenceSeconds = bsSettings.checkCadenceSeconds;
+    } else {
+      settings.checkCadenceSeconds = CHECK_CADENCE_SECONDS_DEFAULT;
+    }
+    if (bsSettings.feeLowMultiplier !== undefined || bsSettings.feeMediumMultiplier !== undefined) {
+      const low = (bsSettings.feeLowMultiplier !== undefined && bsSettings.feeLowMultiplier !== null) ? bsSettings.feeLowMultiplier : FEE_LOW_MULT_DEFAULT;
+      const med = (bsSettings.feeMediumMultiplier !== undefined && bsSettings.feeMediumMultiplier !== null) ? bsSettings.feeMediumMultiplier : FEE_MED_MULT_DEFAULT;
+      if (typeof low !== 'number' || !Number.isFinite(low) || low < FEE_LOW_MULT_MIN || low > FEE_LOW_MULT_MAX) {
+        return sendError(res, 400, 'backup feeLowMultiplier must be a number from ' + FEE_LOW_MULT_MIN + ' to ' + FEE_LOW_MULT_MAX + ' (× peak)');
+      }
+      if (typeof med !== 'number' || !Number.isFinite(med) || med < FEE_MED_MULT_MIN || med > FEE_MED_MULT_MAX) {
+        return sendError(res, 400, 'backup feeMediumMultiplier must be a number from ' + FEE_MED_MULT_MIN + ' to ' + FEE_MED_MULT_MAX + ' (× peak)');
+      }
+      if (low <= med) {
+        return sendError(res, 400, 'backup feeLowMultiplier must be greater than feeMediumMultiplier');
+      }
+      settings.feeLowMultiplier = low;
+      settings.feeMediumMultiplier = med;
+    } else {
+      settings.feeLowMultiplier = FEE_LOW_MULT_DEFAULT;
+      settings.feeMediumMultiplier = FEE_MED_MULT_DEFAULT;
+    }
+    const txs = [];
+    const seenIds = new Set();
+    for (const t of bs.bitcoin.txs) {
+      if (!t || typeof t.hex !== 'string' || !t.hex.trim()) {
+        return sendError(res, 400, 'backup transaction is missing its hex');
+      }
+      let parsed;
+      try { parsed = bitcoin.parseTx(t.hex.trim()); }
+      catch (e) { return sendError(res, 400, 'backup transaction hex is invalid: ' + e.message); }
+      // A release record is only accepted when its status is one the
+      // app itself writes, its txid is a string equal to the txid of
+      // the hex in this same backup entry, and its kind (when
+      // present) is one the app writes. The txid is REQUIRED: without
+      // it, {"release":{"status":"stale"}} would permanently disable a
+      // transaction that was never broadcast. Anything else rejects
+      // the WHOLE restore — a corrupt or hand-edited backup must not
+      // silently mark a transaction stale, or resurrect a broadcast
+      // that never happened. Even a txid-matching broadcast/stale
+      // claim is not believed: it is dropped when the restored tx is
+      // built below, and the network re-derives it; the check here
+      // only rejects a malformed or mismatched record outright. A
+      // record the app wrote always passes: every writer carries
+      // txid = the tx's txid (broadcastOneInner paths, dry-run
+      // verdict writes) and kind in RELEASE_KINDS, and the state
+      // migration guarantees txid on older records.
+      if (t.release !== undefined && t.release !== null) {
+        if (typeof t.release !== 'object' || !RELEASE_STATUSES.has(t.release.status)
+            || typeof t.release.txid !== 'string' || t.release.txid !== parsed.txid
+            || (t.release.kind !== undefined && !RELEASE_KINDS.has(t.release.kind))) {
+          return sendError(res, 400, 'backup transaction release record is invalid');
+        }
+      }
+      if (t.broadcasted !== undefined && t.broadcasted !== null) {
+        if (typeof t.broadcasted !== 'object' || t.broadcasted.txid !== parsed.txid) {
+          return sendError(res, 400, 'backup transaction broadcast record does not match its hex');
+        }
+      }
+      let id = (typeof t.id === 'string' && t.id) ? asStr(t.id, 40) : '';
+      if (!id || seenIds.has(id)) id = store.newTxId();
+      seenIds.add(id);
+      // The rule set rides through validation (the same
+      // per-rule rules as a single trigger), and the triggerState
+      // is normalized to the rule count — a flat object wraps to
+      // one element, an array is sanitized / padded / truncated,
+      // a malformed one restores as null (the evaluator overwrites
+      // it on the next evaluation anyway).
+      const restoredTrigger = store.triggerOf(t);
+      txs.push({
+        id,
+        txid: parsed.txid,
+        hex: t.hex.trim(),
+        label: asStr(t.label || '', 80),
+        notes: asStr(t.notes || '', 500),
+        createdAt: (typeof t.createdAt === 'string' && t.createdAt) ? t.createdAt : now.toISOString(),
+        inputs: parsed.inputs.length,
+        outputs: parsed.outputs.length,
+        totalOutSats: parsed.totalOutSats,
+        // The fee: carried through when present (a number
+        // or null); a backup from before 0.7.18 carries no fee,
+        // which restores as null — the same as an older record
+        // loaded from disk. A negative or non-finite value is not
+        // believed either.
+        feeSats: (typeof t.feeSats === 'number' && Number.isFinite(t.feeSats) && t.feeSats >= 0) ? t.feeSats : null,
+        feeRateSatVb: (typeof t.feeRateSatVb === 'number' && Number.isFinite(t.feeRateSatVb) && t.feeRateSatVb >= 0) ? t.feeRateSatVb : null,
+        locktime: parsed.locktime,
+        segwit: parsed.segwit,
+        enabled: typeof t.enabled === 'boolean' ? t.enabled : true,
+        // The check-in freeze: carried through when
+        // valid; a backup from before the redesign carries none,
+        // which restores as 0 / null — the same as an older record
+        // loaded from disk. (The restore itself counts as a
+        // check-in, so the offsets are reset to the new clock
+        // below — this carry-through is what validates them.)
+        checkinOffsetMs: (typeof t.checkinOffsetMs === 'number' && Number.isFinite(t.checkinOffsetMs) && t.checkinOffsetMs >= 0) ? t.checkinOffsetMs : 0,
+        checkinInactiveSince: (typeof t.checkinInactiveSince === 'string' && t.checkinInactiveSince && !Number.isNaN(new Date(t.checkinInactiveSince).getTime())) ? t.checkinInactiveSince : null,
+        // The broadcast route: a backup from before 0.7.16
+        // carries no route, which restores as 'public' — the same
+        // as an older record loaded from disk.
+        broadcastVia: validBroadcastVia(t.broadcastVia),
+        // The public fallback: a backup from before 0.7.17
+        // carries no duration, which restores as Never (null) — the
+        // same as an older record loaded from disk. The first-attempt
+        // timestamp rides along too (an unparseable one is dropped);
+        // without it a restored failing-submit tx would have no
+        // fallback deadline until its next attempt.
+        publicFallbackDays: validPublicFallbackDays(t.publicFallbackDays),
+        slipstreamFirstAttemptAt: (typeof t.slipstreamFirstAttemptAt === 'string'
+          && !Number.isNaN(new Date(t.slipstreamFirstAttemptAt).getTime())) ? t.slipstreamFirstAttemptAt : null,
+        // The trigger: carried through
+        // when valid — a single trigger or a rule set; a backup
+        // from before 0.8.0 carries none, which restores as the
+        // check-in trigger at the 35-day fallback — the same as
+        // an older record loaded from disk. An invalid trigger in a
+        // hand-edited backup falls back the same way (like the
+        // route and fallback above: lenient, never a 400 — a bad
+        // trigger must not reject a whole restore). The
+        // triggerState rides along too, normalized to the rule
+        // count (a malformed one restores as null — the evaluator
+        // overwrites it on the next evaluation anyway).
+        trigger: restoredTrigger,
+        triggerState: store.normalizeTriggerState(t.triggerState, restoredTrigger.rules.length),
+        // A broadcasted fact — or a release record claiming the tx
+        // already went out ('broadcast') or is spent ('stale') — is
+        // NOT believed from a backup on txid match alone: a
+        // hand-edited backup could falsely mark a transaction
+        // broadcast, or permanently disable one as stale. Both are
+        // re-derived from the network on the next evaluation (the
+        // freshness gate recognises a tx already out there, and
+        // marks spent inputs stale), so the restore drops them and
+        // the tx comes back active. 'failed', 'conflict', and
+        // 'submitted-slipstream' records are transient and
+        // self-correcting, so they ride along.
+        release: (t.release && (t.release.status === 'broadcast' || t.release.status === 'stale')) ? null : (t.release ? t.release : null),
+        broadcasted: null,
+        // The event trail rides along when it is well
+        // formed — display-only, so a hand-edited backup cannot
+        // hurt anything by forging it. The same distrust as the
+        // records above applies to its broadcast claims: a
+        // 'broadcast', 'confirmed', or 'stale' event from the
+        // backup is dropped with the record it describes, and the
+        // network re-derives it. A backup from before 0.8.2
+        // carries no history (null) — the load-time backfill seeds
+        // it from the restored facts on the next load.
+        history: Array.isArray(t.history)
+          ? t.history.filter((e) => e && typeof e === 'object' && store.HISTORY_TYPES.has(e.type)
+              && typeof e.ts === 'string' && !Number.isNaN(new Date(e.ts).getTime())
+              && typeof e.detail === 'string'
+              && e.type !== 'broadcast' && e.type !== 'confirmed' && e.type !== 'stale').slice(-HISTORY_MAX)
+          : null,
+      });
+    }
+    // Trigger sets ride along: each set's members must be
+    // among the restored txs, its trigger normalized, its history
+    // sanitized like a tx's (broadcast/confirmed/stale events are
+    // dropped with the records they describe — the network
+    // re-derives them). A set naming no restored tx is dropped
+    // whole (its members stay standalone); a duplicate id, or a
+    // tx in two sets, keeps only the first.
+    const restoredSets = [];
+    const restoredTxIds = new Set(txs.map((t) => t.id));
+    const seenSetIds = new Set();
+    const seenSetMembers = new Set();
+    if (Array.isArray(bs.bitcoin.sets)) {
+      for (const bsSet of bs.bitcoin.sets) {
+        if (!bsSet || typeof bsSet !== 'object' || typeof bsSet.id !== 'string' || !bsSet.id || seenSetIds.has(bsSet.id)) continue;
+        seenSetIds.add(bsSet.id);
+        const memberIds = Array.isArray(bsSet.txIds)
+          ? [...new Set(bsSet.txIds.filter((id) => typeof id === 'string' && restoredTxIds.has(id) && !seenSetMembers.has(id)))]
+          : [];
+        if (!memberIds.length) continue;
+        const restoredSetTrigger = store.triggerOf(bsSet);
+        restoredSets.push({
+          id: asStr(bsSet.id, 40),
+          label: asStr(bsSet.label || '', 80),
+          enabled: typeof bsSet.enabled === 'boolean' ? bsSet.enabled : true,
+          txIds: memberIds,
+          trigger: restoredSetTrigger,
+          triggerState: store.normalizeTriggerState(bsSet.triggerState, restoredSetTrigger.rules.length),
+          history: Array.isArray(bsSet.history)
+            ? bsSet.history.filter((e) => e && typeof e === 'object' && store.HISTORY_TYPES.has(e.type)
+                && typeof e.ts === 'string' && !Number.isNaN(new Date(e.ts).getTime())
+                && typeof e.detail === 'string'
+                && e.type !== 'broadcast' && e.type !== 'confirmed' && e.type !== 'stale').slice(-HISTORY_MAX)
+            : null,
+          createdAt: (typeof bsSet.createdAt === 'string' && bsSet.createdAt) ? bsSet.createdAt : now.toISOString(),
+          checkinOffsetMs: 0,
+          checkinInactiveSince: null,
+        });
+        for (const id of memberIds) seenSetMembers.add(id);
+      }
+    }
+    const bsCheckin = (bs.checkin && typeof bs.checkin === 'object') ? bs.checkin : {};
+    // The check-in time must be a
+    // real date and not in the future (beyond the same 5-minute skew
+    // the receiver merge allows). An invalid date makes checkinStatus
+    // throw on every status read (new Date(NaN).toISOString()), and a
+    // far-future date would silently postpone the release forever.
+    // Anything else rejects the WHOLE restore before anything is
+    // applied. A real backup always carries a valid ISO timestamp
+    // (or null, for a setup that has never checked in), so this
+    // cannot reject a backup the app itself wrote.
+    if (bsCheckin.lastCheckinAt !== undefined && bsCheckin.lastCheckinAt !== null) {
+      if (typeof bsCheckin.lastCheckinAt !== 'string') {
+        return sendError(res, 400, 'backup check-in time is invalid');
+      }
+      const at = new Date(bsCheckin.lastCheckinAt);
+      if (Number.isNaN(at.getTime())) {
+        return sendError(res, 400, 'backup check-in time is not a valid date');
+      }
+      if (at.getTime() > now.getTime() + 5 * 60 * 1000) {
+        return sendError(res, 400, 'backup check-in time is in the future');
+      }
+    }
+    // The "I was online" stamp rides along the same way:
+    // a real date (or null), never in the future beyond the same
+    // 5-minute skew — a future stamp would hide a real offline gap
+    // and defeat the grace. A backup's check-in hold
+    // (heldUntil) is accepted and dropped, never a 400 — and NOT
+    // translated into a grace the way loadState does: a restore
+    // counts as a check-in (the clock
+    // resets to now below) and the grace is cleared by design,
+    // so there is no due check-in for a translated hold to
+    // protect and no offline gap for it to describe. Dropping
+    // it here cannot cause a broadcast.
+    if (bsCheckin.lastOnlineAt !== undefined && bsCheckin.lastOnlineAt !== null) {
+      if (typeof bsCheckin.lastOnlineAt !== 'string') {
+        return sendError(res, 400, 'backup last-online time is invalid');
+      }
+      const at = new Date(bsCheckin.lastOnlineAt);
+      if (Number.isNaN(at.getTime())) {
+        return sendError(res, 400, 'backup last-online time is not a valid date');
+      }
+      if (at.getTime() > now.getTime() + 5 * 60 * 1000) {
+        return sendError(res, 400, 'backup last-online time is in the future');
+      }
+    }
+    // Check-in API keys ride along in the backup (hashes only — the
+    // plaintext keys were never stored, so a backup cannot leak them).
+    // A malformed key entry rejects the restore, like a bad tx hex. A
+    // backup from before 0.6.6 carries no keys at all, which restores
+    // as an empty list.
+    const restoredKeys = [];
+    if (Array.isArray(bs.checkinKeys)) {
+      for (const k of bs.checkinKeys) {
+        if (!k || typeof k !== 'object' || typeof k.id !== 'string' || !k.id
+            || typeof k.label !== 'string' || typeof k.hash !== 'string'
+            || !/^[0-9a-f]{64}$/.test(k.hash)) {
+          return sendError(res, 400, 'backup check-in key entry is invalid');
+        }
+        restoredKeys.push({
+          id: asStr(k.id, 40), label: asStr(k.label, 80), hash: k.hash,
+          createdAt: (typeof k.createdAt === 'string' && k.createdAt) ? k.createdAt : now.toISOString(),
+          lastUsedAt: (typeof k.lastUsedAt === 'string' || k.lastUsedAt === null) ? (k.lastUsedAt || null) : null,
+        });
+      }
+    }
+    const restored = {
+      version: 7,
+      createdAt: (typeof bs.createdAt === 'string' && bs.createdAt) ? bs.createdAt : now.toISOString(),
+      updatedAt: now.toISOString(),
+      settings,
+      bitcoin: {
+        txs,
+        sets: restoredSets,
+        connection: (bs.bitcoin.connection && typeof bs.bitcoin.connection === 'object')
+          ? bs.bitcoin.connection : { ok: null, checkedAt: null, detail: '' },
+      },
+      checkin: {
+        // A restore is proof the owner is present, so it
+        // counts as a check-in: the clock starts clean at the
+        // restore moment. The backup's clock is still VALIDATED
+        // above (a corrupt or future-dated clock rejects the whole
+        // restore) — it is just not carried forward: lastCheckinAt
+        // and lastOnlineAt are now, and the count keeps the
+        // backup's total plus this restore.
+        lastCheckinAt: now.toISOString(),
+        totalCheckins: clampInt(bsCheckin.totalCheckins, 0, 0, 1000000) + 1,
+        lastOnlineAt: now.toISOString(),
+      },
+      checkinKeys: restoredKeys,
+      // The fee history rides along: the peak is computed
+      // from these observations, so restoring without them would
+      // reset the verdict to "still building" for a day. A backup
+      // from before 0.8.9 carries none, which restores as empty.
+      // Sanitized like a load — a hand-edited backup cannot
+      // smuggle a bad entry into the peak.
+      feeHistory: store.sanitizeFeeHistory(bs.feeHistory),
+    };
+    // The restore counts as a check-in (see the clock
+    // comment above): the offsets are measured against the OLD
+    // clock, so they are reset to the new one — a carried offset
+    // would otherwise push the effective last check-in into the
+    // future and the bar would read a negative count. A tx that
+    // is still inactive (disarmed, or the restored vacation is
+    // on) is re-marked inactive from now, so it stays frozen at 0.
+    for (const t of txs) {
+      if (!store.hasTriggerType(t, 'checkin')) continue;
+      t.checkinOffsetMs = 0;
+      t.checkinInactiveSince = null;
+    }
+    for (const t of txs) syncCheckinFreeze(t, restored, now);
+    // A restored set's check-in freeze resets the same way.
+    for (const s of restoredSets) {
+      if (!store.hasTriggerType(s, 'checkin')) continue;
+      s.checkinOffsetMs = 0;
+      s.checkinInactiveSince = null;
+    }
+    for (const s of restoredSets) syncCheckinFreeze(s, restored, now);
+    store.saveState(DATA_DIR, restored);
+    // The warnings describe the state that was just
+    // replaced — a recovery at boot, say — so they are stale now;
+    // clear both lists.
+    store.clearStateWarnings();
+    startupWarnings.length = 0;
+    // A restored cadence takes effect immediately — the running
+    // fast tick is cleared and restarted with it.
+    rearmFullTick();
+    // The receiver's key list matches the restored state from now on.
+    writeReceiverKeys(restored);
+    if (Array.isArray(body.checkins)) store.writeCheckins(DATA_DIR, body.checkins.slice(-200));
+    if (Array.isArray(body.broadcastLog)) store.writeBroadcastLog(DATA_DIR, body.broadcastLog.slice(-200));
+    // The restore itself is a check-in — record it in
+    // the history so the displayed last check-in matches the
+    // refreshed clock. Appended after the backup's own history
+    // (above), so it is the most recent entry; the method reads
+    // 'restore' in the recent-check-ins list.
+    store.appendCheckin(DATA_DIR, { ts: now.toISOString(), method: 'restore' });
+    // A backup's broadcast and stale records are not trusted (see
+    // above), so every restored card would read Active. Ask the node
+    // instead: the same check as Dry-run all records which ones are
+    // already broadcast, stale, or in conflict. Nothing is sent. A
+    // transaction the node cannot answer for keeps its restored status
+    // until the next dry run.
+    let recheck = { checked: 0, broadcast: 0, stale: 0, conflict: 0, unchecked: 0 };
+    try {
+      const rr = await dryRunAndRecord(restored, restored.bitcoin.txs || [], now, { deadlineMs: Date.now() + RESTORE_CHECK_MS });
+      recheck = {
+        checked: rr.length,
+        broadcast: rr.filter((r) => !(r.spent && r.spent.length) && r.own && r.own.length).length,
+        stale: rr.filter((r) => r.spent && r.spent.length).length,
+        conflict: rr.filter((r) => !(r.spent && r.spent.length) && !(r.own && r.own.length) && r.conflict && r.conflict.length).length,
+        unchecked: rr.filter((r) => r.error || r.verdict === 'unknown').length,
+      };
+    } catch (e) {
+      recheck.unchecked = txs.length;
+    }
+    // The restored state is served the same way as a read (a
+    // one-rule set as its single rule — see GET /api/state) —
+    // re-read, so it carries what the check just recorded.
+    const servedRestored = sanitizeState(store.loadState(DATA_DIR));
+    // The fee history is state-internal — see GET
+    // /api/state — never served, even in a restore response.
+    delete servedRestored.feeHistory;
+    servedRestored.bitcoin.txs = serveTxs(servedRestored.bitcoin.txs || []);
+    servedRestored.bitcoin.sets = serveSets(servedRestored.bitcoin.sets || []);
+    return sendJson(res, 200, { ok: true, restoredTxs: txs.length, restoredSets: restoredSets.length, recheck, state: servedRestored });
+  }
+  return NEXT;
+};

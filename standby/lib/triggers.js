@@ -1,8 +1,7 @@
 'use strict';
 // Standby — trigger text + serve shaping.
 const store = require('./store');
-const bitcoin = require('./bitcoin');
-const { days, validPublicFallbackDays } = require('./util');
+const { validPublicFallbackDays } = require('./util');
 
 // Triggers. Each transaction carries its own trigger — see
 // lib/store.js for the shapes and normalizeTrigger/triggerOf. These

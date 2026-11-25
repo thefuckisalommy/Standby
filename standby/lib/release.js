@@ -2,7 +2,6 @@
 // Standby — release evaluation, refreshes, ticks.
 const store = require('./store');
 const bitcoin = require('./bitcoin');
-const fs = require('fs');
 const { caches } = require('./caches');
 const { applyGrace, expireVacation, mergeExternalCheckin } = require('./checkin');
 const { DATA_DIR } = require('./config');
@@ -11,6 +10,7 @@ const { checkCadenceSecondsOf, fetchTipHeightsCached, refreshPriceIfStale } = re
 const rules = require('./rules');
 const { fallbackDeadline, releaseTriggerFor, setMembers, triggerTypesLabel } = require('./triggers');
 const { validPublicFallbackDays } = require('./util');
+const { findingFor, recordFindings } = require('./verdicts');
 
 // a plain 'already in progress' skip. The flag is set and cleared
 // synchronously around the awaited work, in a finally, so it can never
@@ -445,25 +445,14 @@ async function evaluateReleaseInner(automatic) {
       let chk = null;
       try { chk = await bitcoin.checkInputsUnspent(bitcoin.parseTx(m.hex), endpoints, checkCadenceSecondsOf(state.settings) * 1000); }
       catch (e) { chk = null; } // unknown: rules.broadcastOne decides below
-      if (chk && chk.spent && chk.spent.length) {
-        staleFound.push({ member: m, desc: chk.spent.map((i) => i.prevTxid.slice(0, 12) + ':' + i.prevVout).join(', '), method: chk.checkedVia || 'primary' });
-      }
+      const f = chk && findingFor(m.id, chk, { staleOnly: true });
+      if (f) staleFound.push({ member: m, f });
     }
     if (staleFound.length) {
-      try {
-        const freshS = store.loadState(DATA_DIR);
-        for (const sf of staleFound) {
-          const fm = (freshS.bitcoin.txs || []).find((t) => t.id === sf.member.id);
-          if (!fm || fm.broadcasted || (fm.release && fm.release.status === 'stale')) continue;
-          const err = 'inputs spent: ' + sf.desc;
-          fm.release = { status: 'stale', kind: 'release', trigger: releaseTriggerFor(freshS, fm), txid: fm.txid, method: sf.method, lastAttemptAt: now.toISOString(), error: err };
-          pushHistory(fm, 'stale', err);
-          noteSetMemberStale(freshS, fm, err);
-        }
-        store.saveState(DATA_DIR, freshS);
-      } catch (e) { console.error('set stale marking failed:', e); }
+      try { recordFindings(staleFound.map((sf) => sf.f), now, 'release'); }
+      catch (e) { console.error('set stale marking failed:', e); }
       for (const sf of staleFound) {
-        results.push({ id: sf.member.id, txid: sf.member.txid, label: sf.member.label || '', action: 'stale', error: 'inputs spent: ' + sf.desc, trigger: triggerTypesLabel(sf.member) });
+        results.push({ id: sf.member.id, txid: sf.member.txid, label: sf.member.label || '', action: 'stale', error: sf.f.stale.error, trigger: triggerTypesLabel(sf.member) });
       }
     }
     const staleIds = new Set(staleFound.map((sf) => sf.member.id));
@@ -700,32 +689,16 @@ async function refreshStagedFreshness(state) {
     return !!tx.enabled;
   });
   if (!live.length) return [];
-  const staleFound = [];
+  const findings = [];
   for (const tx of live) {
     let chk = null;
     try { chk = await bitcoin.checkInputsUnspent(bitcoin.parseTx(tx.hex), endpoints, checkCadenceSecondsOf(state.settings) * 1000); }
     catch (e) { console.error('staged freshness check failed for', (tx.label || tx.id) + ':', e.message); continue; }
-    if (chk && chk.spent && chk.spent.length) {
-      staleFound.push({ tx, desc: chk.spent.map((i) => i.prevTxid.slice(0, 12) + ':' + i.prevVout).join(', '), method: chk.checkedVia || 'primary' });
-    }
-    // conflict / own / unknown: no state change (see header).
+    const f = chk && findingFor(tx.id, chk, { staleOnly: true });
+    if (f) findings.push({ f, txid: tx.txid });
   }
-  if (!staleFound.length) return [];
-  // Merge into FRESH state (see refreshConfirmations): an edit
-  // landing while the lookups were on the network would otherwise
-  // be clobbered by the save of this stale copy. Guards
-  // re-evaluated here, exactly as the set-stale path does.
-  const fresh = store.loadState(DATA_DIR);
-  for (const sf of staleFound) {
-    const fm = (fresh.bitcoin.txs || []).find((t) => t.id === sf.tx.id);
-    if (!fm || fm.broadcasted || (fm.release && fm.release.status === 'stale')) continue;
-    const err = 'inputs spent: ' + sf.desc;
-    fm.release = { status: 'stale', kind: 'release', trigger: releaseTriggerFor(fresh, fm), txid: fm.txid, method: sf.method, lastAttemptAt: now.toISOString(), error: err };
-    pushHistory(fm, 'stale', err);
-    noteSetMemberStale(fresh, fm, err);
-  }
-  store.saveState(DATA_DIR, fresh);
-  return staleFound.map((sf) => ({ id: sf.tx.id, txid: sf.tx.txid, action: 'stale', error: 'inputs spent: ' + sf.desc }));
+  recordFindings(findings.map((x) => x.f), now, 'release');
+  return findings.map((x) => ({ id: x.f.id, txid: x.txid, action: 'stale', error: x.f.stale.error }));
 }
 
 // Refresh the MARA-waiting transactions. For every tx

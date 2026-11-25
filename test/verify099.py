@@ -6538,7 +6538,7 @@ def main():
         shutil.rmtree(_bind_checkin, ignore_errors=True)
         _e43 = dict(APP_ENV)
         _e43.update({'PORT': '3440', 'DATA_DIR': _bind_data, 'CHECKIN_DIR': _bind_checkin,
-                     'STANDBY_TEST_STARTUP_TICK_MS': '600000'})
+                     'STANDBY_TEST_STARTUP_TICK_MS': '600000', 'STANDBY_TEST_RESTORE_CHECK_MS': '4000'})
         _e43.pop('STANDBY_PASSWORD', None)
         _app43 = start(['node', 'server.js'], env=_e43, cwd=APP, log=_bind_log)
         check('43 bare: instance comes up', wait_up(_ab43))
@@ -6709,6 +6709,21 @@ def main():
         t = _by_label44(st, 'Bare confirmed')
         check('44 restore: ... and records nothing it could not check',
               t and (t.get('release') or {}).get('status') != 'stale', t and t.get('release'))
+        # A node that accepts the requests but answers too slowly cannot
+        # hold the restore: the check stops at its time limit (4 s here)
+        # and reports the rest unchecked.
+        bak44['state']['settings']['primaryApiUrl'] = _bs_base
+        req('POST', '/__test__/outspend-delay', {'ms': 8000}, base=_bs_base)
+        check('44 restore: caches cleared before the slow-node restore', _clear43())
+        _t0 = time.time()
+        s, r = req('POST', '/api/restore', bak44, base=_ab43, timeout=60)
+        _took = time.time() - _t0
+        rc = r.get('recheck') or {}
+        check('44 restore: a hanging node does not hold the restore past its time limit',
+              s == 200 and r.get('ok') is True and _took < 8, (s, round(_took, 1)))
+        check('44 restore: ... and the transactions it could not check are reported unchecked',
+              rc.get('unchecked') == r.get('restoredTxs') and rc.get('stale') == 0, rc)
+        req('POST', '/__test__/outspend-delay', {'ms': 0}, base=_bs_base)
         stop(_app43)
         stop(_stub43)
 
