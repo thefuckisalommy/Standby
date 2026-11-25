@@ -88,6 +88,9 @@ function defaultState() {
     // SHA-256 hash is stored (the plaintext is shown once). key = { id,
     // label, hash, createdAt, lastUsedAt }
     checkinKeys: [],
+    // First-open setup (the page-per-step walkthrough). done false shows
+    // it; an install from before it existed loads as done.
+    setup: { done: false },
   };
 }
 
@@ -636,6 +639,7 @@ function loadState(dataDir) {
     }
   }
   const state = mergeDefaults(defaultState(), saved);
+  if (!saved.setup || typeof saved.setup !== 'object') state.setup = { done: true };
   // Sanitize the fee history on load, so hand-edited or old state cannot
   // slip a bad, future or out-of-window entry into the peak.
   state.feeHistory = sanitizeFeeHistory(state.feeHistory);

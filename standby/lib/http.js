@@ -106,16 +106,17 @@ function describeAllowedHosts() {
 // under 12 characters. STANDBY_ALLOWED_HOSTS only widens access, so it
 // never silences a warning.
 const MIN_PASSWORD_LENGTH = 12;
-function startupSecurityNotes({ bind, deployment, password }) {
+function startupSecurityNotes({ bind, deployment, password, appPassword }) {
   const warnings = [];
   const info = [];
+  if (!password && appPassword && deployment !== 'umbrel') return { warnings, info };
   if (!password) {
     if (deployment === 'umbrel') {
       warnings.push('Standby: WARNING: STANDBY_PASSWORD is unset — other apps on the Umbrel Docker network can reach the API without Umbrel\'s login. The Umbrel compose file sets it from APP_PASSWORD; check that it is present.');
     } else if (deployment === 'docker') {
-      info.push('Standby: no app login (STANDBY_PASSWORD unset) — access is limited only by the host-side port mapping. Set STANDBY_PASSWORD to require a login.');
+      info.push('Standby: no app login (STANDBY_PASSWORD unset) — access is limited only by the host-side port mapping. Set STANDBY_PASSWORD, or a password in Settings → App login, to require one.');
     } else if (!isLoopback(bind)) {
-      warnings.push('Standby: WARNING: listening on ' + bind + ' with no app login (STANDBY_PASSWORD unset) — anyone who can reach this port can read and broadcast your transactions. Set STANDBY_PASSWORD, or bind 127.0.0.1.');
+      warnings.push('Standby: WARNING: listening on ' + bind + ' with no app login (STANDBY_PASSWORD unset) — anyone who can reach this port can read and broadcast your transactions. Set a password in Settings → App login (or STANDBY_PASSWORD), or bind 127.0.0.1.');
     }
   } else if (password.length < MIN_PASSWORD_LENGTH) {
     warnings.push('Standby: WARNING: STANDBY_PASSWORD is shorter than ' + MIN_PASSWORD_LENGTH + ' characters — use a longer one.');

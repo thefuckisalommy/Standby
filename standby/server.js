@@ -43,6 +43,19 @@ requireWritable([
     process.exit(1);
   }
 }
+// The app password (lib/auth.js). --reset-password removes it: the reset
+// for a forgotten one, possible only by whoever can start Standby on this
+// machine. A damaged login file stops the start rather than turning the
+// login off.
+const auth = require('./lib/auth');
+if (process.argv.includes('--reset-password')) {
+  if (PASSWORD) console.log('Standby: --reset-password does nothing here — the password comes from STANDBY_PASSWORD' + (DEPLOYMENT === 'umbrel' ? " (Umbrel's app password)." : '; change it there.'));
+  else console.log(auth.clearAppPassword() ? 'Standby: app password removed (--reset-password). Open Standby to set a new one.' : 'Standby: --reset-password: no app password was set.');
+}
+try { auth.source(); } catch (e) {
+  console.error('Standby: ' + e.message);
+  process.exit(1);
+}
 
 // An uncaught exception is a crash, not something to serve through: for an
 // app that broadcasts, a corrupted process is worse than a short outage.
@@ -115,10 +128,11 @@ server.on('error', (e) => {
 server.listen(PORT, BIND, () => {
   console.log(`Standby ${VERSION} listening on ${BIND}:${PORT} (data: ${DATA_DIR}, deployment: ${DEPLOYMENT})`);
   console.log('Standby allowed Hosts: ' + describeAllowedHosts());
-  console.log('Standby app login: ' + (PASSWORD ? 'required (STANDBY_PASSWORD set)' : 'off (STANDBY_PASSWORD unset)'));
+  const loginSource = auth.source();
+  console.log('Standby app login: ' + (loginSource === 'env' ? 'required (STANDBY_PASSWORD set)' : loginSource === 'app' ? 'required (password set in the app)' : 'off (no password set)'));
   // Who can reach the API without a login? See
   // startupSecurityNotes in lib/http.js.
-  const notes = startupSecurityNotes({ bind: BIND, deployment: DEPLOYMENT, password: PASSWORD });
+  const notes = startupSecurityNotes({ bind: BIND, deployment: DEPLOYMENT, password: PASSWORD, appPassword: loginSource === 'app' });
   for (const line of notes.info) console.log(line);
   for (const line of notes.warnings) console.warn(line);
   // Endpoint overrides are never silent.

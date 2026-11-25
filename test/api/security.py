@@ -163,8 +163,11 @@ def run():
     s, r = req('GET', '/api/health', base=_ab)
     check('40 auth: health is public', s == 200 and r.get('version') == VERSION, (s, r))
     s, r = req('GET', '/api/auth/status', base=_ab)
-    check('40 auth: status says required, not authenticated',
-          s == 200 and r == {'required': True, 'authenticated': False}, (s, r))
+    check('40 auth: status says required, not authenticated, set by STANDBY_PASSWORD',
+          s == 200 and r.get('required') is True and r.get('authenticated') is False and r.get('source') == 'env', (s, r))
+    s, r = req('POST', '/api/auth/password', {'current': _pw, 'password': 'a new long password'}, base=_ab,
+               headers={'Authorization': 'Bearer ' + _pw})
+    check('40 auth: a STANDBY_PASSWORD cannot be changed from the app (409)', s == 409, (s, r))
     s, r = req('GET', '/api/state', base=_ab)
     check('40 auth: state without a login is 401 login:true',
           s == 401 and r.get('login') is True, (s, r))
@@ -249,6 +252,96 @@ def run():
     check('40 auth-off: status says not required', s == 200 and r.get('required') is False, (s, r))
     s, r = req('POST', '/api/login', {'password': 'anything'}, base=_ab)
     check('40 auth-off: login answers ok with no token', s == 200 and r.get('token') is None, (s, r))
+    stop(_auth_app)
+
+    # --- 40b. app password (set in the app) and first-open setup ---
+    # Without STANDBY_PASSWORD the owner can set one: stored as a scrypt
+    # hash in login.json, changed or removed with the current one, and
+    # reset only by --reset-password at start (or deleting the file).
+    _apw = 'an app password here'
+    _auth_app = _bind_instance({})
+    check('40b app-pw: instance comes up', wait_up(_ab))
+    s, r = req('GET', '/api/state', base=_ab)
+    check('40b setup: a fresh install starts with setup not done', s == 200 and r.get('setup') == {'done': False}, (s, r.get('setup')))
+    s, r = req('POST', '/api/setup', {'done': 'yes'}, base=_ab)
+    check('40b setup: done must be a boolean', s == 400, (s, r))
+    s, r = req('POST', '/api/setup', {'done': True}, base=_ab)
+    s2, st = req('GET', '/api/state', base=_ab)
+    check('40b setup: POST /api/setup marks it done', s == 200 and st.get('setup') == {'done': True}, (s, r, st.get('setup')))
+    s, r = req('POST', '/api/auth/password', {'password': 'short'}, base=_ab)
+    check('40b app-pw: under 12 characters is 400', s == 400 and '12' in r.get('error', ''), (s, r))
+    s, r = req('POST', '/api/auth/password', {'password': _apw}, base=_ab)
+    _atok = r.get('token') if isinstance(r, dict) else None
+    check('40b app-pw: setting one answers a token', s == 200 and r.get('required') is True and isinstance(_atok, str), (s, r))
+    _lf = os.path.join(_bind_data, 'login.json')
+    _ldoc = json.load(open(_lf)) if os.path.exists(_lf) else {}
+    check('40b app-pw: login.json holds a scrypt hash, not the password',
+          _ldoc.get('format') == 'standby-login' and _ldoc.get('kdf', {}).get('name') == 'scrypt' and _apw not in open(_lf).read(), _ldoc)
+    if os.name != 'nt':
+        check('40b app-pw: login.json is 0600', _mode(_lf) == 0o600, oct(_mode(_lf)))
+    s, r = req('GET', '/api/auth/status', base=_ab)
+    check('40b app-pw: status says required, source app', r.get('required') is True and r.get('source') == 'app', r)
+    s, r = req('GET', '/api/state', base=_ab)
+    check('40b app-pw: the API is gated now', s == 401 and r.get('login') is True, (s, r))
+    _ah = {'X-Standby-Token': _atok or ''}
+    s, r = req('GET', '/api/state', base=_ab, headers=_ah)
+    check('40b app-pw: the returned token works', s == 200, s)
+    s, r = req('POST', '/api/login', {'password': _apw}, base=_ab)
+    check('40b app-pw: login with it works', s == 200 and str(r.get('token', '')).startswith('v1.'), (s, r))
+    s, r = req('POST', '/api/auth/password', {'current': 'not the password', 'password': 'another app password'}, base=_ab, headers=_ah)
+    check('40b app-pw: a change with a wrong current password is 401 (no login flag)', s == 401 and r.get('login') is None, (s, r))
+    s, r = req('POST', '/api/auth/password', {'current': _apw, 'password': 'another app password'}, base=_ab, headers=_ah)
+    _atok2 = r.get('token') if isinstance(r, dict) else None
+    check('40b app-pw: a change with the current password works', s == 200 and isinstance(_atok2, str), (s, r))
+    s, r = req('GET', '/api/state', base=_ab, headers=_ah)
+    check('40b app-pw: the old token stops working after a change', s == 401, s)
+    _ah = {'X-Standby-Token': _atok2 or ''}
+    s, r = req('POST', '/api/state/reset', {'confirm': True, 'password': 'nope nope nope'}, base=_ab, headers=_ah)
+    check('40b fresh: start fresh with the wrong password is 401', s == 401 and r.get('error') == 'wrong password', (s, r))
+    s, r = req('POST', '/api/state/reset', {'confirm': True}, base=_ab, headers=_ah)
+    check('40b fresh: start fresh without the password is 401', s == 401, (s, r))
+    s, r = req('POST', '/api/state/reset', {'confirm': True, 'password': 'another app password'}, base=_ab, headers=_ah)
+    check('40b fresh: start fresh with the password works', s == 200 and r.get('ok') is True, (s, r))
+    s, r = req('GET', '/api/state', base=_ab, headers=_ah)
+    check('40b fresh: the login survives start fresh, and setup runs again',
+          s == 200 and r.get('setup') == {'done': False} and os.path.exists(_lf), (s, r.get('setup')))
+    # --reset-password at start removes it.
+    stop(_auth_app)
+    _e = dict(APP_ENV)
+    _e.update({'PORT': '3440', 'DATA_DIR': _bind_data, 'CHECKIN_DIR': _bind_checkin})
+    for _k in ('STANDBY_ALLOWED_HOSTS', 'STANDBY_PASSWORD', 'STANDBY_DEPLOYMENT'):
+        _e.pop(_k, None)
+    _fresh_bind_log()
+    _auth_app = start(['node', 'server.js', '--reset-password'], env=_e, cwd=APP, log=_bind_log)
+    check('40b reset: instance comes up with --reset-password', wait_up(_ab))
+    s, r = req('GET', '/api/auth/status', base=_ab)
+    check('40b reset: the app password is gone', r.get('required') is False and r.get('source') == 'none' and not os.path.exists(_lf), r)
+    check('40b reset: the log says so', 'app password removed (--reset-password)' in _bind_log_text(), _bind_log_text()[-400:])
+    s, r = req('GET', '/api/state', base=_ab)
+    check('40b reset: the data is kept (setup flag unchanged)', s == 200 and r.get('setup') == {'done': False}, (s, r.get('setup')))
+    # Remove from the app (needs the current password).
+    s, r = req('POST', '/api/auth/password', {'password': _apw}, base=_ab)
+    _ah = {'X-Standby-Token': r.get('token') or ''}
+    s, r = req('POST', '/api/auth/password', {'current': 'wrong wrong wrong', 'remove': True}, base=_ab, headers=_ah)
+    check('40b remove: a wrong current password is refused', s == 401 and os.path.exists(_lf), (s, r))
+    s, r = req('POST', '/api/auth/password', {'current': _apw, 'remove': True}, base=_ab, headers=_ah)
+    check('40b remove: the right one removes it', s == 200 and r.get('required') is False and not os.path.exists(_lf), (s, r))
+    stop(_auth_app)
+    # A damaged login.json stops the start (never silently login-off).
+    open(_lf, 'w').write('{damaged')
+    _cp = subprocess.run(['node', 'server.js'], env=dict(os.environ, **_e), cwd=APP, capture_output=True, text=True, timeout=20)
+    check('40b damaged: an unreadable login.json exits 1 and names the fix',
+          _cp.returncode == 1 and 'login.json' in _cp.stderr and 'Delete it' in _cp.stderr, (_cp.returncode, _cp.stderr[-300:]))
+    os.remove(_lf)
+    # An install from before setup existed loads as set up.
+    _sf = os.path.join(_bind_data, 'state.json')
+    _st = json.load(open(_sf))
+    _st.pop('setup', None)
+    json.dump(_st, open(_sf, 'w'))
+    _auth_app = start(['node', 'server.js'], env=_e, cwd=APP, log=_bind_log)
+    check('40b setup: instance comes up on an older state', wait_up(_ab))
+    s, r = req('GET', '/api/state', base=_ab)
+    check('40b setup: an older install (no setup field) loads as done', s == 200 and r.get('setup') == {'done': True}, (s, r.get('setup')))
     stop(_auth_app)
     # A data directory that cannot be created: the app refuses to
     # start (exit 1) and names the problem and the fix.

@@ -16,6 +16,15 @@ module.exports = async function settingsRoutes(ctx) {
   // fresh (bypassing the cache) and return { provider, price, error }.
   // Changes nothing. A failing provider is a 200 with the error; only an
   // unknown id is a 400.
+  // POST /api/setup { done }: the first-open setup finished or skipped
+  // (true), or "Run setup again" (false).
+  if (req.method === 'POST' && pathname === '/api/setup') {
+    const body = await readBody(req);
+    if (!body || typeof body.done !== 'boolean') return sendError(res, 400, 'done must be true or false');
+    saveMutation((f) => { f.setup = { done: body.done }; });
+    return sendJson(res, 200, { ok: true, setup: { done: body.done } });
+  }
+
   if (req.method === 'POST' && pathname === '/api/settings/price-sources/test') {
     const body = await readBody(req);
     const prov = bitcoin.priceProviderById(body && body.provider);

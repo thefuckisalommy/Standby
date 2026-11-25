@@ -28,7 +28,7 @@ Runs on Umbrel (community app store) or any Linux machine with Docker (arm64 and
 
 App Store → Community App Stores → add `https://github.com/thefuckisalommy/Standby`, then install Standby. The login password is shown on Standby's page in the Umbrel dashboard.
 
-Then add a transaction: paste the signed hex, pick a trigger, and arm it.
+On first open, a short setup walks through the app password (skippable, with a warning), the Bitcoin nodes, the price sources and how triggers work, then your first transaction. Every step can keep its default, and everything can be changed later in Settings (which can also run setup again).
 
 ## Run with Docker
 
@@ -54,7 +54,7 @@ Both run read-only, without Linux capabilities, with `no-new-privileges`.
 
 **Updating:** change the image tag (or download the new compose file), then `docker compose pull && docker compose up -d`. Data lives in `./data` and `./checkin`.
 
-**Without Docker** (Linux, macOS or Windows): Node 26+, `cd standby && node server.js` (localhost:3100, data in `./data`). The check-in receiver is `node checkin-receiver/server.js` (port 3101). On Windows, Ctrl+C or Ctrl+Break stops it cleanly. Only one copy runs per data folder; a second refuses to start.
+**Without Docker** (Linux, macOS or Windows): Node 26+, `cd standby && node server.js` (localhost:3100, data in `./data`). The check-in receiver is `node checkin-receiver/server.js` (port 3101). On Windows, Ctrl+C or Ctrl+Break stops it cleanly. Only one copy runs per data folder; a second refuses to start. Forgot a password set in the app? Start it once with `node server.js --reset-password` (see [SECURITY.md](SECURITY.md#login)).
 
 ### Configuration
 
@@ -62,7 +62,7 @@ All optional; see `standby/lib/config.js`.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `STANDBY_PASSWORD` | unset (no login) | The app login. Set from the app password on Umbrel. |
+| `STANDBY_PASSWORD` | unset | The app login. Set from the app password on Umbrel. Unset, a password can be set in the app instead (Settings → App login). |
 | `STANDBY_BIND` | `127.0.0.1` | Listen address. Docker sets `0.0.0.0` inside the container. |
 | `STANDBY_ALLOWED_HOSTS` | unset | Extra hostnames, comma-separated. |
 | `STANDBY_WEB_PORT`, `STANDBY_CHECKIN_PORT` | `3100`, `3101` | Host ports in `docker-compose.yml`. |
