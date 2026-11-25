@@ -1724,8 +1724,11 @@
   function setNodeCheckValue(id, check) {
     var val = $(id);
     if (!val) return;
-    if (!check) { val.textContent = ''; val.classList.remove('failed'); val.classList.remove('warn'); return; }
+    if (!check) { val.textContent = ''; val.title = ''; val.classList.remove('failed'); val.classList.remove('warn'); return; }
     val.textContent = check.value || '';
+    // The longer detail (e.g. which request shape answered) is the
+    // hover text.
+    val.title = check.detail || '';
     // A limited capability (warn) is amber, a failed one red.
     val.classList.toggle('warn', !check.ok && !!check.warn);
     val.classList.toggle('failed', !check.ok && !check.warn);

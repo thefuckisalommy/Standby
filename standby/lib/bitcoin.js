@@ -2948,7 +2948,7 @@ async function testNodeBroadcast(apiBase) {
 //     warn true — the node is CAUTION, the value amber).
 // The lookup goes through the generic outspend negotiation (batch
 // first, singular as fallback) and the shape that answered is named
-// in brackets. A null answer (neither shape) is unavailable; a
+// in the detail (the hover text). A null answer (neither shape) is unavailable; a
 // server error is reported as the reason. Read-only: a lookup,
 // never a broadcast, and no funds move.
 const PROBE_TXID = 'f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16';
@@ -2973,13 +2973,13 @@ async function testNodeOutputLookup(apiBase) {
     if (!entry) {
       // Both outputs read unspent: the node answers, but not with
       // a spend this probe can read the type from.
-      return { ok: true, detail: 'ready (' + shape + '; answer type unknown)', value: 'Answers (' + shape + ')' };
+      return { ok: true, detail: 'ready (' + shape + '; answer type unknown)', value: 'Answers' };
     }
     if (!entry.bare) {
-      return { ok: true, kind: 'full', detail: 'ready — names the spending transaction and its confirmations (' + shape + ')', value: 'Full answers (' + shape + ')' };
+      return { ok: true, kind: 'full', detail: 'ready — names the spending transaction and its confirmations (' + shape + ')', value: 'Full answers' };
     }
     if (entry.verified) {
-      return { ok: true, kind: 'bare-verified', detail: 'ready — says only \u201cspent\u201d; /api/prevouts tells a confirmed spend from a mempool one (' + shape + ')', value: 'Bare + confirmation check (' + shape + ')' };
+      return { ok: true, kind: 'bare-verified', detail: 'ready — says only \u201cspent\u201d; /api/prevouts tells a confirmed spend from a mempool one (' + shape + ')', value: 'Bare + confirmation check' };
     }
     return { ok: false, warn: true, kind: 'bare', detail: 'limited — says only \u201cspent\u201d and has no /api/prevouts, so a confirmed spend cannot be told from a mempool one', value: 'Bare only \u2014 can\u2019t tell confirmed spends' };
   } catch (e) {
