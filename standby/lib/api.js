@@ -24,6 +24,156 @@ const RELEASE_STATUSES = new Set(['stale', 'failed', 'broadcast', 'conflict', 's
 // dry-run verdict. Used by the restore validation.
 const RELEASE_KINDS = new Set(['release', 'broadcast', 'dryrun']);
 
+// Dry-run the given transactions and record what the run found on
+// each card (stale, broadcast, conflict, fee). Shared by the dry-run
+// endpoint and by restore, which re-derives every restored card's
+// status from the node. checkDone also tests transactions already
+// broadcast or stale (a single dry-run of one transaction);
+// priceNotes adds the price-source detail to a price rule's note.
+async function dryRunAndRecord(st, txs, now, { drySet = null, checkDone = false, priceNotes = false } = {}) {
+  const results = [];
+  for (const tx of txs) {
+    if (!checkDone && (tx.broadcasted || (tx.release && tx.release.status === 'stale'))) {
+      continue;
+    }
+    try {
+      const r = await bitcoin.dryRun(DATA_DIR, { tx, endpoints: bitcoin.endpointsFor(st.settings), ttlMs: checkCadenceSecondsOf(st.settings) * 1000 });
+      // A price rule's dry-run note carries the source
+      // detail — which sources were used, their readings,
+      // single-source fallback, or that they disagreed — because
+      // the subcard and the readiness card do not repeat it
+      // (it lives in the Exchange Status section and here, in
+      // the dry-run notes). A price-fetch failure never breaks
+      // the dry run itself; the note just says so.
+      // A set member's dry-run note reads the SET's
+      // trigger — the member's own trigger is dormant while it
+      // is attached.
+      const trg = drySet ? store.triggerOf(drySet) : store.triggerOf(tx);
+      if (priceNotes && trg && trg.rules.some((r) => r.type === 'price')) {
+        try {
+          const readings = await fetchPriceCached(priceSourcesOf(st.settings), checkCadenceSecondsOf(st.settings));
+          const comb = bitcoin.combinePriceReadings(readings, priceAgreementPctOf(st.settings));
+          let srcDetail;
+          if (comb.mode === 'disagree' || comb.mode === 'none') {
+            srcDetail = comb.reason.charAt(0).toUpperCase() + comb.reason.slice(1);
+          } else {
+            srcDetail = 'Price sources: ' + comb.note;
+          }
+          r.note = (r.note || '') + ' ' + srcDetail + '.';
+        } catch (e) {
+          r.note = (r.note || '') + ' Price sources: could not be checked.';
+        }
+      }
+      results.push({ id: tx.id, label: tx.label || '', enabled: drySet ? !!drySet.enabled : !!tx.enabled, ...r });
+    } catch (e) {
+      results.push({ id: tx.id, txid: tx.txid, label: tx.label || '', enabled: drySet ? !!drySet.enabled : !!tx.enabled, broadcastVia: validBroadcastVia(tx.broadcastVia), wouldBroadcast: false, error: e.message });
+    }
+  }
+  // Persist what the run found (three cases, not just
+  // stale): a broadcasted transaction is never
+  // re-marked (its broadcast record takes precedence), and a stale
+  // verdict is a fact and is left alone once recorded. An own-txid
+  // spend is recorded as broadcast — recognition, not a re-send;
+  // the dry-run never broadcasts, and neither does the record. A
+  // conflict warning is re-derived on every fresh check: a clean
+  // verdict clears it (the unconfirmed spend was evicted), a
+  // confirmed spend turns it stale. The dry-run log entry (written
+  // by bitcoin.dryRun) already records the run itself, so no second
+  // log entry is written here.
+  // The verdicts are network facts
+  // collected above; only the per-tx updates ride into FRESH
+  // state, with the same guards re-evaluated there — a tx
+  // broadcast or deleted while the run was on the network must
+  // not have its record rewritten from this stale snapshot.
+  const actions = [];
+  for (const r of results) {
+    const a = { id: r.id };
+    // The fee: a dry-run OVERWRITES the stored fee with
+    // the freshly computed one — the input values were fetched
+    // from the node for the freshness check anyway. A fee stored
+    // wrong (e.g. by the units bug, which read the parent value
+    // as BTC) self-corrects on the next dry-run instead of
+    // lingering; a null result (the node could not answer) leaves
+    // the stored fee alone.
+    if (r.fee && typeof r.fee.feeSats === 'number') {
+      a.fee = { feeSats: r.fee.feeSats, feeRateSatVb: (typeof r.fee.feeRateSatVb === 'number') ? r.fee.feeRateSatVb : null };
+    }
+    if (r.spent && r.spent.length) {
+      a.stale = { method: r.checkedVia, error: 'inputs spent: ' + r.spent.map((i) => String(i.prevTxid || '').slice(0, 12) + ':' + i.prevVout).join(', ') };
+    } else if (r.own && r.own.length) {
+      a.own = { method: r.checkedVia, blockHeight: r.own[0].blockHeight != null ? r.own[0].blockHeight : null };
+    } else if (r.conflict && r.conflict.length) {
+      a.conflict = { method: r.checkedVia, error: (r.conflict.some((i) => i.unverified) ? 'inputs spent by another transaction (the node cannot say whether that spend is confirmed): ' : 'inputs spent by an unconfirmed transaction: ') + r.conflict.map((i) => String(i.prevTxid || '').slice(0, 12) + ':' + i.prevVout).join(', ') };
+    } else if (r.verdict === 'ready') {
+      // A clean verdict re-derives the warning away: the unconfirmed
+      // spend was evicted, so the transaction is ready again. Only a
+      // 'ready' verdict clears — an 'unknown' verdict cannot prove
+      // the input unspent, so the warning stands on ambiguous data.
+      a.clearConflict = true;
+    }
+    if (a.fee || a.stale || a.own || a.conflict || a.clearConflict) actions.push(a);
+  }
+  if (actions.length) {
+    saveMutation((f) => {
+      for (const a of actions) {
+        const ftx = (f.bitcoin.txs || []).find((t) => t.id === a.id);
+        if (!ftx || ftx.broadcasted) continue;
+        if (a.fee) {
+          ftx.feeSats = a.fee.feeSats;
+          ftx.feeRateSatVb = a.fee.feeRateSatVb;
+        }
+        if (a.stale) {
+          if (ftx.release && ftx.release.status === 'stale') continue;
+          ftx.release = { status: 'stale', kind: 'dryrun', trigger: releaseTriggerFor(f, ftx), txid: ftx.txid, method: a.stale.method, lastAttemptAt: now.toISOString(), error: a.stale.error };
+          // The dry run discovered the staleness — the
+          // tx's history should say so, not just its card.
+          pushHistory(ftx, 'stale', a.stale.error);
+          // The set-stale rule: a stale member
+          // does NOT archive its set — the verdict is noted on
+          // the set's shared history, and the set keeps firing
+          // for its non-stale members.
+          noteSetMemberStale(f, ftx, a.stale.error);
+          continue;
+        }
+        if (a.own) {
+          // Repair, don't overwrite: a release that already went out
+          // keeps its kind ('release'); a broadcasted fact keeps the
+          // confirmations it already has. A restore could have left
+          // one half of the pair behind — the check that just proved
+          // the tx is out there fills in the missing half.
+          if (!ftx.broadcasted) {
+            ftx.broadcasted = {
+              txid: ftx.txid, broadcastedAt: now.toISOString(), method: a.own.method,
+              confirmations: null, blockHeight: a.own.blockHeight, found: true, checkedAt: now.toISOString(),
+            };
+            // The dry run discovered the tx is out there.
+            pushHistory(ftx, 'broadcast', 'txid ' + shortTxid(ftx.txid));
+            forwardMemberHistory(f, ftx, 'broadcast', 'txid ' + shortTxid(ftx.txid));
+            if (a.own.blockHeight != null) {
+              pushHistory(ftx, 'confirmed', 'Block ' + a.own.blockHeight.toLocaleString('en-US'));
+              forwardMemberHistory(f, ftx, 'confirmed', 'Block ' + a.own.blockHeight.toLocaleString('en-US'));
+            }
+          }
+          if (!ftx.release || ftx.release.status !== 'broadcast') {
+            ftx.release = { status: 'broadcast', kind: 'dryrun', trigger: releaseTriggerFor(f, ftx), txid: ftx.txid, method: a.own.method, broadcastedAt: now.toISOString() };
+          }
+          continue;
+        }
+        if (a.conflict) {
+          if (ftx.release && ftx.release.status === 'stale') continue;
+          ftx.release = { status: 'conflict', kind: 'dryrun', trigger: releaseTriggerFor(f, ftx), txid: ftx.txid, method: a.conflict.method, lastAttemptAt: now.toISOString(), error: a.conflict.error };
+          // The warning on the card gets its history line.
+          pushHistory(ftx, 'conflict', a.conflict.error);
+          forwardMemberHistory(f, ftx, 'conflict', a.conflict.error);
+          continue;
+        }
+        if (a.clearConflict && ftx.release && ftx.release.status === 'conflict') ftx.release = null;
+      }
+    });
+  }
+  return results;
+}
+
 async function handleApi(req, res, pathname) {
   const now = new Date();
   // Fetch metadata: a browser request from another site
@@ -2154,15 +2304,35 @@ async function handleApi(req, res, pathname) {
     // (above), so it is the most recent entry; the method reads
     // 'restore' in the recent-check-ins list.
     store.appendCheckin(DATA_DIR, { ts: now.toISOString(), method: 'restore' });
+    // A backup's broadcast and stale records are not trusted (see
+    // above), so every restored card would read Active. Ask the node
+    // instead: the same check as Dry-run all records which ones are
+    // already broadcast, stale, or in conflict. Nothing is sent. A
+    // transaction the node cannot answer for keeps its restored status
+    // until the next dry run.
+    let recheck = { checked: 0, broadcast: 0, stale: 0, conflict: 0, unchecked: 0 };
+    try {
+      const rr = await dryRunAndRecord(restored, restored.bitcoin.txs || [], now);
+      recheck = {
+        checked: rr.length,
+        broadcast: rr.filter((r) => !(r.spent && r.spent.length) && r.own && r.own.length).length,
+        stale: rr.filter((r) => r.spent && r.spent.length).length,
+        conflict: rr.filter((r) => !(r.spent && r.spent.length) && !(r.own && r.own.length) && r.conflict && r.conflict.length).length,
+        unchecked: rr.filter((r) => r.error || r.verdict === 'unknown').length,
+      };
+    } catch (e) {
+      recheck.unchecked = txs.length;
+    }
     // The restored state is served the same way as a read (a
-    // one-rule set as its single rule — see GET /api/state).
-    const servedRestored = sanitizeState(restored);
+    // one-rule set as its single rule — see GET /api/state) —
+    // re-read, so it carries what the check just recorded.
+    const servedRestored = sanitizeState(store.loadState(DATA_DIR));
     // The fee history is state-internal — see GET
     // /api/state — never served, even in a restore response.
     delete servedRestored.feeHistory;
     servedRestored.bitcoin.txs = serveTxs(servedRestored.bitcoin.txs || []);
     servedRestored.bitcoin.sets = serveSets(servedRestored.bitcoin.sets || []);
-    return sendJson(res, 200, { ok: true, restoredTxs: txs.length, restoredSets: restoredSets.length, state: servedRestored });
+    return sendJson(res, 200, { ok: true, restoredTxs: txs.length, restoredSets: restoredSets.length, recheck, state: servedRestored });
   }
 
   // POST /api/bitcoin/connection/test — verifies both nodes without
@@ -2222,146 +2392,7 @@ async function handleApi(req, res, pathname) {
       txs = [one];
     }
     if (!txs.length) return sendError(res, 400, 'no transactions stored — paste a signed transaction hex first');
-    const results = [];
-    for (const tx of txs) {
-      if (!body.id && (tx.broadcasted || (tx.release && tx.release.status === 'stale'))) {
-        continue;
-      }
-      try {
-        const r = await bitcoin.dryRun(DATA_DIR, { tx, endpoints: bitcoin.endpointsFor(state.settings), ttlMs: checkCadenceSecondsOf(state.settings) * 1000 });
-        // A price rule's dry-run note carries the source
-        // detail — which sources were used, their readings,
-        // single-source fallback, or that they disagreed — because
-        // the subcard and the readiness card do not repeat it
-        // (it lives in the Exchange Status section and here, in
-        // the dry-run notes). A price-fetch failure never breaks
-        // the dry run itself; the note just says so.
-        // A set member's dry-run note reads the SET's
-        // trigger — the member's own trigger is dormant while it
-        // is attached.
-        const trg = drySet ? store.triggerOf(drySet) : store.triggerOf(tx);
-        if (trg && trg.rules.some((r) => r.type === 'price')) {
-          try {
-            const readings = await fetchPriceCached(priceSourcesOf(state.settings), checkCadenceSecondsOf(state.settings));
-            const comb = bitcoin.combinePriceReadings(readings, priceAgreementPctOf(state.settings));
-            let srcDetail;
-            if (comb.mode === 'disagree' || comb.mode === 'none') {
-              srcDetail = comb.reason.charAt(0).toUpperCase() + comb.reason.slice(1);
-            } else {
-              srcDetail = 'Price sources: ' + comb.note;
-            }
-            r.note = (r.note || '') + ' ' + srcDetail + '.';
-          } catch (e) {
-            r.note = (r.note || '') + ' Price sources: could not be checked.';
-          }
-        }
-        results.push({ id: tx.id, label: tx.label || '', enabled: drySet ? !!drySet.enabled : !!tx.enabled, ...r });
-      } catch (e) {
-        results.push({ id: tx.id, txid: tx.txid, label: tx.label || '', enabled: drySet ? !!drySet.enabled : !!tx.enabled, broadcastVia: validBroadcastVia(tx.broadcastVia), wouldBroadcast: false, error: e.message });
-      }
-    }
-    // Persist what the run found (three cases, not just
-    // stale): a broadcasted transaction is never
-    // re-marked (its broadcast record takes precedence), and a stale
-    // verdict is a fact and is left alone once recorded. An own-txid
-    // spend is recorded as broadcast — recognition, not a re-send;
-    // the dry-run never broadcasts, and neither does the record. A
-    // conflict warning is re-derived on every fresh check: a clean
-    // verdict clears it (the unconfirmed spend was evicted), a
-    // confirmed spend turns it stale. The dry-run log entry (written
-    // by bitcoin.dryRun) already records the run itself, so no second
-    // log entry is written here.
-    // The verdicts are network facts
-    // collected above; only the per-tx updates ride into FRESH
-    // state, with the same guards re-evaluated there — a tx
-    // broadcast or deleted while the run was on the network must
-    // not have its record rewritten from this stale snapshot.
-    const actions = [];
-    for (const r of results) {
-      const a = { id: r.id };
-      // The fee: a dry-run OVERWRITES the stored fee with
-      // the freshly computed one — the input values were fetched
-      // from the node for the freshness check anyway. A fee stored
-      // wrong (e.g. by the units bug, which read the parent value
-      // as BTC) self-corrects on the next dry-run instead of
-      // lingering; a null result (the node could not answer) leaves
-      // the stored fee alone.
-      if (r.fee && typeof r.fee.feeSats === 'number') {
-        a.fee = { feeSats: r.fee.feeSats, feeRateSatVb: (typeof r.fee.feeRateSatVb === 'number') ? r.fee.feeRateSatVb : null };
-      }
-      if (r.spent && r.spent.length) {
-        a.stale = { method: r.checkedVia, error: 'inputs spent: ' + r.spent.map((i) => String(i.prevTxid || '').slice(0, 12) + ':' + i.prevVout).join(', ') };
-      } else if (r.own && r.own.length) {
-        a.own = { method: r.checkedVia, blockHeight: r.own[0].blockHeight != null ? r.own[0].blockHeight : null };
-      } else if (r.conflict && r.conflict.length) {
-        a.conflict = { method: r.checkedVia, error: (r.conflict.some((i) => i.unverified) ? 'inputs spent by another transaction (the node cannot say whether that spend is confirmed): ' : 'inputs spent by an unconfirmed transaction: ') + r.conflict.map((i) => String(i.prevTxid || '').slice(0, 12) + ':' + i.prevVout).join(', ') };
-      } else if (r.verdict === 'ready') {
-        // A clean verdict re-derives the warning away: the unconfirmed
-        // spend was evicted, so the transaction is ready again. Only a
-        // 'ready' verdict clears — an 'unknown' verdict cannot prove
-        // the input unspent, so the warning stands on ambiguous data.
-        a.clearConflict = true;
-      }
-      if (a.fee || a.stale || a.own || a.conflict || a.clearConflict) actions.push(a);
-    }
-    if (actions.length) {
-      saveMutation((f) => {
-        for (const a of actions) {
-          const ftx = (f.bitcoin.txs || []).find((t) => t.id === a.id);
-          if (!ftx || ftx.broadcasted) continue;
-          if (a.fee) {
-            ftx.feeSats = a.fee.feeSats;
-            ftx.feeRateSatVb = a.fee.feeRateSatVb;
-          }
-          if (a.stale) {
-            if (ftx.release && ftx.release.status === 'stale') continue;
-            ftx.release = { status: 'stale', kind: 'dryrun', trigger: releaseTriggerFor(f, ftx), txid: ftx.txid, method: a.stale.method, lastAttemptAt: now.toISOString(), error: a.stale.error };
-            // The dry run discovered the staleness — the
-            // tx's history should say so, not just its card.
-            pushHistory(ftx, 'stale', a.stale.error);
-            // The set-stale rule: a stale member
-            // does NOT archive its set — the verdict is noted on
-            // the set's shared history, and the set keeps firing
-            // for its non-stale members.
-            noteSetMemberStale(f, ftx, a.stale.error);
-            continue;
-          }
-          if (a.own) {
-            // Repair, don't overwrite: a release that already went out
-            // keeps its kind ('release'); a broadcasted fact keeps the
-            // confirmations it already has. A restore could have left
-            // one half of the pair behind — the check that just proved
-            // the tx is out there fills in the missing half.
-            if (!ftx.broadcasted) {
-              ftx.broadcasted = {
-                txid: ftx.txid, broadcastedAt: now.toISOString(), method: a.own.method,
-                confirmations: null, blockHeight: a.own.blockHeight, found: true, checkedAt: now.toISOString(),
-              };
-              // The dry run discovered the tx is out there.
-              pushHistory(ftx, 'broadcast', 'txid ' + shortTxid(ftx.txid));
-              forwardMemberHistory(f, ftx, 'broadcast', 'txid ' + shortTxid(ftx.txid));
-              if (a.own.blockHeight != null) {
-                pushHistory(ftx, 'confirmed', 'Block ' + a.own.blockHeight.toLocaleString('en-US'));
-                forwardMemberHistory(f, ftx, 'confirmed', 'Block ' + a.own.blockHeight.toLocaleString('en-US'));
-              }
-            }
-            if (!ftx.release || ftx.release.status !== 'broadcast') {
-              ftx.release = { status: 'broadcast', kind: 'dryrun', trigger: releaseTriggerFor(f, ftx), txid: ftx.txid, method: a.own.method, broadcastedAt: now.toISOString() };
-            }
-            continue;
-          }
-          if (a.conflict) {
-            if (ftx.release && ftx.release.status === 'stale') continue;
-            ftx.release = { status: 'conflict', kind: 'dryrun', trigger: releaseTriggerFor(f, ftx), txid: ftx.txid, method: a.conflict.method, lastAttemptAt: now.toISOString(), error: a.conflict.error };
-            // The warning on the card gets its history line.
-            pushHistory(ftx, 'conflict', a.conflict.error);
-            forwardMemberHistory(f, ftx, 'conflict', a.conflict.error);
-            continue;
-          }
-          if (a.clearConflict && ftx.release && ftx.release.status === 'conflict') ftx.release = null;
-        }
-      });
-    }
+    const results = await dryRunAndRecord(state, txs, now, { drySet, checkDone: !!(body && body.id), priceNotes: true });
     const armed = results.filter((r) => r.enabled);
     // 'would broadcast' counts the transactions that would actually
     // land: a timelocked transaction is attempted (its per-result

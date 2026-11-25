@@ -565,6 +565,9 @@ function errorCardVisible() {
   check('error: restore reports the restored transaction',
     (document.getElementById('state-error-msg').textContent || '').indexOf('Restored 1 transaction') !== -1,
     document.getElementById('state-error-msg').textContent || '');
+  check('error: restore message says the transactions were checked against the node',
+    (document.getElementById('state-error-msg').textContent || '').indexOf('Checked against the node') !== -1,
+    document.getElementById('state-error-msg').textContent || '');
   check('error: restore reloads the page', global.__reloaded === true, '');
   check('error: health 200 again after restore', (await waitHealth(200)) === 200, '');
   const st1 = await (await fetch('/api/state')).json();

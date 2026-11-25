@@ -6626,6 +6626,51 @@ def main():
         req('POST', '/api/release/check', {}, base=_ab43)
         t = state_tx(_n3, base=_ab43)
         check('43 utxo: at 3 confirmations from first sighting it fires and broadcasts', t and t.get('broadcasted'), t and t.get('release'))
+
+        # --- 44. restore re-checks every card against the node (0.8.13) ---
+        # A backup's broadcast and stale records are not trusted, so
+        # restore drops them — and then runs the dry-run check on every
+        # restored transaction, so a card already broadcast or stale
+        # goes back to Archived instead of reading Active.
+        def _by_label44(st, label):
+            return next((t for t in (st.get('bitcoin') or {}).get('txs', []) if t.get('label') == label), None)
+        s, bak44 = req('GET', '/api/backup', base=_ab43)
+        check('44 restore: backup fetched', s == 200 and 'state' in bak44, s)
+        check('44 restore: caches cleared before the restore', _clear43())
+        s, r = req('POST', '/api/restore', bak44, base=_ab43, timeout=60)
+        check('44 restore: restore succeeds', s == 200 and r.get('ok') is True, (s, r))
+        rc = r.get('recheck') or {}
+        check('44 restore: the response says what the check found',
+              rc.get('checked') == r.get('restoredTxs') and rc.get('stale', 0) >= 1 and rc.get('broadcast', 0) >= 1
+              and rc.get('conflict', 0) >= 1 and rc.get('unchecked') == 0, rc)
+        t = _by_label44(r.get('state') or {}, 'Bare confirmed')
+        check('44 restore: the restore response already carries the re-derived status',
+              t and (t.get('release') or {}).get('status') == 'stale', t and t.get('release'))
+        s, st = req('GET', '/api/state', base=_ab43)
+        t = _by_label44(st, 'Bare confirmed')
+        check('44 restore: a stale transaction is stale again (Archived), not Active',
+              t and (t.get('release') or {}).get('status') == 'stale', t and t.get('release'))
+        check('44 restore: ... with a stale line in its history',
+              t and any(h.get('type') == 'stale' for h in (t.get('history') or [])), t and t.get('history'))
+        t = _by_label44(st, 'Bare own')
+        check('44 restore: our own broadcast transaction is broadcast again (Archived)',
+              t and t.get('broadcasted') and (t.get('release') or {}).get('status') == 'broadcast',
+              t and (t.get('broadcasted'), t.get('release')))
+        t = _by_label44(st, 'Bare mempool')
+        check('44 restore: an unconfirmed conflict keeps its warning',
+              t and (t.get('release') or {}).get('status') == 'conflict', t and t.get('release'))
+        # The node cannot answer: nothing is recorded, the restore still
+        # succeeds, and the response says how many went unchecked.
+        bak44['state']['settings']['primaryApiUrl'] = 'http://127.0.0.1:18199'
+        s, r = req('POST', '/api/restore', bak44, base=_ab43, timeout=60)
+        rc = r.get('recheck') or {}
+        check('44 restore: with the node unreachable the restore still succeeds', s == 200 and r.get('ok') is True, (s, r))
+        check('44 restore: ... and says every transaction went unchecked',
+              rc.get('unchecked') == r.get('restoredTxs') and rc.get('stale') == 0 and rc.get('broadcast') == 0, rc)
+        s, st = req('GET', '/api/state', base=_ab43)
+        t = _by_label44(st, 'Bare confirmed')
+        check('44 restore: ... and records nothing it could not check',
+              t and (t.get('release') or {}).get('status') != 'stale', t and t.get('release'))
         stop(_app43)
         stop(_stub43)
 

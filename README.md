@@ -25,7 +25,7 @@ Standby is a transaction broadcasting tool: you sign Bitcoin transactions in you
 - **Two nodes** — a primary (mempool.space) with a secondary (blockstream.info) as fallback. The secondary can be turned off in Settings for primary-only use, with no fallback anywhere.
 - **Slipstream broadcast route** — each transaction can go out via the public mempool or MARA Pool's private mempool (Slipstream). A Slipstream submission stays private until MARA mines it and reads “Slipstream Pending” until the public nodes see it. It can carry an opt-in Public Fallback (1, 3, 7, 14, 30, 60, or 90 days; Never by default): if MARA hasn't confirmed it in time, Standby broadcasts it publicly instead.
 - **Pending Transactions** — the card above Archived for transactions out the door but unconfirmed: “Broadcast” for public, “Slipstream Pending” for MARA. Once confirmed, a tx moves to Archived. A pending tx's hex and route are locked (label and notes can still change), and a Slipstream-pending tx has a manual “Broadcast publicly” button.
-- **Backup and restore** — export everything (including check-in keys), encrypted with a password you choose or unencrypted, and restore it on a fresh install. An encrypted backup can also be opened without Standby with `tools/decrypt-backup.js`.
+- **Backup and restore** — export everything (including check-in keys), encrypted with a password you choose or unencrypted, and restore it on a fresh install (a restore checks each transaction against your node, so the ones already broadcast or stale go back to Archived). An encrypted backup can also be opened without Standby with `tools/decrypt-backup.js`.
 
 ## Setup
 

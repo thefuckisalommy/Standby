@@ -448,13 +448,29 @@
   });
   $('restore-pw-x').addEventListener('click', function () { closeRestorePw(new Error('cancelled')); });
   $('btn-restore-pw-cancel').addEventListener('click', function () { closeRestorePw(new Error('cancelled')); });
-  async function restoreBackupFile(file) {
+  async function restoreBackupFile(file, msgEl) {
     var backup;
     try { backup = JSON.parse(await readFileText(file)); } catch (e) { throw new Error('this is not a Standby backup file (not JSON)'); }
     if (backup && backup.format === 'standby-backup-encrypted') {
       backup.password = await askBackupPassword();
     }
+    setMsg(msgEl, 'Restoring, then checking each transaction against the node\u2026', true);
     return api('POST', '/api/restore', backup);
+  }
+  // The restore re-checks every restored transaction against the node
+  // (a backup's broadcast and stale records are not trusted); the
+  // message says what that check found.
+  function restoreMessage(r) {
+    var msg = 'Restored ' + r.restoredTxs + ' transaction(s) and settings from the backup.';
+    var c = r.recheck;
+    if (!c || !r.restoredTxs) return msg;
+    var found = [];
+    if (c.broadcast) found.push(c.broadcast + ' already broadcast');
+    if (c.stale) found.push(c.stale + ' stale');
+    if (c.conflict) found.push(c.conflict + ' in conflict');
+    msg += ' Checked against the node: ' + (found.length ? found.join(', ') + '.' : 'none broadcast or stale.');
+    if (c.unchecked) msg += ' ' + c.unchecked + ' could not be checked \u2014 run Dry-run all once the node answers.';
+    return msg;
   }
 
   $('btn-state-restore').addEventListener('click', function () { $('state-restore-file').click(); });
@@ -463,8 +479,8 @@
     var file = $('state-restore-file').files && $('state-restore-file').files[0];
     if (!file) return;
     try {
-      var r = await restoreBackupFile(file);
-      setMsg($('state-error-msg'), 'Restored ' + r.restoredTxs + ' transaction(s) and settings from the backup.', true);
+      var r = await restoreBackupFile(file, $('state-error-msg'));
+      setMsg($('state-error-msg'), restoreMessage(r), true);
       $('state-restore-file').value = '';
       location.reload();
     } catch (e) {
@@ -5899,7 +5915,7 @@
     },
     backup: {
       title: 'Data backup',
-      body: 'Back up or restore everything Standby knows. A backup is a file holding all your staged transactions, triggers, and settings.\n\nRestoring replaces the current state with the backup\u2019s \u2014 a restore counts as a check-in and clears any active grace period.\n\nDownload it encrypted with a password you choose (recommended) or unencrypted. Encrypted, the file is useless without the password \u2014 and Standby cannot recover a lost password, so write it down somewhere other than this device. Unencrypted, it contains the signed hexes, which anyone can broadcast and which reveal the destination addresses and amounts, so treat it like the transactions themselves.\n\nAn encrypted backup can also be opened without Standby, using tools/decrypt-backup.js from the Standby repository.',
+      body: 'Back up or restore everything Standby knows. A backup is a file holding all your staged transactions, triggers, and settings.\n\nRestoring replaces the current state with the backup\u2019s \u2014 a restore counts as a check-in and clears any active grace period. After restoring, Standby checks each transaction against your node (nothing is broadcast), so one that was already broadcast or went stale goes back to Archived.\n\nDownload it encrypted with a password you choose (recommended) or unencrypted. Encrypted, the file is useless without the password \u2014 and Standby cannot recover a lost password, so write it down somewhere other than this device. Unencrypted, it contains the signed hexes, which anyone can broadcast and which reveal the destination addresses and amounts, so treat it like the transactions themselves.\n\nAn encrypted backup can also be opened without Standby, using tools/decrypt-backup.js from the Standby repository.',
       triggers: ['general'],
     },
     // No title/body: the version card has no "?" button and no
@@ -6218,8 +6234,8 @@
     var file = $('backup-file').files && $('backup-file').files[0];
     if (!file) return;
     try {
-      var r = await restoreBackupFile(file);
-      setMsg($('backup-msg'), 'Restored ' + r.restoredTxs + ' transaction(s) and settings from the backup.', true);
+      var r = await restoreBackupFile(file, $('backup-msg'));
+      setMsg($('backup-msg'), restoreMessage(r), true);
       $('backup-file').value = '';
       await load();
     } catch (e) {
