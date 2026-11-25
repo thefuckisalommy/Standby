@@ -13,7 +13,7 @@ def run():
           s == 400 and body == b'Bad request URL', (s, body))
     s, r = req('GET', '/api/health')
     check('32 crash: app still answers after the malformed request',
-          s == 200 and r.get('version') == '0.8.16', (s, r))
+          s == 200 and r.get('version') == '0.8.17', (s, r))
     s, body = raw_get('//[', RBASE)
     check('32 crash: malformed request line to the receiver gets 400',
           s == 400 and body == b'Bad request URL', (s, body))
@@ -50,7 +50,7 @@ def run():
     # logs no warning.
     _expected_bind = APP_ENV.get('STANDBY_BIND', '127.0.0.1')
     check('39 bind: main instance listen line names the profile bind',
-          ('Standby 0.8.16 listening on %s:%d (data: ' % (_expected_bind, PORT)) in read_log(),
+          ('Standby 0.8.17 listening on %s:%d (data: ' % (_expected_bind, PORT)) in read_log(),
           read_log()[-500:])
 
     def _bind_log_text():
@@ -161,7 +161,7 @@ def run():
     _auth_app = _bind_instance({'STANDBY_PASSWORD': _pw})
     check('40 auth: instance comes up', wait_up(_ab))
     s, r = req('GET', '/api/health', base=_ab)
-    check('40 auth: health is public', s == 200 and r.get('version') == '0.8.16', (s, r))
+    check('40 auth: health is public', s == 200 and r.get('version') == '0.8.17', (s, r))
     s, r = req('GET', '/api/auth/status', base=_ab)
     check('40 auth: status says required, not authenticated',
           s == 200 and r == {'required': True, 'authenticated': False}, (s, r))
