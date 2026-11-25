@@ -5,10 +5,16 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
 import urllib.request
+
+# Windows: run in UTF-8 mode, as on Linux. The app's files and logs are
+# UTF-8; the Windows code page can neither read nor print them.
+if os.name == 'nt' and not sys.flags.utf8_mode:
+    sys.exit(subprocess.call([sys.executable, '-X', 'utf8'] + sys.argv))
 
 _TESTDIR = os.path.dirname(os.path.abspath(__file__))
 # The system temp folder (/tmp on Linux, %TEMP% on Windows).

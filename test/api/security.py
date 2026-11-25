@@ -195,13 +195,18 @@ def run():
     for _site, _want in (('same-origin', 200), ('none', 200), ('same-site', 403), ('cross-site', 403)):
         s, r = req('GET', '/api/state', base=_ab, headers=dict(_th, **{'Sec-Fetch-Site': _site}))
         check('40 fetch-site: Sec-Fetch-Site %s -> %d' % (_site, _want), s == _want, (s, r))
-    # Files are owner-only.
+    # Files are owner-only. Windows has no POSIX modes (the user profile's
+    # folder permissions apply), so there the files only need to exist.
     _mode = lambda p: os.stat(p).st_mode & 0o777
-    check('40 modes: data directory is 0700', _mode(_bind_data) == 0o700, oct(_mode(_bind_data)))
-    check('40 modes: state.json is 0600', _mode(os.path.join(_bind_data, 'state.json')) == 0o600,
-          oct(_mode(os.path.join(_bind_data, 'state.json'))))
-    check('40 modes: session.key is 0600', _mode(os.path.join(_bind_data, 'session.key')) == 0o600,
-          oct(_mode(os.path.join(_bind_data, 'session.key'))))
+    if os.name == 'nt':
+        check('40 modes: Windows has no POSIX modes; data files exist',
+              all(os.path.exists(os.path.join(_bind_data, f)) for f in ('state.json', 'session.key')))
+    else:
+        check('40 modes: data directory is 0700', _mode(_bind_data) == 0o700, oct(_mode(_bind_data)))
+        check('40 modes: state.json is 0600', _mode(os.path.join(_bind_data, 'state.json')) == 0o600,
+              oct(_mode(os.path.join(_bind_data, 'state.json'))))
+        check('40 modes: session.key is 0600', _mode(os.path.join(_bind_data, 'session.key')) == 0o600,
+              oct(_mode(os.path.join(_bind_data, 'session.key'))))
     # A token survives a restart.
     stop(_auth_app)
     _e = dict(APP_ENV)
