@@ -45,17 +45,13 @@ function writeReceiverKeys(state) {
       keys: (state.checkinKeys || []).map((k) => ({ id: k.id, label: k.label, hash: k.hash })),
     };
     const file = path.join(CHECKIN_DIR, 'keys.json');
-    // Same durable write as state.json:
-    // a lost keys.json write would silently resurrect a revoked key
-    // or lose a new one, and the receiver reads this file fresh on
-    // every check-in.
+    // Durable write: a lost keys.json write could revive a revoked key or
+    // lose a new one.
     store.writeFileDurable(file, JSON.stringify(doc, null, 2) + '\n');
   } catch (e) {
-    // No shared directory (a plain `node server.js` run, or the
-    // receiver is not installed) — the keys are inert until it is.
-    // But when the directory IS there, a failed write
-    // matters: a revoked key would stay valid at the receiver. Say
-    // so loudly instead of swallowing it.
+    // No shared directory (bare run, no receiver): the keys are inert. If
+    // it exists, a failed write would leave a revoked key valid, so say so
+    // loudly.
     if (fs.existsSync(CHECKIN_DIR)) {
       console.error('Standby: ERROR: could not update the receiver key list (' + path.join(CHECKIN_DIR, 'keys.json') + '): ' + e.message
         + ' — a key created or revoked just now is NOT in effect at the receiver until this is fixed.');
@@ -63,11 +59,8 @@ function writeReceiverKeys(state) {
   }
 }
 
-// Read the receiver's key list (CHECKIN_DIR/keys.json) — tri-state,
-// like readExternalCheckin below: 'missing' (no file — no receiver
-// installed), 'ok' (a parsed {keys:[...]} list), 'error'
-// (unreadable or unparseable). Only entries with a string id and
-// hash count; anything else is dropped, never trusted.
+// Read the receiver's keys.json: 'missing', 'ok' or 'error' (like
+// readExternalCheckin). Only entries with a string id and hash count.
 function readReceiverKeys() {
   const file = path.join(CHECKIN_DIR, 'keys.json');
   let raw;
@@ -91,12 +84,8 @@ function readReceiverKeys() {
   }
 }
 
-// Warnings recorded at startup — the check-in key-store
-// verification below. Kept in memory for the life of the process
-// and served on GET /api/state alongside the persistence layer's
-// warnings, so the UI can show them (a later increment). Deduped
-// by code: the check runs once at startup, but a warning is a
-// fact about this run either way.
+// Startup warnings from the key-store check, kept for this process, served
+// on GET /api/state, deduped by code.
 const startupWarnings = [];
 function addStartupWarning(code, message) {
   if (startupWarnings.some((w) => w.code === code)) return;
@@ -197,19 +186,14 @@ function mergeExternalCheckin(state, now) {
   if (last && ext.at.getTime() <= last.getTime()) return false;
   state.checkin.lastCheckinAt = ext.raw;
   state.checkin.totalCheckins += 1;
-  // A check-in clears the cycle-scoped release records of
-  // the CHECK-IN rules only — a price or UTXO rule's record belongs
-  // to its own trigger's cycle, not the check-in clock, so a
-  // check-in must not clear it (and must not reset its trigger).
-  // A stale record survives either way, as before.
+  // A check-in clears only the check-in rules' cycle records (price and
+  // UTXO records belong to their own triggers); stale records survive.
   for (const t of (state.bitcoin.txs || [])) {
     if (!store.hasTriggerType(t, 'checkin')) continue;
     if (t.release && t.release.status === 'stale') continue;
     t.release = null;
-    // The clock restarts at this check-in: any frozen time is
-    // wiped, then a tx that is still inactive (disarmed, or on
-    // vacation) is re-marked inactive from now — it stays frozen
-    // at 0 instead of counting while inactive.
+    // The clock restarts here: frozen time is wiped, and a still-inactive
+    // tx is re-marked inactive from now (frozen at 0).
     t.checkinOffsetMs = 0;
     t.checkinInactiveSince = null;
   }
@@ -290,9 +274,7 @@ function applyGrace(state, now) {
   const gapMs = now.getTime() - online.getTime();
   let activates = gapMs > offlineDays * 86400000;
   if (!activates) {
-    // Check-in leg (see above): only when a check-in rule is
-    // armed — with none armed there is no check-in rule to
-    // protect, and the flat leg already covers long gaps.
+    // The check-in leg only applies when a check-in rule is armed.
     const thresholdDays = smallestArmedCheckinThresholdDays(state);
     if (thresholdDays !== null) {
       const thresholdMs = thresholdDays * 86400000;
@@ -334,10 +316,9 @@ function resetCheckin(state, now, method) {
   state.checkin.lastCheckinAt = now.toISOString();
   state.checkin.totalCheckins += 1;
   state.checkin.lastOnlineAt = now.toISOString();
-  // The clock restarts at now: any frozen time is wiped (the
-  // effective last check-in is now, so a carried offset would
-  // push it into the future). A tx that is still inactive is
-  // re-marked inactive from now, so it stays frozen at 0.
+  // The clock restarts now: frozen time is wiped (it would push the
+  // effective check-in into the future); a still-inactive tx is re-marked
+  // from now.
   for (const t of (state.bitcoin.txs || [])) {
     if (!store.hasTriggerType(t, 'checkin')) continue;
     t.checkinOffsetMs = 0;
@@ -418,20 +399,15 @@ function checkinClock(state, now, thresholdDays, liveOffsetMs) {
   if (!last || !thresholdDays || thresholdDays <= 0) {
     return { dueMs: null, heldMs: null, heldActive: false, effectiveDueMs: null, nextDue: null, windowDays: null, daysSince: null, state: 'not-started' };
   }
-  // The freeze: inactive time does not count, so the
-  // clock is measured from the EFFECTIVE last check-in — the
-  // real one plus the frozen time. The due and the window shift
-  // together by the same offset, so the window stays the
-  // threshold on-track and daysSince reads the frozen count.
+  // Measured from the effective last check-in (real plus frozen time); due
+  // and window shift together, so the window stays the threshold.
   const off = (typeof liveOffsetMs === 'number' && Number.isFinite(liveOffsetMs) && liveOffsetMs >= 0) ? liveOffsetMs : 0;
   const effLast = new Date(last.getTime() + off);
   const d = Math.max(0, days(effLast, now));
   const dueMs = effLast.getTime() + thresholdDays * 86400000;
   const nextDue = new Date(dueMs).toISOString();
-  // Window, whole days, for the countdown bar + caption:
-  // last check-in to the due. Measured from the EFFECTIVE last
-  // check-in (see the freeze above), so a frozen bar's window
-  // stays its threshold.
+  // The bar's window in whole days, from the effective last check-in to
+  // the due.
   const windowDays = Math.max(1, Math.round((dueMs - effLast.getTime()) / 86400000));
   const st = now.getTime() < dueMs ? 'on-track' : 'release-due';
   return { dueMs, heldMs: null, heldActive: false, effectiveDueMs: dueMs, nextDue, windowDays, daysSince: d, state: st };
@@ -495,10 +471,8 @@ function checkinStatus(state, now) {
       checkinTxs.push({ id: s.id, label: s.label || '', ruleIndex, thresholdDays: th, daysSince: clock.daysSince, windowDays: clock.windowDays, nextDue: clock.nextDue, state: st, enabled: !!s.enabled });
     });
   }
-  // The top level is driven by the ARMED entries only — a
-  // disarmed tx cannot fire (see the comment above). When
-  // nothing is armed the soonest due is null, and daysSince
-  // falls back to the first disarmed entry's frozen count.
+  // The top level comes from armed entries only; with none armed, due is
+  // null and daysSince is the first disarmed entry's frozen count.
   const armedEntries = checkinTxs.filter((c) => c.enabled);
   const nextDue = armedEntries.reduce((acc, c) => (!c.nextDue ? acc : (!acc || c.nextDue < acc ? c.nextDue : acc)), null);
   const soonest = armedEntries.find((c) => c.nextDue === nextDue);
@@ -518,22 +492,14 @@ function checkinStatus(state, now) {
   // due (it is retried); disarmed, stale and never-attempted txs do not.
   // Only check-in txs count here.
   const anyFailed = txs.some((t) => t.enabled && isCheckinTx(t) && t.release && t.release.status === 'failed');
-  // A transaction waiting on MARA means the release is not
-  // done: it still needs to become visible publicly or be declared
-  // failed, so the status is not 'broadcasted' while one is waiting
-  // — even if another transaction already broadcast. Only armed
-  // transactions count (a disabled one's record is inert, like its
-  // 'failed' record).
+  // A tx waiting on MARA means the release is not done, so the status is
+  // not 'broadcasted' (armed txs only).
   const anyWaitingMara = txs.some((t) => t.enabled && isCheckinTx(t) && t.release && t.release.status === 'submitted-slipstream');
   if (!anyFailed && !anyWaitingMara && txs.some((t) => isCheckinTx(t) && t.release && t.release.status === 'broadcast' && t.release.kind === 'release')) {
     return { ...base, state: 'broadcasted', label: 'Broadcasted' };
   }
-  // Only ARMED check-in txs can make the card
-  // 'release-due' — a disarmed tx frozen past its due cannot fire,
-  // so it must not drive the overall state either.
-  // While a grace is active, a past-due armed entry is
-  // held, not due: the top-level state is 'grace' ("Grace
-  // period"), never 'release-due'.
+  // Only armed check-in txs can make the card release-due; during a grace
+  // a past-due armed entry makes it 'grace'.
   if (armedEntries.some((c) => c.state === 'grace')) return { ...base, state: 'grace', label: 'Grace period' };
   if (armedEntries.some((c) => c.state === 'release-due')) return { ...base, state: 'release-due', label: 'Release due' };
   return { ...base, state: 'on-track', label: 'On track' };

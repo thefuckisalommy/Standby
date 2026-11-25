@@ -3,11 +3,8 @@
 const store = require('./store');
 const { validPublicFallbackDays } = require('./util');
 
-// Triggers. Each transaction carries its own trigger — see
-// lib/store.js for the shapes and normalizeTrigger/triggerOf. These
-// are the server-side presentation helpers; the evaluator lives
-// below, next to evaluateRelease.
-// ---------------------------------------------------------------------------
+// Trigger presentation helpers (shapes in lib/store.js; evaluation in
+// lib/rules.js).
 
 // The short label for a trigger type, as shown in the readiness
 // pills and the trigger subcard ("TRIGGER · BTC price").
@@ -34,9 +31,8 @@ function triggerConditionText(trigger) {
   return 'Fires when ' + set.rules.map(ruleConditionShort).join(joiner);
 }
 
-// A rule set from a single rule or a set (both accepted everywhere
-// a trigger is): a set passes through, a single rule wraps as a
-// one-rule OR set, anything else falls back to the default set.
+// A rule set from a single rule or a set; anything else falls back to the
+// default set.
 function toTriggerSet(input) {
   if (input && typeof input === 'object' && !Array.isArray(input) && Array.isArray(input.rules)
       && (input.op === 'AND' || input.op === 'OR')) return input;
@@ -85,10 +81,8 @@ function singleTriggerConditionText(trigger) {
       return 'Fires when BTC price ' + (t.params.op === '>=' ? '≥' : '≤') + ' $' + t.params.value.toLocaleString('en-US');
     case 'utxo': {
       const parts = String(t.params.outpoint || '').split(':');
-      // The confirmation mode rides on the condition:
-      // the default (1 confirmation) reads as before — "is spent"
-      // already meant confirmed — while unconfirmed and N > 1 say
-      // so explicitly, so the subcard names the rule.
+      // The UTXO confirmation mode in words: the default (1) reads "is
+      // spent"; 0 and N > 1 say so.
       const confs = (t.params.confirmations === 0) ? 0 : (t.params.confirmations || 1);
       const suffix = confs === 0 ? ' (unconfirmed)' : (confs === 1 ? '' : ' (' + confs + ' confirmations)');
       return 'Fires when UTXO ' + (parts[0] || '').slice(0, 4) + '…:' + (parts[1] || '') + ' is spent' + suffix;
@@ -125,9 +119,8 @@ function triggerTypesLabel(tx) {
   return store.triggerTypesOf(tx).join('+');
 }
 
-// Trigger sets. setOfTx finds the set a transaction
-// belongs to (at most one — the load-time sanitizer enforces it);
-// setMembers returns a set's transactions, in the set's own order.
+// setOfTx: the one set a tx belongs to; setMembers: a set's txs in its
+// order.
 function setOfTx(state, txId) {
   return ((state.bitcoin.sets || []).find((s) => (s.txIds || []).includes(txId))) || null;
 }
@@ -174,10 +167,7 @@ function serveTxs(txs) {
   return (txs || []).map(serveTx);
 }
 
-// The set as the API serves it: the same dual-shape
-// serving as serveTx — a one-rule set as its single rule with a
-// flat triggerState, a multi-rule set as the set with the
-// per-rule array. The stored form is always the set.
+// The set as served, the same dual shape as serveTx.
 function serveSet(set) {
   if (!set || typeof set !== 'object') return set;
   const trg = store.triggerOf(set);

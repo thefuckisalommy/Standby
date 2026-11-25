@@ -1,27 +1,15 @@
 #!/usr/bin/env python3
-"""Launch Standby 0.8.12 + mempool stubs with
-seeded trigger data, run dom_check099.js against it, then stop
-everything. Reuses the verify script's helpers (importing it does
-not run its main()).
+"""Launch Standby and the stub nodes with seeded trigger data, run
+dom_check099.js against it, then stop everything.
 
-Ports (must not collide with 095, which uses app 3388, receiver
-3389 and stubs 18175/18176, or 096, which uses app 3398, receiver
-3399 and stubs 18185/18186): app 3478, receiver 3479, stubs
-18275 (primary) and 18276 (secondary). The stub's default BTC price
-is $98,200 (STUB_PRICE_USD unset), so the seeded price rule
-(BTC >= $150,000) does not hold and its state line reads
-"currently $98,200". The stub's tip height is 900,000 and its
-economy fee is 1 sat/vB, so the seeded block-height rule (950,000)
-watches and the seeded fee-market rule (0.5 sat/vB) watches.
+Ports: app 3478, receiver 3479, stubs 18275 (primary) and 18276 (secondary).
+Stub price $98,200, tip 900,000, economy fee 1 sat/vB, so the seeded price
+(>= $150,000), block-height (950,000) and fee-market (0.5 sat/vB) rules all
+watch.
 
-Seeds (one armed tx per trigger type, all spending Finney vout 1
-with distinct values): 'Dom Check-in' (trigger omitted -> the
-check-in default), 'Dom Price' (price >= $150,000), 'Dom UTXO'
-(outpoint f4184fc5...e16:1, unspent), 'Dom Manual' (manual only),
-'Dom Blockheight' (target 950,000), 'Dom Setdate' (30 days out),
-'Dom Feemarket' (max 0.5 sat/vB). Then a connection test, one
-check-in, and one POST /api/release/check so the trigger subcards
-show live statuses before the DOM script runs.
+Seeds one armed tx per trigger type, each spending Finney vout 1 with its
+own value, then runs a connection test, a check-in and a release check so
+the subcards show live statuses.
 """
 import importlib.util
 import json
@@ -37,9 +25,7 @@ spec = importlib.util.spec_from_file_location('helpers', os.path.join(os.path.di
 v = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(v)
 
-# Portability (0.8.3, tests-in-repo): resolve paths from this file.
-# _ROOT is the goal dir locally and the repo root in a checkout; the
-# app is branch-0.8.8-nonrpc/ locally and standby/ in a checkout.
+# Resolve paths from this file: the repo root, with the app in standby/.
 _TESTDIR = os.path.dirname(os.path.abspath(__file__))
 GOAL = os.path.dirname(_TESTDIR)
 BRANCH = v.app_dir(GOAL)
@@ -51,12 +37,9 @@ RBASE = 'http://127.0.0.1:3479'
 LOG = '/tmp/standby-test099-dom-proc.log'
 FINNEY_OUTPOINT = 'f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16:1'
 
-# (0.8.11, secure defaults) Profile dimension, same as the API and
-# regression suites: STANDBY_TEST_PROFILE=umbrel runs the app and
-# receiver with STANDBY_BIND=0.0.0.0 and STANDBY_ALLOWED_HOSTS set
-# (the ${APP_DOMAIN} equivalent); the default profile runs the code
-# defaults (loopback bind, no allowlist). CI invokes the launcher
-# once per profile.
+# STANDBY_TEST_PROFILE=umbrel runs the app and receiver with
+# STANDBY_BIND=0.0.0.0 and STANDBY_ALLOWED_HOSTS set; the default profile
+# runs the code defaults. CI runs the launcher once per profile.
 
 
 _PROFILE_ENV = {}
@@ -85,25 +68,18 @@ def port_closed(port):
 
 shutil.rmtree(DATA, ignore_errors=True)
 shutil.rmtree(CHECKIN_DIR, ignore_errors=True)
-# Fee-history seed (0.8.9, accumulated peak): the fee-pill checks
-# need a served peak of 2.0 sat/vB, and a fresh app has no history
-# (the peak appears only after 24 hourly observations spanning a
-# full day). Seed the state file with 25 hourly observations at
-# 2.0 sat/vB over the last 24 hours — the 90th percentile is 2.0
-# over a 1-day window — before the app boots. loadState merges
-# the seed over the defaults, so only version, bitcoin.txs, and
-# feeHistory need to be present. The startup hourly tick adds
-# nothing (one observation per hour: the latest seed is minutes
-# old), so the peak stays 2.0.
+# Seed 25 hourly fee observations at 2.0 sat/vB over the last 24 hours, so
+# the fee-pill checks see a served peak of 2.0. loadState merges the seed
+# over the defaults; the startup tick adds nothing (the latest seed is
+# minutes old).
 os.makedirs(DATA, exist_ok=True)
 _now = datetime.now(timezone.utc)
 _seed_history = [{'t': (_now - timedelta(hours=24 - i)).isoformat().replace('+00:00', 'Z'), 'fee': 2.0} for i in range(25)]
 # The seed must be a plausible state document (version + bitcoin.txs)
 # or loadState rejects it as corrupt; mergeDefaults fills the rest.
 json.dump({'version': 7, 'bitcoin': {'txs': []}, 'feeHistory': _seed_history}, open(os.path.join(DATA, 'state.json'), 'w'), indent=2)
-# Primary stub answers the Slipstream API and the BTC price feed
-# too (same port), so the app never touches the real
-# slipstream.mara.com, mempool.space or CoinGecko.
+# The primary stub also answers Slipstream and the price feeds, so the app
+# never touches a real service.
 p1 = v.start(['node', v.STUB, '18275'], log=LOG)
 p2 = v.start(['node', v.STUB, '18276'], log=LOG)
 recv = v.start(['node', 'checkin-receiver/server.js'],
@@ -157,13 +133,9 @@ try:
         print('seed triggerStatus: %-14s %s' % (t.get('label'), (t.get('triggerStatus') or {}).get('reason')))
     print('seeded: 7 armed txs (checkin/price/utxo/manual/blockheight/setdate/feemarket), nodes tested OK, 1 check-in, 1 release check (no broadcasts)')
     rc = subprocess.run(['node', TESTDIR + '/dom_check099.js']).returncode
-    # Width check (390px): the price $ amount field and every
-    # guard-note in the Add and Edit forms. Runs while the app is
-    # still up, against the same seeded instance. Browsers: use
-    # PLAYWRIGHT_BROWSERS_PATH when set; locally the goal dir's
-    # screenshots/browsers copy; in CI leave it unset so Playwright
-    # uses its default cache (installed by `npx playwright install
-    # chromium`).
+    # Width check at 390px against the same instance.
+    # PLAYWRIGHT_BROWSERS_PATH is used when set; otherwise Playwright's
+    # default cache.
     _pw_env = dict(os.environ)
     if 'PLAYWRIGHT_BROWSERS_PATH' not in _pw_env:
         _local_browsers = os.path.join(GOAL, 'screenshots', 'browsers')
@@ -172,12 +144,9 @@ try:
     wrc = subprocess.run(['node', TESTDIR + '/width_check099.js'],
                          env=_pw_env).returncode
     rc = rc or wrc
-    # Error-screen phase (0.8.3): the main DOM run boots a healthy
-    # app, so the broken-state error view and the restore /
-    # start-fresh flows get their own instance on ports 3468/3469
-    # (stubs 18265/18266, data /tmp/standby-test099-dom-err). The
-    # script kills and respawns the app itself by exact PID; the
-    # launcher stops the receiver + stubs here.
+    # Error-screen phase: its own instance on ports 3468/3469 (stubs
+    # 18265/18266). The script respawns the app itself by PID; the
+    # launcher stops the receiver and stubs here.
     err_data = '/tmp/standby-test099-dom-err'
     err_checkin = '/tmp/standby-test099-dom-err-checkin'
     shutil.rmtree(err_data, ignore_errors=True)
@@ -217,9 +186,8 @@ try:
         erc = subprocess.run(['node', TESTDIR + '/dom_check099_error.js'], env=err_env).returncode
         rc = rc or erc
     finally:
-        # The error script stops the app it last spawned itself;
-        # stop whatever is left (receiver + stubs, and the app if
-        # the script died mid-flow) by process object.
+        # Stop whatever is left (receiver, stubs, and the app if the
+        # script died mid-flow).
         for p in (eapp, erecv, e1, e2):
             v.stop(p)
         err_open = [port for port in (3468, 3469, 18265, 18266) if not port_closed(port)]

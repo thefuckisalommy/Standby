@@ -79,18 +79,14 @@ module.exports = async function setsRoutes(ctx) {
       saveErrs = setAttachErrors(f, body.txIds, null);
       if (saveErrs.length) return false;
       if ((f.bitcoin.sets || []).some((s) => s.id === set.id)) return false;
-      // Single history: the set's trail opens
-      // with each member's existing history (tagged, oldest
-      // first); the creation event closes it, so the trail never
-      // starts from scratch.
+      // The set's trail opens with each member's existing history
+      // (tagged), then the creation event.
       const memberTxs = body.txIds.map((id) => (f.bitcoin.txs || []).find((t) => t.id === id)).filter(Boolean);
       set.history = [];
       store.backfillSetHistory(set, memberTxs);
       pushHistory(set, 'added', 'Set created with ' + body.txIds.length + (body.txIds.length === 1 ? ' transaction' : ' transactions'), now.toISOString());
       (f.bitcoin.sets = f.bitcoin.sets || []).push(set);
-      // The danger zone is measured against the SMALLEST check-in
-      // threshold in the set — the most urgent check-in rule is
-      // the one that would let the release fire soonest.
+      // The danger zone uses the smallest check-in threshold in the set.
       const checkinThresholds = trig.trigger.rules.filter((r) => r.type === 'checkin').map((r) => r.params.thresholdDays);
       if (checkinThresholds.length > 0 && inDangerZone(f, now, Math.min(...checkinThresholds))) {
         resetCheckin(f, now, 'add-reset');
@@ -122,17 +118,14 @@ module.exports = async function setsRoutes(ctx) {
     if (typeof body.label === 'string') set.label = asStr(body.label, 80);
     if (body.txIds !== undefined) {
       if (!Array.isArray(body.txIds)) return sendError(res, 400, 'txIds must be a list of transaction ids');
-      // Only the NEWLY attached ids are validated against the
-      // settled / other-set rules — a member already in this set
-      // stays put even if it has since broadcast.
+      // Only newly attached ids are checked against the settled and other-
+      // set rules.
       const freshIds = body.txIds.filter((id) => !orig.txIds.includes(id));
       const errs = setAttachErrors(state, freshIds, set.id);
       if (errs.length) return sendError(res, 400, errs[0]);
       set.txIds = [...new Set(body.txIds)];
-      // Single history: a newly attached member
-      // brings its existing history into the set's trail (tagged,
-      // oldest first) — the 'Members changed' event below closes
-      // the attach, so it stays the newest entry.
+      // A newly attached member brings its history into the set's trail;
+      // 'Members changed' stays the newest entry.
       const addedTxs = freshIds.map((id) => (state.bitcoin.txs || []).find((t) => t.id === id)).filter(Boolean);
       if (addedTxs.length) store.backfillSetHistory(set, addedTxs);
     }

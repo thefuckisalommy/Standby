@@ -77,12 +77,9 @@ function timelockedUntil(tx, tipHeight, now) {
 // the primary is dropped — trying the same server twice buys nothing.
 function endpointsFor(settings) {
   const eps = [{ label: 'primary', base: mempoolBase(settings) }];
-  // Secondary disabled (Settings: secondaryEnabled,
-  // default true): primary only, no fallback anywhere. Every
-  // consumer reads its endpoints from here — tip, fee, outspend,
-  // confirmations, node test, broadcast — so returning just the
-  // primary is the whole enforcement. Missing flag means enabled
-  // (mergeDefaults sets it true; old state behaves as before).
+  // Secondary disabled: return the primary alone. Every endpoint consumer
+  // reads from here, so this is the whole enforcement. A missing flag
+  // means enabled.
   if (settings && settings.secondaryEnabled === false) return eps;
   const sec = mempoolSecondaryBase(settings);
   if (sec && sec !== eps[0].base) eps.push({ label: 'secondary', base: sec });
@@ -205,11 +202,8 @@ function parseTx(hex) {
     totalOutSats: totalOut.toString(),
     locktime,
     size: buf.length,
-    // vsize: the size the fee rate is computed against. For a
-    // non-segwit transaction it is the serialized size; for a
-    // segwit one it is ceil((3 * base_size + total_size) / 4),
-    // where base_size is the serialization without marker, flag,
-    // or witness data (the `stripped` buffer above).
+    // vsize: the serialized size, or for segwit ceil((3 * base + total) /
+    // 4), where base is the `stripped` serialization without witness data.
     vsize: segwit ? Math.ceil((3 * stripped.length + buf.length) / 4) : buf.length,
   };
 }
@@ -309,11 +303,9 @@ function parseMultisigScript(script) {
   return null;
 }
 
-// The scriptPubKey of the output an input spends, from witness_utxo
-// (0x01) when present, else from non_witness_utxo (0x00) by parsing
-// the previous transaction. Null when the PSBT carries neither —
-// then partial signatures cannot be matched to an address, and the
-// input can only be finalized from final scripts.
+// The scriptPubKey an input spends, from witness_utxo, else the
+// non_witness_utxo parent. Null without either: then only final scripts
+// can finalize it.
 function inputScriptPubKey(inputMap, prevVout) {
   const wit = inputMap.find((e) => e.type === 0x01);
   if (wit) {
@@ -335,11 +327,8 @@ function inputScriptPubKey(inputMap, prevVout) {
   return null;
 }
 
-// Finalize one input. Returns { scriptSig, witness } (a Buffer and an
-// array of Buffers). Throws a descriptive error when it cannot be
-// finalized — the caller collects these into the not-fully-signed
-// report, so the message names the input index and, for missing
-// signatures, how many it has vs. needs.
+// Finalize one input: { scriptSig, witness }. Throws a message naming the
+// input (and signatures had vs needed) for the not-fully-signed report.
 function finalizePsbtInput(inputMap, scriptPubKey, index) {
   const at = 'input ' + index;
   const finalSig = inputMap.find((e) => e.type === 0x07);
@@ -386,9 +375,8 @@ function finalizePsbtInput(inputMap, scriptPubKey, index) {
       if (!hasWit) throw new Error(at + ' is a P2WSH input with no final_scriptWitness, so it is not fully signed');
       if (hasSig) throw new Error(at + ' is a P2WSH input with a final_scriptSig, which it should not have');
     } else {
-      // Unknown script type (including taproot) or no
-      // spent-output info: the finalizer did the work — accept it
-      // as long as at least one final field is actually non-empty.
+      // Unknown script type (taproot) or no spent-output info: accept if
+      // at least one final field is non-empty.
       if (!hasSig && !hasWit) throw new Error(at + ' has no usable final_scriptSig or final_scriptWitness, so it is not fully signed');
     }
     return {
@@ -486,9 +474,7 @@ function finalizePsbtInput(inputMap, scriptPubKey, index) {
   throw new Error(at + ' has an unsupported script type, so it cannot be finalized');
 }
 
-// Extract the raw transaction hex from a PSBT that is fully signed.
-// Throws a clear error for a malformed PSBT, an unparsable unsigned
-// transaction, or a PSBT that is not fully signed.
+// The raw hex of a fully signed PSBT; throws a clear error otherwise.
 function extractTxFromPsbt(data) {
   let buf;
   if (Buffer.isBuffer(data)) {
@@ -597,10 +583,9 @@ function requestText({ protocol, hostname, port, path: p, method, headers, body,
         let received = 0;
         res.on('data', (c) => {
           received += c.length;
-          // Without a cap a faulty (or hostile) custom
-          // endpoint could answer with an unbounded body and grow the
-          // process until Umbrel restarts it. The 15 s timeout bounds
-          // time, not size — this bounds size.
+          // Cap the body size: a faulty or hostile endpoint could
+          // otherwise grow the process without bound (the timeout limits
+          // time, not size).
           if (received > MAX_RESPONSE_BYTES) {
             return fail(new Error('response exceeded ' + MAX_RESPONSE_BYTES + ' bytes'));
           }
@@ -635,22 +620,16 @@ function mempoolReq(path, method, body, base, timeoutMs, contentType) {
     body,
     timeoutMs,
   });
-  // Stamp on ANY HTTP answer (any status, including a 429 or a
-  // 404 — the endpoint was asked and answered). A rejection
-  // (timeout, refused, DNS) is no answer and stamps nothing.
-  // The derived promise's rejection handler keeps it from
-  // becoming an unhandled rejection; the returned promise
-  // itself is untouched.
+  // Stamp the endpoint on any HTTP answer (any status); a timeout, refusal
+  // or DNS error stamps nothing. The derived promise's catch only prevents
+  // an unhandled rejection.
   p.then(() => { nodeCheckedAtByBase[key] = new Date().toISOString(); }, () => {});
   return p;
 }
 
-// Per-endpoint "last answered" stamps: the tick asks the
-// primary every time and the secondary only on fallback, so the
-// two node rows need their own times. mempoolReq stamps each
-// endpoint base above; the server folds the live stamps into the
-// stored connection object (keyed by endpoint label) before a
-// save, so each node row shows when THAT endpoint last answered.
+// Per-endpoint last-answered stamps (the secondary is only asked on
+// fallback, so the rows need their own times); folded into the stored
+// connection before a save.
 const nodeCheckedAtByBase = {};
 function nodeCheckedAt() { return { ...nodeCheckedAtByBase }; }
 
@@ -696,10 +675,9 @@ function feePeakFromObservations(observations, nowMs) {
   const windowDays = (firstTs === null || lastTs === null) ? 0
     : Math.min(FEE_HISTORY_WINDOW_DAYS, Math.ceil((lastTs - firstTs) / 86400000));
   const fetchedAt = (lastTs === null) ? null : new Date(lastTs).toISOString();
-  // A full day of coverage, on the raw span: 24 hourly readings
-  // span 23 hours, so the peak first appears with the 25th — the
-  // reading one full day after the first. A count alone would let
-  // restarts manufacture a peak in minutes.
+  // A full day on the raw span: the 25th hourly reading is the first a
+  // full day after the first. A count alone would let restarts fake a
+  // peak.
   const spanMs = (firstTs === null || lastTs === null) ? 0 : (lastTs - firstTs);
   if (count < FEE_HISTORY_MIN_OBSERVATIONS || spanMs < 86400000) return { peak: null, windowDays, observations: count, fetchedAt };
   fees.sort((a, b) => a - b);
@@ -788,12 +766,8 @@ async function fetchCurrentFeesFromNode(base) {
   return mapped;
 }
 
-// Fetch the current recommended fees from the configured nodes,
-// PRIMARY FIRST: the primary node's tiers are tried first
-// and the secondary is only asked when the primary cannot answer
-// — the same primary-first rule as the fee, tip, and outspend
-// reads. Throws when neither node answers — the caller keeps the
-// last cached fees, never a verdict.
+// Current fees, primary first; the secondary only when the primary cannot
+// answer. Throws when neither answers (the caller keeps the cached fees).
 async function fetchCurrentFeesFromEndpoints(endpoints) {
   if (!endpoints || !endpoints.length) throw new Error('no fee endpoints configured');
   let lastErr = null;
@@ -876,12 +850,9 @@ function priceFromPath(data, path) {
   return cur;
 }
 
-// Build the provider-like object a custom source fetches
-// through: the full URL splits into base (protocol + host) and
-// path (pathname + search), and the parse step is the JSON-path
-// walker. Throws on a non-http(s) or unparseable URL — the
-// caller treats that as "this source is not configured", never
-// as a reading.
+// The provider-like object for a custom source: base and path from the
+// URL, the JSON-path walker as parser. Throws on a bad URL (the source
+// then counts as not configured).
 function customPriceProvider(url, jsonPath) {
   const u = new URL(String(url).trim());
   if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error('custom price URL must be http(s): ' + url);
@@ -917,10 +888,8 @@ function priceSourceKey(v) {
   return String(v);
 }
 
-// Resolve one stored source value to the provider-like object
-// the fetch uses, or null when it is not usable. A custom
-// source resolves through customPriceProvider (its own URL +
-// JSON-path parser); a built-in resolves through the registry.
+// The provider-like object for a stored source (custom or registry), or
+// null when unusable.
 function resolvePriceSource(v) {
   const norm = normalizePriceSourceValue(v);
   if (norm === null) return null;
@@ -928,12 +897,8 @@ function resolvePriceSource(v) {
   return customPriceProvider(norm.url, norm.path);
 }
 
-// The User-Agent for price-provider fetches. CoinGecko's WAF
-// rejects requests with no (or a non-descriptive) User-Agent
-// with a 403 ("Please add a descriptive User-Agent"), so every
-// price fetch identifies the app. Read from package.json so it
-// tracks the release; falls back to a bare name if the file
-// cannot be read (the module must stay loadable standalone).
+// User-Agent for price fetches (CoinGecko rejects requests without a
+// descriptive one), from package.json with a bare fallback.
 let PRICE_USER_AGENT = 'Standby';
 try { PRICE_USER_AGENT = 'Standby/' + require('../package.json').version; } catch { /* keep the bare name */ }
 
@@ -957,12 +922,9 @@ function priceProviderBase(provider) {
   return provider.baseUrl;
 }
 
-// Fetch one provider's BTC price in USD. Throws on a non-200
-// answer, an unparseable body, a shape without a usable price, a
-// non-finite or non-positive number, or a price outside the sanity
-// bounds ($1–$100M) — any of those is invalid data from that
-// source, and the caller treats it as "that source did not
-// answer", never as a reading.
+// One provider's BTC price in USD. Throws on anything unusable (non-200,
+// bad body, non-positive, or outside $1–$100M); the caller treats that as
+// no answer.
 async function fetchPriceFromProvider(provider) {
   const base = priceProviderBase(provider);
   const u = new URL(base);
@@ -1024,10 +986,9 @@ function combinePriceReadings(readings, agreementPct) {
     }
   }
   if (valid.length === 0) {
-    // No source answered with a usable price — the feed is down
-    // (or returned garbage), not a market move. There is no range
-    // check: a reading both sources agree on is trusted, whatever
-    // its size — the agreement check is the only protection.
+    // No usable price: the feed is down or returned garbage, not a market
+    // move. No range check: an agreed reading is trusted whatever its
+    // size.
     return { valid: false, price: null, mode: 'none', note: '', reason: 'price unavailable — will retry', readings };
   }
   if (valid.length === 1) {
@@ -1036,9 +997,8 @@ function combinePriceReadings(readings, agreementPct) {
     const other = (readings || {})[otherSlot];
     const otherLabel = (other && (other.label || other.provider)) || 'the other source';
     const otherErr = (other && other.error) || '';
-    // The other source either did not answer (unreachable) or
-    // answered with garbage (invalid data) — name which, so the
-    // owner can tell an outage from a bad feed.
+    // Say whether the other source was unreachable or returned garbage, so
+    // an outage can be told from a bad feed.
     const otherWhy = /no usable BTC price/.test(otherErr) ? 'returned invalid data' : 'unreachable';
     return { valid: true, price: only.price, mode: 'single',
       note: only.label + ' only — ' + otherLabel + ' ' + otherWhy, reason: '', readings };
@@ -1061,11 +1021,8 @@ function combinePriceReadings(readings, agreementPct) {
     reason: '', readings };
 }
 
-// The consensus price for /api/state (a single representative
-// number, no direction): the PRIMARY exchange's price when the
-// two agree, the single valid reading, or null when they disagree
-// or neither answers. The per-tx effective price comes from
-// combinePriceReadings — this is only the display number.
+// The display price for /api/state: the primary's when the sources agree,
+// the single valid one, or null.
 function priceConsensus(readings, agreementPct) {
   const agree = (typeof agreementPct === 'number' && Number.isFinite(agreementPct) && agreementPct > 0) ? agreementPct / 100 : 0.05;
   const valid = [];
@@ -1101,10 +1058,8 @@ function feeVerdict(rate, peak, economyFee, lowMult, medMult) {
 // Broadcast paths — primary node first, secondary on failure.
 // ---------------------------------------------------------------------------
 
-// Already-on-the-network counts as broadcast: if the endpoint accepted
-// the transaction but the reply was lost (timeout, dropped connection),
-// the fallback endpoint — or the next hourly retry — will see "already
-// in mempool" and must not report it as a failure. The funds already moved.
+// "Already in mempool" counts as broadcast: if the reply to an accepted
+// broadcast was lost, the retry sees this and must not call it a failure.
 function isAlreadyOut(err) {
   return /already in mempool/i.test(err && err.message ? err.message : String(err || ''));
 }
@@ -1181,11 +1136,8 @@ async function broadcastViaSlipstream(hex, txid) {
   if (res.status === 200 && parsed && parsed.status === 'success') {
     return { txid, method: 'slipstream' };
   }
-  // A 400 carries the reason in body.message — surface it (a fee
-  // below the floor, a sanctions rejection, an invalid tx). Anything
-  // else — a non-JSON body, a 403, a Cloudflare challenge, a 200
-  // with an unexpected shape — is a failed submission, never a
-  // success: fail closed.
+  // A 400 carries the reason in body.message; surface it. Anything else
+  // unexpected is a failed submission (fail closed).
   if (parsed && typeof parsed.message === 'string' && parsed.message) {
     throw new Error('Slipstream rejected the transaction (HTTP ' + res.status + '): ' + parsed.message.slice(0, 200));
   }
@@ -1264,11 +1216,8 @@ const OUTSPEND_CACHE_DEFAULT_TTL_MS = 60 * 1000;
 // base. In memory only: a restart re-learns it, and the test cache-clear
 // hook does not reset it.
 const singularOnlyBases = new Set();
-// Test-only (speedup): drop every outspend cache entry and every
-// in-flight dedup promise, so the next lookup fetches fresh —
-// the same cold-cache state a restart produces, without one.
-// Only reachable via the app's POST /__test__/clear-caches, which
-// itself only answers when STANDBY_TEST_MODE=1.
+// Test only: drop all outspend cache entries and in-flight lookups (via
+// POST /__test__/clear-caches, test mode only).
 function clearOutspendCache() {
   outspendCache.clear();
   outspendInflight.clear();
@@ -1352,25 +1301,18 @@ async function mempoolOutspend(prevTxid, prevVout, apiBase, ttlMs, skipBatch) {
     let batchAnswered = false;
     for (const shape of shapes) {
       if (shape === 'batch') {
-        // Only the requested outpoint's entry is cached (the
-        // cacheVout argument) — the batch answers every output of
-        // the funding tx, but caching its siblings would plant
-        // answers for outpoints nobody asked about.
+        // Cache only the requested outpoint: caching its siblings would
+        // plant answers nobody asked for.
         const arr = await mempoolOutspends(prevTxid, apiBase, ttlMs, prevVout);
         if (arr === null) continue; // batch cannot answer — try the singular
-        // The batch answered, so this base serves it — even when
-        // the array has no entry for this vout (the parent is known
-        // and the route works, so the outpoint does not exist in
-        // it); the singular is still tried for that outpoint,
-        // because a node may know an output the batch does not list.
+        // The batch answered, so this base serves it. A missing entry for
+        // this vout still gets the singular, which may know an output the
+        // batch does not list.
         batchAnswered = true;
         singularOnlyBases.delete(apiBase);
         const entry = Array.isArray(arr) ? arr[prevVout] : null;
-        // Cache this outpoint's entry explicitly: the batch fetch
-        // above is shared (in-flight dedup) with any concurrent
-        // lookup for a sibling vout of the same txid, and only the
-        // fetch's own cacheVout is cached there — this caller's
-        // entry must be cached by the caller.
+        // Cache this outpoint here: a shared in-flight batch only caches
+        // its own cacheVout.
         if (entry && typeof entry === 'object') { outspendCachePut(apiBase, prevTxid, prevVout, entry); return entry; }
         continue;
       }
@@ -1421,12 +1363,9 @@ async function mempoolOutspends(prevTxid, apiBase, ttlMs, cacheVout) {
   finally { if (outspendsInflight.get(key) === p) outspendsInflight.delete(key); }
 }
 
-// Batch outspend check against the endpoints, primary-first — the
-// /outspends twin of checkOutspend below. Returns { txid, results,
-// unknown, checkedVia, checkedBase, error? }: `results` is the
-// per-output array (null when unknown). A 404 from one endpoint is
-// inconclusive (the parent is unknown to that node), so the next
-// endpoint is asked — the same rule as the singular check.
+// Batch outspend check, primary first: { txid, results, unknown,
+// checkedVia, checkedBase, error? } (results null when unknown). A 404 is
+// inconclusive, so the next endpoint is asked.
 async function checkOutspends(prevTxid, endpoints, ttlMs) {
   const errors = [];
   let first404 = null;
@@ -1486,11 +1425,8 @@ async function checkOutspendsCached(prevTxid, endpoints, ttlMs, watched) {
   return checkOutspends(prevTxid, endpoints, ttlMs);
 }
 
-// One outspend answer (singular or one batch entry) in the shape
-// checkOutspend returns: { outpoint, spent, confirmed, txid,
-// blockHeight, unknown, checkedVia, checkedBase }. `entry` is the
-// raw {spent, txid, vin, status} object; a null/non-object entry
-// means this output could not be read — unknown, never unspent.
+// One outspend answer as checkOutspend returns it. A missing entry is
+// unknown, never unspent.
 function outspendEntryToResult(outpoint, entry, checkedVia, checkedBase) {
   if (!entry || typeof entry !== 'object') {
     return { outpoint, spent: false, confirmed: false, txid: null, blockHeight: null, unknown: true, checkedVia, checkedBase };
@@ -1513,12 +1449,9 @@ async function checkInputsUnspentVia(parsed, apiBase, ttlMs) {
   const conflict = [];
   const own = [];
   const unknown = [];
-  // A bare spend (no spender txid — see resolveBareSpends) cannot be
-  // matched against our txid, so ask the node about our own txid
-  // instead: if it knows it, the spender is us. Asked at most once
-  // per transaction, and only when a bare spend appears. A failed
-  // lookup leaves the input unknown — never stale, which is
-  // permanent and would be wrong if our transaction is out there.
+  // A bare spend cannot be matched to our txid, so ask the node about our
+  // own txid (once per tx): if it knows it, the spender is us. A failed
+  // lookup leaves the input unknown, never stale.
   let ownLookup; // undefined = not asked; null = not known; 'error'; else the tx status
   const ownStatus = async () => {
     if (ownLookup === undefined) {
@@ -1572,9 +1505,8 @@ async function checkInputsUnspent(parsed, endpoints, ttlMs) {
       acc.spent.push(...result.spent);
       acc.conflict.push(...result.conflict);
       acc.own.push(...result.own);
-      // checkedVia names the last endpoint that resolved anything —
-      // 'primary' when everything resolved there, 'secondary' when
-      // any input needed the fallback.
+      // checkedVia: 'secondary' if any input needed the fallback, else
+      // 'primary'.
       if (result.unspent.length || result.spent.length || result.conflict.length || result.own.length) {
         acc.checkedVia = ep.label;
         acc.checkedBase = ep.base;
@@ -1676,11 +1608,8 @@ async function dryRun(dataDir, { tx, endpoints, ttlMs }) {
     : check.conflict.length ? 'conflict'
     : check.unknown.length ? 'unknown' : 'ready';
   const wouldBroadcast = check.spent.length === 0 && check.own.length === 0;
-  // The route this transaction would take: the dry-run note
-  // names it, so a Slipstream transaction says "would submit to
-  // Slipstream" instead of "would broadcast". The freshness gate is
-  // the same for both routes — a spent input still means stale, never
-  // submitted — only the wording changes.
+  // The route only changes the note's wording ("would submit to
+  // Slipstream"); the freshness gate is the same.
   const viaSlipstream = tx.broadcastVia === 'slipstream';
   const attempt = viaSlipstream ? 'a submission to Slipstream (MARA)' : 'a broadcast';
   const rejecter = viaSlipstream ? 'Slipstream' : 'the node';
@@ -1697,12 +1626,8 @@ async function dryRun(dataDir, { tx, endpoints, ttlMs }) {
             ? check.conflict.length + ' input(s) are spent by another transaction, and this node cannot say whether that spend is confirmed, so it is treated as unconfirmed — this transaction stays active with a warning and ' + attempt + ' will still be attempted. ' + viaNote
             : check.conflict.length + ' input(s) are spent by another transaction that is not confirmed yet — the spend may still be evicted, so this transaction stays active with a warning and ' + attempt + ' will still be attempted. ' + viaNote
           : check.unknown.length + ' input(s) could not be verified — ' + attempt + ' would be attempted, but the network is the arbiter. ' + viaNote;
-  // The fee: the input values come from the parent txs,
-  // fetched best-effort from the node. Always computed fresh — the
-  // caller (the dry-run endpoint) overwrites the stored fee with
-  // it, so a fee stored wrong (e.g. by the units bug, which read
-  // the parent value as BTC) self-corrects on the next dry-run
-  // instead of lingering. dryRun itself only returns it.
+  // The fee, recomputed from the parents on every dry run, so a wrongly
+  // stored fee corrects itself (the caller records it).
   const fee = await computeFee(parsed, endpoints);
   appendBroadcastLog(dataDir, {
     ts: new Date().toISOString(),
@@ -1739,12 +1664,9 @@ async function dryRun(dataDir, { tx, endpoints, ttlMs }) {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Real broadcast. Tries the endpoints in order — primary first, the
-// secondary on failure. Returns { txid, method, fallback } where method
-// is the endpoint that actually broadcast ('primary'|'secondary').
-// Throws on total failure (and logs it). A broadcast that lands is
-// irrevocable; a failed attempt is retried by the caller.
+// Real broadcast, primary first, secondary on failure. Returns { txid,
+// method, fallback }; throws (and logs) on total failure. Irrevocable once
+// it lands.
 async function broadcastTx(dataDir, { hex, txid, endpoints, notePrefix }) {
   const errors = [];
   for (const ep of endpoints) {
@@ -1783,10 +1705,8 @@ async function broadcastTx(dataDir, { hex, txid, endpoints, notePrefix }) {
 // Confirmation lookup — how many blocks deep is a broadcast transaction?
 // ---------------------------------------------------------------------------
 
-// mempool API: GET /api/tx/:txid
-//   200 { status: { confirmed, block_height, block_time, ... } }
-//   404 = the network does not know this transaction (never seen, or
-//     dropped from the mempool).
+// GET /api/tx/:txid: 200 with status { confirmed, block_height, ... }; 404
+// means the network does not know the tx.
 async function mempoolTxStatus(txid, apiBase, timeoutMs) {
   const res = await mempoolReq('/api/tx/' + txid, 'GET', undefined, apiBase, timeoutMs);
   if (res.status === 404) return null;
@@ -1805,12 +1725,9 @@ function satsValue(value) {
   return BigInt(value);
 }
 
-// One input's prevout value, in satoshis, from the node that knows
-// its parent transaction. The endpoints are tried in order; an
-// endpoint that does not know the parent (404) falls through to
-// the next, and an endpoint that is down does too. A parent the
-// node knows but whose vout is missing (or unparseable) is a real
-// answer, not a reason to retry — it returns null.
+// One input's prevout value in satoshis. An endpoint that 404s the parent
+// or is down falls through to the next; a known parent with a missing vout
+// is an answer (null).
 async function parentOutputValue(prevTxid, prevVout, endpoints, timeoutMs) {
   for (const ep of endpoints) {
     let st;
@@ -1877,10 +1794,8 @@ function base58checkEncode(version, payload) {
   return base58Encode(Buffer.concat([body, chk]));
 }
 
-// Bech32 (BIP 173) and Bech32m (BIP 350): the segwit address
-// encoding. Witness version 0 uses bech32 (constant 1); version 1
-// (taproot) uses bech32m (constant 0x2bc830a3). Mainnet only — the
-// app talks to mainnet mempool endpoints.
+// Bech32 (version 0) and bech32m (version 1, taproot) segwit addresses,
+// mainnet only.
 const BECH32_CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
 function bech32Polymod(values) {
   const GEN = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
@@ -1931,11 +1846,8 @@ function bech32Encode(hrp, witver, program) {
   return hrp + '1' + [witver].concat(data).concat(checksum).map((v) => BECH32_CHARSET[v]).join('');
 }
 
-// The destination of one output script, as a human address when the
-// script type has one, else its type. No hashing is needed: the
-// hash / witness program is already in the script. Returns
-// { type, address } — address is null for OP_RETURN and for scripts
-// no known type covers.
+// An output's destination: { type, address }, address null for OP_RETURN
+// and unknown scripts. No hashing needed.
 function scriptPubKeyInfo(scriptHex) {
   let script;
   try { script = Buffer.from(scriptHex || '', 'hex'); } catch { return { type: 'nonstandard', address: null }; }
@@ -1966,12 +1878,9 @@ function scriptPubKeyInfo(scriptHex) {
   return { type: 'nonstandard', address: null };
 }
 
-// The inputs/outputs detail of a parsed transaction. Outputs carry
-// their value (satoshis, as a string — BigInt-safe, like
-// totalOutSats) plus the destination address and script type;
-// inputs carry their outpoint, with valueSats null (no parent
-// lookup at read time — see above). Returns null when the parsed
-// transaction is not usable (defensive only).
+// Inputs and outputs of a parsed tx: outputs with value (satoshis as a
+// string), address and type; inputs with their outpoint and valueSats
+// null. Null if unusable.
 function txIoDetail(parsed) {
   if (!parsed || !Array.isArray(parsed.inputs) || !Array.isArray(parsed.outputs)) return null;
   return {
@@ -2011,10 +1920,8 @@ async function fetchTipHeights(endpoints) {
   for (let i = 1; i < endpoints.length; i++) {
     const ep = endpoints[i];
     if (primaryUsable) {
-      // The primary answered with a valid height — this endpoint
-      // is not needed this fetch. Recorded explicitly (not an
-      // error), so the combined note says so instead of
-      // 'unreachable'.
+      // The primary answered, so the secondary was not needed (recorded so
+      // the note does not say unreachable).
       out[ep.label] = { endpoint: ep.label, height: null, error: null, skipped: true };
       continue;
     }
@@ -2044,10 +1951,7 @@ function combineTipHeights(readings) {
     const only = valid[0];
     const otherLabel = Object.keys(readings || {}).find((label) => label !== only.label) || 'the other node';
     const other = readings[otherLabel];
-    // A secondary that was never asked — the primary
-    // already answered — is 'not needed', not 'unreachable': the
-    // fetch is primary-first, so the secondary is only queried
-    // when the primary cannot answer.
+    // A secondary never asked is 'not needed', not 'unreachable'.
     const otherWhy = (other && other.skipped) ? 'not needed'
       : (other && other.error) ? 'unreachable' : 'returned invalid data';
     return { valid: true, tip: only.height, mode: 'single',
@@ -2061,11 +1965,8 @@ function combineTipHeights(readings) {
     reason: '', readings };
 }
 
-// Tip height from the endpoints in order — the first that answers
-// wins. Used by the UTXO trigger to count confirmations of a
-// spending tx (confirmations = tip - spendBlockHeight + 1).
-// Throws if no endpoint answers, so the caller can fail safe
-// (an uncountable spend never fires).
+// Tip height from the first endpoint that answers; throws if none does (an
+// uncountable spend never fires).
 async function getTipHeight(endpoints) {
   const errors = [];
   for (const ep of endpoints) {
@@ -2099,22 +2000,17 @@ async function getConfirmations(txid, endpoints) {
       errors.push(ep.label + ' (' + mempoolHostLabel(ep.base) + '): ' + e.message);
     }
   }
-  // Every endpoint either 404'd the tx or failed to answer. Distinguish
-  // "answered and does not know it" from "could not reach it": a 404 on
-  // every endpoint that DID answer means not found; anything else is a
-  // lookup failure and the caller keeps the last known value.
+  // Every endpoint 404'd or failed: not found only if every endpoint that
+  // answered said 404; otherwise a lookup failure (the caller keeps the
+  // last value).
   if (errors.length === 0) {
     return { found: false, confirmed: false, blockHeight: null, confirmations: null, checkedVia: null, checkedBase: null };
   }
   throw new Error('could not check confirmations (' + errors.join('; ') + ')');
 }
 
-// ---------------------------------------------------------------------------
-// Archived (settled) transactions — broadcasted, or carrying a release
-// record (broadcast, stale, failed, conflict, submitted-slipstream).
-// Their fate is decided. (The server's RELEASE_STATUSES is the same
-// set; keep the two in sync.)
-// ---------------------------------------------------------------------------
+// Archived: broadcast, or a release record whose fate is decided (keep in
+// sync with RELEASE_STATUSES in lib/routes/backup.js).
 const ARCHIVED_RELEASE_STATUSES = new Set(['stale', 'failed', 'broadcast', 'conflict', 'submitted-slipstream']);
 function isArchivedTx(tx) {
   return !!(tx && (tx.broadcasted || (tx.release && ARCHIVED_RELEASE_STATUSES.has(tx.release.status))));
@@ -2142,12 +2038,8 @@ function findSharedInputs(txs) {
   return out;
 }
 
-// ---------------------------------------------------------------------------
-// Connection test — verifies both endpoints without moving funds.
-// The app is OK if either one answers (the other is the backup). Returns
-// { ok, detail, results: [{ endpoint, base, ok, detail }] }. The probe
-// is the tip height, which both mempool.space and Esplora answer.
-// ---------------------------------------------------------------------------
+// Connection test: checks both endpoints without moving funds; OK if
+// either answers. Returns { ok, detail, results }.
 async function testConnection(endpoints, opts) {
   // probeOutputLookup: only Test connection probes it. The hourly tick
   // reuses each endpoint's last probe (prevResults), so it makes no
@@ -2185,11 +2077,8 @@ async function testOnePath(apiBase, probeOutputLookup, prevOutputLookup) {
   }
   const fees = await testNodeFees(apiBase);
   const broadcast = await testNodeBroadcast(apiBase);
-  // Output lookup is probed on demand (see testConnection): the
-  // button probes it fresh through the negotiation; the tick
-  // reuses the last probed check for this endpoint. A check that
-  // was never probed stays absent — it neither blocks OK nor
-  // shows a value — until the user tests the connection.
+  // Output lookup is only probed by Test connection; the tick reuses the
+  // last probe. Never probed means absent (no value, does not block OK).
   const outputLookup = probeOutputLookup ? await testNodeOutputLookup(apiBase) : (prevOutputLookup || null);
   const checks = { height, fees, broadcast };
   if (outputLookup) checks.outputLookup = outputLookup;
@@ -2210,12 +2099,9 @@ async function testOnePath(apiBase, probeOutputLookup, prevOutputLookup) {
   };
 }
 
-// Block height: GET /api/blocks/tip/height — answered by both
-// mempool.space and Esplora, so it is the probe that works for
-// any endpoint. A 200 with a parseable integer is ready. `value`
-// is the short display string shown next to the status pill
-// ("Height 976,200"); `detail` is the tooltip text. On failure
-// the value IS the reason, so the row shows why it failed.
+// Block height: GET /api/blocks/tip/height, which every node serves. value
+// is the short text beside the pill ("Height 976,200"), or the reason on
+// failure; detail is the tooltip.
 async function testNodeHeight(apiBase) {
   try {
     const res = await mempoolReq('/api/blocks/tip/height', 'GET', undefined, apiBase);
@@ -2258,12 +2144,8 @@ async function fetchNodeFee(apiBase) {
   if (res.status !== 200) throw new Error('no fee endpoint (404 on both)');
   let data;
   try { data = JSON.parse(res.body); } catch { throw new Error('fee-estimates body is not JSON'); }
-  // One consistent measurement: the economy fee is the
-  // day-scale estimate everywhere, so Esplora's is the 144-block
-  // target — the same target the observation records and the
-  // current-fees mapping uses — not the 6-block rate. A map without a usable
-  // 144 rate has no economy
-  // fee at all.
+  // The economy fee is the day-scale estimate everywhere, so Esplora's is
+  // the 144-block rate; without it there is no economy fee.
   const fee = feeEstimateAtTarget(data, ESPLORA_FEE_TARGETS.economy);
   if (typeof fee !== 'number') throw new Error('fee-estimates has no usable rates');
   return { fee, source: 'esplora' };
@@ -2304,9 +2186,8 @@ async function fetchNodeFeeReadings(endpoints) {
   for (let i = 1; i < endpoints.length; i++) {
     const ep = endpoints[i];
     if (primaryUsable) {
-      // The primary answered with a usable fee — this endpoint is
-      // not needed this fetch. Recorded explicitly (not an error),
-      // so the combined note says so instead of 'unreachable'.
+      // The primary answered, so the secondary was not needed (recorded so
+      // the note does not say unreachable).
       out[ep.label] = { endpoint: ep.label, fee: null, source: null, error: null, skipped: true };
       continue;
     }
@@ -2320,11 +2201,8 @@ async function fetchNodeFeeReadings(endpoints) {
   return out;
 }
 
-// A fee above this is implausible data, not a market move — the
-// highest economy fee ever observed is orders of magnitude below
-// it, and the fee-market trigger's own threshold caps at the
-// same value (store.js). An implausible reading is ignored, never
-// trusted — bad data, not a market move.
+// Above this a fee reading is bad data, not a market move (the fee-market
+// threshold caps at the same value).
 const FEE_IMPLAUSIBLE_SATVB = 10000;
 
 // The primary's fee counts; the secondary is a fallback (mode 'single');
@@ -2350,10 +2228,7 @@ function combineFeeReadings(readings) {
     const only = valid[0];
     const otherLabel = Object.keys(readings || {}).find((label) => label !== only.label) || 'the other node';
     const other = readings[otherLabel];
-    // A secondary that was never asked — the primary
-    // already answered — is 'not needed', not 'unreachable': the
-    // fetch is primary-first, so the secondary is only queried
-    // when the primary cannot answer.
+    // A secondary never asked is 'not needed', not 'unreachable'.
     const otherWhy = (other && other.skipped) ? 'not needed'
       : (other && other.error) ? 'unreachable' : 'returned invalid data';
     return { valid: true, fee: only.fee, mode: 'single',

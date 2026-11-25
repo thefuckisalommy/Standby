@@ -60,9 +60,8 @@ function checkCheckinRule(state, rule, now, ctx) {
 async function checkPriceRule(state, rule, now, ctx) {
   const p = rule.params;
   const prev = (ctx && ctx.prevSlice && typeof ctx.prevSlice === 'object') ? ctx.prevSlice : {};
-  // The last GOOD state, kept across unknown readings (fail-safe):
-  // a disagreement or outage never fires the rule, and the subcard
-  // keeps showing the last price it could trust.
+  // Keep the last good state across unknown readings: an outage or
+  // disagreement never fires, and the card keeps the last trusted price.
   const keepGood = {
     lastPrice: (typeof prev.lastPrice === 'number' && Number.isFinite(prev.lastPrice)) ? prev.lastPrice : null,
     lastPriceAt: (typeof prev.lastPriceAt === 'string' && prev.lastPriceAt) ? prev.lastPriceAt : null,
@@ -92,12 +91,8 @@ async function checkPriceRule(state, rule, now, ctx) {
   }
   const price = comb.price;
   const holding = p.op === '>=' ? price >= p.value : price <= p.value;
-  // The stored reason is trigger-only — the effective price, no
-  // per-source note (that lives in priceNote as data, and in the
-  // Exchange Status section and dry-run notes for display). The
-  // GATE's reason (gateReason) keeps the note — the /api/triggers/check
-  // answer names the sources it read ("currently $100,000 (Custom
-  // $100,000, Coinbase $98,200)"), as it always has.
+  // The stored reason is trigger-only (the effective price); the gate's
+  // reason (gateReason) also names the sources it read.
   const shown = '$' + price.toLocaleString('en-US');
   const gateShown = 'currently ' + shown + ' (' + comb.note + ')';
   if (!holding) {
@@ -205,10 +200,8 @@ async function checkUtxoRule(state, rule, now, ctx) {
       detail: { spent: true, confirmed: true, txid: res.txid }, warning: null,
     };
   }
-  // The tip comes from the SHARED per-tick tip cache
-  // (fetchTipHeightsCached, same as the block-height rule) — the
-  // old direct getTipHeight call cost a second, uncached tip fetch
-  // on every confirmed-spend evaluation.
+  // The tip comes from the shared per-tick tip cache, like the block-
+  // height rule.
   let tip;
   try {
     const comb = bitcoin.combineTipHeights(await fetchTipHeightsCached(bitcoin.endpointsFor(state.settings), checkCadenceSecondsOf(state.settings)));
@@ -334,9 +327,7 @@ async function checkFeeMarketRule(state, rule, now, ctx) {
   const maxRate = rule.params.maxFeeRate;
   const dir = rule.params.direction === 'above' ? 'above' : 'below';
   const prev = (ctx && ctx.prevSlice && typeof ctx.prevSlice === 'object') ? ctx.prevSlice : {};
-  // The last GOOD fee, kept across unknown readings (fail-safe):
-  // a disagreement or outage never fires the rule, and the
-  // subcard keeps showing the last fee it could trust.
+  // Keep the last good fee across unknown readings (fail-safe).
   const keepGood = {
     lastEconomyFee: (typeof prev.lastEconomyFee === 'number' && Number.isFinite(prev.lastEconomyFee)) ? prev.lastEconomyFee : null,
   };
@@ -375,10 +366,8 @@ async function checkFeeMarketRule(state, rule, now, ctx) {
   };
 }
 
-// Dispatch by rule type. Returns the check function's result
-// { fire, status, reason, slice, detail, warning } — no state is
-// written here (the caller stores the slice). The manual rule never
-// fires — the owner broadcasts it by hand.
+// Dispatch by rule type; returns the check's result without writing state.
+// Manual never fires.
 async function checkRule(state, rule, now, ctx) {
   switch (rule.type) {
     case 'checkin': return checkCheckinRule(state, rule, now, ctx);
@@ -473,9 +462,7 @@ function combineOutcomes(set, outcomes) {
   return { fire, status, reason, firedIndexes };
 }
 
-// The outcome class of one evaluated rule: 'satisfied' when it
-// fired, 'unknown' when it could not be read, 'held' when a hold
-// kept it from firing, else 'not'.
+// Outcome class of a rule: 'satisfied', 'unknown', 'held' or 'not'.
 function outcomeClass(r) {
   if (r.fire) return 'satisfied';
   if (r.status === 'unknown') return 'unknown';
@@ -515,10 +502,9 @@ function ruleStatusFor(state, tx, rule, slice, now) {
     // Vacation is check-in-only: it freezes this tx's
     // clock and holds its release, and nothing else's.
     if (state.settings.vacationMode) return { ...base, status: 'vacation', reason: 'Vacation mode is on — the countdown is frozen' };
-    // A past-due clock while a grace is active reads
-    // 'grace', not 'release-due' — the rule is held, it cannot
-    // fire; an on-track clock keeps its countdown (the grace
-    // card explains the hold). Mirrors checkinStatus.
+    // Past due during a grace reads 'grace', not 'release-due' (held,
+    // cannot fire); an on-track clock keeps counting. Mirrors
+    // checkinStatus.
     if (isGraceActive(state, now) && clock.state === 'release-due') return { ...base, status: 'grace', reason: 'Grace period active — will evaluate when it ends', daysSince: clock.daysSince, windowDays: clock.windowDays, nextDue: clock.nextDue };
     if (clock.state === 'release-due') return { ...base, status: 'release-due', reason: 'Release due', daysSince: clock.daysSince, windowDays: clock.windowDays, nextDue: clock.nextDue };
     return { ...base, status: 'on-track', reason: clock.daysSince + ' of ' + clock.windowDays + ' days elapsed', daysSince: clock.daysSince, windowDays: clock.windowDays, nextDue: clock.nextDue };
@@ -527,10 +513,8 @@ function ruleStatusFor(state, tx, rule, slice, now) {
     return { ...base, status: 'manual', reason: 'Waiting for manual broadcast' };
   }
   if (trg.type === 'price') {
-    // The cached readings (when they are for the currently
-    // configured sources) give the live effective price + source
-    // note; otherwise the stored last evaluation carries the
-    // price and its note.
+    // Cached readings for the configured sources give the live price;
+    // otherwise the stored evaluation.
     const src = priceSourcesOf(state.settings);
     const cacheOk = caches.price.readings && Object.keys(caches.price.readings).length
       && caches.price.source1Key === bitcoin.priceSourceKey(src.source1) && caches.price.source2Key === bitcoin.priceSourceKey(src.source2);
@@ -539,12 +523,9 @@ function ruleStatusFor(state, tx, rule, slice, now) {
       const comb = bitcoin.combinePriceReadings(caches.price.readings, priceAgreementPctOf(state.settings));
       if (comb.valid) { price = comb.price; note = comb.note; mode = comb.mode; }
       else {
-        // The latest fetch says the reading is not valid (the
-        // sources disagree, or neither answers) — the card shows
-        // unknown, whatever the last evaluation said. The reason
-        // stays generic ('price feed unknown'): the source detail
-        // lives in the Exchange Status section and the dry-run
-        // notes, not on a per-tx line.
+        // The latest fetch is invalid (disagreement or no answer):
+        // unknown, whatever the last evaluation said. The reason stays
+        // generic.
         return { ...base, status: 'unknown', reason: 'price feed unknown', lastPrice: null, priceMode: comb.mode, priceNote: '' };
       }
     }
@@ -557,12 +538,8 @@ function ruleStatusFor(state, tx, rule, slice, now) {
       }
       price = stored; note = storedNote; mode = (st && st.priceMode) || null;
     }
-    // The reason is trigger-only — the effective price, no
-    // per-source note. The source detail lives in the Exchange
-    // Status section (readiness card) and the dry-run notes, not
-    // on a per-tx line. The subcard reads lastPrice directly.
-    // A holding price is due at once — no sustained wait (the
-    // two-source agreement is the protection, not a time delay).
+    // Trigger-only reason (no per-source note). A holding price is due at
+    // once (agreement, not a delay, is the protection).
     const shown = '$' + price.toLocaleString('en-US');
     const holding = trg.params.op === '>=' ? price >= trg.params.value : price <= trg.params.value;
     if (!holding) return { ...base, status: 'watching', reason: 'currently ' + shown, lastPrice: price, priceMode: mode, priceNote: note };
@@ -577,10 +554,8 @@ function ruleStatusFor(state, tx, rule, slice, now) {
     return { ...base, status: st.status || 'watching', reason: st.reason || 'waiting for the height', lastTipHeight: (typeof st.lastTipHeight === 'number' ? st.lastTipHeight : null) };
   }
   if (trg.type === 'setdate') {
-    // Pure clock math — no cache, no network — so a set-date
-    // rule reads live even when never evaluated or disarmed,
-    // like the price rule below. Mirrors checkSetDateRule's
-    // reasons exactly; the stored slice is never consulted.
+    // Set-date is pure clock math, so it reads live even when never
+    // evaluated or disarmed. Same reasons as checkSetDateRule.
     const fireMs = Date.parse(trg.params.fireAt);
     if (!Number.isFinite(fireMs)) return { ...base, status: 'unknown', reason: 'set date is not a valid date — will retry' };
     if (now.getTime() >= fireMs) return { ...base, status: 'due', reason: 'date reached — firing' };
@@ -607,9 +582,8 @@ function ruleStatusFor(state, tx, rule, slice, now) {
         const side = dir === 'above' ? 'below ' : 'above ';
         return { ...base, status: 'watching', reason: 'economy fee ' + econ + ' sat/vB (' + side + maxRate + ')', lastEconomyFee: econ, feeMode: comb.mode, feeNote: comb.note };
       }
-      // The latest fetch says no usable reading — the card shows
-      // unknown, whatever the last evaluation said (same fail-safe
-      // as the price branch above).
+      // No usable reading in the latest fetch: unknown (same fail-safe as
+      // price).
       return { ...base, status: 'unknown', reason: comb.reason || 'fee unavailable — will retry', lastEconomyFee: null, feeMode: comb.mode, feeNote: '' };
     }
     if (!st) return { ...base, status: 'not-evaluated', reason: 'Not evaluated yet', lastEconomyFee: null };
@@ -743,10 +717,8 @@ function preBroadcastCheck(tx, logKind, opts) {
   // publicly" escape hatch (forcePublic).
   if (ftx.release && ftx.release.status === 'submitted-slipstream' && !(opts && opts.forcePublic)) return { ok: false, reason: 'already submitted to Slipstream — waiting on MARA' };
   if (logKind === 'release') {
-    // A set member broadcasts on the SET's arm, not its
-    // own toggle: the set's enabled gates every member, and a
-    // member's own enabled is ignored while it is attached.
-    // opts.setId names the set the caller is broadcasting for.
+    // A set member broadcasts on the set's arm, not its own (opts.setId
+    // names the set).
     if (opts && opts.setId) {
       const fset = (fresh.bitcoin.sets || []).find((s) => s.id === opts.setId);
       if (!fset || !(fset.txIds || []).includes(tx.id)) return { ok: false, reason: 'transaction is not in its trigger set' };
@@ -801,22 +773,16 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
   const failNote = logKind === 'release'
     ? 'Release check failed before broadcast: '
     : 'Broadcast check failed before broadcast: ';
-  // The trigger type stamped on every release record this
-  // broadcast writes — the rule that fired it (or the tx's current
-  // trigger, for a manual broadcast). The caller names the
-  // fired rules when it knows them (the release path does); a
-  // manual broadcast and the fallback paths name none, so the
-  // record carries all of the tx's rule types.
+  // The trigger types stamped on this broadcast's records: the fired rules
+  // when the caller names them, else all of the tx's types.
   const trigType = releaseTriggerFor(state, tx, opts && opts.firedRuleTypes);
   let check;
   try {
     check = await bitcoin.checkInputsUnspent(bitcoin.parseTx(tx.hex), endpoints, checkCadenceSecondsOf(state.settings) * 1000);
   } catch (e) {
-    // The manual "Broadcast publicly" escape hatch (forcePublic)
-    // does NOT write a 'failed' record: the tx stays
-    // Slipstream-pending if the public attempt cannot even check
-    // its inputs — the failure is surfaced to the owner, and MARA
-    // is still holding the tx.
+    // forcePublic writes no 'failed' record if the inputs cannot be
+    // checked: the tx stays Slipstream-pending and the owner sees the
+    // error.
     if (!(opts && opts.forcePublic)) {
       const record = { status: 'failed', kind: logKind, trigger: trigType, txid: tx.txid, method: 'primary', lastAttemptAt: now.toISOString(), error: 'input check failed: ' + e.message };
       const fresh = store.loadState(DATA_DIR);
@@ -861,21 +827,17 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
   }
   if (check.spent.length) {
     const spentDesc = check.spent.map((i) => i.prevTxid.slice(0, 12) + ':' + i.prevVout).join(', ');
-    // The record survives check-ins: spent inputs are a fact about
-    // the transaction, not the cycle (only replacing the hex clears
-    // it — a stale transaction can never broadcast).
+    // A stale record survives check-ins: spent inputs are a fact (only
+    // replacing the hex clears it).
     const record = { status: 'stale', kind: logKind, trigger: trigType, txid: tx.txid, method: check.checkedVia, lastAttemptAt: now.toISOString(), error: 'inputs spent: ' + spentDesc };
-    // Record the stale verdict on the CURRENT transaction only if it
-    // is still the same hex; a replacement in the meantime means the
-    // old tx is gone and there is nothing to mark stale.
+    // Record stale only if the tx still has the same hex (a replaced tx
+    // has nothing to mark).
     const fresh = store.loadState(DATA_DIR);
     const ftx = (fresh.bitcoin.txs || []).find((t) => t.id === tx.id);
     if (ftx && ftx.hex === tx.hex) {
       pushHistory(ftx, 'stale', record.error);
-      // The set-stale rule: a stale member does
-      // NOT archive its set — only itself is marked stale. The
-      // set keeps firing for its non-stale members; the stale
-      // verdict is noted on the set's shared history.
+      // A stale member does not archive its set; the verdict is noted on
+      // the set's history.
       noteSetMemberStale(fresh, ftx, record.error);
       recordRelease(fresh, ftx, record, {
         ts: now.toISOString(), kind: logKind, status: 'stale', method: check.checkedVia, txid: tx.txid,
@@ -893,12 +855,9 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
     return { id: tx.id, txid: tx.txid, label: tx.label || '', action: 'skipped', reason: pre.reason };
   }
   const via = (opts && opts.forcePublic) ? 'public' : (pre.tx.broadcastVia === 'slipstream' ? 'slipstream' : 'public');
-  // The first Slipstream attempt — success or fail — is the
-  // deadline anchor for a transaction whose submit keeps failing
-  // (case (b) of fallbackDeadline). Record it once, before the
-  // network call, so it is set even if the attempt itself throws;
-  // never overwrite it after. The success and failure branches below
-  // reload fresh state, so this write survives them.
+  // Record the first Slipstream attempt once, before the network call
+  // (fallbackDeadline's anchor for a submit that keeps failing). Later
+  // branches reload fresh state, so it survives.
   if (via === 'slipstream') {
     const fresh0 = store.loadState(DATA_DIR);
     const ftx0 = (fresh0.bitcoin.txs || []).find((t) => t.id === tx.id);
@@ -907,11 +866,8 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
       store.saveState(DATA_DIR, fresh0);
     }
   }
-  // The public fallback (refreshPublicFallbacks) passes
-  // fallbackDays: its presence means this public broadcast is the
-  // automatic fallback for a Slipstream transaction that ran out its
-  // timer — the broadcast log must say why it went public, so the
-  // note is prefixed onto the broadcast entry broadcastTx writes.
+  // From the public fallback: prefix the broadcast log entry with why it
+  // went public.
   const fallbackNote = (opts && typeof opts.fallbackDays === 'number')
     ? 'Public fallback: this Slipstream transaction was not publicly visible within ' + opts.fallbackDays + (opts.fallbackDays === 1 ? ' day' : ' days') + ', so Standby broadcast it publicly instead.'
     : null;
@@ -946,9 +902,8 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
     const fresh = store.loadState(DATA_DIR);
     const ftx = (fresh.bitcoin.txs || []).find((t) => t.id === tx.id);
     if (ftx && ftx.hex === tx.hex) {
-      // The escape hatch went public: the stored route follows the
-      // tx — it is a public tx now, and if it ever drops back to
-      // 'release-due' it retries via the public route.
+      // Gone public via the escape hatch: the stored route becomes public,
+      // so any retry uses it.
       if (opts && opts.forcePublic) ftx.broadcastVia = 'public';
       ftx.release = record;
       ftx.broadcasted = {

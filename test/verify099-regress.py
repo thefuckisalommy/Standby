@@ -56,11 +56,9 @@ STUB_BASE_S = 'http://127.0.0.1:%d' % STUB_S
 APP_ENV = {'PORT': str(PORT), 'DATA_DIR': DATA, 'CHECKIN_DIR': CHECKIN_DIR,
            'SLIPSTREAM_API_URL': STUB_BASE_P,
            'PRICE_API_URL': STUB_BASE_P}
-# (0.8.11, secure defaults) Profile dimension, same as the API suite:
-# STANDBY_TEST_PROFILE=umbrel runs with STANDBY_BIND=0.0.0.0 and
-# STANDBY_ALLOWED_HOSTS set (the ${APP_DOMAIN} equivalent); the
-# default profile runs the code defaults (loopback bind, no
-# allowlist). CI invokes the suite once per profile.
+# Profiles, as in the API suite: umbrel sets STANDBY_BIND=0.0.0.0 and
+# STANDBY_ALLOWED_HOSTS; default uses the code defaults. CI runs each
+# once.
 if os.environ.get('STANDBY_TEST_PROFILE') == 'umbrel':
     APP_ENV['STANDBY_BIND'] = '0.0.0.0'
     APP_ENV['STANDBY_ALLOWED_HOSTS'] = 'standby.local'
@@ -94,11 +92,9 @@ def save_state_file(stj):
 
 
 def set_clock(days_back, online_days=0):
-    """Backdate the check-in clock; keep lastOnlineAt fresh so no
-    grace sets in these tests. The
-    30 s margin keeps floored day counts exact when a tx carries
-    a banked freeze offset of a few hundred ms (a disarm->re-arm
-    inside the test banks real elapsed time — section 21)."""
+    """Backdate the check-in clock (with a 30 s margin so floored days land
+    exactly), keeping lastOnlineAt fresh so no grace sets.
+    """
     stj = load_state_file()
     stj['checkin']['lastCheckinAt'] = (datetime.now(timezone.utc) - timedelta(days=days_back, seconds=30)).isoformat().replace('+00:00', 'Z')
     stj['checkin']['lastOnlineAt'] = iso_ago(days=online_days)
@@ -134,11 +130,9 @@ def checkin_last(base=BASE):
 
 
 def set_price(usd=None, fail=None, bad='__keep__', provider=None):
-    """Drive the price stub. bad=None clears a malformed reading
-    (the stub only accepts null / 'zero' / 'huge' / 'empty').
-    With provider=None the control applies to ALL providers
-    (backward compat); with a provider id it applies to that
-    provider only (two-source 0.8.0)."""
+    """Drive the price stub. bad=None clears a malformed reading; provider=None
+    applies to every provider.
+    """
     body = {}
     if usd is not None:
         body['usd'] = usd
@@ -152,9 +146,9 @@ def set_price(usd=None, fail=None, bad='__keep__', provider=None):
 
 
 def set_outspend(txid, vout, block_height):
-    """Drive the outspend block-height override on the primary stub.
-    block_height=None clears it. The spend is then reported as
-    confirmed at that height (confs = 900000 - height + 1)."""
+    """Set (or with None clear) the primary stub's spend height for FINNEY:0
+    (900000 - height + 1 confirmations).
+    """
     body = {'txid': txid, 'vout': vout}
     if block_height is None:
         body['clear'] = True
@@ -181,11 +175,9 @@ def patch_trigger_state(tx_id, **fields):
 
 
 def set_tx_fate(tx_id, release=None, broadcasted='__keep__'):
-    """Set a tx's stored release record / broadcasted fact (direct
-    state.json edit). release=None clears the record; broadcasted
-    '__keep__' leaves the fact alone, None clears it. Used to
-    stage settled / pending / failed / conflict txs for the
-    check-in bar tests."""
+    """Set a tx's release record and broadcasted fact in state.json (None
+    clears; '__keep__' leaves the fact).
+    """
     stj = load_state_file()
     for t in stj.get('bitcoin', {}).get('txs', []):
         if t.get('id') == tx_id:
@@ -197,10 +189,9 @@ def set_tx_fate(tx_id, release=None, broadcasted='__keep__'):
 
 
 def set_clock_margin(days_back, online_days=0, margin_s=30):
-    """Backdate the check-in clock with a margin: lastCheckinAt
-    N days + 30 s ago, so a floored day count lands on N even
-    when a banked freeze offset carries a few seconds of
-    test-execution time (see section 21)."""
+    """Backdate lastCheckinAt by N days plus 30 s, so a floored day count lands
+    on N despite a banked freeze offset.
+    """
     stj = load_state_file()
     stj['checkin']['lastCheckinAt'] = (datetime.now(timezone.utc) - timedelta(days=days_back, seconds=margin_s)).isoformat().replace('+00:00', 'Z')
     stj['checkin']['lastOnlineAt'] = iso_ago(days=online_days)
@@ -208,12 +199,9 @@ def set_clock_margin(days_back, online_days=0, margin_s=30):
 
 
 def set_tx_freeze(tx_id, offset_ms='__keep__', inactive_since='__keep__'):
-    """Direct state.json edit of a tx's freeze fields, like
-    set_clock: offset_ms is the banked inactive time, and
-    inactive_since an ISO timestamp (or None) for the open
-    inactive period. Used to simulate days passing while a tx
-    is inactive — the server measures real elapsed time, so
-    simulated time is written into these fields."""
+    """Set a tx's freeze fields in state.json, to simulate days passing while
+    inactive.
+    """
     stj = load_state_file()
     for t in stj.get('bitcoin', {}).get('txs', []):
         if t.get('id') == tx_id:
@@ -260,10 +248,7 @@ def main():
         seeding firing state.
         """
         nonlocal app
-        # The pre-restart node-check stamp: the poll waits for a
-        # stamp NEWER than this, so a stale stamp can never
-        # satisfy it (mergeNodeStamps keeps the stored stamp
-        # until testNodes re-stamps it at startup).
+        # Wait for a node-check stamp newer than this one.
         prev_stamp = None
         try:
             _, st = req('GET', '/api/state')
@@ -311,9 +296,7 @@ def main():
         p_receiver = start(['node', 'checkin-receiver/server.js'],
                            env=RECEIVER_ENV,
                            cwd=APP, log=LOG)
-        # Poll for the stubs instead of a fixed sleep: under parallel
-        # startup load a stub can take longer than 0.8 s to listen,
-        # and the probe below used to crash on Connection refused.
+        # Poll for the stubs instead of sleeping.
         wait_up(STUB_BASE_P, path='/api/v3/simple/price')
         wait_up(STUB_BASE_S, path='/api/v3/simple/price')
         s, pr = req('GET', '/api/v3/simple/price', base=STUB_BASE_P)
@@ -356,11 +339,8 @@ def main():
             s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft(1, 110000 + i * 2), 'label': 'bad ' + label, 'trigger': trig})
             check('2 invalid trigger at add -> 400 (%s)' % label,
                   s == 400 and frag in (r.get('error') or ''), (s, r))
-        # No range check on a price trigger value any more: 0 and
-        # $999,999,999 are both valid values. (0 with op '>=' is
-        # holding at $98,200, so it needs triggerConfirmed — the
-        # already-true gate, not validation — while $999,999,999
-        # is not holding and adds plain.)
+        # No range check on a price value: 0 and $999,999,999 are both
+        # valid (0 with '>=' already holds, so it needs triggerConfirmed).
         s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft(1, 110100), 'label': 'P value 0',
                                                 'trigger': {'type': 'price', 'params': {'op': '>=', 'value': 0}}, 'triggerConfirmed': True})
         check('2 price trigger value 0 adds (201, stored normalized)',
@@ -457,9 +437,8 @@ def main():
         before = checkin_last()
         check('5 setup: clock is 30 days back (danger zone, 5 days left)',
               before is not None and abs((datetime.now(timezone.utc) - datetime.fromisoformat(before.replace('Z', '+00:00'))).total_seconds() - 30 * 86400) < 300, before)
-        # (a) adding price + utxo txs must NOT reset; a global
-        # threshold PUT is gone entirely (400 — section 16 covers
-        # the per-tx bars that replace it).
+        # (a) Adding price and UTXO txs must not reset the clock; a global
+        # threshold PUT is a 400.
         s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft(1, 100501), 'label': 'P5 price',
                                                 'trigger': {'type': 'price', 'params': {'op': '>=', 'value': 90000}}, 'triggerConfirmed': True})
         txp5 = r['tx']['id']
@@ -512,10 +491,9 @@ def main():
               bool((p5 or {}).get('broadcasted')), (p5 or {}).get('broadcasted'))
         s, st = req('GET', '/api/status')
         check('5c after the check-in the status is On track', st.get('state') == 'on-track', st.get('state'))
-        # (d) a price broadcast via a release check must NOT flip the check-in card.
-        # The tx is added AFTER the restart: the startup full tick
-        # would broadcast a due price tx on its own, so the add
-        # comes after it and the release check is what broadcasts.
+        # (d) A price broadcast must not flip the check-in card. Added
+        # after the restart so the release check, not the startup tick,
+        # broadcasts it.
         check('5d restart before the release check (fresh price-tick clock, empty price cache)', restart())
         s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft(1, 100507), 'label': 'P5d price release',
                                                 'trigger': {'type': 'price', 'params': {'op': '>=', 'value': 90000}}, 'triggerConfirmed': True})
@@ -531,11 +509,9 @@ def main():
         check("5d after a price broadcast the check-in card is still 'on-track', not 'broadcasted'",
               st.get('state') == 'on-track' and st.get('label') == 'On track', st)
 
-        # --- 6. price trigger ------------------------------------------
-        # (a) immediate fire — a holding price broadcasts on the
-        # FIRST evaluation (no sustained wait); below threshold
-        # does not fire; the triggerState carries no sustained
-        # clock (no `since` field).
+        # --- 6. price trigger ---
+        # (a) A holding price broadcasts on the first evaluation; below
+        # threshold does not; no sustained clock.
         s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft(1, 100601), 'label': 'P6a immediate',
                                                 'trigger': {'type': 'price', 'params': {'op': '>=', 'value': 90000}}, 'triggerConfirmed': True})
         txp6a = r['tx']['id']
@@ -582,10 +558,8 @@ def main():
         check('6b feed down -> the tx is not broadcast', not (p6b or {}).get('broadcasted'), (p6b or {}).get('broadcasted'))
         s, pr = set_price(fail=False)
         check('6b stub price feed restored', s == 200 and pr.get('coingecko', {}).get('fail') is False and pr.get('coinbase', {}).get('fail') is False, pr)
-        # (c) malformed readings — zero / empty each -> unknown, no
-        # fire. A huge reading both sources agree on is NOT
-        # malformed: with no range check the agreement is the only
-        # protection, so $1,000,000,000,000 fires at once (below).
+        # (c) Zero or empty readings are unknown, no fire. A huge reading
+        # both sources agree on fires (no range check).
         for bad in ('zero', 'empty'):
             s, pr = set_price(bad=bad)
             check('6c stub price set to bad=%s' % bad, s == 200 and pr.get('coingecko', {}).get('bad') == bad and pr.get('coinbase', {}).get('bad') == bad, pr)
@@ -629,12 +603,9 @@ def main():
         s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'checkin', 'params': {'thresholdDays': 35}}})
         check('6d /api/triggers/check on an on-track check-in trigger -> on-track, no warning',
               s == 200 and r.get('fire') is False and r.get('status') == 'on-track' and r.get('warning') is None, r)
-        # (d2) check-in /api/triggers/check with a txId counts the
-        # tx's frozen time — a tx disarmed for 20 days, clock 40
-        # days back, threshold 35: raw the clock is past due, but
-        # the effective clock (40 - 20 = 20 days) is on-track.
-        # Without the txId the freeze is not counted (a new tx has
-        # none), so the same trigger reads release-due.
+        # (d2) /api/triggers/check with a txId counts the tx's frozen
+        # time: 40 days back minus 20 disarmed is on track; without txId
+        # it reads release-due.
         s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft(1, 100607), 'label': 'P6d freeze check',
                                                 'trigger': {'type': 'checkin', 'params': {'thresholdDays': 35}}})
         txp6d2 = r['tx']['id']
@@ -655,12 +626,8 @@ def main():
         txp6d = r['tx']['id']
         check('6d adding a holding price tx returns triggerWarning that it would fire on the next evaluation',
               s == 201 and isinstance(r.get('triggerWarning'), str) and 'would fire on the next evaluation' in r.get('triggerWarning'), r.get('triggerWarning'))
-        # (e) a large jump both sources agree on is trusted and
-        # fires — there is no range check: the
-        # two-source agreement is the only protection. A fresh
-        # below-threshold price tx watches at $98,200; a $1,000,000
-        # reading (10.2x) fires at once. (txp6b broadcast in 6c's
-        # huge case, so this section uses its own tx.)
+        # (e) A large jump both sources agree on fires ($1,000,000); a
+        # fresh tx is used.
         s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft(1, 100609), 'label': 'P6e jump',
                                                 'trigger': {'type': 'price', 'params': {'op': '>=', 'value': 99000}}})
         txp6e = r['tx']['id']
@@ -785,9 +752,8 @@ def main():
 
         # --- 9. one release check evaluates per-tx triggers ------------
         delete_all_txs()
-        # Section 6e left a $1,000,000 reading in the price cache —
-        # without a restart the below-threshold add below would read
-        # it as holding and the price gate would 400 it.
+        # Restart to clear the $1,000,000 reading left by 6e (else the
+        # price gate would 400 the next add).
         check('9 caches cleared before the adds (empty cache)', clear_caches())
         s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft(1, 100901), 'label': 'R9c due checkin',
                                                 'trigger': {'type': 'checkin', 'params': {'thresholdDays': 35}}})
@@ -800,10 +766,8 @@ def main():
         txr9m = r['tx']['id']
         check('9 three txs added (clock on-track)', s == 201, r)
         check('9 restart before the release check (fresh tick clock, empty cache)', restart())
-        # The due price tx is added AFTER the restart, beside the
-        # UTXO tx: the startup full tick would broadcast it on its
-        # own, and the point here is that ONE release check
-        # broadcasts everything due at once.
+        # The due price tx is added after the restart, so one release
+        # check broadcasts everything due.
         s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft(1, 100903), 'label': 'R9p price',
                                                 'trigger': {'type': 'price', 'params': {'op': '>=', 'value': 90000}}, 'triggerConfirmed': True})
         txr9p = r['tx']['id']
@@ -860,10 +824,8 @@ def main():
         ck_dt = datetime.fromisoformat((ck.get('lastCheckinAt') or '').replace('Z', '+00:00')) if ck.get('lastCheckinAt') else None
         check('10 restore: lastCheckinAt is the restore moment (within minutes), not the backup\'s 100 days back',
               ck_dt is not None and abs((datetime.now(timezone.utc) - ck_dt).total_seconds()) < 300, ck.get('lastCheckinAt'))
-        # (0.8.1, audit: restored `broadcasted` records) A broadcasted
-        # fact + a 'broadcast' release record are NOT believed from a
-        # backup on txid match alone — both are dropped and the tx
-        # comes back active, to be re-derived from the network.
+        # A broadcasted fact and 'broadcast' record are not believed from
+        # a backup; the tx restores active.
         check('10 restore: broadcasted facts + broadcast release records are dropped (re-derived from the network)',
               txs10[txr9c].get('broadcasted') is None and txs10[txr9c].get('release') is None, txs10[txr9c])
         # The clock is fresh (asserted above), and with the broadcast
@@ -872,11 +834,9 @@ def main():
         check("10 restore: the status is 'on-track' — the dropped broadcast record no longer overrides the fresh clock",
               st.get('state') == 'on-track', st.get('state'))
 
-        # --- 11. utxo confirmation modes --------------------------------
-        # Stub facts: FINNEY:0 is a confirmed spend at block 899990
-        # (tip 900000 -> 11 confirmations); CONFLICT:0 is an
-        # unconfirmed spend on the primary stub and a confirmed spend
-        # (11 confirmations) on the secondary.
+        # --- 11. UTXO confirmation modes ---
+        # FINNEY:0: confirmed spend, 11 confirmations. CONFLICT:0:
+        # unconfirmed on the primary, 11 confirmations on the secondary.
         delete_all_txs()
         # (a) unconfirmed mode (0) fires on an unconfirmed spend.
         # The add-time gate sees it as already satisfied (fire).
@@ -958,10 +918,9 @@ def main():
         check('11g the same PUT WITH triggerConfirmed -> 200, stored with confirmations 6',
               s == 200 and r.get('tx', {}).get('trigger') == {'type': 'utxo', 'params': {'outpoint': FINNEY + ':0', 'condition': 'spent', 'confirmations': 6}}, r)
 
-        # --- 12. two-source BTC price --------------------------------------
-        # (a) settings defaults + provider list + the cache holds both
-        # readings. A release check populates the price cache (armed
-        # price txs exist), so read it right after one.
+        # --- 12. two-source BTC price ---
+        # (a) Defaults, provider list, and both readings in the cache
+        # after a release check.
         s, r, res = release_results()
         s, st = req('GET', '/api/state')
         check('12a settings default to CoinGecko + Coinbase',
@@ -1012,9 +971,8 @@ def main():
                                                 'trigger': {'type': 'price', 'params': {'op': '>=', 'value': 90000}}})
         txp12c = r['tx']['id'] if s == 201 else None
         check('12c a price tx added while the sources disagree', s == 201, r)
-        # Seed a prior GOOD reading (no sustained clock — just the
-        # last price): the fail-safe must keep it across the
-        # disagreement instead of letting the bad reading replace it.
+        # Seed a prior good reading: the fail-safe must keep it across the
+        # disagreement.
         patch_trigger_state(txp12c, lastPrice=98200, lastPriceAt=iso_now(), status='watching')
         s, r, res = release_results()
         p12c_res = res.get(txp12c, {})
@@ -1068,12 +1026,8 @@ def main():
         s, pr = set_price(fail=False)
         check('12e both price sources restored',
               s == 200 and pr.get('coingecko', {}).get('fail') is False and pr.get('coinbase', {}).get('fail') is False, pr)
-        # (f) primary decides — 149k/151k straddle a $150,000
-        # threshold: CoinGecko (source1, primary) is $149,000,
-        # Coinbase (source2, secondary) $151,000 (1.3% apart, so
-        # they agree). BOTH rules are judged on the primary's
-        # $149,000: >= does NOT hold, <= DOES. The secondary's
-        # higher price must not fire the >= rule.
+        # (f) The primary decides: $149,000 vs $151,000 (they agree)
+        # around a $150,000 threshold; '>=' does not hold, '<=' does.
         s, pr = set_price(usd=149000, provider='coingecko')
         check('12f CoinGecko set to $149,000', s == 200 and pr.get('coingecko', {}).get('usd') == 149000, pr)
         s, pr = set_price(usd=151000, provider='coinbase')
@@ -1137,9 +1091,8 @@ def main():
               p12g_res.get('action') == 'broadcast' and p12g_res.get('method') == 'primary', p12g_res)
         check('12g the firing triggerState status is due',
               (state_tx(txp12g) or {}).get('triggerState', {}).get('status') == 'due', (state_tx(txp12g) or {}).get('triggerState'))
-        # The reason is trigger-only now (no source note) — the
-        # proof that Kraken + Bitstamp were the sources fetched
-        # and parsed lives in the stored priceNote, not the reason.
+        # The reason is trigger-only; proof of which sources were read is
+        # in the stored priceNote.
         p12g_ts = (state_tx(txp12g) or {}).get('triggerStatus', {})
         check('12g the stored priceNote names both sources (Kraken + Bitstamp fetched and parsed)',
               'Kraken $98,200' in (p12g_ts.get('priceNote') or '')
@@ -1147,9 +1100,8 @@ def main():
         s, r = req('PUT', '/api/settings', {'priceSources': {'source1': 'coingecko', 'source2': 'coinbase'}})
         check('12g sources restored to CoinGecko + Coinbase',
               s == 200 and r.get('priceSources') == {'source1': 'coingecko', 'source2': 'coinbase'}, r)
-        # (h) immediate fire still works with two sources: a fresh
-        # holding rule broadcasts on the FIRST evaluation — no
-        # sustained wait, no clock to seed.
+        # (h) A holding rule still fires on its first evaluation with two
+        # sources.
         check('12h restart before the immediate-fire eval (empty cache)', restart())
         s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft(1, 120115), 'label': 'P12h immediate',
                                                 'trigger': {'type': 'price', 'params': {'op': '>=', 'value': 90000}}, 'triggerConfirmed': True})
@@ -1191,9 +1143,7 @@ def main():
         check('13a one release check: the N=1 tx broadcasts (caught at 2, fires on >=)',
               res.get(txu13a, {}).get('action') == 'broadcast', res.get(txu13a))
         check('13a the N=1 tx is broadcast', bool((state_tx(txu13a) or {}).get('broadcasted')), state_tx(txu13a))
-        # (b) N=0 (unconfirmed) noticed at 2 confirmations fires —
-        # an already-confirmed spend satisfies an unconfirmed-mode
-        # rule (unconfirmed is 0 confirmations; 2 >= 0).
+        # (b) N=0 seen at 2 confirmations fires.
         s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'utxo', 'params': {'outpoint': FINNEY + ':0', 'confirmations': 0}}})
         check('13b /api/triggers/check N=0 at 2 confirmations -> fire true (unconfirmed mode, any spend)',
               s == 200 and r.get('fire') is True and (r.get('reason') or '') == 'spent — firing', r)
@@ -1205,9 +1155,7 @@ def main():
         s, r, res = release_results()
         check('13b one release check: the N=0 tx broadcasts (confirmed spend satisfies unconfirmed mode)',
               res.get(txu13b, {}).get('action') == 'broadcast', res.get(txu13b))
-        # (c) N=3 noticed at 2 confirmations does NOT fire yet — it
-        # watches until the spend reaches 3, and the add is NOT
-        # blocked (below threshold, so no already-spent gate).
+        # (c) N=3 seen at 2 does not fire yet, and the add is not blocked.
         s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'utxo', 'params': {'outpoint': FINNEY + ':0', 'confirmations': 3}}})
         check('13c /api/triggers/check N=3 at 2 confirmations -> fire false, 2 of 3',
               s == 200 and r.get('fire') is False and r.get('detail', {}).get('confirmations') == 2
@@ -1232,12 +1180,8 @@ def main():
         for _f in sorted(os.listdir(os.path.join(APP, 'lib'))):
             if _f.endswith('.js'):
                 _all += open(os.path.join(APP, 'lib', _f)).read()
-        # (0.8.3) rearmFullTick reads the cadence from state inside a
-        # try/catch: when state.json is corrupt and no backup loads,
-        # loadState throws, and the tick falls back to the 60 s
-        # default instead of crashing the process at startup — so
-        # the interval still tracks the saved cadence, and the
-        # fallback is explicit, not a hard-coded interval.
+        # rearmFullTick falls back to 60 s if state cannot load, instead
+        # of crashing at startup.
         check('13d the full tick interval tracks the saved check cadence (rearmFullTick, not a hard-coded 60s)',
               'function rearmFullTick()' in _release
               and 'checkCadenceSecondsOf(store.loadState(DATA_DIR).settings)' in _release
@@ -1248,9 +1192,8 @@ def main():
               and 'PRICE_CACHE_MAX_AGE_MS' not in _prices, '')
         check('13d the full tick evaluates every type together (no onlyTypes filter anywhere)',
               'evaluateRelease({ automatic: true })' in _release and 'onlyTypes' not in _all, '')
-        # The hourly tick does housekeeping only: extract its body
-        # and assert it never evaluates but still refreshes node
-        # status + confirmations.
+        # The hourly tick never evaluates, but still refreshes nodes and
+        # confirmations.
         _start = _release.find('async function runHourlyTick() {')
         _end = _release.find('\n}\n', _start) if _start != -1 else -1
         _hourly = _release[_start:_end] if _start != -1 and _end != -1 else ''
@@ -1261,12 +1204,8 @@ def main():
         # due check-in tx both broadcast on the next 60 s full tick.
         delete_all_txs()
         check('13e restart before the full-tick eval (fresh tick clock)', restart())
-        # (Optimization O4) Park the cadence at 10 s for this
-        # section only: the full tick that broadcasts both txs
-        # then fires ~10 s after the restart instead of ~60 s.
-        # The 60 s interval itself is covered by §20's cadence
-        # test, so nothing is lost. Restored to 60 s at the end
-        # of this section.
+        # Cadence 10 s for this section only, so the full tick fires
+        # quickly (60 s is covered in §20). Restored after.
         s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 10})
         check('13e cadence set to 10 s for this section', s == 200, (s, r))
         set_clock(0)
@@ -1280,10 +1219,7 @@ def main():
         txc13e = r['tx']['id'] if s == 201 else None
         check('13e a check-in tx added on a fresh clock', s == 201, r)
         set_clock(36)
-        # The full tick fires ~10 s after the cadence change
-        # above; poll for both broadcasts (the loop exits as soon
-        # as both land, so the extra iterations cost nothing in
-        # the normal case).
+        # Poll until both broadcast.
         txu13e_broadcast = False
         txc13e_broadcast = False
         for _ in range(15):
@@ -1309,9 +1245,9 @@ def main():
         s, pr = set_outspend(FINNEY, 0, None)
         check('13e outspend override cleared',
               s == 200 and (FINNEY.lower() + ':0') not in (pr.get('overrides') or {}), pr)
-        # --- 14. price-source test button + UA fix + Exchange Status ----
-        # One armed price tx (>= $150,000, never fires at the stub
-        # prices used here) drives the cache for the whole section.
+        # --- 14. price-source test button, User-Agent, Exchange Status
+        # ---
+        # One armed price tx that never fires drives the cache.
         s, pr = set_price(usd=98200)
         check('14 stub price set to $98,200 on all providers',
               s == 200 and pr.get('coingecko', {}).get('usd') == 98200 and pr.get('coinbase', {}).get('usd') == 98200, pr)
@@ -1330,9 +1266,8 @@ def main():
         s, r = req('POST', '/api/settings/price-sources/test', {'provider': 'coinbase'})
         check('14a test endpoint: Coinbase returns $98,200',
               s == 200 and r.get('provider') == 'coinbase' and r.get('price') == 98200 and r.get('error') is None, (s, r))
-        # (b) the User-Agent fix: the stub records the UA each
-        # price feed was fetched with. CoinGecko 403s a missing /
-        # non-descriptive UA, so the app must identify itself.
+        # (b) Every price fetch sends a descriptive User-Agent (CoinGecko
+        # rejects others).
         s, ua = req('GET', '/__test__/price-ua', base=STUB_BASE_P)
         check('14b CoinGecko was fetched with a descriptive User-Agent (Standby/…)',
               s == 200 and isinstance((ua.get('ua') or {}).get('coingecko'), str)
@@ -1350,10 +1285,8 @@ def main():
         s, r = req('POST', '/api/settings/price-sources/test', {'provider': 'nope'})
         check('14d test endpoint: an unknown provider -> 400',
               s == 400 and 'unknown price provider' in (r.get('error') or ''), (s, r))
-        # (e) the test endpoint bypasses the cache and does not
-        # update it: change the stub, test, and the cached price
-        # is still the old one (the cache is fresh for 1 min, so
-        # the full tick cannot have refreshed it in this window).
+        # (e) The test endpoint bypasses the cache and leaves it
+        # unchanged.
         s, pr = set_price(usd=100000, provider='coinbase')
         check('14e Coinbase stub moved to $100,000',
               s == 200 and pr.get('coinbase', {}).get('usd') == 100000, pr)
@@ -1369,9 +1302,7 @@ def main():
         s, pr = set_price(usd=98200, provider='coinbase')
         check('14e Coinbase stub restored to $98,200',
               s == 200 and pr.get('coinbase', {}).get('usd') == 98200, pr)
-        # (f) the test endpoint: a failing provider answers 200
-        # with price null and the error (the test itself worked —
-        # the provider is down).
+        # (f) A failing provider is a 200 with price null and the error.
         s, pr = set_price(fail=True, provider='coingecko')
         check('14f CoinGecko set to fail', s == 200 and pr.get('coingecko', {}).get('fail') is True, pr)
         s, r = req('POST', '/api/settings/price-sources/test', {'provider': 'coingecko'})
@@ -1380,10 +1311,8 @@ def main():
               and isinstance(r.get('error'), str) and 'CoinGecko' in r.get('error'), (s, r))
         s, pr = set_price(fail=False, provider='coingecko')
         check('14f CoinGecko restored', s == 200 and pr.get('coingecko', {}).get('fail') is False, pr)
-        # (f2) the test-all endpoint: one call tests both
-        # sources (the Settings "Test connection" button). It
-        # returns {results: [{provider, price, error}, ...]} in
-        # the order requested, with fresh fetches.
+        # (f2) test-all tests both sources in one call, results in request
+        # order.
         s, r = req('POST', '/api/settings/price-sources/test-all', {'providers': ['coingecko', 'coinbase']})
         check('14f2 test-all: both configured sources return $98,200 in one call',
               s == 200 and isinstance(r.get('results'), list) and len(r['results']) == 2
@@ -1395,8 +1324,7 @@ def main():
         check('14f2 test-all: non-configured providers (Binance, Kraken) return a price',
               s == 200 and [x.get('provider') for x in r.get('results', [])] == ['binance', 'kraken']
               and all(x.get('price') == 98200 and x.get('error') is None for x in r['results']), (s, r))
-        # test-all: a failing provider is a per-result error, not
-        # a whole-call failure — the other result still carries a
+        # A failing provider is a per-result error; the other still has a
         # price.
         s, pr = set_price(fail=True, provider='coingecko')
         check('14f2 CoinGecko set to fail (test-all)', s == 200 and pr.get('coingecko', {}).get('fail') is True, pr)
@@ -1438,10 +1366,8 @@ def main():
               st.get('settings', {}).get('priceSources') == {'source1': 'coingecko', 'source2': 'coinbase'}, st.get('settings'))
         s, pr = set_price(usd=98200, provider='coinbase')
         check('14f2 Coinbase stub restored to $98,200 (test-all)', s == 200 and pr.get('coinbase', {}).get('usd') == 98200, pr)
-        # (g) Exchange Status, OK: both sources agree. The
-        # readiness card shows the consolidated status once; the
-        # per-tx reason is trigger-only (no per-source note) and
-        # readinessReason is gone — the subcard reads lastPrice.
+        # (g) Exchange Status OK: both agree; the per-tx reason is
+        # trigger-only.
         s, st = req('GET', '/api/state')
         check('14g Exchange Status is OK when both sources agree',
               (st.get('bitcoin', {}).get('exchangeStatus') or {}).get('status') == 'ok',
@@ -1505,10 +1431,8 @@ def main():
               'Price sources: Coinbase only — CoinGecko unreachable' in note14h, note14h)
         s, pr = set_price(fail=False, provider='coingecko')
         check('14h CoinGecko restored', s == 200 and pr.get('coingecko', {}).get('fail') is False, pr)
-        # (i) Exchange Status, error: the sources disagree by
-        # more than 5%. The per-tx readiness line is a generic
-        # "price feed unknown" — the disagreement detail lives in
-        # the Exchange Status section, not on every price tx.
+        # (i) Exchange Status error (sources over 5% apart): the per-tx
+        # line just says the feed is unknown.
         s, pr = set_price(usd=100000, provider='coingecko')
         check('14i CoinGecko set to $100,000', s == 200 and pr.get('coingecko', {}).get('usd') == 100000, pr)
         s, pr = set_price(usd=106000, provider='coinbase')
@@ -1679,11 +1603,8 @@ def main():
               bars.get(txb16b, {}).get('daysSince') == 3 and bars.get(txb16b, {}).get('windowDays') == 10, bars.get(txb16b))
         check('16 clock 3 days back: the top-level state is still on-track',
               st.get('state') == 'on-track' and st.get('label') == 'On track', st.get('state'))
-        # A disarmed check-in tx keeps a FROZEN bar (0.8.0
-        # redesign): still listed, still at its day count, marked
-        # enabled=false — inactive time does not count, so the bar
-        # does not advance while it is disarmed. The top-level due
-        # still comes from the ARMED tx only.
+        # A disarmed check-in tx keeps a frozen bar (enabled false, not
+        # advancing); the top-level due comes from the armed tx.
         s, r = req('PUT', '/api/bitcoin/txs/' + txb16b, {'enabled': False})
         check('16 disarming the 10d tx', s == 200 and r.get('tx', {}).get('enabled') is False, r)
         s, st = req('GET', '/api/status')
@@ -1717,10 +1638,7 @@ def main():
               st.get('state') == 'grace' and st.get('label') == 'Grace period', (st.get('state'), st.get('label')))
         check('16 grace: no heldUntil anywhere in the status',
               'heldUntil' not in json.dumps(st), json.dumps(st)[:400])
-        # A check-in clears the clock but NOT the grace: both bars
-        # reset to 0 (on-track again — the clock is fresh, so no
-        # entry is past due any more), while the grace stays
-        # active until it expires or is resumed.
+        # A check-in resets both bars but not the grace.
         s, r = req('POST', '/api/checkin', {'method': 'app'})
         check('16 check-in lands during the grace', s == 200 and r.get('ok') is True, r)
         s, st = req('GET', '/api/status')
@@ -1905,9 +1823,8 @@ def main():
               st['settings'].get('graceDurationDays') == 0, st['settings'])
         s, r = req('PUT', '/api/settings', {'graceDurationDays': 7})
         check('18 graceDurationDays restored to 7 after the 0 check', s == 200, (s, r))
-        # The toggle (0.8.8): a non-boolean is a 400; false reads
-        # back as false. Restored to true right away — the rest of
-        # this section needs the grace on.
+        # The toggle: a non-boolean is a 400; false reads back. Turned
+        # back on at once.
         s, r = req('PUT', '/api/settings', {'graceEnabled': 'yes'})
         check('18 graceEnabled non-boolean is rejected (400)', s == 400, (s, r))
         s, r = req('PUT', '/api/settings', {'graceEnabled': False})
@@ -1918,9 +1835,8 @@ def main():
         s, r = req('PUT', '/api/settings', {'graceEnabled': True})
         check('18 graceEnabled restored to true', s == 200, (s, r))
 
-        # A price rule that HOLDS at the stub price ($98,200 >=
-        # $90,000), a UTXO rule on an unspent outpoint, and a
-        # check-in rule — all armed, none fired yet.
+        # A holding price rule, an unspent UTXO rule and a check-in rule,
+        # all armed.
         restart()
         delete_all_txs()
         set_price(98200)
@@ -1945,10 +1861,8 @@ def main():
         s, stat = req('GET', '/api/status')
         check('18 /api/status agrees — no grace field at a 6-day gap',
               'grace' not in stat, [k for k in stat.keys() if 'grace' in k.lower()])
-        # 8 days offline is past the threshold: the grace sets on
-        # the next read. lastCheckinAt stays fresh, so the
-        # check-in rule is on-track, not due — but it is still
-        # held by the grace while the grace is active.
+        # 8 days offline sets the grace on the next read; the check-in
+        # rule is on track but still held.
         set_clock(0, 8)
         s, st = req('GET', '/api/state')
         g = st.get('grace') or {}
@@ -1964,11 +1878,8 @@ def main():
         s, stat = req('GET', '/api/status')
         check('18 /api/status stays grace-free even while a grace is active',
               'grace' not in stat, [k for k in stat.keys() if 'grace' in k.lower()])
-        # The UTXO is spent (confirmed, 2 confs) and the price is
-        # past the threshold — both would fire now, but the grace
-        # holds them. (The trigger watches SECOND:0, not FINNEY:1:
-        # every craft(1, ...) tx spends FINNEY:1 as its input, so
-        # spending FINNEY:1 would make the txs themselves stale.)
+        # The UTXO (SECOND:0, since the txs themselves spend FINNEY:1) is
+        # now spent and the price holds: both held by the grace.
         set_outspend(SECOND, 0, 899999)
         s, rc, res = release_results()
         check('18 the holding price tx does NOT fire during the grace (skipped, status grace)',
@@ -2039,11 +1950,8 @@ def main():
               s == 200 and r.get('ok') is True and r.get('grace') is None, (s, r))
         s, r = req('PUT', '/api/settings', {'graceDurationDays': 7})
         check('18 grace duration restored to 7', s == 200, (s, r))
-        # After the grace EXPIRES, the triggers evaluate normally
-        # and fire if the condition still holds. Seed an expired
-        # grace (graceUntil an hour ago) with a FRESH lastOnlineAt,
-        # so no new grace sets on the read. (The restart also
-        # clears the price cache, so the price read is fresh.)
+        # After the grace expires (seeded an hour ago, fresh
+        # lastOnlineAt), triggers fire normally.
         restart()
         set_price(98200)
         stj = load_state_file()
@@ -2054,9 +1962,8 @@ def main():
         s, st = req('GET', '/api/state')
         check('18 an expired grace reads as no grace (grace null)',
               st.get('grace') is None, st.get('grace'))
-        # The restart's startup full tick already fired both (the
-        # grace was cleared and the conditions still hold) — the
-        # release check below finds them already broadcast.
+        # The startup tick already fired both; the release check finds
+        # them broadcast.
         pg = state_tx(txg_price)
         ug = state_tx(txg_utxo)
         check('18 after expiry the startup tick fired the holding price tx',
@@ -2070,15 +1977,11 @@ def main():
               res.get(txg_utxo, {}).get('action') == 'skipped' and res.get(txg_utxo, {}).get('reason') == 'already broadcast', res.get(txg_utxo))
         check('18 the check-in tx does NOT broadcast (clock fresh, not due)',
               res.get(txg_ck, {}).get('action') == 'skipped', res.get(txg_ck))
-        # Clear the SECOND:0 override now: the next phase adds a
-        # fresh UTXO tx on the same outpoint, and it must be
-        # unspent at add time.
+        # Clear the SECOND:0 override so the next UTXO tx is unspent when
+        # added.
         set_outspend(SECOND, 0, None)
-        # A check-in trigger IS held by the grace (0.8.8
-        # unification): with the clock 36 days back and an 8-day
-        # offline gap, the grace sets — and the due check-in tx
-        # is held like the price and UTXO txs. Once the grace is
-        # resumed it broadcasts.
+        # A due check-in tx is held by the grace like the others, then
+        # broadcasts once resumed.
         restart()
         delete_all_txs()
         set_price(98200)
@@ -2115,11 +2018,8 @@ def main():
               res.get(txg_utxo2))
         check('18 the due check-in tx did NOT broadcast during the grace',
               (state_tx(txg_ck2) or {}).get('broadcasted') is None, (state_tx(txg_ck2) or {}).get('broadcasted'))
-        # Both-numbers grace card (0.8.8): 2 of 3 would fire —
-        # the holding price tx (warm cache) and the past-due
-        # check-in tx (live clock, 36d past the 35d threshold).
-        # The UTXO tx would NOT: its spend landed after its last
-        # evaluation and its stored slice was never written.
+        # Grace card: 2 of 3 would fire (the holding price and the past-
+        # due check-in); the UTXO tx's slice was never written.
         s, st = req('GET', '/api/state')
         wf2 = {t.get('id'): (t.get('triggerStatus') or {}).get('wouldFire') for t in st.get('bitcoin', {}).get('txs', [])}
         check('18 wouldFire: the second holding price tx would fire (warm price cache)',
@@ -2128,11 +2028,8 @@ def main():
               wf2.get(txg_utxo2) is False, wf2.get(txg_utxo2))
         check('18 wouldFire: the past-due check-in tx would fire (live clock, 36d past 35d)',
               wf2.get(txg_ck2) is True, wf2.get(txg_ck2))
-        # Resume: the due check-in tx broadcasts, like the price
-        # and UTXO txs. The outspend cache still holds the
-        # add-time "unspent" verdict (TTL = the cadence), so
-        # clear just the outspend cache first — otherwise the
-        # resumed check reads the stale verdict.
+        # Resume: the check-in tx broadcasts. Clear the outspend cache
+        # first (it still says unspent).
         s, r = req('POST', '/api/grace/resume', {})
         check('18 resumed after the held check-in leg', s == 200, (s, r))
         s, r = req('POST', '/api/__test__/clear-caches', {'only': ['outspend']})
@@ -2144,10 +2041,8 @@ def main():
               s == 200 and res.get(txg_price2, {}).get('action') == 'broadcast', res.get(txg_price2))
         check('18 the second UTXO tx broadcasts once the grace is resumed',
               s == 200 and res.get(txg_utxo2, {}).get('action') == 'broadcast', res.get(txg_utxo2))
-        # Re-seed an active grace for the restore section below:
-        # it expects the backup to carry an ACTIVE grace (and
-        # the restore to drop it). lastOnlineAt is fresh after
-        # the resume, so the seeded grace reads as-is.
+        # Re-seed an active grace for the restore section (the restore
+        # must drop it).
         stj = load_state_file()
         stj['grace'] = {'graceUntil': (datetime.now(timezone.utc) + timedelta(days=6)).isoformat().replace('+00:00', 'Z'),
                         'triggeredAt': iso_ago(days=1), 'offlineGapDays': 8}
@@ -2215,9 +2110,8 @@ def main():
         check('18 restore: a pre-0.8.0 backup restores the price-source defaults (coingecko / coinbase)',
               st['settings'].get('priceSources') == {'source1': 'coingecko', 'source2': 'coinbase'},
               st['settings'].get('priceSources'))
-        # Cleanup: resume any grace, clear the outspend
-        # overrides, put the price back, restore the default grace
-        # settings, leave the clock fresh, and remove the txs.
+        # Cleanup: resume, clear overrides, reset price and grace
+        # settings, fresh clock, no txs.
         s, r = req('POST', '/api/grace/resume', {})
         check('18 cleanup: resume is a 200', s == 200, (s, r))
         set_outspend(SECOND, 0, None)
@@ -2309,12 +2203,8 @@ def main():
               and st['settings']['feeLowMultiplier'] == 3
               and st['settings']['feeMediumMultiplier'] == 1.5,
               st['settings'])
-        # (d) Price agreement behaviour: two readings 2% apart
-        # count at 2% but not at 1%. Restart first so the price
-        # cache is cold (the cache would otherwise serve the
-        # pre-change readings); the stub prices are set per
-        # provider. A clean slate (no txs) so no full-tick
-        # broadcast can fire while the agreement is being probed.
+        # (d) Price agreement: readings 2% apart count at 2% but not 1%.
+        # Restart for a cold cache; no txs, so no tick can fire.
         delete_all_txs()
         clear_caches()
         set_price(98200, provider='coingecko')
@@ -2328,10 +2218,8 @@ def main():
         check('20 at agreement 1%, the same 2%-apart reading is unknown (disagree, no fire)',
               s == 200 and r.get('fire') is False and r.get('status') == 'unknown'
               and 'disagree' in (r.get('reason') or ''), r)
-        # The consensus display follows the same rule: at 1% the
-        # two readings disagree, so /api/state shows no consensus
-        # price; at 2% it shows the PRIMARY exchange's price
-        # (CoinGecko's $98,200), not an average.
+        # The consensus price follows the same rule: none at 1%, the
+        # primary's $98,200 at 2%.
         s, st = req('GET', '/api/state')
         check('20 at agreement 1%, the consensus price is null (readings disagree)',
               st.get('bitcoin', {}).get('currentPrice') is None, st.get('bitcoin', {}).get('currentPrice'))
@@ -2351,28 +2239,22 @@ def main():
         s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft_prev(SECOND, 0, 100000), 'label': 'Cadence 10s', 'trigger': {'type': 'price', 'params': {'op': '>=', 'value': 90000}}, 'triggerConfirmed': True})
         check('20 cadence 10s: seeding a firing price tx (201)', s == 201, (s, r))
         cad10 = r.get('tx', {}).get('id')
-        # (Optimization O5) Poll until the full tick broadcasts
-        # it — the tick's observable effect, not a fixed 15 s
-        # wait for a 10 s cadence.
+        # Poll until the tick broadcasts it.
         wait_until(lambda: (state_tx(cad10) or {}).get('broadcasted') is not None, deadline=20)
         check('20 cadence 10s: the full tick broadcast it within ~15s',
               state_tx(cad10) is not None and state_tx(cad10).get('broadcasted') is not None,
               state_tx(cad10))
         s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 3600})
         check('20 cadence set to 3600s', s == 200, (s, r))
-        # A different output value (100001) so the hex differs
-        # from the Cadence 10s tx — the same hex would be
-        # rejected as a duplicate of the stored tx.
+        # A different value (100001) so the hex is not a duplicate.
         s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft_prev(SECOND, 0, 100001), 'label': 'Cadence 3600s', 'trigger': {'type': 'price', 'params': {'op': '>=', 'value': 90000}}, 'triggerConfirmed': True})
         check('20 cadence 3600s: seeding an identical firing price tx (201)', s == 201, (s, r))
         cad3600 = r.get('tx', {}).get('id')
         check('20 cadence 3600s: the tx is not broadcast yet at seed time',
               state_tx(cad3600) is not None and state_tx(cad3600).get('broadcasted') is None,
               state_tx(cad3600))
-        # (Optimization O5) The next tick is 3600 s away and the
-        # PUT above re-armed the interval, so no 10 s tick is in
-        # flight — a 20 s wait proves no tick fired, the same
-        # evidence the 60 s wait bought.
+        # At 3600 s the next tick is far away: 20 s with no broadcast
+        # proves it.
         time.sleep(20)
         check('20 cadence 3600s: no full-tick evaluation fired in the next ~20s (still unbroadcast)',
               state_tx(cad3600) is not None and state_tx(cad3600).get('broadcasted') is None,
@@ -2412,11 +2294,8 @@ def main():
               nv.get('dCrit') == 'Critical Risk' and nv.get('cCrit') == 'Critical Risk', nv)
         check('20 fee verdict: omitted multipliers fall back to the defaults (2x/1x)',
               nv.get('dNoMult') == 'Low Risk', nv)
-        # (g) Restore carries all four through with the same
-        # validation as PUT (the grace/price-source restore
-        # pattern): a backup with the values restores them, a
-        # backup with an invalid value 400s and changes nothing,
-        # and a pre-0.8.0 backup without them gets the defaults.
+        # (g) Restore carries all four with PUT's validation: valid values
+        # restore, an invalid one 400s, old backups get the defaults.
         s, r = req('PUT', '/api/settings', {'priceAgreementPct': 2, 'checkCadenceSeconds': 10, 'feeLowMultiplier': 3, 'feeMediumMultiplier': 1.5})
         check('20 restore: non-default values saved for the backup', s == 200, (s, r))
         s, bak = req('POST', '/api/backup', {})
@@ -2471,10 +2350,8 @@ def main():
               and st['settings']['feeLowMultiplier'] == 2
               and st['settings']['feeMediumMultiplier'] == 1,
               st['settings'])
-        # Cleanup: settings back to the defaults, the stub price
-        # back to $98,200 on all providers, no txs left, the
-        # check-in clock fresh (the restore counted as one, but
-        # be explicit for the next section's port check).
+        # Cleanup: default settings, $98,200 everywhere, no txs, fresh
+        # clock.
         s, r = req('PUT', '/api/settings', {'priceAgreementPct': 5, 'checkCadenceSeconds': 60, 'feeLowMultiplier': 2, 'feeMediumMultiplier': 1})
         check('20 cleanup: settings restored to the defaults', s == 200, (s, r))
         set_price(98200)
@@ -2535,11 +2412,8 @@ def main():
         bars = {c.get('id'): c for c in st.get('checkinTxs', [])}
         check('21a one more day later the bar advances from the frozen count: 14 of 25',
               bars.get(txv21a, {}).get('daysSince') == 14 and bars.get(txv21a, {}).get('windowDays') == 25, bars.get(txv21a))
-        # (b) Vacation is check-in-only: while on vacation, a
-        # price tx past threshold FIRES and a UTXO tx fires, but
-        # a check-in tx past threshold does NOT fire. Restart
-        # first (fresh full-tick clock + empty price cache), so
-        # the manual release check lands inside one 60 s window.
+        # (b) Vacation is check-in-only: price and UTXO txs fire, a past-
+        # due check-in tx does not. Restart first.
         delete_all_txs()
         check('21b restart before the vacation check-in-only evals', restart())
         s, pr = set_outspend(FINNEY, 0, 899999)
@@ -2611,11 +2485,8 @@ def main():
         check('21c one more day later the bar advances from the frozen count: 14 of 25',
               bars.get(txv21c, {}).get('daysSince') == 14, bars.get(txv21c))
         delete_all_txs()
-        # (d) Global Arm/Disarm: the toggle disarms all txs and
-        # arms all; while globally disarmed the check-in counts
-        # freeze; on re-arm they resume from the frozen value.
-        # Checking in does NOT re-arm anything (no global pause
-        # to auto-resume any more).
+        # (d) Global Arm/Disarm: disarm freezes check-in counts, re-arm
+        # resumes them; a check-in re-arms nothing.
         s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft(1, 210401), 'label': 'V21d ck 25d',
                                                 'trigger': {'type': 'checkin', 'params': {'thresholdDays': 25}}})
         txv21d_ck25 = r['tx']['id'] if s == 201 else None
@@ -2710,11 +2581,8 @@ def main():
         check('21e the disarmed tx is broadcast after Broadcast All',
               bool((state_tx(txv21e_dis) or {}).get('broadcasted')), state_tx(txv21e_dis))
         delete_all_txs()
-        # (f) Indefinite vacation: vacationUntil null stays on
-        # vacation (does not expire), clock frozen; turning it
-        # off resumes from the frozen count. Dated vacation
-        # expires at vacationUntil (end of day) and resumes from
-        # the frozen count.
+        # (f) An indefinite vacation never expires (clock frozen; off
+        # resumes it). A dated one ends after its last day.
         s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft(1, 210601), 'label': 'V21f ck 25d',
                                                 'trigger': {'type': 'checkin', 'params': {'thresholdDays': 25}}})
         txv21f = r['tx']['id'] if s == 201 else None
@@ -2786,10 +2654,8 @@ def main():
         s, r = req('PUT', '/api/settings', {'vacationMode': False})
         check('21f vacation off (cleanup)', s == 200, r)
         delete_all_txs()
-        # (g) No double-counting: disarm -> vacation on -> vacation
-        # off -> re-arm. The frozen count is counted once: the
-        # banked offset equals the single 14-day disarm period,
-        # not disarm + vacation.
+        # (g) No double-counting: disarm, vacation on, off, re-arm; the
+        # banked offset is the single 14-day span.
         s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft(1, 210701), 'label': 'V21g ck 25d',
                                                 'trigger': {'type': 'checkin', 'params': {'thresholdDays': 25}}})
         txv21g = r['tx']['id'] if s == 201 else None
@@ -2879,10 +2745,9 @@ def main():
         for t in bak_old['state']['bitcoin']['txs']:
             t.pop('checkinOffsetMs', None)
             t.pop('checkinInactiveSince', None)
-            # Arm the tx in this copy: a disarmed tx is re-marked
-            # inactive on restore (restore counts as a check-in),
-            # so the 0 / null defaults are only observable on an
-            # armed tx.
+            # Arm the tx in this copy: a disarmed tx is re-marked inactive
+            # on restore, so the 0 / null defaults only show on an armed
+            # one.
             t['enabled'] = True
         bak_old['state']['settings']['paused'] = True
         s, r = req('POST', '/api/restore', bak_old)

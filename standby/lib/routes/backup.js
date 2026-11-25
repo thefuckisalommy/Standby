@@ -13,9 +13,8 @@ const { CHECK_CADENCE_SECONDS_DEFAULT, CHECK_CADENCE_SECONDS_MAX, CHECK_CADENCE_
 const { NEXT } = require('./shared');
 
 const RELEASE_STATUSES = new Set(['stale', 'failed', 'broadcast', 'conflict', 'submitted-slipstream']);
-// The kinds a release record may carry — 'release' for the automatic
-// release, 'broadcast' for a manual broadcast, 'dryrun' for a
-// dry-run verdict. Used by the restore validation.
+// Release record kinds: 'release' (automatic), 'broadcast' (manual),
+// 'dryrun' (a dry-run verdict).
 const RELEASE_KINDS = new Set(['release', 'broadcast', 'dryrun']);
 
 module.exports = async function backupRoutes(ctx) {
@@ -29,11 +28,8 @@ module.exports = async function backupRoutes(ctx) {
   // treat it like the transactions. POST only, so a password never lands
   // in a URL and the plain backup is never one link away.
   const buildBackup = () => {
-    // The backup carries the SERVED form of each tx (a
-    // one-rule set as its single rule) — restore accepts both
-    // shapes, and the backup is compared against the served
-    // triggers after a restore, so the backup must match what
-    // the UI sees.
+    // The backup carries the served form of each tx (a one-rule set as its
+    // rule); restore accepts both shapes.
     const backupState = JSON.parse(JSON.stringify(state));
     backupState.bitcoin.txs = serveTxs(backupState.bitcoin.txs || []);
     backupState.bitcoin.sets = serveSets(backupState.bitcoin.sets || []);
@@ -62,9 +58,8 @@ module.exports = async function backupRoutes(ctx) {
   // carried).
   if (req.method === 'POST' && pathname === '/api/restore') {
     let body = await readBody(req);
-    // An encrypted backup is decrypted first — the UI sends
-    // the file's JSON with the password added as `password` — then
-    // validated exactly like a plain one.
+    // An encrypted backup (the file's JSON plus `password`) is decrypted
+    // first, then validated like a plain one.
     if (backupcrypto.isEncryptedBackup(body)) {
       try {
         body = await backupcrypto.decryptBackup(body, body.password);
@@ -86,10 +81,8 @@ module.exports = async function backupRoutes(ctx) {
     const settings = {
       primaryApiUrl: bitcoin.DEFAULT_PUBLIC_API_URL,
       secondaryApiUrl: '',
-      // `paused` is not a setting — a backup carrying it restores
-      // WITHOUT it (ignored, not an error). vacationUntil is null
-      // for indefinite, a 'YYYY-MM-DD' date otherwise; anything
-      // else (including a legacy '') restores as null.
+      // paused is ignored; vacationUntil is a 'YYYY-MM-DD' date or null (a
+      // legacy '' too).
       vacationMode: !!bsSettings.vacationMode,
       vacationUntil: (typeof bsSettings.vacationUntil === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(bsSettings.vacationUntil))
         ? bsSettings.vacationUntil : null,
@@ -102,19 +95,16 @@ module.exports = async function backupRoutes(ctx) {
       try { settings.secondaryApiUrl = bitcoin.normalizePublicApiUrl(bsSettings.secondaryApiUrl); }
       catch (e) { return sendError(res, 400, 'backup secondary node URL: ' + e.message); }
     }
-    // The secondary-enabled toggle rides along: a backup
-    // from before 0.8.8 carries none, which restores as enabled
-    // (the default); a present but non-boolean value rejects the
-    // whole restore, like a bad node URL.
+    // The secondary toggle rides along (missing means enabled; a non-
+    // boolean rejects the restore).
     if (bsSettings.secondaryEnabled !== undefined && bsSettings.secondaryEnabled !== null) {
       if (typeof bsSettings.secondaryEnabled !== 'boolean') return sendError(res, 400, 'backup secondaryEnabled must be true or false');
       settings.secondaryEnabled = bsSettings.secondaryEnabled;
     } else {
       settings.secondaryEnabled = true;
     }
-    // The price sources ride along: a backup from before
-    // 0.8.0 carries none, which restores as the defaults; a present
-    // but invalid pair rejects the whole restore, like a bad node URL.
+    // Price sources ride along (missing means the defaults; an invalid
+    // pair rejects the restore).
     if (bsSettings.priceSources !== undefined && bsSettings.priceSources !== null) {
       const ps = bsSettings.priceSources;
       if (!ps || typeof ps !== 'object') return sendError(res, 400, 'backup priceSources must be {source1, source2}');
@@ -220,12 +210,8 @@ module.exports = async function backupRoutes(ctx) {
       let id = (typeof t.id === 'string' && t.id) ? asStr(t.id, 40) : '';
       if (!id || seenIds.has(id)) id = store.newTxId();
       seenIds.add(id);
-      // The rule set rides through validation (the same
-      // per-rule rules as a single trigger), and the triggerState
-      // is normalized to the rule count — a flat object wraps to
-      // one element, an array is sanitized / padded / truncated,
-      // a malformed one restores as null (the evaluator overwrites
-      // it on the next evaluation anyway).
+      // The rule set is validated like a single trigger; triggerState is
+      // normalized to the rule count (malformed restores as null).
       const restoredTrigger = store.triggerOf(t);
       txs.push({
         id,
@@ -237,34 +223,22 @@ module.exports = async function backupRoutes(ctx) {
         inputs: parsed.inputs.length,
         outputs: parsed.outputs.length,
         totalOutSats: parsed.totalOutSats,
-        // The fee: carried through when present (a number
-        // or null); a backup from before 0.7.18 carries no fee,
-        // which restores as null — the same as an older record
-        // loaded from disk. A negative or non-finite value is not
-        // believed either.
+        // The fee rides along when a non-negative number or null; anything
+        // else, or missing, restores as null.
         feeSats: (typeof t.feeSats === 'number' && Number.isFinite(t.feeSats) && t.feeSats >= 0) ? t.feeSats : null,
         feeRateSatVb: (typeof t.feeRateSatVb === 'number' && Number.isFinite(t.feeRateSatVb) && t.feeRateSatVb >= 0) ? t.feeRateSatVb : null,
         locktime: parsed.locktime,
         segwit: parsed.segwit,
         enabled: typeof t.enabled === 'boolean' ? t.enabled : true,
-        // The check-in freeze: carried through when
-        // valid; a backup from before the redesign carries none,
-        // which restores as 0 / null — the same as an older record
-        // loaded from disk. (The restore itself counts as a
-        // check-in, so the offsets are reset to the new clock
-        // below — this carry-through is what validates them.)
+        // Freeze offsets are validated here (missing means 0 / null); they
+        // are reset to the new clock below.
         checkinOffsetMs: (typeof t.checkinOffsetMs === 'number' && Number.isFinite(t.checkinOffsetMs) && t.checkinOffsetMs >= 0) ? t.checkinOffsetMs : 0,
         checkinInactiveSince: (typeof t.checkinInactiveSince === 'string' && t.checkinInactiveSince && !Number.isNaN(new Date(t.checkinInactiveSince).getTime())) ? t.checkinInactiveSince : null,
-        // The broadcast route: a backup from before 0.7.16
-        // carries no route, which restores as 'public' — the same
-        // as an older record loaded from disk.
+        // Missing route restores as 'public'.
         broadcastVia: validBroadcastVia(t.broadcastVia),
-        // The public fallback: a backup from before 0.7.17
-        // carries no duration, which restores as Never (null) — the
-        // same as an older record loaded from disk. The first-attempt
-        // timestamp rides along too (an unparseable one is dropped);
-        // without it a restored failing-submit tx would have no
-        // fallback deadline until its next attempt.
+        // Missing fallback restores as Never. The first-attempt time rides
+        // along (dropped if unparseable), so a failing Slipstream submit
+        // keeps its deadline.
         publicFallbackDays: validPublicFallbackDays(t.publicFallbackDays),
         slipstreamFirstAttemptAt: (typeof t.slipstreamFirstAttemptAt === 'string'
           && !Number.isNaN(new Date(t.slipstreamFirstAttemptAt).getTime())) ? t.slipstreamFirstAttemptAt : null,
@@ -360,11 +334,8 @@ module.exports = async function backupRoutes(ctx) {
         return sendError(res, 400, 'backup last-online time is in the future');
       }
     }
-    // Check-in API keys ride along in the backup (hashes only — the
-    // plaintext keys were never stored, so a backup cannot leak them).
-    // A malformed key entry rejects the restore, like a bad tx hex. A
-    // backup from before 0.6.6 carries no keys at all, which restores
-    // as an empty list.
+    // Check-in key hashes ride along (never the keys). A malformed entry
+    // rejects the restore; missing means none.
     const restoredKeys = [];
     if (Array.isArray(bs.checkinKeys)) {
       for (const k of bs.checkinKeys) {
@@ -400,12 +371,8 @@ module.exports = async function backupRoutes(ctx) {
         lastOnlineAt: now.toISOString(),
       },
       checkinKeys: restoredKeys,
-      // The fee history rides along: the peak is computed
-      // from these observations, so restoring without them would
-      // reset the verdict to "still building" for a day. A backup
-      // from before 0.8.9 carries none, which restores as empty.
-      // Sanitized like a load — a hand-edited backup cannot
-      // smuggle a bad entry into the peak.
+      // The fee history rides along (sanitized like a load), so the
+      // verdict does not restart from "still building".
       feeHistory: store.sanitizeFeeHistory(bs.feeHistory),
     };
     // Freeze offsets were measured against the old clock, so they reset; a
@@ -425,9 +392,7 @@ module.exports = async function backupRoutes(ctx) {
     }
     for (const s of restoredSets) syncCheckinFreeze(s, restored, now);
     store.saveState(DATA_DIR, restored);
-    // The warnings describe the state that was just
-    // replaced — a recovery at boot, say — so they are stale now;
-    // clear both lists.
+    // The warnings described the replaced state; clear them.
     store.clearStateWarnings();
     startupWarnings.length = 0;
     // A restored cadence takes effect immediately — the running
@@ -437,18 +402,13 @@ module.exports = async function backupRoutes(ctx) {
     writeReceiverKeys(restored);
     if (Array.isArray(body.checkins)) store.writeCheckins(DATA_DIR, body.checkins.slice(-200));
     if (Array.isArray(body.broadcastLog)) store.writeBroadcastLog(DATA_DIR, body.broadcastLog.slice(-200));
-    // The restore itself is a check-in — record it in
-    // the history so the displayed last check-in matches the
-    // refreshed clock. Appended after the backup's own history
-    // (above), so it is the most recent entry; the method reads
-    // 'restore' in the recent-check-ins list.
+    // Record the restore as a check-in in the history, after the backup's
+    // own entries.
     store.appendCheckin(DATA_DIR, { ts: now.toISOString(), method: 'restore' });
-    // A backup's broadcast and stale records are not trusted (see
-    // above), so every restored card would read Active. Ask the node
-    // instead: the same check as Dry-run all records which ones are
-    // already broadcast, stale, or in conflict. Nothing is sent. A
-    // transaction the node cannot answer for keeps its restored status
-    // until the next dry run.
+    // Broadcast and stale claims were dropped above, so ask the node: the
+    // same check as Dry-run all records what is already broadcast, stale
+    // or in conflict. Nothing is sent; it stops at RESTORE_CHECK_MS, and a
+    // tx it could not check keeps its restored status.
     let recheck = { checked: 0, broadcast: 0, stale: 0, conflict: 0, unchecked: 0 };
     try {
       const rr = await dryRunAndRecord(restored, restored.bitcoin.txs || [], now, { deadlineMs: Date.now() + RESTORE_CHECK_MS });
@@ -462,9 +422,8 @@ module.exports = async function backupRoutes(ctx) {
     } catch (e) {
       recheck.unchecked = txs.length;
     }
-    // The restored state is served the same way as a read (a
-    // one-rule set as its single rule — see GET /api/state) —
-    // re-read, so it carries what the check just recorded.
+    // Serve the restored state like a read, re-read so it includes what
+    // the check recorded.
     const servedRestored = sanitizeState(store.loadState(DATA_DIR));
     // The fee history is state-internal — see GET
     // /api/state — never served, even in a restore response.

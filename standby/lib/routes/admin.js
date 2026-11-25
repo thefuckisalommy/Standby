@@ -22,11 +22,8 @@ module.exports = async function adminRoutes(ctx) {
       return sendError(res, 400, 'reset requires {confirm:true}');
     }
     store.resetStateFiles(DATA_DIR);
-    // Also drop the receiver's last check-in record: on
-    // the next /api/state read mergeExternalCheckin would otherwise
-    // resurrect the pre-reset check-in time into the fresh state
-    // (a fresh state's clock is null, so any last.json wins).
-    // A start-fresh means fresh — including the clock.
+    // Also drop the receiver's last.json, or the next read would merge the
+    // pre-reset check-in back in.
     try { fs.unlinkSync(path.join(CHECKIN_DIR, 'last.json')); } catch {}
     const fresh = store.defaultState();
     store.saveState(DATA_DIR, fresh);

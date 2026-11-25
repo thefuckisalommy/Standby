@@ -12,9 +12,9 @@ module.exports = async function authRoutes(ctx) {
     return sendJson(res, 200, { required: auth.enabled(), authenticated: auth.requestAuthorized(req, now.getTime()) });
   }
 
-  // POST /api/login {password} -> {ok, token}. With no
-  // password configured it answers {ok:true, token:null}. Wrong
-  // passwords are rate-limited (429) and logged without the value.
+  // POST /api/login { password }: { ok, token } (token null with no
+  // password set). Wrong passwords are rate-limited and logged without the
+  // value.
   if (req.method === 'POST' && pathname === '/api/login') {
     const body = await readBody(req).catch(() => ({}));
     if (!auth.enabled()) return sendJson(res, 200, { ok: true, token: null });

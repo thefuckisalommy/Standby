@@ -1,8 +1,6 @@
 'use strict';
-// Standby — env-derived config.
-// Every environment variable the app reads lives here,
-// so the full set of knobs is visible in one file. Modules import
-// the parsed values; none of them read process.env directly.
+// Every environment variable the app reads is parsed here; modules never
+// read process.env.
 const path = require('path');
 
 const PORT = parseInt(process.env.PORT || '3100', 10);
@@ -10,26 +8,19 @@ const PORT = parseInt(process.env.PORT || '3100', 10);
 // Docker sets 0.0.0.0 (a loopback bind would never see forwarded traffic);
 // there the port mapping or proxy, plus the app login, is the boundary.
 const BIND = process.env.STANDBY_BIND || '127.0.0.1';
-// Where this process is running, so startup checks and
-// messages can be specific instead of guessing:
-//   'umbrel' — the Umbrel package (standby/docker-compose.yml)
-//   'docker' — the generic Docker image (Dockerfile default)
-//   'bare'   — `node server.js` from a checkout (the default)
+// Where this runs: 'umbrel', 'docker' or 'bare' (the default), so startup
+// checks and messages can be specific.
 const DEPLOYMENTS = ['umbrel', 'docker', 'bare'];
 const DEPLOYMENT = DEPLOYMENTS.includes(process.env.STANDBY_DEPLOYMENT)
   ? process.env.STANDBY_DEPLOYMENT : 'bare';
-// The app login. Empty means no login. On Umbrel the compose file sets it
-// to the per-install
-// APP_PASSWORD, which Umbrel shows on the app's page.
+// The app login; empty means none. Umbrel sets it to APP_PASSWORD (shown
+// on the app's page).
 const PASSWORD = process.env.STANDBY_PASSWORD || '';
 // Test mode: set only by the test harness. Gates the /__test__
 // routes and every test-only override below.
 const TEST_MODE = process.env.STANDBY_TEST_MODE === '1';
-// The startup-tick delay (the three 5 s
-// setTimeouts in server.js: full tick, hourly tick, fee recompute).
-// Test-only: honored ONLY in test mode. With the var unset the
-// delay is exactly 5000. STANDBY_TEST_STARTUP_TICK_MS must parse
-// to a non-negative integer; anything else falls back to 5000.
+// The startup tick delay (5 s); STANDBY_TEST_STARTUP_TICK_MS changes it in
+// test mode only.
 const STARTUP_TICK_MS = (() => {
   if (!TEST_MODE) return 5000;
   const ms = parseInt(process.env.STANDBY_TEST_STARTUP_TICK_MS || '', 10);
@@ -37,20 +28,15 @@ const STARTUP_TICK_MS = (() => {
 })();
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
-// The directory shared with the check-in receiver (mounted as a
-// volume in docker-compose.yml). The app publishes the key hashes
-// there (keys.json) and reads the receiver's check-in timestamps
-// (last.json). Absent on a plain `node server.js` run — the key
-// feature is dormant then; every file access is guarded.
+// The directory shared with the check-in receiver (keys.json out,
+// last.json in). Absent on a bare run, where keys are dormant.
 const CHECKIN_DIR = process.env.CHECKIN_DIR || '/checkin';
 // One source of truth for the version: package.json.
 const VERSION = require('../package.json').version;
 const MAX_BODY = 1024 * 1024; // 1 MB
 
-// Primary-node override for self-hosters:
-// MEMPOOL_HOST / MEMPOOL_PORT / MEMPOOL_PROTOCOL win over the
-// primary node URL saved in Settings. Logged at startup when set,
-// so an override is never silent. null when unset.
+// MEMPOOL_HOST / MEMPOOL_PORT / MEMPOOL_PROTOCOL override the saved
+// primary node (logged at startup). null when unset.
 const MEMPOOL_OVERRIDE = (() => {
   if (!process.env.MEMPOOL_HOST) return null;
   const proto = process.env.MEMPOOL_PROTOCOL || 'https:';

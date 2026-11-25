@@ -1,7 +1,6 @@
 'use strict';
-// Standby — plain-file JSON storage. No database server.
-// All state lives in DATA_DIR/state.json; check-ins and broadcast attempts
-// are append-only JSONL audit logs in the same directory.
+// Plain-file JSON storage, no database: DATA_DIR/state.json, plus append-
+// only JSONL logs of check-ins and broadcast attempts.
 const fs = require('fs');
 const crypto = require('crypto');
 const path = require('path');
@@ -9,14 +8,11 @@ const path = require('path');
 const STATE_FILE = 'state.json';
 const CHECKIN_LOG = 'checkins.jsonl';
 const BROADCAST_LOG = 'broadcast.jsonl';
-// The heartbeat file: the live "I was online"
-// stamp, kept out of state.json so the every-minute tick does not
-// have to rewrite the whole state to record it. A few bytes,
-// tmp+rename for atomicity, NO backup rotation.
+// The heartbeat file holds the live "I was online" stamp, so the tick need
+// not rewrite state to record it. Tiny, atomic, no backup rotation.
 const HEARTBEAT_FILE = 'heartbeat.json';
-// Throttle: at most one heartbeat write per 5 minutes per data
-// dir. Grace thresholds are 7 days flat / T/4 with a 6-hour
-// minimum, so 5 minutes of staleness costs nothing.
+// At most one heartbeat write per 5 minutes per data dir (grace thresholds
+// are hours, so this costs nothing).
 const HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
 
 function defaultState() {
@@ -30,17 +26,13 @@ function defaultState() {
       secondaryApiUrl: 'https://blockstream.info/api', // the secondary node, tried only if the primary does not answer; blank = primary runs alone
       secondaryEnabled: true, // the secondary node is on by default — off means primary only, no fallback anywhere (see endpointsFor in lib/bitcoin.js); a missing flag in old state means enabled
       priceSources: { source1: 'coingecko', source2: 'coinbase' }, // the two BTC price feeds for price rules — each a provider id (see PRICE_PROVIDERS in lib/bitcoin.js) or a custom { id: 'custom', url, path } object; a reading is only trusted when the two agree within the configured agreement (Settings: Price agreement), and when they agree the primary source's price is the one that decides
-      // Price agreement: the two BTC price sources must
-      // agree within this % for a reading to count (Settings:
-      // Price agreement; 1–20, default 5). Tighter is safer but
-      // the rule waits ("unknown") more during fast moves; looser
-      // fires more readily.
+      // Price agreement: the two price sources must agree within this %
+      // (1–20, default 5). Tighter is safer but waits more during fast
+      // moves.
       priceAgreementPct: 5,
-      // Check cadence: how often the fast tick evaluates
-      // price + UTXO triggers, in seconds (Settings: Check
-      // cadence; 10–3600, default 60). Faster catches an
-      // unconfirmed spend and brief price spikes sooner; slower
-      // means fewer API calls.
+      // Check cadence: how often the full tick evaluates every rule, in
+      // seconds (10–3600, default 60). Faster reacts sooner; slower makes
+      // fewer API calls.
       checkCadenceSeconds: 60,
       // Fee verdict thresholds as multiples of the 90-day peak: Low (1–10,
       // default 2) must stay above Medium (0.5–5, default 1). Critical
@@ -84,23 +76,17 @@ function defaultState() {
     // by the tick), so a gap means the device was off. A stored heldUntil
     // becomes a grace on load if unexpired, else is dropped.
     checkin: { lastCheckinAt: null, totalCheckins: 0, lastOnlineAt: null },
-    // Grace period state: nulls = no grace was ever set
-    // (or it was resumed / expired). graceUntil null = an
-    // indefinite grace, active until resumed. See server.js
-    // graceStatus / applyGrace.
+    // Grace state: all null when none was set (or it was resumed or
+    // expired); graceUntil null is an indefinite grace. See
+    // lib/checkin.js.
     grace: { graceUntil: null, triggeredAt: null, offlineGapDays: null },
-    // Fee history: the hourly economy-fee observations
-    // the peak is computed from — [{ t, fee }] — see
-    // sanitizeFeeHistory above. Empty until the hourly tick
-    // records the first observation; the peak is served only
-    // once 24 observations (a day) have accumulated.
+    // Fee history: the hourly economy-fee readings the peak comes from
+    // (see sanitizeFeeHistory).
     feeHistory: [],
-    // Check-in API keys: one per service that may check in for the
-    // owner (a bot, a shortcut, an AI assistant). A key is a bearer
-    // token that authorizes exactly one thing — recording a check-in,
-    // via the check-in receiver. Only the SHA-256 hash is stored; the
-    // plaintext key is shown once, at creation, and never again.
-    // key = { id, label, hash, createdAt, lastUsedAt }
+    // Check-in API keys, one per service allowed to check in. A key
+    // authorizes only recording a check-in via the receiver; only its
+    // SHA-256 hash is stored (the plaintext is shown once). key = { id,
+    // label, hash, createdAt, lastUsedAt }
     checkinKeys: [],
   };
 }
@@ -125,12 +111,7 @@ function newSetId() {
 // MAX_RULES_PER_TX caps a set's rules.
 const TRIGGER_TYPES = ['checkin', 'price', 'utxo', 'manual', 'blockheight', 'setdate', 'feemarket'];
 const MAX_RULES_PER_TX = 5;
-// The per-transaction history event types — the only
-// types a history entry may carry (see lib/history.js pushHistory and
-// the load-time backfill below). 'slipstream' is the MARA
-// submission; 'conflict' is the dry-run's unconfirmed-spend
-// warning. Only transitions are recorded — never the hourly
-// release checks.
+// The history event types allowed (see lib/history.js). Transitions only.
 const HISTORY_TYPES = new Set(['added', 'fired', 'broadcast', 'slipstream', 'confirmed', 'stale', 'failed', 'conflict', 'edited', 'armed', 'disarmed']);
 const HISTORY_MAX = 50;
 
@@ -182,11 +163,9 @@ function memberHistoryDetail(set, tx, detail) {
   return detail ? tag + ': ' + detail : tag;
 }
 function backfillSetHistory(set, txs) {
-  // Events already on the trail (same type + detail — a live
-  // forward, or an earlier backfill) are skipped by count, so
-  // a re-attach never shows the same line twice; genuine
-  // repeats inside one member's own trail are kept. The merged
-  // trail stays chronological, capped at the newest HISTORY_MAX.
+  // Events already on the trail (same type and detail) are skipped by
+  // count, so a re-attach never duplicates a line. The merged trail stays
+  // chronological, capped at HISTORY_MAX.
   const remaining = new Map();
   for (const e of (set.history || [])) {
     const key = e.type + '|' + e.detail;
@@ -197,11 +176,8 @@ function backfillSetHistory(set, txs) {
     for (const e of (Array.isArray(t.history) ? t.history : [])) {
       const tagged = { ts: e.ts, type: e.type, detail: memberHistoryDetail(set, t, e.detail) };
       const key = tagged.type + '|' + tagged.detail;
-      // The tag format changed from the bare
-      // member label to '"<set label>" - Tx N': an event already
-      // on the trail under the OLD tag still counts as the same
-      // event, so a load across the format change does not copy
-      // it in a second time under the new tag.
+      // An event already on the trail under the old bare-label tag counts
+      // as the same event.
       const legacy = (t.label || 'Untitled transaction');
       const legacyDetail = e.detail ? legacy + ': ' + e.detail : legacy;
       const legacyKey = e.type + '|' + legacyDetail;
@@ -217,11 +193,8 @@ function backfillSetHistory(set, txs) {
     .sort((a, b) => String(a.ts).localeCompare(String(b.ts)))
     .slice(-HISTORY_MAX);
 }
-// The check-in fallback: there is no global broadcast
-// threshold — each check-in tx carries its own
-// thresholdDays ("Days of silence"). A tx with no usable trigger
-// defaults to check-in at 35 days, and a new check-in tx
-// defaults to 35 days too.
+// No global threshold: each check-in rule has its own thresholdDays; 35 is
+// the default and the fallback.
 const FALLBACK_THRESHOLD_DAYS = 35;
 
 function clampThresholdDays(v, fallback) {
@@ -238,12 +211,8 @@ function defaultTriggerSet() {
   return { op: 'OR', rules: [defaultTrigger()] };
 }
 
-// Validate + normalize ONE rule (from a client, a backup, or a
-// stored state file). Returns { trigger } (normalized) or
-// { error: '...' } — never throws, so a bad rule is a
-// validation error, not a crash. A check-in thresholdDays is
-// clamped to 1..3650 (a range issue is not a rejection);
-// a non-numeric one is.
+// Validate and normalize one rule: { trigger } or { error }, never throws.
+// A check-in threshold is clamped to 1..3650; a non-number is an error.
 function normalizeRule(input) {
   if (input === undefined || input === null) return { error: 'trigger is required' };
   if (typeof input !== 'object' || Array.isArray(input)) return { error: 'trigger must be an object with a type' };
@@ -264,11 +233,8 @@ function normalizeRule(input) {
     case 'utxo': {
       const outpoint = typeof params.outpoint === 'string' ? params.outpoint.trim() : '';
       if (!/^[0-9a-fA-F]{64}:[0-9]+$/.test(outpoint)) return { error: "utxo trigger outpoint must be 'txid:vout' — a 64-hex transaction id, a colon, and an output index" };
-      // How many confirmations the spending tx needs
-      // before the rule fires: 0 = fire on an unconfirmed
-      // (mempool) spend, N >= 1 = fire once the spend has N
-      // confirmations. Omitted (older / migrated rules) means 1 —
-      // confirmed-only — so those rules keep their meaning.
+      // Confirmations the spender needs: 0 fires on a mempool spend, N >=
+      // 1 once it has N. Missing means 1 (confirmed only).
       let confirmations = 1;
       if (params.confirmations !== undefined) {
         if (typeof params.confirmations !== 'number' || !Number.isInteger(params.confirmations) || params.confirmations < 0 || params.confirmations > 100) {
@@ -281,9 +247,8 @@ function normalizeRule(input) {
     case 'manual':
       return { trigger: { type: 'manual', params: {} } };
     case 'blockheight': {
-      // Fire when the chain tip reaches a height. The
-      // height is a positive integer; a reorg cannot un-fire it
-      // (once the tip has reached the height, the rule has fired).
+      // Fire when the chain tip reaches a height (a positive integer).
+      // Judged fresh each evaluation, so a reorg below it un-fires it.
       const h = params.targetHeight;
       if (typeof h !== 'number' || !Number.isInteger(h) || h < 1 || h > 10000000) {
         return { error: 'block-height trigger targetHeight must be an integer block height from 1 to 10,000,000' };
@@ -291,9 +256,8 @@ function normalizeRule(input) {
       return { trigger: { type: 'blockheight', params: { targetHeight: h } } };
     }
     case 'setdate': {
-      // Fire at a date/time, regardless of check-ins (a
-      // pure deadline — the "fire unless I check in" snooze variant
-      // is a later addition). Stored normalized as an ISO string.
+      // Fire at a date and time, regardless of check-ins. Stored as an ISO
+      // string.
       const raw = typeof params.fireAt === 'string' ? params.fireAt.trim() : '';
       const ms = raw ? Date.parse(raw) : NaN;
       if (!raw || !Number.isFinite(ms)) return { error: 'set-date trigger fireAt must be a valid date/time' };
@@ -342,10 +306,9 @@ function normalizeTrigger(input) {
   return { trigger: { op: 'OR', rules: [r.trigger] } };
 }
 
-// The tx's rule set, normalized — a missing or unusable trigger
-// defaults to the one-rule check-in set at the 35-day fallback, so
-// the release never loses a transaction to a trigger it cannot
-// read. (The frontend mirrors this rule in public/app.js.)
+// The tx's normalized rule set; missing or unusable means a 35-day check-
+// in rule, so no transaction is lost to an unreadable trigger. Mirrored in
+// public/app.js.
 function triggerOf(tx) {
   if (!tx || typeof tx !== 'object') return defaultTriggerSet();
   const r = normalizeTrigger(tx.trigger);
@@ -368,11 +331,8 @@ function hasTriggerType(tx, type) {
   return triggerRulesOf(tx).some((r) => r.type === type);
 }
 
-// The rule set as the API serves it (dual-shape serving): a
-// one-rule set is served as its single rule (the single-rule shape
-// clients and tests expect for one-rule txs); a multi-rule set is
-// served as the set. The stored form is always the set. This can go
-// once every client normalizes both shapes on read.
+// The rule set as served: a one-rule set as its single rule, a multi-rule
+// set as the set (stored form is always the set).
 function serveTrigger(set) {
   if (!set || typeof set !== 'object' || !Array.isArray(set.rules)) return defaultTrigger();
   if (set.rules.length === 1) return set.rules[0];
@@ -426,12 +386,10 @@ function ensureDir(dataDir) {
   fs.mkdirSync(dataDir, { recursive: true, mode: DATA_DIR_MODE });
 }
 
-// Startup pass: tighten an existing data directory
-// written by an older version (0755 / 0644). Best effort — a file
-// this process does not own cannot be chmod-ed, and the startup
-// writability check reports that separately. Subdirectories are
-// left alone (on Umbrel the shared check-in directory lives in
-// here). Returns the number of entries changed.
+// At startup, tighten a data directory left 0755/0644 by an older version.
+// Best effort (files this process does not own are reported by the
+// writability check); subdirectories are left alone. Returns the count
+// changed.
 function secureDataDir(dataDir) {
   let changed = 0;
   try {
@@ -466,12 +424,9 @@ const DAILY_BACKUP_RE = /^state\.json\.bak\.(\d{4}-\d{2}-\d{2})$/;
 // (see recoverStateFromBackup below).
 const CORRUPT_FILE_PREFIX = 'state.json.corrupt.';
 
-// Warnings recorded by the persistence layer — a state
-// recovery, for now. Kept in memory for the life of the process
-// and served on GET /api/state so the UI can show them (a later
-// increment). Cleared only when the state they describe is
-// replaced wholesale (a restore or a reset) — a recovery is
-// otherwise a fact about this run.
+// Persistence warnings (a state recovery), kept for this process and
+// served on GET /api/state; cleared when the state is replaced (restore or
+// reset).
 const stateWarnings = [];
 function addStateWarning(code, message) {
   if (stateWarnings.some((w) => w.code === code)) return;
@@ -484,11 +439,8 @@ function clearStateWarnings() {
   stateWarnings.length = 0;
 }
 
-// Delete the state file and every local backup:
-// the previous version, the daily snapshots, the pre-migration
-// snapshot, and any preserved corrupt files. Missing files are
-// fine — a reset from the missing-state failure has nothing to
-// delete. Returns the number of files removed.
+// Delete the state file and every local backup (missing files are fine).
+// Returns the count removed.
 function resetStateFiles(dataDir) {
   let names = [];
   try { names = fs.readdirSync(dataDir); } catch { return 0; }
@@ -528,10 +480,8 @@ function pruneDailyBackups(dataDir) {
   }
 }
 
-// Rotate the backups BEFORE the new state is written, while the
-// current state.json is still the previous version. Called by
-// saveState only. Failures are logged, never thrown — a backup
-// that cannot be written must not take down the save itself.
+// Rotate backups before the new state is written (saveState only).
+// Failures are logged, never thrown: a backup must not block the save.
 function rotateStateBackups(dataDir) {
   const file = path.join(dataDir, STATE_FILE);
   if (!fs.existsSync(file)) return; // first save ever — nothing to back up
@@ -547,9 +497,8 @@ function rotateStateBackups(dataDir) {
   } catch (e) { console.error('Standby: daily state snapshot failed:', e.message); }
 }
 
-// Snapshot the current state file before a migration rewrites it
-// (called by loadState's migration branch). A plain copy — the
-// migration can then be undone by hand if it ever goes wrong.
+// Copy the state file before a migration rewrites it, so the migration can
+// be undone by hand.
 function snapshotPreMigration(dataDir) {
   const file = path.join(dataDir, STATE_FILE);
   if (!fs.existsSync(file)) return;
@@ -578,10 +527,8 @@ function backupCandidates(dataDir) {
   return out;
 }
 
-// Try each backup candidate in order; return { parsed, file } for
-// the first one that parses and looks like a Standby state, or
-// null. A backup that cannot be read or parsed is skipped, never
-// an error.
+// The first backup candidate that parses as a Standby state: { parsed,
+// file }, or null. Unreadable ones are skipped.
 function tryBackupCandidates(dataDir, candidates) {
   for (const cand of candidates) {
     let parsed;
@@ -640,11 +587,8 @@ function recoverMissingState(dataDir) {
     + ' No state file was created — restore a backup manually; the state was NOT reset to defaults.');
 }
 
-// Find the newest backup that still holds check-in keys (for the
-// startup key-store check in lib/checkin.js): daily snapshots
-// newest first, then the previous version. Returns
-// { file, count } or null. A backup that cannot be read or parsed
-// simply does not count — it is skipped, never an error.
+// The newest backup that still holds check-in keys (daily snapshots first,
+// then the previous version): { file, count } or null.
 function findBackupWithKeys(dataDir) {
   const candidates = listDailyBackups(dataDir).map((d) => d.file);
   candidates.push(BACKUP_FILE);
@@ -664,12 +608,8 @@ function loadState(dataDir) {
   const file = path.join(dataDir, STATE_FILE);
   let saved;
   if (!fs.existsSync(file)) {
-    // A missing state file is NOT a fresh
-    // install when backups exist — recover from the newest usable
-    // backup, exactly like the corrupt-state path. Only a data
-    // directory with no backups at all is a genuine first boot.
-    // recoverMissingState throws loudly when backups exist but
-    // none loads, and returns null when there are none.
+    // A missing state file with backups present is recovered, like a
+    // corrupt one; only no backups at all is a first boot.
     const recovered = recoverMissingState(dataDir);
     if (recovered) {
       saved = recovered;
@@ -679,12 +619,9 @@ function loadState(dataDir) {
       return state;
     }
   } else {
-    // A state file that cannot be read must not crash
-    // the app on startup with no fallback: recover from the newest
-    // usable backup (previous version, then daily snapshots newest
-    // first). A file that parses but is not a Standby state document
-    // is treated the same way. If no backup loads, this throws
-    // loudly — the state is NEVER silently reset to defaults.
+    // An unreadable or non-Standby state file is recovered from the newest
+    // usable backup; if none loads this throws, never resetting to
+    // defaults.
     try {
       saved = JSON.parse(fs.readFileSync(file, 'utf8'));
       if (!isPlausibleState(saved)) {
@@ -695,20 +632,16 @@ function loadState(dataDir) {
     }
   }
   const state = mergeDefaults(defaultState(), saved);
-  // The fee history is sanitized on load — a hand-edited
-  // or older state file cannot smuggle a bad entry, a future
-  // timestamp, or a series older than the window into the peak.
-  // mergeDefaults already keeps a stored array; this pass drops
-  // anything malformed and prunes past the 90-day window.
+  // Sanitize the fee history on load, so hand-edited or old state cannot
+  // slip a bad, future or out-of-window entry into the peak.
   state.feeHistory = sanitizeFeeHistory(state.feeHistory);
   // Merge the heartbeat on every load: lastOnlineAt is max(heartbeat,
   // state), ignoring and capping future stamps (a forward clock would
   // otherwise hide a real outage). Read-only: writing it back would defeat
   // the save dedupe; it rides along on the next real save.
   mergeHeartbeat(state, dataDir);
-  // `paused` is not a setting — Global Arm/Disarm is the
-  // control. Prune it from older state files so a stale
-  // `paused: true` can never resurface through /api/state.
+  // paused is not a setting (Global Arm/Disarm is); prune it so a stale
+  // paused: true never resurfaces.
   if (state.settings && typeof state.settings === 'object' && 'paused' in state.settings) {
     delete state.settings.paused;
   }
@@ -717,12 +650,8 @@ function loadState(dataDir) {
   if (state.settings && typeof state.settings === 'object' && state.settings.vacationUntil === '') {
     state.settings.vacationUntil = null;
   }
-  // Grace on/off toggle replaces the "No grace period"
-  // duration: old state with graceDurationDays 0 and no
-  // graceEnabled field loads as grace OFF, not on — the 0 meant
-  // off, and the default (on) must not resurrect it. A saved
-  // flag always wins; this only covers state written before
-  // the toggle existed.
+  // Old state with graceDurationDays 0 and no graceEnabled loads as off
+  // (the 0 meant off). A saved flag always wins.
   if (state.settings && typeof state.settings === 'object'
     && saved && saved.settings && typeof saved.settings === 'object'
     && !('graceEnabled' in saved.settings) && saved.settings.graceDurationDays === 0) {
@@ -749,10 +678,9 @@ function loadState(dataDir) {
     }
     delete state.checkin.heldUntil;
   }
-  // 0.3.0 migration: the message release is gone. Prune everything it
-  // left behind — including any stored Part 2 ciphertext — so no message
-  // data lingers unread in state.json. Old delivery.jsonl stays on disk
-  // (audit history) but is no longer read.
+  // 0.3.0 migration: the message release is gone; prune what it left
+  // (including any stored ciphertext). delivery.jsonl stays on disk but is
+  // not read.
   let pruned = false;
   for (const k of ['recipient', 'channels', 'reminders']) {
     if (k in state) { delete state[k]; pruned = true; }
@@ -761,9 +689,8 @@ function loadState(dataDir) {
     state.release = null;
     pruned = true;
   }
-  // 0.4.0 migration: one transaction became a list. A stored single tx
-  // (0.3.x shape: bitcoin.tx + bitcoin.enabled + top-level release)
-  // becomes txs[0] with its own enable and its own release record.
+  // 0.4.0 migration: a single stored tx becomes txs[0] with its own arm
+  // and release record.
   let migrated = false;
   if (state.bitcoin && state.bitcoin.tx && typeof state.bitcoin.tx === 'object') {
     const old = state.bitcoin.tx;
@@ -788,25 +715,16 @@ function loadState(dataDir) {
     migrated = true;
   }
   if ('release' in state) { delete state.release; pruned = true; }
-  // 0.8.0 migration: the global broadcast threshold is gone —
-  // each check-in tx carries its own threshold now. Prune it
-  // from settings so a state file written before 0.8.0 does not
-  // keep serving it (a backup from before 0.8.0 restores the
-  // same way — the restore builds settings fresh, without it).
+  // 0.8.0 migration: prune the global broadcast threshold (each check-in
+  // rule has its own).
   if (state.settings && 'thresholdDays' in state.settings) { delete state.settings.thresholdDays; pruned = true; }
-  // 0.5.2 migration: the ladder is one number now. Prune the check-in
-  // interval, both warning levels, and the grace period from settings —
-  // the status is on-track until the broadcast threshold, then
-  // release-due. Dropping the grace period moves the release 5 days
-  // earlier for a cycle already in progress.
+  // 0.5.2 migration: prune the check-in interval, warning levels and old
+  // grace period (one threshold now).
   for (const k of ['checkinIntervalDays', 'warn1Days', 'warn2Days', 'graceDays']) {
     if (state.settings && k in state.settings) { delete state.settings[k]; pruned = true; }
   }
-  // 0.5.4 migration: the RPC path is gone — no broadcast method, no RPC
-  // config, and the stored RPC password along with it. The two mempool
-  // endpoints replace them. A custom public endpoint from 0.5.3 carries
-  // over as the primary (an own-mempool-on-the-LAN install keeps it);
-  // the default mempool.space just becomes the new default.
+  // 0.5.4 migration: the RPC path is gone, with its config and stored
+  // password; a custom endpoint from 0.5.3 becomes the primary.
   if (state.settings && typeof state.settings.publicApiUrl === 'string'
       && state.settings.publicApiUrl && state.settings.publicApiUrl !== 'https://mempool.space') {
     state.settings.primaryApiUrl = state.settings.publicApiUrl;
@@ -897,12 +815,8 @@ function loadState(dataDir) {
           && typeof e.detail === 'string').slice(-HISTORY_MAX);
         if (clean.length !== s.history.length) { s.history = clean; setsNormalized = true; }
       }
-      // A set created before the single-history
-      // change carries only its own creation event — its members'
-      // earlier histories are backfilled now, so an old set's
-      // trail starts true instead of thin. Idempotent: events
-      // already on the trail are skipped, so a later load changes
-      // nothing and this runs exactly once per set.
+      // A set from before the single-history change gets its members'
+      // earlier histories backfilled. Idempotent.
       const histBefore = s.history.length;
       backfillSetHistory(s, (state.bitcoin.txs || []).filter((t) => (s.txIds || []).includes(t.id)));
       if (s.history.length !== histBefore) setsNormalized = true;
@@ -955,17 +869,13 @@ function saveState(dataDir, state) {
   return state;
 }
 
-// The last saveState write, per state file: the comparison
-// string plus the file's mtime+size as written, so an
-// out-of-band edit invalidates the cache (see saveState above).
+// The last saveState write per state file: the comparison string plus the
+// file's mtime and size, so an outside edit invalidates it.
 const lastWritten = new Map();
 
-// The saveState comparison: the state as it
-// would be written, minus the fields that advance on every tick
-// without meaning anything changed. See saveState for why each
-// field is excluded. Values that matter — statuses, reasons,
-// prices, tips, fees, outspends, grace, connection stamps —
-// all still compare, so any real change still writes.
+// The state as written, minus fields that change every tick without
+// meaning anything (see saveState). Everything that matters still
+// compares.
 function comparableState(state) {
   const copy = JSON.parse(JSON.stringify(state));
   delete copy.updatedAt;
@@ -987,9 +897,8 @@ function comparableState(state) {
 // tick can record liveness without rewriting state. touchHeartbeat
 // (throttled) from the tick, writeHeartbeat on shutdown, merged on load.
 function readHeartbeat(dataDir) {
-  // The heartbeat's lastOnlineAt ISO string, or null when the
-  // file is missing, unreadable, or malformed. Never throws —
-  // a bad heartbeat is a fallback, not an error.
+  // The heartbeat's lastOnlineAt, or null when missing or malformed. Never
+  // throws.
   try {
     const doc = JSON.parse(fs.readFileSync(path.join(dataDir, HEARTBEAT_FILE), 'utf8'));
     if (doc && typeof doc.lastOnlineAt === 'string') {
@@ -1000,27 +909,22 @@ function readHeartbeat(dataDir) {
   return null;
 }
 
-// In-memory throttle record: last heartbeat write per data dir
-// (ms since epoch). A fresh process starts empty, so its first
-// touchHeartbeat always writes.
+// Last heartbeat write per data dir (empty in a fresh process, so the
+// first touch writes).
 const heartbeatLastWrite = new Map();
 
 function writeHeartbeat(dataDir, isoNow) {
-  // Unconditional write (tmp+rename via writeFileDurable, NO
-  // backup rotation — the file is a few bytes and is rewritten
-  // every few minutes). Records the write for the throttle.
+  // Unconditional heartbeat write (durable, no rotation); records it for
+  // the throttle.
   ensureDir(dataDir);
   writeFileDurable(path.join(dataDir, HEARTBEAT_FILE), JSON.stringify({ lastOnlineAt: isoNow }) + '\n', DATA_FILE_MODE);
   heartbeatLastWrite.set(dataDir, Date.now());
 }
 
 function touchHeartbeat(dataDir, isoNow) {
-  // Throttled write: at most once per HEARTBEAT_INTERVAL_MS per
-  // data dir. Returns true when it wrote. A negative elapsed time
-  // means the clock went BACKWARD since the last write (an NTP
-  // correction after a forward jump) — the throttle is expired,
-  // not extended: write now instead of blocking writes until the
-  // clock catches up.
+  // Throttled heartbeat write (once per HEARTBEAT_INTERVAL_MS). A negative
+  // elapsed time means the clock went back: write now rather than wait for
+  // it to catch up. Returns true when it wrote.
   const last = heartbeatLastWrite.get(dataDir) || 0;
   const elapsed = Date.now() - last;
   if (elapsed >= 0 && elapsed < HEARTBEAT_INTERVAL_MS) return false;
@@ -1065,10 +969,8 @@ function fsyncDir(dir) {
   }
 }
 
-// `mode`: the file's permission bits. Set on
-// the tmp file before the content is written, so the final file
-// never exists with looser permissions — even when a leftover .tmp
-// from a crash already existed with other bits.
+// mode is set on the temp file before writing, so the final file never
+// exists with looser permissions.
 function writeFileDurable(file, content, mode) {
   const tmp = file + '.tmp';
   const fd = mode === undefined ? fs.openSync(tmp, 'w') : fs.openSync(tmp, 'w', mode);
@@ -1084,12 +986,8 @@ function writeFileDurable(file, content, mode) {
 }
 
 function appendJsonl(dataDir, file, entry) {
-  // Durable like state.json: open, append,
-  // fsync, close. These are audit logs — a lost line costs
-  // history, not correctness (the authoritative check-in and
-  // broadcast state lives in the fsynced state.json, and the
-  // reader skips a torn line) — but check-ins and broadcasts
-  // are rare, so the fsync costs nothing.
+  // Logs are appended durably too (append, fsync). A lost line costs
+  // history, not correctness, and these writes are rare.
   ensureDir(dataDir);
   const full = path.join(dataDir, file);
   const fd = fs.openSync(full, 'a', DATA_FILE_MODE);
@@ -1132,9 +1030,8 @@ function appendBroadcastLog(dataDir, entry) { appendJsonl(dataDir, BROADCAST_LOG
 function readBroadcastLog(dataDir, limit) { return readJsonl(dataDir, BROADCAST_LOG, limit); }
 function writeBroadcastLog(dataDir, entries) { writeJsonl(dataDir, BROADCAST_LOG, entries); }
 
-// Overwrite a JSONL audit log with an array of entries (used by
-// restore, which replaces the logs with the backup's copies). An empty
-// array clears the file.
+// Replace a JSONL log with the given entries (restore); an empty array
+// clears it.
 function writeJsonl(dataDir, file, entries) {
   // Durable via the same tmp+rename+fsync as
   // state.json — a full rewrite, so the durable helper fits.
@@ -1153,9 +1050,8 @@ module.exports = {
   TRIGGER_TYPES, HISTORY_TYPES, HISTORY_MAX,
   sanitizeFeeHistory, FEE_HISTORY_WINDOW_DAYS, FEE_HISTORY_MIN_OBSERVATIONS, FEE_HISTORY_MAX_ENTRIES,
   memberHistoryDetail, backfillSetHistory,
-  // Persistence hardening: backup rotation, corrupt-state
-  // recovery warnings, and the backup-with-keys lookup for the
-  // startup key-store check.
+  // Persistence hardening: backup rotation, recovery warnings, the backup-
+  // with-keys lookup.
   getStateWarnings, clearStateWarnings, resetStateFiles, findBackupWithKeys,
   BACKUP_FILE, PRE_MIGRATION_FILE, DAILY_BACKUP_PREFIX, DAILY_BACKUP_KEEP,
 };

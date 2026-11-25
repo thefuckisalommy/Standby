@@ -11,22 +11,17 @@ const ROUTES = [require('./routes/admin'), require('./routes/state'), require('.
 
 async function handleApi(req, res, pathname) {
   const now = new Date();
-  // Fetch metadata: a browser request from another site
-  // — or another port on the same host, i.e. another Umbrel app —
-  // is refused before anything else, reads included. See
-  // fetchSiteAllowed in lib/http.js.
+  // Fetch metadata: requests from another site or another Umbrel app are
+  // refused, reads included (lib/http.js).
   if (!fetchSiteAllowed(req)) {
     return sendError(res, 403, 'cross-site request rejected');
   }
-  // CSRF gate: state-changing requests must come from the
-  // app's own page — see csrfAllowed above. Checked before any state
-  // is loaded, so a rejected request cannot touch anything.
+  // CSRF gate for state-changing requests, before any state loads.
   if (req.method !== 'GET' && !csrfAllowed(req)) {
     return sendError(res, 403, 'cross-origin or non-JSON request rejected');
   }
-  // App login — see lib/auth.js. Checked before any
-  // state is loaded. Off when STANDBY_PASSWORD is unset. The
-  // `login: true` flag tells the UI to show its login screen.
+  // App login (lib/auth.js), before any state loads; off without
+  // STANDBY_PASSWORD. login: true tells the UI to show its login screen.
   if (auth.enabled() && !auth.routeIsPublic(req.method, pathname) && !auth.requestAuthorized(req, now.getTime())) {
     return sendJson(res, 401, { error: 'login required', login: true });
   }

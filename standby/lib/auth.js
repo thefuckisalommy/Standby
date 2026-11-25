@@ -91,19 +91,16 @@ function requestAuthorized(req, nowMs) {
   return false;
 }
 
-// Routes that work without a login: the liveness probe (version
-// only — used by container health checks), the auth status the UI
-// asks for before it shows the login screen, and the login itself.
+// Public without a login: health (version only), auth status and login.
 function routeIsPublic(method, pathname) {
   return (method === 'GET' && pathname === '/api/health')
     || (method === 'GET' && pathname === '/api/auth/status')
     || (method === 'POST' && pathname === '/api/login');
 }
 
-// Brute-force brake: more than LOGIN_MAX_FAILURES wrong passwords
-// in LOGIN_WINDOW_MS (from anyone) and the login answers 429 until
-// the window clears. Global, not per address — behind Umbrel's
-// proxy every client shares one address anyway.
+// Brute-force brake: more than LOGIN_MAX_FAILURES wrong passwords in
+// LOGIN_WINDOW_MS answers 429. Global (behind Umbrel's proxy every client
+// shares an address).
 const failures = [];
 function pruneFailures(nowMs) {
   while (failures.length && nowMs - failures[0] > LOGIN_WINDOW_MS) failures.shift();

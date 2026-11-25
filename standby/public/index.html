@@ -24,10 +24,8 @@
 </header>
 
 <main>
-  <!-- State-load error: shown in place of the normal UI
-       when the state file cannot be loaded and no backup could be
-       recovered. The app cannot run, but it can still be rescued:
-       restore a backup file, or start fresh. -->
+  <!-- Shown instead of the app when state cannot load and nothing was
+       recovered: restore a backup or start fresh. -->
   <div class="card" id="state-error-card" style="display:none">
     <h2>Standby could not load its data</h2>
     <p>The file holding all transactions, settings, and the check-in clock is missing or damaged, and no backup could be loaded. Nothing was erased — the app stopped instead of starting over empty.</p>
@@ -160,14 +158,10 @@
 
   <!-- ============ SETTINGS ============ -->
   <section class="tab" id="tab-settings">
-    <!-- There is no global check-in setting: each check-in
-         transaction carries its own threshold ("Days of silence",
-         set when it is added or edited). -->
-    <!-- Settings filter: a dropdown at the top of the
-         tab, so it takes one row instead of two. The filter reads
-         the same triggers array the "?" pop-out renders its
-         "Applies to" line from (SETTINGS_HELP in app.js) — one
-         declaration per card, no second mapping. -->
+    <!-- No global check-in setting: each check-in rule has its own
+         threshold. -->
+    <!-- Settings filter: reads the same triggers array as the "?" pop-outs
+         (SETTINGS_HELP in app.js). -->
     <div class="settings-filter" id="settings-filter">
       <label for="filter-select">Show:</label>
       <select id="filter-select" aria-label="Filter settings">
@@ -360,10 +354,7 @@
       <div class="inline-unit" id="set-fee-low-row"><input id="set-fee-low" type="number" min="1" max="10" step="0.5" value="2"><span>× peak tx fee</span></div>
       <label for="set-fee-medium">High Risk at or below</label>
       <div class="inline-unit" id="set-fee-medium-row"><input id="set-fee-medium" type="number" min="0.5" max="5" step="0.5" value="1"><span>× peak tx fee</span></div>
-      <!-- Fee verdict zone bar: always visible under the
-           numbers, showing the three zones as a bar that moves
-           live as you type. No ticks or axis label below —
-           the ranges are written inside each zone. -->
+      <!-- Fee verdict zone bar, live as you type. -->
       <div class="zone-bar" id="zone-bar">
         <div class="bar">
           <div class="seg seg-high" id="seg-high"><span class="name">High Risk</span><span class="range" id="range-high">1× and below</span></div>
@@ -421,10 +412,7 @@
       <p id="logout-msg" class="muted"></p>
     </div>
 
-    <!-- App version: a short card at the very bottom of
-         General settings showing the installed version, from
-         /api/health. It only changes on an update. No "?" button
-         and no details pop-out — just the version line. -->
+    <!-- App version from /api/health, at the bottom of General settings. -->
     <div class="card" id="card-version">
       <div class="section-head">
         <h2>App version</h2>
@@ -434,9 +422,8 @@
   </section>
 </main>
 
-<!-- Confirmation dialog (Broadcast Now / Broadcast Armed / Delete) and
-     details pop-out (a broadcast log entry). A native confirm() would
-     work, but this keeps the warning inside the app and testable. -->
+<!-- Confirmation dialog and details pop-out (kept in-app rather than
+     confirm(), so it is testable). -->
 <!-- Restore progress: shown while a restore runs (the node check can
      take up to a minute), then switches to the result. -->
 <div id="restore-progress-modal" class="modal-overlay">
@@ -478,9 +465,7 @@
   </div>
 </div>
 
-<!-- Edit-transaction popup: editing happens in a popup, so it
-     never scrolls the page down to a form at the bottom of the tab
-     on a phone. -->
+<!-- Edit popup (no scrolling to a form on a phone). -->
 <div id="edit-modal" class="modal-overlay">
   <div class="modal" role="dialog" aria-modal="true">
     <button id="edit-modal-x" class="modal-x" aria-label="Close">×</button>
@@ -597,11 +582,8 @@
 </div>
 
 
-<!-- Add-transaction popup. Three buttons open it: the Getting Started button,
-     the "+ Add a pre-signed transaction" button at the bottom
-     of the Transactions tab, and the oval "+ Add Tx" in the
-     Staged Transactions header. The popup never switches tabs
-     or scrolls the page. -->
+<!-- Add popup, opened by Getting Started, the bottom-of-tab button and "+
+     Add Tx"; never switches tabs. -->
 <div id="add-modal" class="modal-overlay">
   <div class="modal" role="dialog" aria-modal="true">
     <button id="add-modal-x" class="modal-x" aria-label="Close">×</button>
@@ -663,10 +645,8 @@
   </div>
 </div>
 
-<!-- App login: shown only when the server requires a
-     password (STANDBY_PASSWORD; on Umbrel it is the password shown
-     on the app's page). It covers the page until a login succeeds;
-     the page then reloads with the session token in place. -->
+<!-- App login: covers the page until a login succeeds (only when
+     STANDBY_PASSWORD is set). -->
 <div id="login-modal" class="modal-overlay">
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="login-title">
     <h3 id="login-title">Log in to Standby</h3>
@@ -680,9 +660,8 @@
   </div>
 </div>
 
-<!-- Backup download: encrypted with a password the owner
-     chooses (the default), or unencrypted after a warning. The two
-     choices are the app's usual on/off switches. -->
+<!-- Backup download: encrypted (default) or unencrypted, chosen with on/off
+     switches. -->
 <div id="backup-modal" class="modal-overlay">
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="backup-modal-title">
     <button id="backup-modal-x" class="modal-x" aria-label="Close">×</button>
@@ -691,9 +670,7 @@
     <label class="switch green switch-row"><span>Encrypted (recommended)</span>
       <input type="checkbox" id="backup-encrypt" checked><span class="slider"></span></label>
     <div id="backup-encrypted-fields">
-      <!-- Either the owner types a password twice, or Standby
-           generates one: the switch picks which. A generated
-           passphrase is shown once, in full, to be written down. -->
+      <!-- Type a password twice, or generate one (shown once, in full). -->
       <label class="switch green switch-row"><span>Generate a passphrase for me</span>
         <input type="checkbox" id="backup-generate"><span class="slider"></span></label>
       <div id="backup-typed-fields">

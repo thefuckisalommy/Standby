@@ -48,9 +48,7 @@ module.exports = async function broadcastRoutes(ctx) {
           break;
         }
       }
-      // Arm/disarm every set too — a set's arm is the
-      // only arm its members have, so leaving sets out would
-      // leave half the release armed after "Disarm all".
+      // Arm or disarm every set too: a set's arm is its members' only arm.
       const newlyArmedSets = [];
       for (const s of (f.bitcoin.sets || [])) {
         const wasEnabled = s.enabled;
@@ -75,12 +73,9 @@ module.exports = async function broadcastRoutes(ctx) {
     return sendJson(res, 200, { ok: true, enabled: body.enabled, count: freshTxs.length, checkinReset, txs: serveTxs(freshTxs), sets: serveSets(fresh.bitcoin.sets || []) });
   }
 
-  // POST /api/bitcoin/txs/:id/broadcast — MANUAL broadcast, now. Same
-  // path as the release (freshness gate, then primary with secondary
-  // fallback) but on the owner's explicit say-so: it ignores the
-  // check-in clock, the armed toggle, and vacation mode. The UI
-  // asks first (a confirmation dialog). A tx already broadcast is
-  // skipped, never re-sent.
+  // POST /api/bitcoin/txs/:id/broadcast: manual broadcast now, through the
+  // release path, ignoring clock, arm and vacation. Already broadcast is
+  // skipped.
   const txBroadcastMatch = pathname.match(/^\/api\/bitcoin\/txs\/([^/]+)\/broadcast$/);
   if (req.method === 'POST' && txBroadcastMatch) {
     const tx = (state.bitcoin.txs || []).find((t) => t.id === txBroadcastMatch[1]);
@@ -127,9 +122,7 @@ module.exports = async function broadcastRoutes(ctx) {
       for (const id of body.ids) {
         const tx = txs.find((t) => t.id === id);
         if (!tx) return sendError(res, 400, 'unknown transaction id: ' + id);
-        // A transaction already submitted to Slipstream is not
-        // re-submitted — it is waiting on MARA, and the
-        // MARA-waiting refresh is what moves it on.
+        // Already with MARA: not re-submitted.
         if (!tx.broadcasted && !(tx.release && tx.release.status === 'submitted-slipstream')) targets.push(tx);
       }
     } else {
@@ -149,10 +142,8 @@ module.exports = async function broadcastRoutes(ctx) {
     return sendJson(res, 200, { ok: true, action, results });
   }
 
-  // GET /api/bitcoin/confirmations — the confirmation count for every
-  // broadcast transaction, refreshed from the network unless checked
-  // less than a minute ago (the UI polls this; the hourly tick
-  // refreshes it too). A failed lookup keeps the last known value.
+  // GET /api/bitcoin/confirmations: counts for broadcast txs, refreshed
+  // unless checked within a minute. A failure keeps the last value.
   if (req.method === 'GET' && pathname === '/api/bitcoin/confirmations') {
     const refreshed = await refreshConfirmations(state, 60);
     return sendJson(res, 200, { confirmations: refreshed });

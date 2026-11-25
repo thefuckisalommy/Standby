@@ -11,18 +11,13 @@ module.exports = async function nodesRoutes(ctx) {
   const { req, res, pathname, now } = ctx;
   let state = ctx.state;
 
-  // POST /api/bitcoin/connection/test — verifies both nodes without
-  // moving funds. Saves the result (including the per-endpoint results)
-  // so the Dashboard can show each node's own status. The app is OK if
-  // either one answers (the other is the backup).
+  // POST /api/bitcoin/connection/test: test both nodes without moving
+  // funds and save the per-endpoint results. OK if either answers.
   if (req.method === 'POST' && pathname === '/api/bitcoin/connection/test') {
     const r = await bitcoin.testConnection(bitcoin.endpointsFor(state.settings), { probeOutputLookup: true });
     const conn = { ok: r.ok, checkedAt: now.toISOString(), detail: r.detail, results: r.results };
-    // The node test awaited the network —
-    // only the connection result rides into FRESH state.
-    // The per-endpoint stamps ride over from the stored
-    // connection, then the live stamps (the test just asked both
-    // endpoints) overwrite them.
+    // Only the connection result is saved into fresh state; stored per-
+    // endpoint stamps carry over, then the live ones overwrite them.
     saveMutation((f) => {
       const prev = (f.bitcoin.connection && f.bitcoin.connection.nodeCheckedAt) || null;
       f.bitcoin.connection = conn;

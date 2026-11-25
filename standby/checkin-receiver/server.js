@@ -30,9 +30,7 @@ const MAX_KEY_LEN = 256;
 requireWritable([{ dir: CHECKIN_DIR, create: true }], DEPLOYMENT, 'Standby receiver');
 
 function sendJson(res, status, obj) {
-  // The receiver serves JSON only: no full
-  // CSP, just nosniff + frame-ancestors, so its responses cannot be
-  // framed or sniffed as another type.
+  // JSON only, so just nosniff and frame-ancestors (no full CSP).
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Content-Security-Policy', "frame-ancestors 'self'");
   const body = JSON.stringify(obj);
@@ -40,9 +38,8 @@ function sendJson(res, status, obj) {
   res.end(body);
 }
 
-// The key list, read fresh on every request: a revocation lands the
-// moment the main app rewrites keys.json. A missing or unreadable
-// file means no keys are configured — nothing can check in.
+// Keys read fresh per request, so a revocation applies at once; a missing
+// or unreadable file means nothing can check in.
 function readKeys() {
   try {
     const doc = JSON.parse(fs.readFileSync(path.join(CHECKIN_DIR, 'keys.json'), 'utf8'));
@@ -56,9 +53,8 @@ function hashKey(plain) {
   return crypto.createHash('sha256').update(plain, 'utf8').digest('hex');
 }
 
-// The presented key: a Bearer token, or the X-Api-Key header for
-// clients that cannot set Authorization (a phone shortcut, a simple
-// webhook). Nothing else is accepted.
+// The key: a Bearer token, or X-Api-Key for clients that cannot set
+// Authorization.
 function presentedKey(req) {
   const auth = req.headers.authorization || '';
   if (typeof auth === 'string' && auth.startsWith('Bearer ')) return auth.slice(7).trim();
@@ -77,9 +73,8 @@ function writeLastCheckin(keyId, label, sourceIp) {
   if (sourceIp) doc.sourceIp = sourceIp;
   fs.mkdirSync(CHECKIN_DIR, { recursive: true });
   const file = path.join(CHECKIN_DIR, 'last.json');
-  // Write + fsync + rename + dir fsync,
-  // so a recorded check-in survives a power cut — a lost last.json
-  // would silently move the broadcast clock forward.
+  // Durable write: a lost last.json would silently move the broadcast
+  // clock forward.
   writeFileDurable(file, JSON.stringify(doc, null, 2) + '\n');
   return now;
 }
@@ -92,11 +87,8 @@ process.on('uncaughtExceptionMonitor', (e) => {
 });
 
 const server = http.createServer((req, res) => {
-  // Host allowlist — first, before the URL
-  // parse, routing, and key check. This port is published directly
-  // on the LAN with no proxy in front of it, so the allowlist is
-  // the rebinding defense here. 421, plain text, and a log line
-  // naming the rejected Host so a lockout is diagnosable.
+  // Host allowlist first: this port faces the LAN with no proxy, so it is
+  // the rebinding defence here. 421, logged with the Host.
   if (!hostAllowed(req.headers.host)) {
     console.warn('Standby receiver: rejected request with unrecognised Host header: ' + JSON.stringify(req.headers.host));
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -109,9 +101,7 @@ const server = http.createServer((req, res) => {
   try {
     url = new URL(req.url, 'http://localhost');
   } catch (e) {
-    // A malformed request target (e.g. `GET // [`) must not throw
-    // out of the handler and kill the process: answer 400 and keep
-    // serving.
+    // A malformed request target answers 400 instead of throwing.
     res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('Bad request URL');
     return;
@@ -122,12 +112,8 @@ const server = http.createServer((req, res) => {
     return sendJson(res, 200, { ok: true });
   }
 
-  // POST /__test__/throw-uncaught (test-only): same as the app
-  // server's hook — throw outside any handler so the suite can
-  // prove the receiver terminates instead of serving through it.
-  // Gated on STANDBY_TEST_MODE=1, which only
-  // the test harness sets; without it this 404s like any unknown
-  // path. Answers 200 first — the throw lands after the response.
+  // POST /__test__/throw-uncaught: test mode only (else 404); answers 200,
+  // then throws outside any handler.
   if (req.method === 'POST' && pathname === '/__test__/throw-uncaught') {
     if (!TEST_MODE) return sendJson(res, 404, { error: 'not found' });
     setTimeout(() => { throw new Error('test-only uncaught exception'); }, 0);

@@ -46,45 +46,32 @@ module.exports = async function txsRoutes(ctx) {
       locktime: parsed.locktime,
       segwit: parsed.segwit,
       enabled: true, // new transactions are armed by default
-      // The check-in freeze: the accumulated inactive
-      // time and the start of the current inactive period (see
-      // syncCheckinFreeze). Only check-in logic reads them; a new
-      // tx starts active, at 0 / null.
+      // Check-in freeze fields (see syncCheckinFreeze); a new tx starts
+      // active.
       checkinOffsetMs: 0,
       checkinInactiveSince: null,
       broadcastVia: validBroadcastVia(broadcastVia),
       publicFallbackDays: validPublicFallbackDays(publicFallbackDays),
       slipstreamFirstAttemptAt: null,
-      // The rule that fires this transaction — already
-      // normalized by the caller (see the add / import handlers).
-      // triggerState is the trigger's last evaluation, null until
-      // the release has evaluated it once.
+      // The rule set (normalized by the caller) and its last evaluation
+      // (null until evaluated).
       trigger,
       triggerState: null,
       // The event trail: starts with the add itself —
       // the rule that was set, in its own words.
       history: [{ ts: now.toISOString(), type: 'added', detail: triggerConditionText(trigger) }],
       release: null,
-      // broadcasted is set by broadcastOne() (release or manual) and
-      // survives check-ins: { txid, broadcastedAt, method,
-      // confirmations, blockHeight, found, checkedAt }.
+      // broadcasted: set by broadcastOne and kept across check-ins.
       broadcasted: null,
     };
   }
-  // The fee for a parsed tx, best-effort: null when the
-  // node cannot answer (unknown parent, unreachable node). Never
-  // throws — an add must never fail because the fee could not be
-  // computed.
+  // The fee, best-effort: null when the node cannot answer. Never throws.
   async function feeFor(parsed) {
     try { return await bitcoin.computeFee(parsed, bitcoin.endpointsFor(state.settings)); }
     catch { return null; }
   }
-  // A transaction is identified by its txid: the same on-chain
-  // transaction stored twice is two cards, both armed, for one
-  // Bitcoin tx (the second broadcast is a no-op). Reject a txid
-  // that is already stored, naming the existing card by its label
-  // (or its id when it has no label). `exceptId` is the tx being
-  // edited — its own txid is not a duplicate.
+  // A txid may be stored only once (two cards for one transaction).
+  // exceptId is the tx being edited.
   function duplicateTx(txid, exceptId) {
     const dup = (state.bitcoin.txs || []).find((t) => t.txid === txid && t.id !== exceptId);
     return dup ? "This transaction is already stored as '" + (dup.label || dup.id) + "'" : null;
@@ -98,11 +85,8 @@ module.exports = async function txsRoutes(ctx) {
       // Clean hex — the original paste path.
       hex = input;
     } else {
-      // Maybe a pasted PSBT (base64). extractTxFromPsbt detects the
-      // format by content. A PSBT that parses but is not fully
-      // signed reports its own error (naming the inputs); anything
-      // that is not a PSBT at all is an invalid paste, like a
-      // corrupt hex.
+      // Maybe a base64 PSBT: a not-fully-signed one reports its own error;
+      // anything else is an invalid paste.
       try { hex = bitcoin.extractTxFromPsbt(input).hex; }
       catch (e) {
         if (e.message.indexOf('not fully signed') !== -1) return sendError(res, 400, e.message);
@@ -114,9 +98,8 @@ module.exports = async function txsRoutes(ctx) {
     catch (e) { return sendError(res, 400, 'invalid transaction: ' + e.message); }
     const dupErr = duplicateTx(parsed.txid);
     if (dupErr) return sendError(res, 400, dupErr);
-    // The trigger: validated server-side (an invalid one
-    // is a 400 with the reason). Omitted → the check-in trigger at
-    // the 35-day fallback, so the old add path is unchanged.
+    // Validated trigger (400 with the reason); omitted means a 35-day
+    // check-in rule.
     const trig = (body.trigger === undefined)
       ? { trigger: store.defaultTriggerSet() }
       : store.normalizeTrigger(body.trigger);
@@ -149,9 +132,8 @@ module.exports = async function txsRoutes(ctx) {
       if (dup) { dupTx = dup; return false; }
       if (txs.some((t) => t.id === tx.id)) return false;
       txs.push(tx);
-      // The danger zone is measured against the SMALLEST check-in
-      // threshold in the set — the most urgent check-in rule is
-      // the one that would let the release fire soonest.
+      // The danger zone uses the smallest check-in threshold in the set
+      // (the one that would fire soonest).
       const checkinThresholds = trig.trigger.rules.filter((r) => r.type === 'checkin').map((r) => r.params.thresholdDays);
       if (checkinThresholds.length > 0 && inDangerZone(f, now, Math.min(...checkinThresholds))) {
         resetCheckin(f, now, 'add-reset');
@@ -229,11 +211,8 @@ module.exports = async function txsRoutes(ctx) {
         return sendError(res, 400, gate.message);
       }
     } catch (e) { /* best-effort: the import proceeds without the warning */ }
-    // The import path arms by default too —
-    // same reset as the paste path when the clock is in the danger
-    // zone, and only for a check-in rule.
-    // The push + the reset ride into FRESH state (see the paste
-    // path above): the fee and trigger checks awaited the network.
+    // Import arms too, with the same danger-zone reset, saved into fresh
+    // state.
     let checkinReset = false;
     let dupTx = null;
     const fresh = saveMutation((f) => {
@@ -242,9 +221,7 @@ module.exports = async function txsRoutes(ctx) {
       if (dup) { dupTx = dup; return false; }
       if (txs.some((t) => t.id === tx.id)) return false;
       txs.push(tx);
-      // The danger zone is measured against the SMALLEST check-in
-      // threshold in the set — the most urgent check-in rule is
-      // the one that would let the release fire soonest.
+      // The danger zone uses the smallest check-in threshold in the set.
       const checkinThresholds = trig.trigger.rules.filter((r) => r.type === 'checkin').map((r) => r.params.thresholdDays);
       if (checkinThresholds.length > 0 && inDangerZone(f, now, Math.min(...checkinThresholds))) {
         resetCheckin(f, now, 'add-reset');
@@ -263,21 +240,16 @@ module.exports = async function txsRoutes(ctx) {
   if (txsMatch && (req.method === 'PUT' || req.method === 'DELETE')) {
     const tx = (state.bitcoin.txs || []).find((t) => t.id === txsMatch[1]);
     if (!tx) return sendError(res, 404, 'no such transaction');
-    // Snapshot for the fresh-state merge
-    // below: only the fields this edit changes are copied into
-    // fresh state at save time. (Shallow: the handler replaces
-    // trigger/release/broadcasted, never mutates them in place.)
+    // Snapshot for the fresh-state merge (shallow: trigger, release and
+    // broadcasted are replaced, never mutated).
     const orig = { ...tx };
     if (req.method === 'DELETE') {
-      // The removal rides into FRESH
-      // state: the request body was awaited above, so a second
-      // request may have saved in between.
+      // Remove from fresh state (another request may have saved
+      // meanwhile).
       const fresh = saveMutation((f) => {
         if (!(f.bitcoin.txs || []).some((t) => t.id === tx.id)) return false;
         f.bitcoin.txs = (f.bitcoin.txs || []).filter((t) => t.id !== tx.id);
-        // The tx leaves any set it was in; a set left with
-        // no members has nothing to drive and goes with it. The
-        // other members stay put.
+        // The tx leaves its set; a set left empty goes with it.
         for (const s of (f.bitcoin.sets || [])) {
           s.txIds = (s.txIds || []).filter((id) => id !== tx.id);
         }
@@ -312,20 +284,16 @@ module.exports = async function txsRoutes(ctx) {
         tx.inputs = parsed.inputs.length;
         tx.outputs = parsed.outputs.length;
         tx.totalOutSats = parsed.totalOutSats;
-        // A replaced hex is a different transaction: its fee is
-        // recomputed from the new inputs (best-effort, null when
-        // the parents cannot be fetched).
+        // A replaced hex is a different transaction: recompute its fee
+        // (best-effort).
         const fee = await feeFor(parsed);
         tx.feeSats = fee ? fee.feeSats : null;
         tx.feeRateSatVb = fee ? fee.feeRateSatVb : null;
         tx.locktime = parsed.locktime;
         tx.segwit = parsed.segwit;
-        // A replaced hex is a different transaction: the broadcasted fact
-        // and any release record belong to the old hex, so both are
-        // cleared. The broadcast log keeps the history. (Only reachable
-        // for an unlocked tx — a locked tx with a different txid is
-        // rejected above, and a locked tx with the same txid takes the
-        // no-op path, so its broadcasted fact is never cleared here.)
+        // A replaced hex clears the old broadcasted fact and release
+        // record; the log keeps the history. Only reachable for an
+        // unlocked tx.
         tx.release = null;
         tx.broadcasted = null;
       }
@@ -339,11 +307,8 @@ module.exports = async function txsRoutes(ctx) {
     if (body.trigger !== undefined) {
       const v = store.normalizeTrigger(body.trigger);
       if (!v.trigger) return sendError(res, 400, 'invalid trigger: ' + v.error);
-      // The trigger is locked with the hex and route: a transaction
-      // out the door (broadcasted, submitted to Slipstream, stale)
-      // has already fired its rule, and re-ruling it now would
-      // only rewrite history — the Edit popup disables the picker
-      // for a locked tx, and this is the server-side backstop.
+      // The trigger is locked with the hex and route once the tx is out
+      // the door (the UI disables it; this is the server backstop).
       const triggerLocked = !!(tx.broadcasted || (tx.release
         && (tx.release.status === 'submitted-slipstream' || tx.release.status === 'stale' || tx.release.status === 'broadcast')));
       if (triggerLocked && JSON.stringify(v.trigger) !== JSON.stringify(store.triggerOf(tx))) {
@@ -366,10 +331,8 @@ module.exports = async function txsRoutes(ctx) {
     // Other rule types, disarming, and arming outside the zone leave the
     // clock alone.
     if (typeof body.enabled === 'boolean') tx.enabled = body.enabled;
-    // The route toggle on the card: switching the route
-    // applies to the NEXT broadcast attempt — a transaction already
-    // submitted to Slipstream is not re-submitted by toggling it
-    // (preBroadcastCheck blocks a re-submit while it waits on MARA).
+    // A route change applies to the next attempt; a tx already with MARA
+    // is not re-submitted.
     if (typeof body.broadcastVia === 'string') tx.broadcastVia = validBroadcastVia(body.broadcastVia);
     // Public-fallback duration: editable for active and pending txs,
     // invalid means Never (no 400). Changing it while waiting on MARA re-
@@ -415,21 +378,14 @@ module.exports = async function txsRoutes(ctx) {
       for (const k of ['hex', 'txid', 'inputs', 'outputs', 'totalOutSats', 'locktime', 'segwit', 'feeSats', 'feeRateSatVb', 'release', 'broadcasted', 'label', 'notes', 'trigger', 'triggerState', 'enabled', 'broadcastVia', 'publicFallbackDays', 'history']) {
         if (JSON.stringify(tx[k]) !== JSON.stringify(orig[k])) ftx[k] = tx[k];
       }
-      // Single history: the member's edit lands
-      // on its set's trail too (forwardMemberHistory no-ops for a
-      // standalone tx). This runs only on the success path — the
-      // early returns above leave a rejected edit with no event
-      // anywhere.
+      // A member's edit is forwarded to its set's trail (success path
+      // only).
       for (const fe of forwardedEditEvents) forwardMemberHistory(f, ftx, fe.type, fe.detail);
-      // The freeze: the danger zone is measured from the
-      // EFFECTIVE last check-in — the tx's live frozen time — so a
-      // frozen clock is never in the danger zone for time that never
-      // counted. The freeze is re-synced after the toggle: disarming
-      // starts an inactive period, re-arming banks it.
+      // The danger zone is measured from the effective last check-in; the
+      // freeze is re-synced after the toggle (disarming opens an inactive
+      // period, re-arming banks it).
       syncCheckinFreeze(ftx, f, now);
-      // The danger zone is measured against the SMALLEST check-in
-      // threshold in the set — the most urgent check-in rule is
-      // the one that would let the release fire soonest.
+      // The danger zone uses the smallest check-in threshold in the set.
       const ftxCheckinThresholds = store.triggerOf(ftx).rules.filter((r) => r.type === 'checkin').map((r) => r.params.thresholdDays);
       if (body.enabled === true && freshWasEnabled === false
           && ftxCheckinThresholds.length > 0

@@ -18,8 +18,8 @@ function outpoints(inputs) {
 // One finding per checked tx, from a dry-run or checkInputsUnspent
 // result. staleOnly (the hourly check) records a confirmed foreign
 // spend and nothing else: the broadcast-time gate owns the rest.
-function findingFor(id, r, { staleOnly = false } = {}) {
-  const f = { id };
+function findingFor(tx, r, { staleOnly = false } = {}) {
+  const f = { id: tx.id, txid: tx.txid };
   if (!staleOnly && r.fee && typeof r.fee.feeSats === 'number') {
     f.fee = { feeSats: r.fee.feeSats, feeRateSatVb: typeof r.fee.feeRateSatVb === 'number' ? r.fee.feeRateSatVb : null };
   }
@@ -43,15 +43,15 @@ function findingFor(id, r, { staleOnly = false } = {}) {
 }
 
 // Apply findings to FRESH state, re-checking the guards there: a tx
-// broadcast or deleted while the check was on the network is left
-// alone. kind is the release record's kind ('dryrun' or 'release').
+// broadcast, deleted or given a new hex while the check was on the
+// network is left alone. kind is the release record's kind ('dryrun' or 'release').
 function recordFindings(findings, now, kind) {
   if (!findings.length) return;
   const at = now.toISOString();
   saveMutation((f) => {
     for (const a of findings) {
       const t = (f.bitcoin.txs || []).find((x) => x.id === a.id);
-      if (!t || t.broadcasted) continue;
+      if (!t || t.broadcasted || t.txid !== a.txid) continue;
       if (a.fee) { t.feeSats = a.fee.feeSats; t.feeRateSatVb = a.fee.feeRateSatVb; }
       const isStale = t.release && t.release.status === 'stale';
       if (a.stale) {
@@ -106,6 +106,7 @@ async function priceNote(st) {
 // it (its lookup may still finish in the background).
 async function dryRunAndRecord(st, txs, now, { drySet = null, checkDone = false, priceNotes = false, deadlineMs = null } = {}) {
   const results = [];
+  const findings = [];
   const endpoints = bitcoin.endpointsFor(st.settings);
   const ttlMs = checkCadenceSecondsOf(st.settings) * 1000;
   for (const tx of txs) {
@@ -135,11 +136,13 @@ async function dryRunAndRecord(st, txs, now, { drySet = null, checkDone = false,
         r.note = (r.note || '') + ' ' + await priceNote(st);
       }
       results.push({ ...base, ...r });
+      const f = findingFor(tx, r);
+      if (f) findings.push(f);
     } catch (e) {
       results.push({ ...base, txid: tx.txid, broadcastVia: validBroadcastVia(tx.broadcastVia), wouldBroadcast: false, error: e.message });
     }
   }
-  recordFindings(results.filter((r) => !r.timedOut && !r.error).map((r) => findingFor(r.id, r)).filter(Boolean), now, 'dryrun');
+  recordFindings(findings, now, 'dryrun');
   return results;
 }
 

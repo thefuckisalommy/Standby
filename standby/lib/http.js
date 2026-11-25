@@ -19,9 +19,8 @@ const MIME = {
 
 function serveStatic(req, res, pathname) {
   let file = pathname === '/' ? 'index.html' : pathname.slice(1);
-  // Prevent path traversal. Compare against the
-  // directory WITH a trailing separator: a bare prefix check would
-  // also accept a sibling like ".../public-old/x".
+  // No path traversal: compare against the directory with a trailing
+  // separator (a bare prefix would also match "public-old").
   const resolved = path.resolve(PUBLIC_DIR, file);
   if (!resolved.startsWith(PUBLIC_DIR + path.sep)) { sendError(res, 403, 'forbidden'); return; }
   if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) { sendError(res, 404, 'not found'); return; }
@@ -56,10 +55,8 @@ function hostOf(h) {
     return (close === -1 ? h.slice(1) : h.slice(1, close)).toLowerCase();
   }
   let name = h.split(':')[0].toLowerCase();
-  // A trailing dot marks a fully-qualified
-  // name in DNS — "localhost." IS localhost — so strip one after
-  // the port is split off. A bare "." becomes "" and is still
-  // rejected (hostAllowed requires a non-empty name).
+  // Strip one trailing DNS dot ("localhost." is localhost); a bare "."
+  // becomes "" and is rejected.
   if (name.endsWith('.')) name = name.slice(0, -1);
   return name;
 }

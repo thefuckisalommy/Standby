@@ -6,7 +6,7 @@ Code comments describe how the app works now; the history of why it changed live
 
 ## 0.8.13.1
 
-Maintenance release. A restore no longer waits indefinitely on a node that accepts requests but never answers: its check of the restored transactions stops after 60 seconds, and any transaction it could not check is reported as unchecked (run Dry-run all once the node answers). Restoring now opens a pop-out with an animated Standby logo while it works, then shows what it found. Under the hood: the API is split into smaller modules by area, the dry run, the restore check and the hourly check of staged transactions now record their findings through one shared path, and the code comments are trimmed to what explains the code. Nothing else about how the app works changes.
+Maintenance release. A restore no longer waits indefinitely on a node that accepts requests but never answers: its check of the restored transactions stops after 60 seconds, and any transaction it could not check is reported as unchecked (run Dry-run all once the node answers). Restoring now opens a pop-out with an animated Standby logo while it works, then shows what it found. Fix: a dry run or node check still in flight when a transaction's hex was replaced could record its result on the new transaction (for example, mark it stale); a result now applies only to the transaction it checked. Under the hood: the API is split into smaller modules by area, the dry run, the restore check and the hourly check of staged transactions now record their findings through one shared path, and the code comments are trimmed to what explains the code. Nothing else about how the app works changes.
 
 ## 0.8.13
 

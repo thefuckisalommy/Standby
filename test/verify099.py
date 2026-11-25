@@ -32,19 +32,16 @@ def req(method, path, body=None, base=None, timeout=20, headers=None):
     return v.req(method, path, body, base=base or BASE, timeout=timeout, headers=headers)
 
 
-# The expected security-header policy (0.8.10, fix 3) — kept in sync
-# with the CSP constant in branch-0810-fixes/lib/http.js. Asserted
-# exactly below: a drifted policy is a real regression, not a
-# cosmetic one.
+# The expected security headers, matching the CSP constant in
+# standby/lib/http.js exactly (a drift is a regression).
 CSP_0810 = ("default-src 'self'; script-src 'self'; style-src 'self' "
             "'unsafe-inline'; img-src 'self'; connect-src 'self'; "
             "object-src 'none'; base-uri 'self'; frame-ancestors 'self'")
 
 
 def raw_get(path, base):
-    # Sends the request line verbatim (no client-side URL
-    # normalization) and returns (status, body bytes) — so a
-    # malformed target like // [ reaches the server exactly as typed.
+    # Send the request line verbatim, so a malformed target like // [
+    # reaches the server as typed. Returns (status, body bytes).
     u = urllib.parse.urlparse(base)
     conn = http.client.HTTPConnection(u.hostname, u.port, timeout=5)
     conn.putrequest('GET', path)
@@ -55,10 +52,8 @@ def raw_get(path, base):
 
 
 def raw_req(method, path, base, host=None, headers=None, body=None):
-    # Like raw_get, but the Host header is caller-controlled (or
-    # omitted) and extra headers / a body can be sent — for the
-    # Host-allowlist checks, where urllib would always send its own
-    # Host. Returns (status, body bytes).
+    # Like raw_get, with a caller-controlled (or missing) Host, extra
+    # headers and a body. Returns (status, body bytes).
     u = urllib.parse.urlparse(base)
     conn = http.client.HTTPConnection(u.hostname, u.port, timeout=5)
     conn.putrequest(method, path, skip_host=True)
@@ -74,11 +69,9 @@ def raw_req(method, path, base, host=None, headers=None, body=None):
 
 
 def raw_socket_status(request_lines, base):
-    # A bare socket: the only way to send a request with no Host
-    # header at all. (http.client always sends one unless told not
-    # to — and Node rejects a Host-less HTTP/1.1 request at the
-    # parser, before the handler ever runs — so the request must
-    # be HTTP/1.0, where Host is optional.) Returns the status int.
+    # A request with no Host at all needs a bare socket and HTTP/1.0 (Node
+    # rejects a Host-less HTTP/1.1 request before the handler). Returns
+    # the status.
     u = urllib.parse.urlparse(base)
     s = socket.create_connection((u.hostname, u.port), timeout=5)
     try:
@@ -95,9 +88,7 @@ def raw_socket_status(request_lines, base):
 
 
 def resp_headers(method, path, base):
-    # (status, {lower-cased header name: value}) for one request —
-    # v.req returns the parsed body only, and the header checks
-    # below need the raw response headers.
+    # (status, {lower-cased header: value}) for one request.
     r = urllib.request.Request(base + path, method=method)
     try:
         with urllib.request.urlopen(r, timeout=10) as resp:
@@ -182,9 +173,9 @@ def state_tx(tx_id, base=BASE):
 
 
 def rule_slice(t, i=0):
-    """One rule's triggerState slice from a state_tx() tx: the API
-    serves a one-rule set's state as its single flat slice (a dict)
-    and a multi-rule set's as an array (serveTriggerState)."""
+    """One rule's slice: a one-rule set's state is served flat, a multi-rule
+    set's as an array.
+    """
     ts = (t or {}).get('triggerState')
     if isinstance(ts, list):
         return ts[i] if i < len(ts) else {}
@@ -207,10 +198,7 @@ def wait_until(cond, deadline=12, interval=0.5):
 
 
 def wait_slice(tx_id, want, deadline=12, interval=0.5, i=0):
-    """Poll until the tx's rule slice matches every key/value in
-    want (e.g. {'status': 'due', 'lastTipHeight': STUB_TIP}) —
-    the tick's observable effect, replacing a fixed 'wait a tick'
-    sleep. Same deadline as the sleep it replaces."""
+    """Poll until the tx's rule slice matches every key in want."""
     def cond():
         t = state_tx(tx_id)
         if t is None:
@@ -221,10 +209,9 @@ def wait_slice(tx_id, want, deadline=12, interval=0.5, i=0):
 
 
 def wait_last_eval(tx_id, before, deadline=12, interval=0.5, i=0):
-    """Poll until the tx's rule slice carries a lastEvalAt newer
-    than `before` (an ISO string, or None) — one observed tick,
-    which is exactly the evidence a fixed sleep was buying for a
-    negative check ('did NOT broadcast')."""
+    """Poll until the rule slice's lastEvalAt is newer than before: one
+    observed tick, for negative checks.
+    """
     def cond():
         t = state_tx(tx_id)
         if t is None:
@@ -274,10 +261,8 @@ def main():
         state that must be on disk at boot.
         """
         nonlocal app
-        # The pre-restart node-check stamp: the poll waits for a
-        # stamp NEWER than this, so a stale stamp can never
-        # satisfy it (mergeNodeStamps keeps the stored stamp
-        # until testNodes re-stamps it at startup).
+        # Wait for a node-check stamp newer than this one, so a stale
+        # stamp cannot satisfy the poll.
         prev_stamp = None
         try:
             _, st = req('GET', '/api/state')
@@ -315,11 +300,9 @@ def main():
         return s == 200 and r.get('ok') is True
 
     def restart_stubs(own=None):
-        """Restart both stubs, keeping their 099 env (conflict modes
-        + stub price). `own` sets STUB_OWN_SPEND_TXID so the
-        OWN_SPEND parent ('ee'*32) answers as spent by that txid —
-        the dry-run / release 'own' anchor (the 094 finding-1
-        pattern). Without it the stubs are pristine again."""
+        """Restart both stubs with their env. own sets STUB_OWN_SPEND_TXID, so
+        'ee'*32 reads as spent by that txid.
+        """
         nonlocal p_primary, p_secondary
         stop(p_primary); stop(p_secondary)
         e1 = {'SENTINEL_TXID': SENTINEL_TXID, 'STUB_CONFLICT_MODE': 'unconfirmed',
@@ -331,9 +314,8 @@ def main():
             e2['STUB_OWN_SPEND_TXID'] = own
         p_primary = start(['node', STUB, str(STUB_P)], env=e1, log=LOG)
         p_secondary = start(['node', STUB, str(STUB_S)], env=e2, log=LOG)
-        # Poll for the stubs instead of a fixed sleep (same parallel-
-        # startup race as main(): a slow stub + an immediate probe
-        # crashes on Connection refused).
+        # Poll for the stubs instead of sleeping (a slow stub would refuse
+        # the probe).
         wait_up(STUB_BASE_P, path='/api/v3/simple/price')
         wait_up(STUB_BASE_S, path='/api/v3/simple/price')
 
@@ -351,9 +333,7 @@ def main():
         p_receiver = start(['node', 'checkin-receiver/server.js'],
                            env=RECEIVER_ENV,
                            cwd=APP, log=LOG)
-        # Poll for the stubs instead of a fixed sleep: under parallel
-        # startup load a stub can take longer than 0.8 s to listen,
-        # and the probe below used to crash on Connection refused.
+        # Poll for the stubs instead of sleeping.
         wait_up(STUB_BASE_P, path='/api/v3/simple/price')
         wait_up(STUB_BASE_S, path='/api/v3/simple/price')
         s, pr = req('GET', '/api/v3/simple/price', base=STUB_BASE_P)
@@ -362,9 +342,8 @@ def main():
         check('stubs up: secondary price route answers 98200', s == 200 and pr.get('bitcoin', {}).get('usd') == 98200, pr)
         check('app up', restart())
         check('receiver up', wait_up(RBASE, path='/health'))
-        # Point the node endpoints at the stubs (like verify095):
-        # getTipHeight and the outspend checks must read the stub's
-        # fixed tip (900000), not the live chain.
+        # Point the nodes at the stubs, so tip and outspend reads are the
+        # stubs' fixed values.
         s, r = req('PUT', '/api/settings', {'primaryApiUrl': STUB_BASE_P, 'secondaryApiUrl': STUB_BASE_S})
         check('0 node endpoints point at the stubs',
               s == 200 and r.get('primaryApiUrl') == STUB_BASE_P and r.get('secondaryApiUrl') == STUB_BASE_S, r)
@@ -412,23 +391,17 @@ def main():
               t and t.get('triggerStatus', {}).get('status') == 'watching' and t.get('triggerStatus', {}).get('lastTipHeight') == STUB_TIP, t.get('triggerStatus') if t else None)
         delete_all_txs()
 
-        # --- 2c. block-height: NO latch (0.8.4) -------------------------
-        # The one-way latch is gone: the rule is judged fresh every
-        # evaluation, like every other rule. A reorg that drops the
-        # tip below the target un-fires it again.
+        # --- 2c. block-height: no latch ---
+        # Judged fresh every evaluation: a reorg below the target un-fires
+        # it.
         s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 10})
         check('2c tick: cadence set to 10 s', s == 200, (s, r))
-        # (a) The check endpoint judges the CURRENT tip: due above
-        # the target, watching again after a simulated reorg. The
-        # check reads the per-tick tip cache (TTL = the 10 s cadence),
-        # so each stub-tip move waits the cache out first.
+        # (a) The check endpoint judges the current tip (through the per-
+        # tick tip cache).
         s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'blockheight', 'params': {'targetHeight': STUB_TIP - 100000}}})
         check('2c no-latch check: tip above target fires', s == 200 and r.get('fire') is True and r.get('status') == 'due', r)
         s, r = req('POST', '/__test__/tip', {'height': STUB_TIP - 200000}, base=STUB_BASE_P)
-        # The check endpoint reads the per-tick tip cache (TTL =
-        # the cadence) — clear it so the check below reads the new
-        # stub tip at once, instead of waiting 11 s for the cache
-        # to expire.
+        # Clear the tip cache so the check reads the new stub tip at once.
         check('2c tip cache cleared so the check reads the new tip', clear_caches())
         check('2c primary stub tip dropped to 700000', s == 200 and r.get('height') == STUB_TIP - 200000, r)
         s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'blockheight', 'params': {'targetHeight': STUB_TIP - 100000}}})
@@ -469,9 +442,8 @@ def main():
         # it so the check below reads the new stub tip at once.
         check('2c tip cache cleared so the check reads the new tip (again)', clear_caches())
         check('2c primary stub tip restored to 900000 (again)', s == 200 and r.get('height') == STUB_TIP, r)
-        # (c) An AND set [blockheight, price] stops firing when the
-        # tip drops: the height rule is judged fresh, so the set
-        # cannot fire on a stale latch.
+        # (c) An AND set [blockheight, price] stops firing when the tip
+        # drops.
         and_bh = {'op': 'AND', 'rules': [{'type': 'blockheight', 'params': {'targetHeight': STUB_TIP - 100000}},
                                        {'type': 'price', 'params': {'op': '>=', 'value': 90000}}]}
         s, r = req('POST', '/api/triggers/check', {'trigger': and_bh})
@@ -504,9 +476,8 @@ def main():
         sl = rule_slice(t)
         check('2c no-latch edit: retargeted rule is due again (tip 900000 of 800000)',
               sl.get('status') == 'due' and sl.get('lastTipHeight') == STUB_TIP, sl)
-        # (e) Safety: the disarmed tx whose target is reached still
-        # does NOT broadcast; re-arming it after the tip is still
-        # past the target DOES broadcast on the next manual check.
+        # (e) A disarmed tx past its target does not broadcast; re-armed,
+        # it does on the next check.
         s, r, res = release_results()
         check('2c no-latch safety: manual check lists the disarmed due tx as skipped',
               res.get(bh_nl, {}).get('action') == 'skipped', res.get(bh_nl))
@@ -522,11 +493,9 @@ def main():
         check('2c tick: cadence restored to 60 s', s == 200, (s, r))
         delete_all_txs()
 
-        # --- 2b. block-height: the PRIMARY node's tip decides ----------
-        # Secondary stub runs 1000 blocks ahead of the primary: a target
-        # between the two must WATCH (the primary has not reached it) —
-        # the secondary's higher tip no longer fires the rule. The
-        # add-time gate uses the same rule.
+        # --- 2b. block-height: the primary's tip decides ---
+        # The secondary runs 1000 blocks ahead; a target between them
+        # watches. The add gate agrees.
         s, r = req('POST', '/__test__/tip', {'height': STUB_TIP + 1000}, base=STUB_BASE_S)
         check('2b secondary stub tip set to 901000', s == 200 and r.get('height') == STUB_TIP + 1000, r)
         s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'blockheight', 'params': {'targetHeight': STUB_TIP + 500}}})
@@ -583,9 +552,9 @@ def main():
               t and t.get('triggerStatus', {}).get('status') == 'watching', t.get('triggerStatus') if t else None)
         delete_all_txs()
 
-        # --- 4. fee-market trigger ----------------------------------------
+        # --- 4. fee-market trigger ---
         # The stub's economy fee is 1 sat/vB: a threshold >= 1 fires,
-        # below 1 watches.
+        # below watches.
         bad_rates = [
             ({'type': 'feemarket', 'params': {}}, 'missing maxFeeRate'),
             ({'type': 'feemarket', 'params': {'maxFeeRate': 0}}, 'zero'),
@@ -615,11 +584,9 @@ def main():
         check('4 feemarket status: low-threshold tx is watching with the economy fee',
               t and t.get('triggerStatus', {}).get('status') == 'watching' and t.get('triggerStatus', {}).get('lastEconomyFee') == STUB_ECONOMY_FEE, t.get('triggerStatus') if t else None)
 
-        # --- 4b. fee-market direction -------------------------------------
-        # 'above' fires when the economy fee rises to or above the
-        # threshold (stub economy fee is 1 sat/vB): threshold 0.5
-        # fires, threshold 5 watches. A rule with no direction
-        # defaults to 'below', and a bad direction is rejected.
+        # --- 4b. fee-market direction ---
+        # 'above' 0.5 fires, 5 watches. No direction means 'below'; a bad
+        # one is rejected.
         s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'feemarket', 'params': {'maxFeeRate': 0.5, 'direction': 'above'}}})
         check('4b feemarket above: threshold below the fee fires (fire=true)', s == 200 and r.get('fire') is True and r.get('warning'), r)
         s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'feemarket', 'params': {'maxFeeRate': 5, 'direction': 'above'}}})
@@ -647,9 +614,8 @@ def main():
         # counts; the secondary is only a fallback.
         s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 10})
         check('4c two-node fees: cadence set to 10 s', s == 200, (s, r))
-        # Dual, close: primary 5, secondary 4.5. BOTH directions
-        # use the primary (5) — the secondary's lower reading does
-        # not fire a 'below' rule and does not hold back an 'above'.
+        # Close: primary 5, secondary 4.5; both directions use the
+        # primary.
         s, r = req('POST', '/__test__/fees', {'economyFee': 5}, base=STUB_BASE_P)
         check('4c two-node fees: primary stub fee set to 5', s == 200, (s, r))
         s, r = req('POST', '/__test__/fees', {'economyFee': 4.5}, base=STUB_BASE_S)
@@ -663,19 +629,16 @@ def main():
         check("4c two-node fees: 'below' 5.1 fires on the primary reading (5)", s == 200 and r.get('fire') is True, r)
         s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'feemarket', 'params': {'maxFeeRate': 5.1, 'direction': 'above'}}})
         check("4c two-node fees: 'above' 5.1 watches — the primary (5) has not crossed", s == 200 and r.get('fire') is False and r.get('status') == 'watching', r)
-        # Far apart, no agreement check: primary 10 vs secondary
-        # 4.5 — the primary still decides. 'below' 5 watches (the
-        # secondary's 4.5 does not fire it); 'above' 9 fires (10).
+        # Far apart, no agreement check: primary 10 decides ('below' 5
+        # watches, 'above' 9 fires).
         s, r = req('POST', '/__test__/fees', {'economyFee': 10}, base=STUB_BASE_P)
         check('4c two-node fees: caches cleared for a cold fee cache (fee 10)', clear_caches())
         s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'feemarket', 'params': {'maxFeeRate': 5, 'direction': 'below'}}})
         check("4c two-node fees: far apart, 'below' 5 watches on the primary (10)", s == 200 and r.get('fire') is False and r.get('status') == 'watching', r)
         s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'feemarket', 'params': {'maxFeeRate': 9, 'direction': 'above'}}})
         check("4c two-node fees: far apart, 'above' 9 fires on the primary (10)", s == 200 and r.get('fire') is True, r)
-        # (0.8.5) Primary-first fetch: the secondary is never asked
-        # while the primary answers — the stored slice says so.
-        # (/api/triggers/check drops the slice, so this reads it
-        # off a real tx after a manual release check.)
+        # Primary first: the secondary is never asked while the primary
+        # answers (read from a real tx's slice).
         s, r = add_tx('FM 4c note', {'type': 'feemarket', 'params': {'maxFeeRate': 5, 'direction': 'below'}}, 110520)
         check("4c two-node fees: far apart, a 'below' 5 fee tx adds (watching on the primary 10)", s == 201, (s, r))
         fm_note = r['tx']['id'] if s == 201 else None
@@ -686,9 +649,8 @@ def main():
               and (t.get('triggerState') or {}).get('feeNote') == 'primary only — secondary not needed',
               t.get('triggerState') if t else None)
         delete_all_txs()
-        # An implausible primary fee counts as the primary not
-        # answering — the secondary is asked, so a valid reading
-        # is not lost to bad data.
+        # An implausible primary fee counts as no answer, so the secondary
+        # is asked.
         s, r = req('POST', '/__test__/fees', {'economyFee': 20000}, base=STUB_BASE_P)
         check('4c two-node fees: primary stub fee set implausible (20000)', s == 200, (s, r))
         check('4c two-node fees: caches cleared for a cold fee cache (implausible fee)', clear_caches())
@@ -707,9 +669,8 @@ def main():
         delete_all_txs()
         s, r = req('POST', '/__test__/fees', {'economyFee': 10}, base=STUB_BASE_P)
         check('4c two-node fees: primary stub fee back to 10', s == 200, (s, r))
-        # One node down: point the PRIMARY at a closed port — the
-        # secondary alone is used, with no agreement check. (The
-        # changed URL busts the fee cache, so no sleep is needed.)
+        # Primary down (closed port): the secondary alone decides. The URL
+        # change busts the fee cache.
         s, r = req('PUT', '/api/settings', {'primaryApiUrl': 'http://127.0.0.1:9'})
         s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'feemarket', 'params': {'maxFeeRate': 4.7, 'direction': 'below'}}})
         check('4c two-node fees: primary down, secondary alone decides (4.5 <= 4.7 fires)', s == 200 and r.get('fire') is True, r)
@@ -733,11 +694,9 @@ def main():
         s, r = req('POST', '/__test__/fees', {'economyFee': 1}, base=STUB_BASE_S)
         check('4c two-node fees: stubs restored to fee 1', s == 200, (s, r))
 
-        # --- 5. the full tick fires the new types ------------------------
-        # Set the cadence to 10 s, restart (fresh tick clock), wait
-        # past the startup tick, then arm one already-satisfied tx of
-        # each new type. A broadcast within ~15 s proves the full
-        # tick picks them up.
+        # --- 5. the full tick fires the new types ---
+        # At a 10 s cadence, one already-satisfied tx of each new type
+        # broadcasts on the tick.
         s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 10})
         check('5 full tick: cadence set to 10 s', s == 200, (s, r))
         check('5 full tick: app restarted', restart())
@@ -748,9 +707,7 @@ def main():
         s, r = add_tx('FT feemarket', {'type': 'feemarket', 'params': {'maxFeeRate': 5}}, 110604, trigger_confirmed=True)
         ft_fm = r['tx']['id'] if s == 201 else None
         check('5 full tick: three already-satisfied txs added', ft_bh and ft_sd and ft_fm, (ft_bh, ft_sd, ft_fm))
-        # (Optimization O3) Poll until the full tick has broadcast
-        # all three — the tick's observable effect, not a fixed
-        # 16 s wait for a 10 s cadence plus the startup tick.
+        # Poll until the tick has broadcast all three.
         wait_until(lambda: all(
             ((state_tx(x) or {}).get('release') or {}).get('status') == 'broadcast'
             for x in (ft_bh, ft_sd, ft_fm)), deadline=16)
@@ -793,9 +750,8 @@ def main():
         for gid, name in ((g_bh, 'block-height'), (g_sd, 'set-date'), (g_fm, 'fee-market'), (g_ck, 'check-in')):
             check('6 grace: %s tx is held during the grace (skipped, status grace)' % name,
                   s == 200 and res.get(gid, {}).get('action') == 'skipped' and res.get(gid, {}).get('triggerStatus') == 'grace', res.get(gid))
-        # Resume: the three satisfied txs fire on the next release
-        # check; the check-in tx stays staged (its clock is fresh,
-        # so it evaluates on-track, not due).
+        # Resumed: the satisfied txs fire on the next check; the check-in
+        # tx stays staged (fresh clock).
         s, r = req('POST', '/api/grace/resume', {})
         check('6 grace: resumed', s == 200, (s, r))
         s, r, res = release_results()
@@ -854,9 +810,8 @@ def main():
         s, st = req('GET', '/api/state')
         check('6b grace toggle: pre-toggle duration 0 loads as graceEnabled false',
               st.get('settings', {}).get('graceEnabled') is False, st.get('settings'))
-        # Turning the toggle back on restores the grace: a 10-day
-        # gap sets one again. Restore the defaults for the
-        # remaining sections — grace on, duration 7.
+        # Toggle back on: a 10-day gap sets a grace again. Then restore
+        # the defaults.
         s, r = req('PUT', '/api/settings', {'graceDurationDays': 7, 'graceEnabled': True})
         check('6b grace toggle: duration 7 + toggle on saved', s == 200, (s, r))
         stj = load_state_file()
@@ -953,9 +908,8 @@ def main():
         s, st = req('GET', '/api/state')
         check('6c unify: a stored heldUntil loads dropped (no heldUntil key)',
               'heldUntil' not in st.get('checkin', {}), st.get('checkin'))
-        # Backup/restore: a backup carrying a heldUntil — even a
-        # garbage one — restores without a 400, and the restored
-        # state carries no heldUntil.
+        # A backup carrying a heldUntil (even garbage) restores, without
+        # it.
         s, bak = req('POST', '/api/backup', {})
         check('6c unify: backup fetched', s == 200 and 'state' in bak, (s, list(bak.keys()) if isinstance(bak, dict) else bak))
         bak['state']['checkin']['heldUntil'] = 'not-a-date'
@@ -989,10 +943,8 @@ def main():
             s2, st2 = req('GET', '/api/state')
             for x in st2.get('bitcoin', {}).get('sets', []):
                 req('DELETE', '/api/bitcoin/sets/' + x['id'], base=BASE)
-        # Leg 1 — 30h gap, 1-day threshold: the flat leg cannot
-        # fire (30h < 7d), so an active grace proves the
-        # check-in leg. Past due (30h > 24h), held, nothing
-        # broadcasts — and the grant is 7 days, not 12h.
+        # Leg 1: 30h gap, 1-day threshold. Only the check-in leg can set
+        # the grace; the past-due tx is held and the grant is 7 days.
         s, r = req('POST', '/api/checkin', {'method': 'app'})
         check('6e short: check-in lands so the clock is fresh for the add', s == 200 and r.get('ok') is True, r)
         s, r = add_tx('E checkin 1d', {'type': 'checkin', 'params': {'thresholdDays': 1}}, 111200)
@@ -1021,11 +973,8 @@ def main():
         delete_all_txs()
         s, r = req('POST', '/api/grace/resume', {})
         check('6e short: resumed', s == 200, (s, r))
-        # Leg 2 — 18h gap, 1-day threshold (the audit's corrected
-        # example, AFTER the fix): 18h clears both old bars
-        # (6h and 12h), so the grace activates and holds the
-        # not-yet-due tx (due in 6h) instead of leaving it to
-        # fire on schedule.
+        # Leg 2: 18h gap clears both bars (6h and 12h), so the grace holds
+        # the tx due in 6h.
         s, r = req('POST', '/api/checkin', {'method': 'app'})
         check('6e 18h: check-in lands so the clock is fresh for the add', s == 200 and r.get('ok') is True, r)
         s, r = add_tx('E checkin 1d 18h', {'type': 'checkin', 'params': {'thresholdDays': 1}}, 111202)
@@ -1048,10 +997,8 @@ def main():
         delete_all_txs()
         s, r = req('POST', '/api/grace/resume', {})
         check('6e 18h: resumed', s == 200, (s, r))
-        # Leg 3 — 5h gap, 1-day threshold: the true no-grace pin.
-        # 5h is under a quarter of the threshold (6h) and under
-        # the flat 7 days, so no grace sets and the tx (due in
-        # 19h) stays staged.
+        # Leg 3: 5h gap is under both, so no grace; the tx (due in 19h)
+        # stays staged.
         s, r = req('POST', '/api/checkin', {'method': 'app'})
         check('6e 5h: check-in lands so the clock is fresh for the add', s == 200 and r.get('ok') is True, r)
         s, r = add_tx('E checkin 1d 5h', {'type': 'checkin', 'params': {'thresholdDays': 1}}, 111204)
@@ -1117,12 +1064,9 @@ def main():
         delete_all_txs()
         s, r = req('POST', '/api/grace/resume', {})
         check('6e set: resumed', s == 200, (s, r))
-        # Leg 5 — migration: a stored UNEXPIRED heldUntil
-        # translates into an active grace ending at the heldUntil,
-        # instead of being dropped. The clock is 40 days stale
-        # with a FRESH lastOnlineAt, so no new grace could set —
-        # the active grace below can only be the translation.
-        # The past-due tx is held, nothing broadcasts.
+        # Leg 5: an unexpired stored heldUntil becomes an active grace
+        # (the fresh lastOnlineAt rules out a new one); the past-due tx is
+        # held.
         s, r = req('POST', '/api/checkin', {'method': 'app'})
         check('6e mig: check-in lands so the clock is fresh for the add', s == 200 and r.get('ok') is True, r)
         s, r = add_tx('E mig checkin', {'type': 'checkin', 'params': {'thresholdDays': 35}}, 111208)
@@ -1152,10 +1096,8 @@ def main():
         delete_all_txs()
         s, r = req('POST', '/api/grace/resume', {})
         check('6e mig: resumed', s == 200, (s, r))
-        # Leg 6 — migration: an EXPIRED heldUntil is still
-        # dropped, and the past-due tx broadcasts on the startup
-        # tick as before (no grace: the gap is fresh, the hold
-        # is spent).
+        # Leg 6: an expired heldUntil is dropped and the past-due tx
+        # broadcasts on the startup tick.
         s, r = req('POST', '/api/checkin', {'method': 'app'})
         check('6e mig-exp: check-in lands so the clock is fresh for the add', s == 200 and r.get('ok') is True, r)
         s, r = add_tx('E mig-exp checkin', {'type': 'checkin', 'params': {'thresholdDays': 35}}, 111210)
@@ -1196,12 +1138,9 @@ def main():
         check('6d wouldFire: stub fee pinned to 1 sat/vB', s == 200, (s, r))
         s, r = req('POST', '/__test__/outspend', {'txid': SECOND, 'vout': 0, 'blockHeight': 899999}, base=STUB_BASE_P)
         check('6d wouldFire: SECOND:0 driven to spent (2 confs)', s == 200, (s, r))
-        # The spent UTXO tx first, alone and disarmed: a real
-        # evaluation writes its slice 'due' without broadcasting
-        # (disarmed txs are evaluated for display but never enter
-        # the firing set). It stays disarmed — a real 'due' UTXO
-        # tx would broadcast before any grace could hold it, which
-        # is exactly why the number reads the last evaluation.
+        # The spent UTXO tx first, alone and disarmed: an evaluation
+        # writes 'due' without broadcasting. It stays disarmed (armed, it
+        # would broadcast before a grace could hold it).
         s, r = add_tx('WF UTXO spent', {'type': 'utxo', 'params': {'outpoint': SECOND + ':0'}}, 111000, trigger_confirmed=True)
         check('6d wouldFire: the spent UTXO tx adds (triggerConfirmed)', s == 201, (s, r))
         wf_utxo_spent = r['tx']['id'] if s == 201 else None
@@ -1261,10 +1200,8 @@ def main():
         s, r = add_tx('WF manual', {'type': 'manual', 'params': {}}, 111014)
         check('6d wouldFire: the manual tx adds', s == 201, (s, r))
         wf_manual = r['tx']['id'] if s == 201 else None
-        # Backdate the clock 40 days (past the 35-day check-in
-        # threshold) and the online stamp 10 days (past the
-        # 7-day grace threshold), then restart: the grace sets
-        # on the startup tick before any held rule evaluates.
+        # Backdate the clock 40 days and liveness 10 days, then restart:
+        # the grace sets before any held rule evaluates.
         stj = load_state_file()
         stj['checkin']['lastOnlineAt'] = iso_ago(days=10)
         stj['checkin']['lastCheckinAt'] = iso_ago(days=40)
@@ -1287,12 +1224,9 @@ def main():
         check('6d wouldFire: the unreached block-height tx would not fire', wf(wf_bh_no) is False, wf(wf_bh_no))
         check('6d wouldFire: the manual tx would never fire', wf(wf_manual) is False, wf(wf_manual))
         check('6d wouldFire: the unmet AND set would not fire (one rule unmet)', wf(wf_and_no) is False, wf(wf_and_no))
-        # Cold caches, one snapshot: the holding price, the met
-        # fee-market, and the reached block-height txs read false
-        # until their caches warm — the card must not claim a
-        # condition it has no data for. The OR set already reads
-        # true (its set-date rule is clock-exact); the met AND set
-        # reads false (its price rule is unreadable cold).
+        # Cold caches: price, fee and height read false until warm (no
+        # claim without data). The OR set is true via its clock-exact set-
+        # date rule; the AND set is false (price unreadable).
         check('6d wouldFire: caches cleared cold', clear_caches())
         s, st = req('GET', '/api/state')
         cold = {t.get('id'): (t.get('triggerStatus') or {}).get('wouldFire') for t in st.get('bitcoin', {}).get('txs', [])}
@@ -1320,11 +1254,9 @@ def main():
         check('6d wouldFire: the check-in tx reads false once the clock is fresh', wf(wf_ck) is False, wf(wf_ck))
         s, st = req('GET', '/api/state')
         check('6d wouldFire: the grace is still active after the check-in', st.get('grace', {}).get('active') is True, st.get('grace'))
-        # A stale 'due' block-height slice still counts when the
-        # tip cache is cold (the fallback): seed one on the
-        # unreached tx via before_start — on disk before boot,
-        # race-free — and restart. The grace holds the rules, so
-        # the seeded slice survives the startup tick.
+        # Cold tip cache falls back to the stored slice: seed a 'due'
+        # slice before boot; the grace keeps the startup tick from
+        # overwriting it.
         def seed_bh_due():
             stj2 = load_state_file()
             for t in stj2.get('bitcoin', {}).get('txs', []):
@@ -1353,9 +1285,8 @@ def main():
         save_state_file(stj)
         check('6d wouldFire: check-in clock restored (restart)', restart())
 
-        # --- 7. vacation does NOT freeze the new types --------------------
-        # Vacation is check-in-only: a set-date tx must still fire
-        # while vacation mode is on.
+        # --- 7. vacation does not freeze the new types ---
+        # A set-date tx still fires during vacation.
         s, r = req('PUT', '/api/settings', {'vacationMode': True, 'vacationUntil': None})
         check('7 vacation: vacation mode on', s == 200, (s, r))
         s, r = add_tx('V setdate', {'type': 'setdate', 'params': {'fireAt': iso_ago(hours=1)}}, 110800, trigger_confirmed=True)
@@ -1409,12 +1340,9 @@ def main():
               by_label.get('R feemarket', {}).get('trigger', {}).get('type') == 'feemarket'
               and by_label.get('R feemarket', {}).get('trigger', {}).get('params', {}).get('maxFeeRate') == 0.5,
               by_label.get('R feemarket', {}).get('trigger'))
-        # (0.8.1, audit: restored `broadcasted` records) A backup
-        # carrying a fabricated broadcasted fact + a 'broadcast'
-        # release record — txids matching the hex, so the old
-        # validation passes — must NOT come back broadcast: both
-        # claims are dropped and the tx restores active. A transient
-        # 'failed' record rides along.
+        # A backup with a fabricated broadcasted fact and 'broadcast'
+        # record (txids matching) restores active: both claims are
+        # dropped. A 'failed' record rides along.
         bak2 = copy.deepcopy(bak)
         for tx2 in bak2['state']['bitcoin']['txs']:
             if tx2.get('label') == 'R blockheight':
@@ -1444,9 +1372,8 @@ def main():
               by_label.get('R setdate', {}).get('release'))
         delete_all_txs()
 
-        # --- 10. node capability test (OK / CAUTION / FAIL) ------------
-        # Both stubs are full mempool-style nodes: height, fees and
-        # broadcast all answer, so both results are OK.
+        # --- 10. node capability test (OK / CAUTION / FAIL) ---
+        # Both stubs answer everything: OK.
         s, r = req('POST', '/api/bitcoin/connection/test', {})
         check('10 nodes: connection test returns 200', s == 200, (s, r))
         res = {x.get('endpoint'): x for x in r.get('results', [])}
@@ -1465,9 +1392,8 @@ def main():
               res.get('primary', {}).get('checks'))
         check('10 nodes: secondary is OK too', res.get('secondary', {}).get('status') == 'ok', res.get('secondary'))
         check('10 nodes: overall ok is true', r.get('ok') is True, r.get('ok'))
-        # A height-only server (answers /api/blocks/tip/height, 404s
-        # everything else) is CAUTION: it IS a node, but fees and
-        # broadcast are not ready.
+        # A height-only server is CAUTION: a node, but no fees or
+        # broadcast.
         import threading
         from http.server import BaseHTTPRequestHandler, HTTPServer
         class HeightOnly(BaseHTTPRequestHandler):
@@ -1505,10 +1431,8 @@ def main():
               res.get('secondary', {}).get('detail'))
         check('10 nodes: primary stays OK while secondary is CAUTION', res.get('primary', {}).get('status') == 'ok', res.get('primary'))
         check('10 nodes: overall ok stays true with a CAUTION node', r.get('ok') is True, r.get('ok'))
-        # An Esplora-style server (height + /api/fee-estimates,
-        # 404s the mempool fee endpoint and /api/tx) is CAUTION
-        # with fees READY via the fallback — and the fee value is
-        # the 6-block rate from the estimates.
+        # An Esplora-style server is CAUTION with fees ready via /fee-
+        # estimates.
         class EsploraStyle(BaseHTTPRequestHandler):
             def do_GET(self):
                 if self.path == '/api/blocks/tip/height':
@@ -1579,11 +1503,8 @@ def main():
         check('11 stamps: after a connection test both stamps are set',
               bool(stamps1.get('primary')) and bool(stamps1.get('secondary')),
               stamps1)
-        # Restart for a cold fee cache — and note the restart
-        # itself re-tests both nodes (the startup hourly tick
-        # runs testNodes at 5 s), so the baseline is re-read
-        # after it: both stamps move to the startup test, and
-        # only the primary may move after that.
+        # Restart for a cold fee cache; the restart re-tests both nodes,
+        # so re-read the baseline after it.
         check('11 stamps: app restarted for a cold fee cache', restart())
         s, st = req('GET', '/api/state')
         stamps1 = (((st.get('bitcoin', {}) or {}).get('connection') or {}).get('nodeCheckedAt') or {})
@@ -1604,12 +1525,11 @@ def main():
               (stamps1, stamps2))
         delete_all_txs()
 
-        # --- 12. custom price source --------------------------------------
-        # A Custom entry ({id, url, path}) fetches a price from any
-        # JSON endpoint via a dot-path (with [n] indices). It decides
-        # as primary, falls back as secondary, validates like a
-        # built-in, and survives restore. The stub's CoinGecko route
-        # answers {bitcoin: {usd}} — the custom URL points at it.
+        # --- 12. custom price source ---
+        # { id, url, path } reads a price from any JSON endpoint by dot-
+        # path. It decides as primary, falls back as secondary, validates
+        # like a built-in and survives restore. The URL points at the
+        # stub's CoinGecko route.
         CG_URL = STUB_BASE_P + '/api/v3/simple/price?ids=bitcoin&vs_currencies=usd'
         KR_URL = STUB_BASE_P + '/0/public/Ticker?pair=XBTUSD'
         CB_URL = STUB_BASE_P + '/v2/prices/BTC-USD/spot'
@@ -1640,10 +1560,8 @@ def main():
               (st.get('bitcoin', {}).get('exchangeStatus') or {}).get('status') == 'ok'
               and [x.get('label') for x in (st.get('bitcoin', {}).get('exchangeStatus') or {}).get('sources', [])] == ['Custom', 'Coinbase'],
               st.get('bitcoin', {}).get('exchangeStatus'))
-        # Custom-primary decides: CoinGecko stub $100,000, Coinbase
-        # $98,200 (1.8% apart — they agree). '>=' $99,000 fires on
-        # the custom $100,000; '<=' $99,000 watches (Coinbase's
-        # $98,200 must not fire it).
+        # Custom primary decides: $100,000 vs Coinbase $98,200 (they
+        # agree). '>=' $99,000 fires; '<=' $99,000 watches.
         s, pr = req('POST', '/__test__/price', {'provider': 'coingecko', 'usd': 100000}, base=STUB_BASE_P)
         check('12 CoinGecko stub set to $100,000', s == 200 and pr.get('coingecko', {}).get('usd') == 100000, pr)
         check('12 caches cleared before the straddle eval (empty cache)', clear_caches())
@@ -1677,9 +1595,8 @@ def main():
               and (st.get('bitcoin', {}).get('currentPrices') or {}).get('source1', {}).get('error')
               and (st.get('bitcoin', {}).get('exchangeStatus') or {}).get('status') == 'degraded',
               (st.get('bitcoin', {}).get('currentPrices'), st.get('bitcoin', {}).get('exchangeStatus')))
-        # Bracket indices + string numbers: the Kraken shape
-        # (result.XXBTZUSD.c[0], a string) and the Coinbase shape
-        # (data.amount, a string) both read through the walker.
+        # Kraken (result.XXBTZUSD.c[0], a string) and Coinbase
+        # (data.amount) shapes both read through the walker.
         custom_kr = {'id': 'custom', 'url': KR_URL, 'path': 'result.XXBTZUSD.c[0]'}
         s, r = req('PUT', '/api/settings', {'priceSources': {'source1': custom_kr, 'source2': 'coinbase'}})
         check('12 Kraken-shaped custom saves (200)', s == 200, (s, r))
@@ -1737,12 +1654,10 @@ def main():
         s, r = req('PUT', '/api/settings', {'priceSources': {'source1': 'coingecko', 'source2': 'coinbase'}})
         check('12 defaults restored (CoinGecko + Coinbase)', s == 200, (s, r))
 
-        # --- 13. UTXO 404 failover (0.8.1, audit 2) ----------------------
-        # A 404 from the primary is inconclusive, not an answer: the
-        # secondary is asked. FINNEY:0 is a confirmed spend (block
-        # 899990) — the primary 404s the parent, the secondary answers
-        # it, so the rule must fire. With both 404ing it must stay
-        # unknown, never fire.
+        # --- 13. UTXO 404 failover ---
+        # A primary 404 is inconclusive, so the secondary is asked (and
+        # fires on FINNEY:0's confirmed spend). Both 404: unknown, never
+        # fires.
         s, r = req('POST', '/__test__/unknown-parent', {'txid': FINNEY}, base=STUB_BASE_P)
         check('13 primary stub marks FINNEY unknown', s == 200 and FINNEY in r.get('unknownParents', []), r)
         s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'utxo', 'params': {'outpoint': FINNEY + ':0', 'confirmations': 1}}})
@@ -1755,12 +1670,8 @@ def main():
         s, r = req('POST', '/api/broadcast/test', {'id': u404})
         one = (r.get('results') or [{}])[0]
         check('13 404 dry-run: spent input seen via the secondary', s == 200 and len(one.get('spent', [])) == 1, one)
-        # Both 404: unknown, never fires. (0.8.6) The outpoint
-        # cache holds the secondary's answer from the failover
-        # check above, inside its TTL window — so restart first
-        # for a cold cache; this proves the failover logic itself,
-        # not the cache. The startup tick evaluates only the
-        # manual dry-run tx, so no outspend fetch warms the cache.
+        # Both 404: unknown, never fires. Restart first for a cold
+        # outspend cache.
         s, r = req('POST', '/__test__/unknown-parent', {'txid': FINNEY}, base=STUB_BASE_S)
         check('13 secondary stub marks FINNEY unknown', s == 200 and FINNEY in r.get('unknownParents', []), r)
         check('13 both 404: caches cleared for a cold outpoint cache', clear_caches())
@@ -1772,10 +1683,9 @@ def main():
         check('13 unknown-parent cleared on both stubs', s == 200, (s, r))
         delete_all_txs()
 
-        # --- 14. concurrent API writes (0.8.1, audit 4) ------------------
-        # Ten adds fired at once, each awaiting the fee lookup before
-        # saving: every one must survive. Before the fix the last
-        # save won and most adds were lost.
+        # --- 14. concurrent API writes ---
+        # Ten adds at once, each awaiting the fee lookup: all must
+        # survive.
         conc_ids = []
         conc_errs = []
 
@@ -1907,10 +1817,9 @@ def main():
               s == 200 and res.get(g16, {}).get('action') == 'broadcast', res.get(g16))
         delete_all_txs()
 
-        # Vacation (check-in): the clock is 40 days past due, but
-        # vacation holds the rule — the gate still reports fire
-        # (with and without the txId), the release check still
-        # does not broadcast, until vacation is off.
+        # Vacation: the gate still reports fire for a past-due check-in
+        # (with or without txId); the release does not broadcast until
+        # vacation ends.
         s, r = req('PUT', '/api/settings', {'vacationMode': True, 'vacationUntil': None})
         check('16 vacation: vacation mode on', s == 200, (s, r))
         s, r = add_tx('16 checkin vacation', {'type': 'checkin', 'params': {'thresholdDays': 35}}, 116002)
@@ -1978,9 +1887,8 @@ def main():
               h[1] if isinstance(h, list) and len(h) >= 2 else h)
         delete_all_txs()
 
-        # 17.2 AND fires only when all rules hold on the SAME tick:
-        # the price crosses, then falls back before the fee rule
-        # holds — the earlier hold must NOT latch.
+        # 17.2 AND fires only when all rules hold on the same tick: a
+        # price hold that lapses before the fee rule holds must not latch.
         and_set = {'op': 'AND', 'rules': [
             {'type': 'price', 'params': {'asset': 'BTC', 'op': '>=', 'value': 100000}},
             {'type': 'feemarket', 'params': {'maxFeeRate': 0.5, 'direction': 'below'}},
@@ -1993,10 +1901,8 @@ def main():
         # Phase 1: the price crosses ($101,000) while the fee is 1.
         s, pr = req('POST', '/__test__/price', {'usd': 101000}, base=STUB_BASE_P)
         check('17 AND: stub price $101,000', s == 200, pr)
-        # (Optimization O3) Clear the caches so the next tick
-        # fetches the new $101,000 price at once (the price-cache
-        # TTL is the 10 s cadence — no need to wait it out), then
-        # poll until a tick has written the due price slice.
+        # Clear caches so the next tick fetches the new price, then poll
+        # for the due slice.
         check('17 AND phase 1: caches cleared for a cold price cache', clear_caches())
         wait_slice(and17, {'status': 'due', 'lastPrice': 101000})
         s, r, res = release_results()
@@ -2018,16 +1924,11 @@ def main():
         check('17 AND phase 2: fee holds, price does not — no broadcast (no latching)',
               s == 200 and res.get(and17, {}).get('action') == 'skipped'
               and res.get(and17, {}).get('triggerStatus') == 'watching', res.get(and17))
-        # Phase 3: both hold on the same tick. (With the 10 s
-        # cadence the full tick may broadcast it before the manual
-        # check below — either path is the same tick's decision —
-        # so the assertion reads the stored release, not the
-        # manual check's action.)
+        # Phase 3: both hold on the same tick (the tick may broadcast
+        # before the manual check, so read the stored release).
         s, pr = req('POST', '/__test__/price', {'usd': 101000}, base=STUB_BASE_P)
         check('17 AND: stub price $101,000 again', s == 200, pr)
-        # (Optimization O3) Clear the caches so the next tick
-        # fetches the new $101,000 price at once, then poll until
-        # the tick broadcasts (both rules hold on the same tick).
+        # Clear caches, then poll until the tick broadcasts.
         check('17 AND phase 3: caches cleared for a cold price cache', clear_caches())
         wait_until(lambda: ((state_tx(and17) or {}).get('release') or {}).get('status') == 'broadcast', deadline=12)
         s, r, res = release_results()
@@ -2046,10 +1947,8 @@ def main():
         check('17 AND: cadence back to 60 s', s == 200, (s, r))
         delete_all_txs()
 
-        # 17.3 An unknown rule blocks AND and is ignored by OR:
-        # CoinGecko $90,000 vs Coinbase $98,200 (8.7% apart) — the
-        # price cannot be read, so the AND set cannot fire while
-        # the OR set fires on its set-date rule.
+        # 17.3 Sources 8.7% apart make price unknown: the AND set cannot
+        # fire; the OR set fires on its set-date rule.
         s, pr = req('POST', '/__test__/price', {'provider': 'coingecko', 'usd': 90000}, base=STUB_BASE_P)
         check('17 unknown: CoinGecko stub set to $90,000', s == 200 and pr.get('coingecko', {}).get('usd') == 90000, pr)
         check('17 unknown: restart before the disagree eval (empty cache)', restart())
@@ -2136,18 +2035,15 @@ def main():
         check('17 grace: AND broadcasts once the grace is resumed',
               s == 200 and res.get(andg17, {}).get('action') == 'broadcast', res.get(andg17))
         delete_all_txs()
-        # Restore a fresh check-in clock for the remaining
-        # sections (the OR set's past-due check-in rule above
-        # needed lastCheckinAt 3 days back).
+        # Restore a fresh check-in clock.
         stj = load_state_file()
         stj['checkin']['lastOnlineAt'] = iso_ago()
         stj['checkin']['lastCheckinAt'] = iso_ago()
         save_state_file(stj)
         check('17 grace: check-in clock restored (restart)', restart())
 
-        # 17.5 An already-satisfied set blocks the add with the
-        # combined semantics: OR on any satisfied rule, AND only
-        # when every rule is satisfied. Unknown rules never block.
+        # 17.5 An already-satisfied set blocks the add: OR on any
+        # satisfied rule, AND only when all are. Unknown never blocks.
         or_block = {'op': 'OR', 'rules': [
             {'type': 'price', 'params': {'asset': 'BTC', 'op': '>=', 'value': 90000}},
             {'type': 'setdate', 'params': {'fireAt': iso_in(days=1)}},
@@ -2178,10 +2074,8 @@ def main():
         ]}
         s, r = add_tx('17 AND open', and_open, 116122)
         check('17 gate: AND with one rule not holding accepted without confirm (201)', s == 201, (s, r))
-        # The check endpoint answers the set the same way. (The
-        # fireAt strings are compared structurally, not exactly:
-        # the test's iso_* carry microseconds, the server stores
-        # millisecond ISO.)
+        # The check endpoint answers the same (fireAt compared
+        # structurally: microseconds vs milliseconds).
         s, r = req('POST', '/api/triggers/check', {'trigger': or_block})
         trig = r.get('trigger')
         check('17 gate: check on a firing OR set reports fire',
@@ -2194,10 +2088,8 @@ def main():
               and [x.get('type') for x in trig.get('rules', [])] == ['price', 'setdate'], r)
         delete_all_txs()
 
-        # 17.6 Migration wraps a single trigger as a one-rule OR
-        # set with per-rule state: a stored single trigger + flat
-        # triggerState (the 0.8.1 shape) loads as a set + array,
-        # is served as the single rule, and still evaluates.
+        # 17.6 A stored single trigger with a flat triggerState loads as a
+        # set and array, is served as the single rule, and evaluates.
         s, r = add_tx('17 migrate', {'type': 'price', 'params': {'asset': 'BTC', 'op': '>=', 'value': 200000}}, 116124)
         check('17 migrate: single-rule tx accepted (201)', s == 201, (s, r))
         mig17 = r['tx']['id'] if s == 201 else None
@@ -2231,9 +2123,7 @@ def main():
               s == 200 and res.get(mig17, {}).get('action') == 'skipped' and res.get(mig17, {}).get('triggerStatus') == 'watching', res.get(mig17))
         delete_all_txs()
 
-        # 17.7 Per-rule triggerState survives a restart: a
-        # multi-rule tx evaluated once carries one slice per rule,
-        # and the array is intact after a restart.
+        # 17.7 Per-rule slices survive a restart.
         two_set = {'op': 'OR', 'rules': [
             {'type': 'price', 'params': {'asset': 'BTC', 'op': '>=', 'value': 200000}},
             {'type': 'setdate', 'params': {'fireAt': iso_in(days=1)}},
@@ -2266,11 +2156,8 @@ def main():
         # after the hour.
         s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 10})
         check('18 tick: cadence set to 10 s', s == 200, (s, r))
-        # 18.1 AND [checkin, price] fires on the full tick: the
-        # clock is 40 days past due (check-in rule holds) and the
-        # stub price $98,200 is past the $90,000 threshold. The tx
-        # is added before the restart so the startup tick (5 s
-        # after boot, a full evaluation) is the tick that fires it.
+        # 18.1 AND [checkin, price] fires on the startup tick (clock 40
+        # days past due, price past $90,000).
         cross_set = {'op': 'AND', 'rules': [
             {'type': 'checkin', 'params': {'thresholdDays': 35}},
             {'type': 'price', 'params': {'asset': 'BTC', 'op': '>=', 'value': 90000}},
@@ -2324,10 +2211,7 @@ def main():
         types = [e.get('type') for e in h] if isinstance(h, list) else []
         check('18 backoff: exactly one failed history event, fired once',
               types.count('failed') == 1 and types.count('fired') == 1, types)
-        # A second tick, minutes later, must not re-attempt it.
-        # (Optimization O3) Poll until one more tick has evaluated
-        # the tx (lastEvalAt advances) — a negative check needs one
-        # observed tick, not a fixed 12 s wait.
+        # A later tick must not retry: poll for one more evaluation.
         before18 = rule_slice(state_tx(bo18)).get('lastEvalAt')
         wait_last_eval(bo18, before18)
         s, c2p = req('GET', '/__test__/broadcast-count', base=STUB_BASE_P)
@@ -2341,10 +2225,8 @@ def main():
               t is not None and (t.get('release') or {}).get('status') == 'failed'
               and [e.get('type') for e in (t.get('history') or [])].count('failed') == 1
               and [e.get('type') for e in (t.get('history') or [])].count('fired') == 1, (t or {}).get('history'))
-        # 18.3 Manual paths bypass the backoff (explicit user
-        # action): a manual release check retries — and fails
-        # again against the rejecting stubs — and so does a manual
-        # broadcast of the tx. Each moves lastAttemptAt forward.
+        # 18.3 A manual check and a manual broadcast bypass the backoff
+        # (and fail again against the rejecting stubs).
         s, r, res = release_results()
         check('18 manual: a manual release check retries despite the backoff',
               s == 200 and res.get(bo18, {}).get('action') == 'failed', res.get(bo18))
@@ -2378,10 +2260,7 @@ def main():
         save_state_file(stj)
         app = start(['node', 'server.js'], env=APP_ENV, cwd=APP, log=LOG)
         check('18 retry: app restarted with lastAttemptAt two hours back', wait_up(BASE))
-        # (Optimization O3, extra — not in the proposal) Poll until
-        # the startup tick's retry moves lastAttemptAt forward:
-        # the observable effect of the startup tick, not a fixed
-        # 7 s wait for it.
+        # Poll until the startup retry moves lastAttemptAt.
         wait_until(lambda: ((state_tx(bo18) or {}).get('release') or {}).get('lastAttemptAt', '') > last_attempt3, deadline=7)
         t = state_tx(bo18)
         check('18 retry: the startup tick retried after the hour and failed again',
@@ -2405,9 +2284,7 @@ def main():
         save_state_file(stj)
         app = start(['node', 'server.js'], env=APP_ENV, cwd=APP, log=LOG)
         check('18 retry: app restarted with lastAttemptAt two hours back again', wait_up(BASE))
-        # (Optimization O3, extra — not in the proposal) Poll until
-        # the startup tick's retry broadcasts: the observable
-        # effect, not a fixed 7 s wait for the startup tick.
+        # Poll until the startup retry broadcasts.
         wait_until(lambda: ((state_tx(bo18) or {}).get('release') or {}).get('status') == 'broadcast', deadline=7)
         t = state_tx(bo18)
         check('18 retry: the startup tick retried after the hour and broadcast',
@@ -2478,9 +2355,8 @@ def main():
         check('19 AND: combined status is due, both rules due live',
               ts.get('status') == 'due' and len(ts.get('rules', [])) == 2
               and ts['rules'][0].get('status') == 'due' and ts['rules'][1].get('status') == 'due', ts)
-        # Block-height and UTXO have no live cache read — their
-        # status comes from the evaluation slice, pinned after the
-        # manual check below (0.8.4: the tick writes it too).
+        # Block-height and UTXO statuses come from the slice (pinned after
+        # the manual check).
         s, r = add_tx('BH live disarmed', {'type': 'blockheight', 'params': {'targetHeight': STUB_TIP + 50000}}, 119010)
         check('19 blockheight: disarmed tx adds (201)', s == 201, (s, r))
         bh_live = r['tx']['id'] if s == 201 else None
@@ -2491,10 +2367,8 @@ def main():
         ux_live = r['tx']['id'] if s == 201 else None
         s, r = req('PUT', '/api/bitcoin/txs/' + ux_live, {'enabled': False})
         check('19 utxo: disarmed at once (200)', s == 200, (s, r))
-        # (0.8.4) A manual release check evaluates every disarmed
-        # tx and writes fresh slices — no broadcast (nothing is
-        # armed), and the due ones are listed as skipped with a
-        # disarmed reason.
+        # A manual check evaluates every disarmed tx: fresh slices, no
+        # broadcast, due ones listed as skipped.
         s, r, res = release_results()
         check('19 slices: the manual check evaluates all disarmed txs (200)',
               s == 200, (s, r))
@@ -2527,11 +2401,8 @@ def main():
         check('19 slices: the due disarmed txs are listed as skipped, not broadcast',
               res.get(fm_due, {}).get('action') == 'skipped' and res.get(and_live, {}).get('action') == 'skipped'
               and (res.get(fm_due, {}).get('reason') or '').startswith('disarmed'), res)
-        # Cold cache (0.8.4): restart clears the in-memory caches,
-        # but the slices are wiped from the state file first, so
-        # only the startup tick can rewrite them — proving the tick
-        # evaluates disarmed txs. The fee rule reads watching from
-        # the fresh slice and the re-warmed cache.
+        # Cold cache: the slices are wiped before the restart, so only the
+        # startup tick can write them (proving it evaluates disarmed txs).
         stj = load_state_file()
         for txj in stj.get('bitcoin', {}).get('txs', []):
             txj['triggerState'] = None
@@ -2557,10 +2428,7 @@ def main():
         t = state_tx(and_live)
         check('19 ttl: AND price rule live (due) right after warming',
               t and (t.get('triggerStatus', {}).get('rules') or [{}])[0].get('status') == 'due', t.get('triggerStatus') if t else None)
-        # (Optimization O3) Poll until one more tick has evaluated
-        # the fee tx (lastEvalAt advances) — a negative check needs
-        # one observed tick, not a fixed 12 s wait for a 10 s
-        # cadence.
+        # Poll for one more evaluation of the fee tx.
         before19 = rule_slice(state_tx(fm_live)).get('lastEvalAt')
         wait_last_eval(fm_live, before19)
         t = state_tx(fm_live)
@@ -2617,9 +2485,8 @@ def main():
         daily_today = os.path.join(DATA, 'state.json.bak.' + today)
         check("20 daily: today's snapshot exists and parses",
               os.path.exists(daily_today) and json.load(open(daily_today)).get('version') == 7)
-        # Retention: nine fake old dailies + a new day's first save
-        # prunes to the 7 newest. (Today's snapshot is removed first
-        # so the next save counts as the day's first.)
+        # Retention: nine old dailies plus a new day's first save prune to
+        # 7.
         for d in ('2026-11-01', '2026-11-02', '2026-11-03', '2026-11-04', '2026-11-05',
                   '2026-11-06', '2026-11-07', '2026-11-08', '2026-11-09'):
             open(os.path.join(DATA, 'state.json.bak.' + d), 'w').write('{}\n')
@@ -2696,9 +2563,7 @@ def main():
               open(os.path.join(DATA, 'state.json'), 'rb').read().startswith(b'GARBAGE'))
         open(os.path.join(DATA, 'state.json'), 'wb').write(good_bytes)
         check('20 noreset: app recovers once a good state file is restored', restart())
-        # (b2) Missing state.json with backups -> recovers from
-        # .bak (finding 1): a missing state file is a lost state
-        # file, not a fresh install.
+        # (b2) A missing state.json with backups recovers from .bak.
         s, r = add_tx('20 missing A', {'type': 'manual', 'params': {}}, 120020)
         check('20 missing: tx A adds (201)', s == 201, (s, r))
         s, r = add_tx('20 missing B', {'type': 'manual', 'params': {}}, 120022)
@@ -2795,10 +2660,8 @@ def main():
         time.sleep(0.5)
         check('20 keys: revoke writes a log line',
               ('check-in key revoked: ' + str(log_id)) in read_log())
-        # (b2) Fresh install: no state file AND no backups -> a
-        # genuine default state, not an error. A second app
-        # instance on its own port + data dir proves first boot
-        # still works after the finding-1 change.
+        # (b2) No state and no backups: a genuine first boot (a second
+        # instance proves it).
         fresh_data = '/tmp/standby-test099-fresh'
         fresh_checkin = '/tmp/standby-test099-fresh-checkin'
         shutil.rmtree(fresh_data, ignore_errors=True)
@@ -2819,11 +2682,8 @@ def main():
         check('20 fresh: no backup files on disk',
               not any(f.startswith('state.json.bak') for f in os.listdir(fresh_data)), os.listdir(fresh_data))
         stop(fresh_app)
-        # (b2) Rescue endpoints (0.8.3, clearable error): with
-        # state.json corrupt and every backup corrupt, the app
-        # stays up answering 500s — but POST /api/restore with a
-        # valid backup still works, and POST /api/state/reset
-        # with {confirm:true} starts fresh.
+        # (b2) With state and every backup corrupt the app answers 500s,
+        # but restore and reset still work.
         s, backup_doc = req('POST', '/api/backup', {})
         check('20 rescue: backup downloads before breaking (200)',
               s == 200 and backup_doc.get('format') == 'standby-backup'
@@ -2870,9 +2730,7 @@ def main():
         # the reset must remove those too, not just .bak files.
         open(os.path.join(DATA, 'state.json.pre-migration'), 'w').write('{}\n')
         open(os.path.join(DATA, 'state.json.corrupt.2026-01-01T00-00-00-000Z'), 'w').write('GARBAGE\n')
-        # Plant a stale receiver check-in record: the reset must
-        # drop it too, or the next state read would resurrect the
-        # pre-reset check-in time into the fresh state.
+        # Plant a stale receiver check-in: the reset must drop it too.
         json.dump({'lastCheckinAt': '2026-11-17T21:48:49.883Z', 'keyId': 'key_test'},
                   open(os.path.join(CHECKIN_DIR, 'last.json'), 'w'))
         s, r = req('POST', '/api/state/reset', {'confirm': True})
@@ -2900,12 +2758,9 @@ def main():
               and st.get('checkin', {}).get('totalCheckins') == 0,
               (s, st.get('checkin') if s == 200 else st))
 
-        # --- 21. crash recovery, receiver auth, untested endpoints ----
-        # The §20 reset restored factory defaults — including the
-        # node URLs (real mempool.space / blockstream.info). The
-        # sections below check inputs against the nodes, so re-point
-        # them at the stubs first; otherwise the real mainnet FINNEY
-        # vout 1 (spent) makes every crash-tx check read stale.
+        # --- 21. crash recovery, receiver auth, untested endpoints ---
+        # The §20 reset restored the default nodes; point them back at the
+        # stubs.
         s, r = req('PUT', '/api/settings', {'primaryApiUrl': 'http://127.0.0.1:18235',
                                             'secondaryApiUrl': 'http://127.0.0.1:18236'})
         check('21 crash: node urls re-pointed at the stubs after the §20 reset', s == 200, (s, r))
@@ -2953,12 +2808,9 @@ def main():
         t = state_tx(crash_id)
         check('21 crash: the skipped release check leaves it un-staled',
               t and (t.get('release') or {}).get('status') != 'stale', t)
-        # Point the stubs at our own txid: the OWN_SPEND parent now
-        # answers as spent by the crash tx itself. The restart also
-        # resets the stub price to its env default, so lower it again
-        # first — with the price back at 98,200 the background tick
-        # would re-fire the armed tx and heal it through the
-        # broadcast path instead of the dry-run anchor.
+        # Point the stubs at our own txid. The restart resets the stub
+        # price, so lower it first (else the tick would re-fire the tx and
+        # heal it through the broadcast path).
         restart_stubs(own=crash_txid)
         s, r = req('POST', '/__test__/price', {'usd': 80000}, base=STUB_BASE_P)
         check('21 crash: stub price lowered again after the restart (primary)', s == 200, (s, r))
@@ -2986,10 +2838,7 @@ def main():
         s, r = req('POST', '/__test__/price', {'usd': 98200}, base=STUB_BASE_S)
         check('21 crash: stub price restored (secondary)', s == 200, (s, r))
 
-        # (b) Receiver check-in auth: the receiver is a separate
-        # process with its own key file — nothing in the suite ever
-        # POSTed to it, so a broken auth path (or a bypass) would
-        # have been silent. Create a key, use it, revoke it.
+        # (b) Receiver auth: create a key, check in with it, revoke it.
         s, r = req('POST', '/api/checkin-keys', {'label': '21 auth'})
         check('21 auth: key creates (201)', s == 201, (s, r))
         key_plain = r.get('plain') if s == 201 else None
@@ -3018,11 +2867,9 @@ def main():
             s, r = req('POST', '/checkin', {}, base=RBASE, headers={'Authorization': 'Bearer anything'})
             check('21 auth: no keys configured rejects any key (401)', s == 401, (s, r))
 
-        # (c) Endpoints the suite never called: GET /api/checkins and
-        # GET /api/broadcast/log are fetched by every page load but
-        # their contents were never asserted; POST
-        # /api/bitcoin/txs/preview was never called at all; and the
-        # CSRF gate was only covered by the 094 generation's own run.
+        # (c) Endpoints never asserted before: GET /api/checkins, GET
+        # /api/broadcast/log, POST /api/bitcoin/txs/preview, and the CSRF
+        # gate.
         s, r = req('POST', '/api/checkin', {'method': 'app'})
         check('21 log: app check-in succeeds (200)', s == 200, (s, r))
         s, r = req('GET', '/api/checkins')
@@ -3040,9 +2887,8 @@ def main():
         check('21 preview: bad format rejected (400)', s == 400, (s, r))
         s, r = req('POST', '/api/bitcoin/txs/preview', {'format': 'psbt', 'data': 'not a psbt'})
         check('21 preview: bad psbt rejected (400)', s == 400, (s, r))
-        # CSRF: a state-changing POST without a JSON content type
-        # (and no Origin) is rejected 403 — raw urllib, because the
-        # suite's req() always sends Content-Type: application/json.
+        # CSRF: a POST without a JSON content type is 403 (raw urllib;
+        # req() always sends JSON).
         import urllib.request as _urlreq
         import urllib.error as _urlerr
         try:
@@ -3066,17 +2912,14 @@ def main():
         s, r = req('POST', '/__test__/broadcast-fail', {'fail': False}, base=STUB_BASE_S)
         check('22 stubs: secondary accepting broadcasts', s == 200 and r.get('fail') is False, r)
         delete_all_txs()
-        # (a) Disarmed price tx: no armed price tx anywhere, yet
-        # the tick warms the price cache (refreshPriceIfStale) and
-        # writes a fresh due slice.
+        # (a) A disarmed price tx: the tick still warms the price cache
+        # and writes a due slice.
         s, r = add_tx('22 price disarmed', {'type': 'price', 'params': {'op': '>=', 'value': 90000}}, 122000, trigger_confirmed=True)
         check('22 price: disarmed price tx adds with confirmation (201)', s == 201, (s, r))
         pr22 = r['tx']['id'] if s == 201 else None
         s, r = req('PUT', '/api/bitcoin/txs/' + pr22, {'enabled': False})
         check('22 price: disarmed at once (200)', s == 200, (s, r))
-        # (Optimization O3) Poll until a full tick has written the
-        # fresh due slice for the disarmed tx — the tick's
-        # observable effect, not a fixed 12 s wait.
+        # Poll until a tick writes the slice.
         wait_slice(pr22, {'status': 'due', 'lastPrice': 98200})
         t = state_tx(pr22)
         sl = rule_slice(t)
@@ -3123,16 +2966,12 @@ def main():
         sl = rule_slice(t)
         check('22 utxo: disarmed slice is live (watching, FINNEY:1 unspent)',
               sl.get('status') == 'watching', sl)
-        # (e) Safety: the disarmed price tx's conditions all hold,
-        # yet ticks do NOT broadcast it — no broadcast, no release
-        # record, no 'fired' history. The manual check lists it as
-        # skipped.
+        # (e) Its conditions hold, yet ticks never broadcast it; the
+        # manual check lists it as skipped.
         s, c0p = req('GET', '/__test__/broadcast-count', base=STUB_BASE_P)
         s, c0s = req('GET', '/__test__/broadcast-count', base=STUB_BASE_S)
         check('22 safety: attempt counts read', isinstance(c0p.get('count'), int) and isinstance(c0s.get('count'), int), (c0p, c0s))
-        # (Optimization O3) Poll until one more tick has evaluated
-        # the disarmed due tx (lastEvalAt advances) — a negative
-        # check needs one observed tick, not a fixed 12 s wait.
+        # Poll for one more evaluation.
         before22e = rule_slice(state_tx(pr22)).get('lastEvalAt')
         wait_last_eval(pr22, before22e)
         s, c1p = req('GET', '/__test__/broadcast-count', base=STUB_BASE_P)
@@ -3165,19 +3004,15 @@ def main():
         check('22 rearm: fired logged exactly once, on the re-arm',
               types.count('fired') == 1, types)
         delete_all_txs()
-        # (g) Disarmed check-in tx: the clock stays frozen while
-        # disarmed — the tick evaluates it but the bar never
-        # advances.
+        # (g) A disarmed check-in tx's clock stays frozen across ticks.
         s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft(1, 122100), 'label': '22 ck frozen',
                                                 'trigger': {'type': 'checkin', 'params': {'thresholdDays': 25}}})
         check('22 frozen: the check-in tx adds (201)', s == 201, (s, r))
         ck22 = r['tx']['id'] if s == 201 else None
         s, r = req('POST', '/api/checkin', {'method': 'app'})
         check('22 frozen: check-in lands (clock fresh)', s == 200 and r.get('ok') is True, r)
-        # The §21 auth test checked in to the receiver, so its
-        # last.json holds a recent timestamp — the tick's
-        # mergeExternalCheckin would apply it over any backdate.
-        # Remove it so the simulated clock below survives.
+        # Remove the receiver's last.json (from §21) so the backdated
+        # clock survives.
         try:
             os.remove(os.path.join(CHECKIN_DIR, 'last.json'))
         except OSError:
@@ -3189,10 +3024,7 @@ def main():
         save_state_file(stj)
         s, r = req('PUT', '/api/bitcoin/txs/' + ck22, {'enabled': False})
         check('22 frozen: disarmed at 13/25 (200)', s == 200 and r.get('tx', {}).get('enabled') is False, r)
-        # Simulate 14 more days passing while disarmed: the clock
-        # moves to 27 days back and the open inactive period
-        # started 14 days ago — the live offset is the simulated
-        # inactive span, so the bar stays at the frozen 13.
+        # Simulate 14 more days disarmed: the bar stays at the frozen 13.
         stj = load_state_file()
         stj['checkin']['lastCheckinAt'] = iso_ago(days=27, seconds=30)
         stj['checkin']['lastOnlineAt'] = iso_ago(minutes=5)
@@ -3200,9 +3032,7 @@ def main():
             if txj.get('id') == ck22:
                 txj['checkinInactiveSince'] = iso_ago(days=14)
         save_state_file(stj)
-        # (Optimization O3) Poll until a full tick has evaluated
-        # the disarmed tx (lastEvalAt advances) — the tick's
-        # observable effect, not a fixed 12 s wait.
+        # Poll for one evaluation.
         before22g = rule_slice(state_tx(ck22)).get('lastEvalAt')
         wait_last_eval(ck22, before22g)
         s, st = req('GET', '/api/status')
@@ -3239,11 +3069,9 @@ def main():
         s, r = req('POST', '/__test__/tip-fail', {'fail': False}, base=STUB_BASE_S)
         check('23 setup: caches cleared for a cold tip cache', clear_caches())
         FROZEN = iso_ago(hours=2)
-        # (a) An archived broadcast tx (>= 6 confs), a stale tx, and
-        # a disarmed staged tx. The archived/stale ones are seeded
-        # via the state file (a broadcast fact cannot be made
-        # through the API) with frozen slices; the disarmed one is
-        # a real price tx, so its slice must still refresh.
+        # (a) An archived tx (>= 6 confirmations) and a stale one, seeded
+        # via the state file with frozen slices, plus a disarmed price tx
+        # whose slice must still refresh.
         s, r = add_tx('Arch BH', {'type': 'blockheight', 'params': {'targetHeight': 950000}}, 111300)
         check('23 archived: watching blockheight tx adds', s == 201, (s, r))
         arch23 = r['tx']['id'] if s == 201 else None
@@ -3295,10 +3123,8 @@ def main():
         cp1, cs1 = tip_counts()
         check('23 archived: the release check made no tip fetch at all (both stubs quiet)',
               (cp1, cs1) == (cp0, cs0), ((cp0, cs0), (cp1, cs1)))
-        # (b) A pending broadcast tx (< 6 confs) still gets its
-        # confirmations refreshed hourly, but its rules are not
-        # re-evaluated — while the >= 6 tx above is not re-queried
-        # even though its last check is hours old.
+        # (b) A pending broadcast (< 6 confirmations) is refreshed hourly
+        # but not evaluated; the >= 6 one is not re-queried.
         s, r = add_tx('Pend BH', {'type': 'blockheight', 'params': {'targetHeight': 950000}}, 111303)
         check('23 pending: watching blockheight tx adds', s == 201, (s, r))
         pend23 = r['tx']['id'] if s == 201 else None
@@ -3329,12 +3155,9 @@ def main():
         cp1, cs1 = tip_counts()
         check('23 pending: the release check made no tip fetch for it either',
               (cp1, cs1) == (cp0, cs0), ((cp0, cs0), (cp1, cs1)))
-        # (c) Primary-first tip fetch + per-tick cache: two
-        # disarmed staged blockheight rules in one release check
-        # cost ONE tip fetch, from the primary only. (The
-        # secondary is pointed at a closed port first: the cache
-        # is keyed by endpoint bases, so the settings change busts
-        # it — and a closed-port secondary is never even asked.)
+        # (c) Two block-height rules in one check cost one primary tip
+        # fetch (the secondary points at a closed port, which also busts
+        # the cache).
         s, r = add_tx('Tip BH 1', {'type': 'blockheight', 'params': {'targetHeight': 950000}}, 111304)
         check('23 cache: first watching blockheight tx adds', s == 201, (s, r))
         tip1 = r['tx']['id'] if s == 201 else None
@@ -3425,9 +3248,8 @@ def main():
         for tid in (fee1, fee2):
             s, r = req('PUT', '/api/bitcoin/txs/' + tid, {'enabled': False})
         check('24 cache: both fee txs disarm (disarmed staged txs are still evaluated)', s == 200, (s, r))
-        # The cache is keyed by endpoint bases, so pointing the
-        # secondary at a closed port busts it — the first
-        # evaluation below fetches, the second reads the cache.
+        # Pointing the secondary at a closed port busts the cache: the
+        # first evaluation fetches, the second reads it.
         s, r = req('PUT', '/api/settings', {'secondaryApiUrl': 'http://127.0.0.1:9'})
         check('24 cache: secondary pointed at a closed port (busts the fee cache)', s == 200, (s, r))
         fp0, fs0 = fee_counts()
@@ -3469,10 +3291,7 @@ def main():
             return rp.get('count', -1), rs.get('count', -1)
         s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 3600})
         check('25 setup: cadence parked at 3600 s', s == 200, (s, r))
-        # (a) Two rules, one outpoint: the startup tick's evaluation
-        # costs ONE batch outspend request, primary only — (0.8.10)
-        # every lookup tries the batch first now, so the lone
-        # outpoint is answered by the batch, not the singular.
+        # (a) Two rules, one outpoint: one batch request, primary only.
         s, r = add_tx('UTXO 25a', {'type': 'utxo', 'params': {'outpoint': FINNEY + ':1', 'confirmations': 1}}, 111500)
         check('25 dedup: first same-outpoint tx adds', s == 201, (s, r))
         utxo_a1 = r['tx']['id'] if s == 201 else None
@@ -3578,12 +3397,8 @@ def main():
         t = state_tx(utxo_f)
         check('25 unknown: the spend is detected on the next evaluation (the 404 was not cached)',
               rule_slice(t).get('status') == 'due', rule_slice(t))
-        # The mirror side, pinned explicitly: a genuine observation
-        # stands for one TTL window — if both nodes go unknown
-        # again right after observing the spend, the rule still
-        # reads due from the cache. The fail-safe is that unknowns
-        # are never cached, not that a fresh 404 overrides a fresh
-        # observation.
+        # The mirror case: a real observation stands for one TTL window
+        # even if both nodes go unknown right after.
         s, r = req('POST', '/__test__/unknown-parent', {'txid': FINNEY}, base=STUB_BASE_P)
         s, r = req('POST', '/__test__/unknown-parent', {'txid': FINNEY}, base=STUB_BASE_S)
         check('25 unknown: both stubs mark FINNEY unknown again', s == 200, (s, r))
@@ -3601,10 +3416,8 @@ def main():
         s, r = req('POST', '/__test__/outspend', {'txid': FINNEY, 'vout': 1, 'clear': True}, base=STUB_BASE_S)
         check('25 unknown: overrides cleared', s == 200, (s, r))
         delete_all_txs()
-        # (d) A confirmed-spend UTXO rule reuses the shared tip
-        # cache: with the tip cache warm, a re-evaluation costs
-        # ZERO tip fetches (before the fix, every evaluation paid
-        # for its own direct tip fetch).
+        # (d) A confirmed-spend rule with a warm tip cache costs no tip
+        # fetch.
         s, r = add_tx('UTXO 25g', {'type': 'utxo', 'params': {'outpoint': FINNEY + ':0', 'confirmations': 1}}, 111506, True)
         check('25 tip: confirmed-spend tx adds (trigger confirmed)', s == 201, (s, r))
         utxo_g = r['tx']['id'] if s == 201 else None
@@ -3633,10 +3446,7 @@ def main():
         # hooks cleared at the end.
         s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 3600})
         check('26 setup: cadence parked at 3600 s', s == 200, (s, r))
-        # (a) Batch re-evaluation inside the cache window costs
-        # nothing — the startup tick's batch fetch populated the
-        # per-output cache, and the release check's batch consults
-        # it before fetching.
+        # (a) Re-evaluating within the cache window costs nothing.
         s, r = add_tx('UTXO 26a', {'type': 'utxo', 'params': {'outpoint': FINNEY + ':0', 'confirmations': 1}}, 111600, True)
         check('26 batch-cache: first same-funding-tx tx adds (trigger confirmed)', s == 201, (s, r))
         utxo_a1 = r['tx']['id'] if s == 201 else None
@@ -3660,12 +3470,8 @@ def main():
         check('26 batch-cache: the spent output still reads due from the cached batch',
               rule_slice(t).get('status') == 'due', rule_slice(t))
         delete_all_txs()
-        # (b) Two simultaneous lookups of one outpoint cost ONE
-        # request: the stub delays its answer 400 ms so the second
-        # lookup lands while the first is still in flight, and the
-        # in-flight map shares it. (0.8.10) The shared request is
-        # a batch one now — every lookup tries the batch first.
-        # A restart first, for a cold cache — otherwise the cache
+        # (b) Two simultaneous lookups of one outpoint cost one request
+        # (the stub delays 400 ms). Caches cleared first.
         check('26 inflight: caches cleared for a cold outpoint cache', clear_caches())
         s, r = req('POST', '/__test__/outspend-delay', {'ms': 400}, base=STUB_BASE_P)
         check('26 inflight: primary stub delays outspend answers 400 ms', s == 200 and r.get('delayMs') == 400, r)
@@ -3687,6 +3493,31 @@ def main():
         s, r = req('POST', '/__test__/outspend-delay', {'ms': 0}, base=STUB_BASE_P)
         s, r = req('POST', '/__test__/outspend-delay', {'ms': 0}, base=STUB_BASE_S)
         check('26 inflight: stub delays cleared', s == 200, (s, r))
+        # (b2) A finding is for the txid that was checked: a hex replaced
+        # while a dry run is in flight is not marked stale by the old run.
+        check('26 race: caches cleared', clear_caches())
+        s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft(0, 113500), 'label': 'Race hex', 'trigger': {'type': 'manual', 'params': {}}})
+        check('26 race: tx spending a spent input added (201)', s == 201, (s, r))
+        race_id = r['tx']['id'] if s == 201 else None
+        for b in (STUB_BASE_P, STUB_BASE_S):
+            req('POST', '/__test__/outspend-delay', {'ms': 1500}, base=b)
+        race_dry = []
+        th = threading.Thread(target=lambda: race_dry.append(req('POST', '/api/broadcast/test', {'id': race_id})))
+        th.start()
+        time.sleep(0.5)
+        new_hex = craft(1, 113500)
+        s, r = req('PUT', '/api/bitcoin/txs/' + race_id, {'txHex': new_hex})
+        check('26 race: hex replaced mid-check (200)', s == 200, (s, r))
+        th.join()
+        one = ((race_dry[0][1] if race_dry else {}).get('results') or [{}])[0]
+        check('26 race: the dry run saw the old hex spent', len(one.get('spent', [])) == 1, one)
+        t = state_tx(race_id)
+        check('26 race: the new hex is not marked stale by the old run',
+              t and t.get('txid') == txid_of(new_hex) and (t.get('release') or {}).get('status') != 'stale',
+              t and (t.get('txid'), t.get('release')))
+        for b in (STUB_BASE_P, STUB_BASE_S):
+            req('POST', '/__test__/outspend-delay', {'ms': 0}, base=b)
+        delete_all_txs()
         # (c) Two concurrent checkOutspends calls against the primary must
         # move the counter by exactly one.
         node_probe_26 = '/tmp/standby-test099-batch-inflight.js'
@@ -3714,12 +3545,8 @@ def main():
         bp1_26 = bp1_26.get('count', -1)
         check('26 batch-inflight: two simultaneous batch lookups cost ONE batch request',
               bp1_26 == bp0_26 + 1, (bp0_26, bp1_26))
-        # (d) A failed request does not poison the in-flight map:
-        # with both stubs answering 500, a lookup fails
-        # (unknown, never cached); with the failure cleared, the
-        # retry fetches fresh and reads the real answer. If the
-        # rejected promise stayed in the map, the retry would
-        # return the same failure without a new request.
+        # (d) A failed request (both stubs 500) does not poison the in-
+        # flight map: the retry fetches fresh.
         check('26 fail: caches cleared for a cold outpoint cache', clear_caches())
         s, r = req('POST', '/__test__/outspend-fail', {'fail': True}, base=STUB_BASE_P)
         check('26 fail: primary stub fails outspend requests', s == 200 and r.get('fail') is True, r)
@@ -3798,9 +3625,8 @@ def main():
                   'trigger': {'type': 'utxo', 'params': {'outpoint': FINNEY + ':1', 'confirmations': 1}}})
         check('27 single: set created with 3 members (201)', s == 201, (s, r))
         set27a = r.get('set', {}).get('id') if s == 201 else None
-        # (0.8.7, round 9) Single history: the set's trail opens
-        # with each member's 'added' event (tagged with the member
-        # label, oldest first) and the creation event closes it.
+        # The set's trail opens with each member's 'added' (tagged, oldest
+        # first), then the creation event.
         hist27a = r.get('set', {}).get('history', []) if s == 201 else []
         check('27 single: set serves its label, members, arm, and backfilled history',
               s == 201 and r.get('set', {}).get('label') == 'Set 27a'
@@ -3830,11 +3656,8 @@ def main():
             t = state_tx(mid)
             check('27 single: member own trigger never evaluated (triggerState stays null)',
                   t is not None and t.get('triggerState') is None, (t or {}).get('triggerState'))
-        # (0.8.7.4) The rule itself still costs exactly one
-        # request when the cache is cold: clear the outspend cache
-        # and run a release check — no freshness refresh runs on a
-        # release check, so the set rule's FINNEY:1 lookup is the
-        # only outspend request the check makes.
+        # The rule alone costs one request on a cold cache (a release
+        # check runs no freshness refresh).
         s, r = req('POST', '/api/__test__/clear-caches', {'only': ['outspend']})
         check('27 single: outspend cache cleared for the cold rule check', s == 200, (s, r))
         p0, s0, bp0, bs0 = outspend_counts()
@@ -3843,9 +3666,8 @@ def main():
         p1, s1, bp1, bs1 = outspend_counts()
         check('27 single: the set rule alone costs ONE batch request on a cold cache, primary only, no singular',
               (p1, s1, bp1, bs1) == (p0, s0, bp0 + 1, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
-        # (b) Fire broadcasts ALL members: retarget the set to a
-        # past setdate, then a manual release check sends all
-        # three through the per-tx broadcast path.
+        # (b) Retarget to a past date: a release check broadcasts all
+        # three.
         s, r = req('PUT', '/api/bitcoin/sets/' + set27a,
                    {'trigger': {'type': 'setdate', 'params': {'fireAt': '2020-01-01T00:00:00.000Z'}}, 'triggerConfirmed': True})
         check('27 fire: set retargeted to a past setdate (trigger confirmed)', s == 200, (s, r))
@@ -3892,9 +3714,8 @@ def main():
             t = state_tx(mid)
             check('27 disarmed: member not broadcast', t is not None and not t.get('broadcasted'), (t or {}).get('broadcasted'))
         delete_all_txs()
-        # (d) Detach: PUT txIds drops a member, and deleting the
-        # set returns its txs to standalone — each with its own
-        # trigger live again.
+        # (d) Detach one member, then delete the set: its txs return to
+        # standalone with their own triggers.
         s, r = add_tx_vout('Set 27d m1', {'type': 'setdate', 'params': {'fireAt': '2020-01-01T00:00:00.000Z'}}, 1, 112720, trigger_confirmed=True)
         check('27 detach: member 1 adds', s == 201, (s, r))
         d1 = r['tx']['id'] if s == 201 else None
@@ -3923,12 +3744,8 @@ def main():
         check('27 detach: the freed member fires on its own trigger now',
               res.get(d1, {}).get('action') == 'broadcast', res.get(d1))
         delete_all_txs()
-        # (e) Stale member (0.8.7, revised rule): member 1 is fine
-        # (FINNEY:1), member 2 spends FINNEY:0 (confirmed spent).
-        # The set fires: the fine member broadcasts, the spent
-        # member is marked stale and skipped — the set itself
-        # stays live for the member that is left. Only when EVERY
-        # member is stale does the set archive (see (g)).
+        # (e) One fine member and one spending FINNEY:0: the fine one
+        # broadcasts, the spent one is marked stale, the set stays live.
         s, r = add_tx_vout('Set 27e m1', {'type': 'setdate', 'params': {'fireAt': '2999-01-01T00:00:00.000Z'}}, 1, 112730)
         check('27 stale: member 1 adds (FINNEY:1, fine)', s == 201, (s, r))
         e1 = r['tx']['id'] if s == 201 else None
@@ -3960,11 +3777,8 @@ def main():
               [ev.get('type') for ev in (x or {}).get('history', [])].count('stale') == 1
               and any('"Set 27e" - Tx 2' in (ev.get('detail') or '') for ev in (x or {}).get('history', []) if ev.get('type') == 'stale'), (x or {}).get('history'))
         delete_all_txs()
-        # (g) All members stale archives the set: both members
-        # spend FINNEY:0 (confirmed spent). The set fires, the
-        # pre-check finds both stale, and NOTHING broadcasts.
-        # A second release check then reads the set as archived
-        # (skipped — all members are stale).
+        # (g) Both members spend FINNEY:0: nothing broadcasts, and the set
+        # then reads archived.
         s, r = add_tx_vout('Set 27g m1', {'type': 'setdate', 'params': {'fireAt': '2999-01-01T00:00:00.000Z'}}, 0, 112750)
         check('27 all-stale: member 1 adds (FINNEY:0, confirmed spent)', s == 201, (s, r))
         g1 = r['tx']['id'] if s == 201 else None
@@ -3992,11 +3806,8 @@ def main():
         check('27 all-stale: the set still exists in state (archived, not deleted)',
               state_set(set27g) is not None, state_sets())
         delete_all_txs()
-        # (f) Migration / compat: a pre-set state file (no `sets`
-        # key at all) loads as sets [], and a hand-edited set
-        # with a dangling member and a member claimed by two sets
-        # is sanitized on load — the dangling id is pruned, the
-        # duplicate stays only in the first set.
+        # (f) A state file with no sets loads as []; a dangling member is
+        # pruned and a member claimed twice stays in the first set.
         stj = load_state_file()
         stj['bitcoin'].pop('sets', None)
         save_state_file(stj)
@@ -4019,11 +3830,8 @@ def main():
               sets27f.get('set_hand1', {}).get('txIds') == [f1], sets27f.get('set_hand1'))
         check('27 migrate: a tx in two sets stays only in the first',
               sets27f.get('set_hand2', {}).get('txIds') == [], sets27f.get('set_hand2'))
-        # (0.8.7, round 9) The load-time backfill runs for a
-        # hand-edited set too: the seeded creation event plus the
-        # member's own 'added' event, tagged by its set
-        # (0.8.7, round 13: '"Hand 1" - Tx 1', never the bare
-        # member label).
+        # The load-time backfill also runs for a hand-edited set (tag
+        # '"Hand 1" - Tx 1').
         handHist27f = sets27f.get('set_hand1', {}).get('history', [])
         check('27 migrate: missing fields defaulted (history seeded + member backfilled, enabled true)',
               sets27f.get('set_hand1', {}).get('enabled') is True
@@ -4036,9 +3844,7 @@ def main():
         # one (it returns to standalone), delete the set, and the rest
         # fall back to their own trigger.
         shared27h = {'op': 'OR', 'rules': [{'type': 'setdate', 'params': {'fireAt': '2999-01-01T00:00:00.000Z'}}]}
-        # Dual-shape serving: a one-rule set is SERVED as its
-        # single rule (serveTx / serveSet unwrap it), so the
-        # served trigger reads as the rule, not the wrapper.
+        # A one-rule set is served as its single rule.
         shared_rule27h = {'type': 'setdate', 'params': {'fireAt': '2999-01-01T00:00:00.000Z'}}
         s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft_prev(FINNEY, 1, 112760), 'trigger': shared27h})
         check('27 add-set: member 1 adds with the SHARED trigger in the body (201)', s == 201, (s, r))
@@ -4077,12 +3883,9 @@ def main():
               ((t1 or {}).get('trigger'), (t3 or {}).get('trigger')))
         delete_all_txs()
         delete_all_sets()
-        # (i) Single history (0.8.7, round 9): ONE history per
-        # card — the set's. A member's events are forwarded to
-        # it tagged with the member's label; a set's trail opens
-        # with its members' existing histories (creation and
-        # attach backfill); the member's own history keeps
-        # recording and survives the set's delete.
+        # (i) One history per card (the set's): member events are
+        # forwarded, tagged; the set's trail opens with its members'; a
+        # member's own history survives the set's delete.
         s, r = add_tx_vout('Dom Single M1', {'type': 'setdate', 'params': {'fireAt': '2999-01-01T00:00:00.000Z'}}, 1, 112800)
         check('27 single-hist: member 1 adds (future setdate)', s == 201, (s, r))
         i1 = r['tx']['id'] if s == 201 else None
@@ -4138,9 +3941,8 @@ def main():
         hist27i = (x or {}).get('history', [])
         check('27 single-hist: re-attach does NOT duplicate member 3 history',
               sum(1 for e in hist27i if e.get('detail', '').startswith('"Dom Single Set" - Tx 3')) == 2, hist27i)
-        # (0.8.7, round 13) A label-less member is tagged by
-        # its set, never "Untitled transaction": attach one as
-        # Tx 3, edit its notes, and read the tag back.
+        # A label-less member is tagged by its set, never "Untitled
+        # transaction".
         s, r = add_tx_vout('', {'type': 'setdate', 'params': {'fireAt': '2999-01-01T00:00:00.000Z'}}, 4, 112803)
         check('27 single-hist: label-less member adds (future setdate)', s == 201, (s, r))
         i4 = r['tx']['id'] if s == 201 else None
@@ -4207,12 +4009,8 @@ def main():
                             'txid': t.get('txid'), 'method': 'mempool.space', 'broadcastedAt': FROZEN28}
         save_state_file(stj)
         check('28 setup: app restarted with the seeded not-found txs', restart())
-        # Let the startup hourly tick finish before the endpoint
-        # call, so its merge (which logs the stale transition)
-        # cannot race the endpoint's own merge.
-        # (Optimization O8) Poll until the startup hourly tick's
-        # merge has refreshed the seeded tx's checkedAt — the
-        # merge's observable effect, not a fixed 3 s wait.
+        # Poll until the startup tick's merge has refreshed the seeded tx,
+        # so it cannot race the endpoint's.
         wait_until(lambda: ((state_tx(stale28) or {}).get('broadcasted') or {}).get('checkedAt') != FROZEN28, deadline=5)
         s, r = req('GET', '/api/bitcoin/confirmations')
         check('28 refresh: the confirmations endpoint runs', s == 200, (s, r))
@@ -4237,10 +4035,8 @@ def main():
         check('28 conflict: the verdict is stored, and no stale event is logged',
               t is not None and (t.get('broadcasted') or {}).get('conflictInput', {}).get('spentBy') == CONFLICT_SPENDER
               and 'stale' not in [e.get('type') for e in t.get('history', [])], (t or {}).get('broadcasted'))
-        # Force a real second refresh (backdate checkedAt past the
-        # endpoint's 60 s window): the conflict re-checks (it is
-        # transient) but the stale one is never re-checked — and
-        # never re-logged — once recorded.
+        # Force a second refresh: the conflict re-checks; the stale one is
+        # never re-checked or re-logged.
         stj = load_state_file()
         by_id = {t.get('id'): t for t in stj.get('bitcoin', {}).get('txs', [])}
         for tx_id in (stale28, conflict28):
@@ -4286,10 +4082,7 @@ def main():
                               'txid': arch_tx.get('txid'), 'method': 'mempool.space', 'broadcastedAt': FROZEN29}
         save_state_file(stj)
         check('29 setup: app restarted with the seeded archived tx', restart())
-        # (Optimization O8) No wait here: the archived tx (7
-        # confirmations) is never touched by refreshConfirmations,
-        # so nothing races the endpoint's own refresh — the old
-        # 3 s sleep bought nothing.
+        # No wait: the archived tx is never touched by the refresh.
         s, r = req('GET', '/api/bitcoin/confirmations')
         check('29 refresh: the confirmations endpoint runs', s == 200, (s, r))
         conf_by_id = {c.get('id'): c for c in r.get('confirmations', [])}
@@ -4301,15 +4094,12 @@ def main():
         check('29 stored: the stored snapshot is untouched (still 7, checkedAt still frozen)',
               t is not None and (t.get('broadcasted') or {}).get('confirmations') == 7
               and (t.get('broadcasted') or {}).get('checkedAt') == FROZEN29, (t or {}).get('broadcasted'))
-        # Move the stub tip forward; restart (cold tip cache — the
-        # TTL is the parked 3600 s cadence); the derived count must
-        # follow the tip while the stored snapshot stays put.
+        # Move the stub tip and restart (cold tip cache): the derived
+        # count follows; the stored snapshot stays.
         s, r = req('POST', '/__test__/tip', {'height': 900010}, base=STUB_BASE_P)
         s, r = req('POST', '/__test__/tip', {'height': 900010}, base=STUB_BASE_S)
         check('29 setup: caches cleared for a cold tip cache after the tip move', clear_caches())
-        # (Optimization O8) No wait: the endpoint re-fetches the
-        # tip itself on a cold cache — the old 3 s sleep bought
-        # nothing.
+        # No wait: the endpoint fetches the tip itself.
         s, r = req('GET', '/api/bitcoin/confirmations')
         check('29 refresh after tip move: the endpoint runs', s == 200, (s, r))
         conf_by_id = {c.get('id'): c for c in r.get('confirmations', [])}
@@ -4357,9 +4147,8 @@ def main():
         s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft_prev(CONFLICT, 0, 113002), 'label': 'Conflict staged', 'notes': '', 'trigger': {'type': 'manual', 'params': {}}})
         check('30 conflict: the CONFLICT:0 staged tx adds', s == 201, (s, r))
         conflict30 = r['tx']['id'] if s == 201 else None
-        # A set with one stale member and one live member: the
-        # member goes stale on its own history AND the set's
-        # shared history, and the set stays live for the rest.
+        # A set with one stale and one live member: the stale one is noted
+        # on its own and the set's history; the set stays live.
         s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft_prev(FINNEY, 0, 113003), 'label': 'Set stale m', 'notes': '', 'trigger': {'type': 'manual', 'params': {}}})
         check('30 set: the stale member adds', s == 201, (s, r))
         sm30 = r['tx']['id'] if s == 201 else None
@@ -4371,9 +4160,7 @@ def main():
         check('30 set: set created with 2 members (201)', s == 201, (s, r))
         set30 = r.get('set', {}).get('id') if s == 201 else None
         check('30 setup: app restarted (startup hourly tick is the refresh)', restart())
-        # (Optimization O8) Poll until the refresh's merge has
-        # marked the tx stale — the merge's observable effect,
-        # not a fixed wait.
+        # Poll until the tx is marked stale.
         wait_until(lambda: ((state_tx(stale30) or {}).get('release') or {}).get('status') == 'stale', deadline=5)
         t = state_tx(stale30)
         check('30 stale: the staged tx is marked stale by the hourly refresh',
@@ -4402,10 +4189,8 @@ def main():
         t = state_tx(lm30)
         check('30 set: the live member is untouched, so the set stays live',
               t is not None and not t.get('release'), t)
-        # No re-check: delete everything but the stale tx, restart
-        # again — the second startup hourly tick must cost ZERO
-        # singular outspend requests (no live staged txs left to
-        # check, and the stale one is terminal so it is skipped).
+        # No re-check: with only the stale tx left, the next startup tick
+        # makes no outspend request.
         for tid in (live30, conflict30, sm30, lm30):
             s, r = req('DELETE', '/api/bitcoin/txs/' + tid)
         p0, s0, bp0, bs0 = outspend_counts()
@@ -4445,11 +4230,8 @@ def main():
             return json.load(open(os.path.join(lp_dir, 'state.json')))
 
         def lp_seed_state(fee_history, primary=STUB_BASE_P, secondary=STUB_BASE_S):
-            # Seed the second app's state from the main app's, with
-            # the node URLs pinned and the fee history replaced by
-            # exactly the given observations — the main app's own
-            # history is already long (one observation per restart),
-            # so only an overwritten history gives controlled counts.
+            # Seed the second app from the main app's state with pinned
+            # nodes and exactly the given readings.
             shutil.rmtree(lp_dir, ignore_errors=True)
             shutil.rmtree(lp_checkin, ignore_errors=True)
             os.makedirs(lp_dir, exist_ok=True)
@@ -4466,9 +4248,8 @@ def main():
             return start(['node', 'server.js'], env=env, cwd=APP, log=lp_log)
 
         def lp_wait_obs(n, deadline=15):
-            # Poll until the second app has recorded at least n
-            # observations (or the deadline expires); returns the
-            # state bitcoin object from the last read.
+            # Poll until the second app has at least n readings; returns
+            # the last bitcoin object.
             end = time.time() + deadline
             st = {}
             while time.time() < end:
@@ -4586,10 +4367,8 @@ def main():
                   nv.get('mSub1') == {'fastestFee': 1, 'halfHourFee': 1, 'hourFee': 1, 'economyFee': 1, 'minimumFee': 1}, nv.get('mSub1'))
             check('31 unit: feeEstimateAtTarget floors a present sub-1 rate at 1 and still returns null for a missing target',
                   nv.get('tSub1') == 1, nv.get('tSub1'))
-            # (b) Fresh app: the startup hourly tick records one
-            # observation from the primary stub (economyFee 1) and
-            # the peak stays null — the history is still building.
-            # The served state never carries the raw history.
+            # (b) A fresh app records one reading on the startup tick; the
+            # peak stays null and the raw history is never served.
             lp_seed_state([])
             app_lp = lp_start()
             check('31 fresh: second app (empty history) up', wait_up(lp_base))
@@ -4630,12 +4409,8 @@ def main():
             fh = (lp_state_file().get('feeHistory') or [])
             check('31 25th: the startup tick adds nothing (latest seed minutes old)',
                   len(fh) == 25 and fh[-1].get('fee') == 2.0, fh[-1] if fh else fh)
-            # (h) Restart survival: the history is in state.json,
-            # so a restart keeps it — but the next startup tick
-            # adds NOTHING (one observation per hour: the latest
-            # reading is minutes old), so the count stays 25 and
-            # the peak stays 2.0. Restarts cannot manufacture
-            # observations.
+            # (h) A restart keeps the history but adds nothing (the latest
+            # reading is minutes old): restarts cannot fake readings.
             stop(app_lp)
             app_lp = lp_start()
             check('31 restart: second app up after restart', wait_up(lp_base))
@@ -4648,9 +4423,7 @@ def main():
             fh = (lp_state_file().get('feeHistory') or [])
             check('31 restart: the seeded entries survive (first fee still 2.0, 25th is 2.0 — no new observation)',
                   len(fh) == 25 and fh[0].get('fee') == 2.0 and fh[-1].get('fee') == 2.0, (len(fh), fh[0] if fh else None, fh[-1] if fh else None))
-            # (i) Restore round-trip: the backup carries the
-            # history, so restoring it keeps the peak — the verdict
-            # does not reset to "still building" for a day.
+            # (i) A restore keeps the history and the peak.
             s, bak = req('POST', '/api/backup', {}, base=lp_base)
             check('31 restore: the backup carries the 25-observation history',
                   s == 200 and len((bak.get('state', {}) or {}).get('feeHistory') or []) == 25, s)
@@ -4659,10 +4432,8 @@ def main():
             st = lp_bitcoin()
             check('31 restore: the peak survives the restore (25 observations, 2.0)',
                   st.get('feePeakObservations') == 25 and st.get('feePeak') == 2.0, (st.get('feePeakObservations'), st.get('feePeak')))
-            # (d) Primary-to-secondary fallback: the primary is a
-            # dead port and the secondary stub's economy fee is 5 —
-            # the observation still records, from the secondary,
-            # and the history continues the primary's picture.
+            # (d) Primary dead, secondary at 5: the reading comes from the
+            # secondary.
             s, r = req('POST', '/__test__/fees', {'economyFee': 5}, base=STUB_BASE_S)
             check('31 fallback: secondary stub fee set to 5', s == 200 and r.get('economyFee') == 5, (s, r))
             stop(app_lp)
@@ -4682,9 +4453,7 @@ def main():
                   lp_wait_current_fee(5), lp_bitcoin().get('currentFees'))
             s, r = req('POST', '/__test__/fees', {'economyFee': 1}, base=STUB_BASE_S)
             check('31 fallback: secondary stub fee restored to 1', s == 200 and r.get('economyFee') == 1, (s, r))
-            # (e) Both nodes fail: the hour records nothing and the
-            # peak stays null — a dead hour leaves the history
-            # (and the peak) unchanged, never a wrong value.
+            # (e) Both nodes down: nothing recorded, peak unchanged.
             stop(app_lp)
             lp_seed_state([obs_hours_ago(24 - i, 2.0) for i in range(24)],
                           primary='http://127.0.0.1:9', secondary='http://127.0.0.1:19998')
@@ -4705,10 +4474,8 @@ def main():
             lp_log_text = open(lp_log, errors='ignore').read() if os.path.exists(lp_log) else ''
             check('31 both-fail: the skipped hour is logged',
                   'fee-history observation skipped' in lp_log_text, lp_log_text[-500:])
-            # (f) Esplora mode: the primary stub 404s
-            # /fees/recommended, so the app reads /fee-estimates —
-            # the 144-block rate (economy 3) is the observation,
-            # and the current fees map to the mempool tiers.
+            # (f) Esplora mode: the 144-block rate (3) is the reading;
+            # current fees map to the mempool tiers.
             s, r = req('POST', '/__test__/fee-mode', {'mode': 'esplora'}, base=STUB_BASE_P)
             check('31 esplora: primary stub in esplora mode', s == 200 and r.get('mode') == 'esplora', (s, r))
             s, r = req('POST', '/__test__/fees', {'economyFee': 3}, base=STUB_BASE_P)
@@ -4732,10 +4499,8 @@ def main():
             check('31 esplora: primary stub back in mempool mode', s == 200 and r.get('mode') == 'mempool', (s, r))
             s, r = req('POST', '/__test__/fees', {'economyFee': 1}, base=STUB_BASE_P)
             check('31 esplora: primary stub economy fee restored to 1', s == 200 and r.get('economyFee') == 1, (s, r))
-            # (g) Pruning on load: a 91-day-old observation is
-            # dropped when the state loads, so it can never
-            # pollute the peak — the history after the startup
-            # tick is 23 kept readings + 1 new one.
+            # (g) A 91-day-old reading is pruned on load (23 kept plus 1
+            # new).
             stop(app_lp)
             old_obs = {'t': iso_ago(days=91), 'fee': 100}
             lp_seed_state([old_obs] + [obs_hours_ago(24 - i, 2.0) for i in range(24)])
@@ -4760,11 +4525,8 @@ def main():
             race_base_count = (rc0 or {}).get('count') or 0
             app_lp = lp_start()
             check('31 race: second app up', wait_up(lp_base))
-            # Wait until a fee request is in flight (the stub
-            # counts it on receipt, before the delay answers) —
-            # the count is cumulative, so wait for it to rise
-            # past its pre-boot value. The observation fetch runs
-            # ~4 s, so the edits below land well before its save.
+            # Wait until a fee request is in flight (the stub counts on
+            # receipt), so the edits land before the save.
             fee_in_flight = False
             for _ in range(20):
                 try:
@@ -4798,11 +4560,8 @@ def main():
                   len(race_tx_now) == 1 and race_tx_now[0].get('enabled') is False, race_tx_now)
             s, r = req('POST', '/__test__/fee-delay', {'ms': 0}, base=STUB_BASE_P)
             check('31 race: primary stub fee delay cleared', s == 200 and r.get('delayMs') == 0, (s, r))
-            # (k) Sparse Esplora map (0.8.9 audit fix 3): the
-            # primary serves /fee-estimates with only a 6-block
-            # rate and no 144 — exact-target-or-nothing means no
-            # economy fee, so the startup tick records nothing
-            # (the secondary is dead, so it cannot mask the gap).
+            # (k) A sparse Esplora map without 144: no economy fee,
+            # nothing recorded (the dead secondary cannot mask it).
             s, r = req('POST', '/__test__/fee-mode', {'mode': 'esplora'}, base=STUB_BASE_P)
             check('31 sparse: primary stub in esplora mode', s == 200 and r.get('mode') == 'esplora', (s, r))
             s, r = req('POST', '/__test__/fee-estimates-map', {'map': {'6': 7}}, base=STUB_BASE_P)
@@ -4873,11 +4632,10 @@ def main():
             except Exception:
                 pass
 
-        # --- 32. audit fixes 1/3/4 (0.8.10) ---------------------------
-        # (fix 1) A malformed request target gets a 400 and the
-        # process keeps serving — the app server and the receiver
-        # alike. (fix 3) Security headers on the page, the API, and
-        # the receiver.
+        # --- 32. malformed requests and security headers ---
+        # A malformed request target is a 400 and the process keeps
+        # serving (app and receiver); security headers on the page, the
+        # API and the receiver.
         s, body = raw_get('//[', BASE)
         check('32 crash: malformed request line gets 400, not a dead server',
               s == 400 and body == b'Bad request URL', (s, body))
@@ -4935,10 +4693,8 @@ def main():
         check('33 hosts: startup log names the allowed Hosts',
               'Standby allowed Hosts: any IP literal, localhost, *.local' in read_log(),
               read_log()[-500:])
-        # STANDBY_ALLOWED_HOSTS: a second instance on port 3440
-        # (§31's port — its instance is stopped by now) with two
-        # extra names. The names pass, anything else still 421s,
-        # and the IP-literal rule still holds with the var set.
+        # STANDBY_ALLOWED_HOSTS: a second instance with two extra names.
+        # They pass, others still 421, IP literals still pass.
         extra_data = '/tmp/standby-test099-extra'
         extra_checkin = '/tmp/standby-test099-extra-checkin'
         shutil.rmtree(extra_data, ignore_errors=True)
@@ -4961,11 +4717,8 @@ def main():
         check('33 hosts: IP literal still passes with STANDBY_ALLOWED_HOSTS set',
               s == 200, (s, body))
         stop(extra_app)
-        # X-Forwarded-Host is no longer trusted: a matching Origin
-        # smuggled in via XFH must not pass the CSRF gate. (Before
-        # the fix, Origin evil.example + XFH evil.example passed
-        # it.) A matching Origin still passes — the gate itself is
-        # intact, only the forged-header bypass is gone.
+        # X-Forwarded-Host is not trusted: a matching Origin smuggled via
+        # XFH fails the CSRF gate; a genuine matching Origin passes.
         s, body = raw_req('POST', '/api/checkin', BASE, host='127.0.0.1:3438',
                           headers={'Origin': 'https://evil.example',
                                    'X-Forwarded-Host': 'evil.example',
@@ -4977,10 +4730,8 @@ def main():
                    headers={'Origin': 'http://127.0.0.1:3438'})
         check('33 hosts: a matching Origin still passes the CSRF gate',
               s == 200, (s, r))
-        # (fsync) A save round-trips through the file: the value
-        # written via the API is the value on disk, the file loads
-        # cleanly, and no .tmp file is left behind. The cadence is
-        # restored to 60 afterwards (the §22 pattern).
+        # (fsync) A saved value round-trips to disk, the file loads, no
+        # .tmp is left. Cadence back to 60 after.
         s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 33})
         check('33 fsync: settings save succeeds (200)', s == 200, (s, r))
         check('33 fsync: no state.json.tmp left behind',
@@ -5049,11 +4800,8 @@ def main():
         s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 60})
         check('34 quiet: cadence restored to 60 s', s == 200, (s, r))
         delete_all_txs()
-        # (b) A grace activation still writes: backdate the clock
-        # 10 days (flat leg) with an armed 35-day check-in tx, drop
-        # the heartbeat and the receiver's last.json so the seeded
-        # clock survives (the §22 pattern), restart, and the
-        # startup tick's grace must persist to state.json.
+        # (b) A grace activation still writes (clock backdated 10 days,
+        # heartbeat and last.json dropped).
         s, r = add_tx('34 gap checkin', {'type': 'checkin', 'params': {'thresholdDays': 35}}, 121002)
         check('34 grace: gap check-in tx adds (201)', s == 201, (s, r))
         seed_mtime = []
@@ -5093,10 +4841,8 @@ def main():
         s, r = req('POST', '/api/grace/resume', {})
         check('34 grace: resumed after the checks', s == 200, (s, r))
         delete_all_txs()
-        # (d) SIGTERM flush: a fresh instance on port 3440, its
-        # heartbeat deleted, SIGTERM at once — the next tick is up
-        # to 60 s away, so only the flush can recreate the file —
-        # and the process must exit 0.
+        # (d) SIGTERM flush: a fresh instance with its heartbeat deleted
+        # must recreate it on SIGTERM and exit 0.
         sig_data = '/tmp/standby-test099-sigterm'
         sig_checkin = '/tmp/standby-test099-sigterm-checkin'
         shutil.rmtree(sig_data, ignore_errors=True)
@@ -5216,12 +4962,8 @@ def main():
         s, r = req('POST', '/api/grace/resume', {})
         check('35 clamp: resumed after the checks', s == 200, (s, r))
         delete_all_txs()
-        # (b) The clamp, pinned directly against lib/store.js in a
-        # scratch data dir (the §34(e) pattern): a future
-        # heartbeat is ignored, a future state stamp is capped,
-        # and both future together cap too — the documented
-        # residual, which activates no grace until the heartbeat
-        # rewrites correctly.
+        # (b) The clamp, on lib/store.js directly: a future heartbeat is
+        # ignored, a future state stamp capped, both together capped.
         cl_dir = '/tmp/standby-test099-clamp'
         shutil.rmtree(cl_dir, ignore_errors=True)
         os.makedirs(cl_dir)
@@ -5263,10 +5005,7 @@ def main():
               out + err)
         out, err = node_out(node_grace)
         check('35 clamp: both future together activate no grace (documented residual)', out == 'NO-GRACE', out + err)
-        # (c) The heartbeat throttle treats a backward clock jump
-        # as expired: write, confirm the immediate re-touch is
-        # throttled, jump the fake clock back 10 days, and the
-        # next touch writes.
+        # (c) A backward clock jump expires the heartbeat throttle.
         node_throttle = ("const s=require('./lib/store');const fs=require('fs');"
                          "const d=%s;fs.rmSync(d,{recursive:true,force:true});fs.mkdirSync(d,{recursive:true});"
                          "let now=Date.now();const real=Date.now;Date.now=()=>now;"
@@ -5280,10 +5019,8 @@ def main():
         out, err = node_out(node_throttle)
         check('35 throttle: write, throttled re-touch, backward jump writes again',
               out == 'WROTE SKIP WROTE', out + err)
-        # (d) Trailing-dot hostnames: "localhost." IS localhost
-        # and "umbrel.local." IS umbrel.local (a trailing dot
-        # marks a fully-qualified name), so both pass; a bare "."
-        # is empty after the strip and still gets a 421.
+        # (d) "localhost." and "umbrel.local." pass; a bare "." gets a
+        # 421.
         s, body = raw_req('GET', '/api/health', BASE, host='localhost.')
         check('35 hosts: localhost. passes', s == 200, (s, body))
         s, body = raw_req('GET', '/api/health', BASE, host='umbrel.local.')
@@ -5295,10 +5032,8 @@ def main():
               s == 421 and body == b'Unrecognised Host header', (s, body))
         s, body = raw_req('GET', '/health', RBASE, host='localhost.')
         check('35 hosts: localhost. passes on the receiver', s == 200, (s, body))
-        # (e) The JSONL logs are durable: a live app check-in
-        # lands in checkins.jsonl with no .tmp left behind, and
-        # the node round-trip (append + full rewrite) reads back
-        # what was written.
+        # (e) Durable JSONL logs: a live check-in lands with no .tmp left;
+        # append and rewrite round-trip.
         s, r = req('POST', '/api/checkin', {'method': 'app'}, headers={'Origin': 'http://127.0.0.1:3438'})
         check('35 jsonl: app check-in succeeds (200)', s == 200, (s, r))
         _log = os.path.join(DATA, 'checkins.jsonl')
@@ -5405,11 +5140,9 @@ def main():
         p1, s1, bp1, bs1 = outspend_counts()
         check('37 singular-only: second lookup goes singular-first — ONE singular request, ZERO batch',
               (p1, s1, bp1, bs1) == (p0 + 1, s0, bp0, bs0), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
-        # (c) Neither shape: both routes 404 on both nodes — the
-        # rule reads unknown and never fires. The primary, whose
-        # shape was learned as singular-only in (b), tries its
-        # singular first (one singular, zero batch); the secondary
-        # tries the batch first, then the singular.
+        # (c) Neither route on either node: unknown, never fires. The
+        # primary (learned singular-only) tries singular first; the
+        # secondary tries batch then singular.
         check('37 neither: primary stub serves neither shape', set_outspend_mode('neither', STUB_BASE_P))
         check('37 neither: secondary stub serves neither shape', set_outspend_mode('neither', STUB_BASE_S))
         check('37 neither: caches cleared for a cold outpoint cache', clear_caches())
@@ -5447,12 +5180,8 @@ def main():
         check('37 fallthrough: the unspent output reads watching',
               rule_slice(t).get('status') == 'watching' and rule_slice(t).get('reason') == 'still unspent', rule_slice(t))
         delete_all_txs()
-        # (e) A 500 on the batch still throws — no fallback for a
-        # server error. The primary is batch-only and failing; the
-        # secondary is both and healthy, so the check still reads
-        # watching via the secondary — but the primary must show
-        # exactly one batch request and ZERO singular ones (the
-        # 500 never triggered the singular fallback).
+        # (e) A batch 500 still throws (no singular fallback for server
+        # errors); the healthy secondary answers.
         check('37 no-fallback-on-500: app restarted (cold shape record)', restart())
         check('37 no-fallback-on-500: primary stub serves batch only', set_outspend_mode('batch', STUB_BASE_P))
         check('37 no-fallback-on-500: secondary stub serves both', set_outspend_mode('both', STUB_BASE_S))
@@ -5483,9 +5212,8 @@ def main():
         s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 3600})
         check('38 setup: cadence parked at 3600 s', s == 200, (s, r))
         check('38 setup: caches cleared for a cold outpoint cache', clear_caches())
-        # Baseline (both shapes served): the probe answers via the
-        # batch on both nodes, and both nodes are OK with all four
-        # checks ready.
+        # Baseline: the probe answers via the batch on both nodes; both
+        # OK.
         p0, s0, bp0, bs0 = outspend_counts()
         s, r = req('POST', '/api/bitcoin/connection/test', {})
         check('38 baseline: connection test returns 200', s == 200, (s, r))
@@ -5501,11 +5229,9 @@ def main():
         p1, s1, bp1, bs1 = outspend_counts()
         check('38 baseline: the probe costs ONE batch request per node, zero singular',
               (p1, s1, bp1, bs1) == (p0, s0, bp0 + 1, bs0 + 1), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
-        # The probe leaves nothing in the outspend cache: it asks about
-        # FINNEY's outputs, and a UTXO rule watching FINNEY:0 must read
-        # the node's current answer right after a connection test, not
-        # the probe's. The stubs now say FINNEY:0 confirmed at the tip
-        # (1 confirmation), so a 3-confirmation rule must not fire.
+        # The probe leaves nothing in the outspend cache: with the stubs
+        # now saying FINNEY:0 has 1 confirmation, a 3-confirmation rule
+        # must not fire right after a connection test.
         for _b in (STUB_BASE_P, STUB_BASE_S):
             req('POST', '/__test__/outspend', {'txid': v.FINNEY, 'vout': 0, 'blockHeight': STUB_TIP}, base=_b)
         s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'utxo', 'params': {'outpoint': v.FINNEY + ':0', 'confirmations': 3}}})
@@ -5514,9 +5240,7 @@ def main():
         for _b in (STUB_BASE_P, STUB_BASE_S):
             req('POST', '/__test__/outspend', {'txid': v.FINNEY, 'vout': 0, 'clear': True}, base=_b)
         check('38 baseline: caches cleared after the probe-cache check', clear_caches())
-        # Singular-only node (the shape a node serves when it has
-        # no batch route): the batch 404s, the singular answers,
-        # and the value names it — the node is still OK.
+        # Singular-only node: still OK, singular named in the detail.
         check('38 singular-only: primary stub serves singular only', set_outspend_mode('singular', STUB_BASE_P))
         check('38 singular-only: caches cleared for a cold outpoint cache', clear_caches())
         p0, s0, bp0, bs0 = outspend_counts()
@@ -5531,9 +5255,8 @@ def main():
         p1, s1, bp1, bs1 = outspend_counts()
         check('38 singular-only: the probe costs ONE batch 404 + ONE singular on the primary, ONE batch on the secondary',
               (p1, s1, bp1, bs1) == (p0 + 1, s0, bp0 + 1, bs0 + 1), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
-        # The learned shape survives a cache clear: the second
-        # probe goes singular-first — ONE singular, ZERO batch on
-        # the primary — and still reads Full answers, singular in its detail.
+        # The learned shape survives a cache clear: one singular, no
+        # batch.
         check('38 singular-only: caches cleared again (shape record survives)', clear_caches())
         p0, s0, bp0, bs0 = outspend_counts()
         s, r = req('POST', '/api/bitcoin/connection/test', {})
@@ -5545,11 +5268,8 @@ def main():
         p1, s1, bp1, bs1 = outspend_counts()
         check('38 singular-only: the second probe costs ONE singular, ZERO batch on the primary',
               (p1, s1, bp1, bs1) == (p0 + 1, s0, bp0, bs0 + 1), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
-        # Neither shape: both routes 404 on the primary — the
-        # check reads Unavailable with the reason as its value,
-        # the node drops to CAUTION (height still works), and the
-        # tooltip names the missing capability plainly. Overall ok
-        # stays true: the height probe passed, so the node is usable.
+        # Neither route on the primary: Unavailable, node CAUTION with a
+        # plain tooltip; overall ok stays true.
         check('38 neither: primary stub serves neither shape', set_outspend_mode('neither', STUB_BASE_P))
         check('38 neither: caches cleared for a cold outpoint cache', clear_caches())
         p0, s0, bp0, bs0 = outspend_counts()
@@ -5569,9 +5289,8 @@ def main():
         p1, s1, bp1, bs1 = outspend_counts()
         check('38 neither: the probe costs ONE singular, ZERO batch on the primary (recorded singular-only, 404 returns at once)',
               (p1, s1, bp1, bs1) == (p0 + 1, s0, bp0, bs0 + 1), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
-        # Cleanup: the primary serves both shapes again, cadence
-        # back to 60, and the app restarts so the learned
-        # singular-only record does not leak past this section.
+        # Cleanup: both shapes again, cadence 60, restart (clears the
+        # learned shape).
         check('38 cleanup: primary stub serves both shapes again', set_outspend_mode('both', STUB_BASE_P))
         s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 60})
         check('38 cleanup: cadence restored to 60 s', s == 200, (s, r))
@@ -5598,9 +5317,8 @@ def main():
                 return ''
 
         def _fresh_bind_log():
-            # start() appends — truncate so each instance's warning
-            # (or its absence) is judged on its own log, not on an
-            # earlier instance's lines.
+            # start() appends to the log; truncate so each instance is
+            # judged on its own lines.
             open(_bind_log, 'wb').close()
 
         def _bind_instance(extra, drop=()):
@@ -5799,12 +5517,10 @@ def main():
               _cp.stderr[-500:])
         os.remove(_blocker)
 
-        # --- 41. encrypted backups (0.8.12) --------------------------
-        # POST /api/backup {password} returns the backup encrypted
-        # (scrypt + AES-256-GCM, lib/backupcrypto.js); restore asks
-        # for the password; tools/decrypt-backup.js opens the file
-        # with no Standby. A plain backup is POST without a password;
-        # there is no GET route (0.8.13).
+        # --- 41. encrypted backups ---
+        # POST /api/backup { password } encrypts (lib/backupcrypto.js);
+        # restore asks for the password; tools/decrypt-backup.js opens it
+        # without Standby. No GET route.
         _bpw = 'a long enough backup passphrase'
         s, r = req('POST', '/api/backup', {'password': 'short'})
         check('41 backup: a password under 12 characters is 400', s == 400 and '12 characters' in r.get('error', ''), (s, r))
@@ -5926,9 +5642,8 @@ def main():
         s, r = req('GET', '/api/tx/' + v.FINNEY + '/outspends', base=_bs_base)
         check('43 bare: the stub batch answer is bare (no txid, no status)',
               s == 200 and r[0] == {'spent': True}, r)
-        # Test connection names the node type: bare answers with the
-        # confirmation check, then — with /api/prevouts gone — bare
-        # only, which is limited (CAUTION, amber).
+        # Output lookup: bare with confirmation check, then bare only
+        # (CAUTION) without /api/prevouts.
         def _lookup43():
             s, r = req('POST', '/api/bitcoin/connection/test', {}, base=_ab43)
             res = {x.get('endpoint'): x for x in r.get('results', [])}
@@ -5957,9 +5672,8 @@ def main():
         def _clear43():
             return req('POST', '/api/__test__/clear-caches', {'only': ['outspend', 'nodeTip']}, base=_ab43)[0] == 200
 
-        # Confirmed foreign spend (FINNEY:0, confirmed in the stub) —
-        # first with no prevouts route: unverifiable, so the old
-        # reading stands (unconfirmed — a warning, never stale).
+        # A confirmed foreign spend without /api/prevouts reads
+        # unconfirmed (a warning, never stale).
         s, r = req('POST', '/api/bitcoin/txs', {'txHex': v.craft(0, 114001), 'label': 'Bare confirmed', 'trigger': {'type': 'manual', 'params': {}}}, base=_ab43)
         check('43 bare: tx spending a confirmed-spent input added', s == 201, (s, r))
         _conf43 = r['tx']['id'] if s == 201 else None
@@ -6043,11 +5757,9 @@ def main():
         t = state_tx(_n3, base=_ab43)
         check('43 utxo: at 3 confirmations from first sighting it fires and broadcasts', t and t.get('broadcasted'), t and t.get('release'))
 
-        # --- 44. restore re-checks every card against the node (0.8.13) ---
-        # A backup's broadcast and stale records are not trusted, so
-        # restore drops them — and then runs the dry-run check on every
-        # restored transaction, so a card already broadcast or stale
-        # goes back to Archived instead of reading Active.
+        # --- 44. restore re-checks every card against the node ---
+        # Broadcast and stale claims are dropped on restore, then re-
+        # derived by the node check, so those cards return to Archived.
         def _by_label44(st, label):
             return next((t for t in (st.get('bitcoin') or {}).get('txs', []) if t.get('label') == label), None)
         s, bak44 = req('POST', '/api/backup', {}, base=_ab43)
@@ -6087,9 +5799,9 @@ def main():
         t = _by_label44(st, 'Bare confirmed')
         check('44 restore: ... and records nothing it could not check',
               t and (t.get('release') or {}).get('status') != 'stale', t and t.get('release'))
-        # A node that accepts the requests but answers too slowly cannot
-        # hold the restore: the check stops at its time limit (4 s here)
-        # and reports the rest unchecked.
+        # A node that answers too slowly cannot hold the restore: the
+        # check stops at its limit (4 s here) and reports the rest
+        # unchecked.
         bak44['state']['settings']['primaryApiUrl'] = _bs_base
         req('POST', '/__test__/outspend-delay', {'ms': 8000}, base=_bs_base)
         check('44 restore: caches cleared before the slow-node restore', _clear43())

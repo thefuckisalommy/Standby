@@ -1,8 +1,5 @@
-"""Shared helpers for the Standby test suites (verify099.py,
-verify099-regress.py, dom_launcher099.py): the check/failure tally,
-a JSON request helper, process start/stop, and builders for the fake
-signed transactions the stub nodes understand. Importing it runs
-nothing.
+"""Shared helpers for the test suites: check tally, JSON requests, process
+start/stop, and fake transactions the stub nodes understand.
 """
 import hashlib
 import json
@@ -56,9 +53,9 @@ def req(method, path, body=None, base=None, timeout=20, headers=None):
 
 
 def craft_prev(prev_txid, vout, value=100000):
-    """A one-input, one-output transaction spending prev_txid:vout.
-    The signature is empty: the app parses transactions, it does not
-    verify signatures."""
+    """A one-input, one-output transaction spending prev_txid:vout (empty
+    signature: the app does not verify signatures).
+    """
     tx = b'\x01\x00\x00\x00' + b'\x01'
     tx += bytes.fromhex(prev_txid)[::-1]
     tx += vout.to_bytes(4, 'little')

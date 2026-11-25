@@ -77,9 +77,8 @@ function b64(v, name, wantLen) {
   return buf;
 }
 
-// Validates the envelope, then decrypts. Throws BackupCryptoError
-// with a message fit for the owner; a wrong password and a damaged
-// file are indistinguishable by design (GCM says only "no").
+// Validate the envelope, then decrypt. A wrong password and a damaged file
+// look the same (GCM only says no).
 async function decryptBackup(doc, password) {
   if (!isEncryptedBackup(doc)) throw new BackupCryptoError('not an encrypted Standby backup');
   if (doc.version !== VERSION) throw new BackupCryptoError('unsupported encrypted backup version: ' + doc.version);

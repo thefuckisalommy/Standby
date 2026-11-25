@@ -20,28 +20,19 @@ module.exports = async function stateRoutes(ctx) {
     // A receiver check-in that landed since the last read is merged
     // first, so the state served is current.
     mergeExternalCheckin(state, now);
-    // The grace: judged here too, so a
-    // page load reflects it even if no release tick has run since
-    // the device came back — held rules cannot fire before the
-    // grace is noticed. The stamp is NOT refreshed on a read
-    // (only the tick does that), so the gap stays honest.
+    // Judge the grace on reads too, so a page load shows it before any
+    // tick has run. Reads never refresh the stamp, so the gap stays
+    // honest.
     try {
       let changed = false;
       if (applyGrace(state, now)) changed = true;
       if (changed) store.saveState(DATA_DIR, state);
     } catch (e) { console.error('grace apply failed:', e); }
     const served = sanitizeState(state);
-    // The fee history is state-internal — the raw hourly
-    // observations (~2,160 entries) are never served; the peak,
-    // window, count, and basis below describe them. Serving the
-    // series would bloat every state read for data the UI never
-    // renders.
+    // The raw fee history is never served (the peak and its window
+    // describe it).
     delete served.feeHistory;
-    // Persistence / startup warnings for the UI (a later
-    // increment renders them): a state recovery that happened in
-    // this process, a receiver key list rewritten at startup, keys
-    // orphaned in the receiver, or keys found in a backup. Empty
-    // on a healthy run.
+    // Persistence and startup warnings (empty on a healthy run).
     served.warnings = startupWarnings.concat(store.getStateWarnings());
     served.grace = graceStatus(state, now); // the grace: null when none is active, else { active, indefinite, graceUntil, triggeredAt, offlineGapDays }
     served.bitcoin.overlaps = bitcoin.findSharedInputs(state.bitcoin.txs || []);
@@ -54,35 +45,22 @@ module.exports = async function stateRoutes(ctx) {
     served.bitcoin.feePeakObservations = fp.observations;
     served.bitcoin.feePeakBasis = fp.basis;
     served.bitcoin.feePeakAt = fp.fetchedAt;
-    // The current recommended fees: the cached object (or
-    // null when there is no usable current-fee data), with the
-    // fetched-at timestamp. The frontend compares each active tx's
-    // own fee rate to the economy fee for the Critical Risk check;
-    // a null object means the check is skipped and only the
-    // historical ladder runs.
+    // Current fees with fetchedAt, or null (then the frontend skips the
+    // Critical check).
     const cf = currentFeesForState();
     served.bitcoin.currentFees = cf.fees;
     served.bitcoin.currentFeesAt = cf.fetchedAt;
-    // The BTC price: the cached price (or nulls when
-    // nothing has been fetched yet), so a price rule's "currently
-    // $X" line is live on the card. currentPrices is the
-    // per-source readings map (for the Settings display); the
-    // provider list is served so the Settings selects always
-    // match the registry.
+    // Cached price and per-source readings (nulls before the first fetch),
+    // plus the provider list for the Settings selects.
     const pc = priceCacheForState(priceAgreementPctOf(state.settings));
     served.bitcoin.currentPrice = pc.price;
     served.bitcoin.currentPriceAt = pc.fetchedAt;
     served.bitcoin.currentPrices = pc.prices;
     served.bitcoin.priceProviders = bitcoin.PRICE_PROVIDERS.map((p) => ({ id: p.id, label: p.label })).concat([{ id: 'custom', label: 'Custom' }]);
-    // The consolidated exchange status: one status for
-    // the configured price sources, shown once on the readiness
-    // card (like Node Status) instead of repeated per price tx.
+    // One exchange status for the readiness card.
     served.bitcoin.exchangeStatus = exchangeStatusFor(pc, priceSourcesOf(state.settings), priceAgreementPctOf(state.settings));
-    // The inputs/outputs detail: derived from
-    // the stored hexes on every read, like the overlaps — never
-    // stored, so no migration and no restore change. An unparseable
-    // hex (defensive only — adds and restores validate) gets no
-    // detail, and the card falls back to the plain counts.
+    // Inputs/outputs detail derived from the hex on every read (never
+    // stored); none for an unparseable hex.
     for (const t of served.bitcoin.txs || []) {
       try { t.detail = bitcoin.txIoDetail(bitcoin.parseTx(t.hex)); }
       catch { t.detail = null; }
@@ -95,11 +73,8 @@ module.exports = async function stateRoutes(ctx) {
       t.trigger = store.serveTrigger(servedSet);
       t.triggerState = store.serveTriggerState(servedSet, t.triggerState);
     }
-    // Trigger sets are served the same way as txs: the
-    // trigger in the dual shape, its current status computed from
-    // the stored evaluation (no network on a read). The members
-    // ride in served.bitcoin.txs as usual — the frontend joins
-    // them by the set's txIds.
+    // Sets are served like txs (dual-shape trigger, status from the stored
+    // evaluation); members stay in bitcoin.txs, joined by txIds.
     for (const s of served.bitcoin.sets || []) {
       s.triggerStatus = triggerStatusFor(state, s, now);
       const servedSetT = store.triggerOf(s);
@@ -124,18 +99,15 @@ module.exports = async function stateRoutes(ctx) {
       ...checkinStatus(state, now),
       lastCheckinAt: state.checkin.lastCheckinAt,
       totalCheckins: state.checkin.totalCheckins,
-      // Whether the receiver's
-      // check-in file could not be read. A missing file is NOT an
-      // error (no receiver installed); an unreadable one means the
-      // release evaluation is withheld until it can be read again.
+      // Whether the receiver's check-in file is unreadable (missing is
+      // fine); while it is, releases are withheld.
       checkinReadError: merged === 'error',
       bitcoinEnabled: txs.some((t) => t.enabled),
       bitcoinTxStored: txs.length > 0,
       primaryApiUrl: state.settings.primaryApiUrl,
       secondaryApiUrl: state.settings.secondaryApiUrl,
-      // Per-tx release records (only txs with one) — the cycle-scoped
-      // ones are cleared by a check-in, but a stale record survives
-      // (it is a fact about the inputs, not the cycle).
+      // Release records per tx (a check-in clears cycle records; stale
+      // ones stay).
       releases: txs.filter((t) => t.release).map((t) => ({
         id: t.id, txid: t.txid, label: t.label || '', ...t.release,
       })),
@@ -153,20 +125,15 @@ module.exports = async function stateRoutes(ctx) {
     return sendJson(res, 200, store.readBroadcastLog(DATA_DIR, 50).reverse());
   }
 
-  // POST /api/release/check — run the release evaluation now (the full tick runs the same evaluation on the cadence).
-  // A receiver check-in is merged inside evaluateRelease first,
-  // so a check-in that arrived since the last read is honoured here too.
+  // POST /api/release/check: run the release evaluation now (the full tick
+  // runs the same on its cadence); a receiver check-in is merged first.
   if (req.method === 'POST' && pathname === '/api/release/check') {
     const r = await evaluateRelease();
-    // MARA-waiting transactions: refresh after the
-    // evaluation, so a tx MARA just dropped is retried on the next
-    // evaluation, not in this one. The response below is read from
-    // fresh state, so it already reflects the refresh.
+    // Refresh MARA-waiting txs after the evaluation, so a dropped tx
+    // retries next time; the response reads fresh state.
     try { await refreshMaraWaiting(store.loadState(DATA_DIR)); } catch (e) { console.error('MARA-waiting refresh failed:', e); }
-    // Public fallback: after the MARA refresh, so a tx
-    // MARA just confirmed as visible is not also fallback-broadcast.
-    // Runs regardless of the check-in clock — a due fallback fires
-    // even while the clock is on-track.
+    // Then the public fallback (after the MARA refresh), whatever the
+    // clock.
     let fallbacks = [];
     try { fallbacks = await refreshPublicFallbacks(store.loadState(DATA_DIR)); } catch (e) { console.error('public-fallback refresh failed:', e); }
     state = store.loadState(DATA_DIR);
@@ -188,9 +155,7 @@ module.exports = async function stateRoutes(ctx) {
     const body = await readBody(req).catch(() => ({}));
     const v = store.normalizeTrigger(body.trigger);
     if (!v.trigger) return sendError(res, 400, 'invalid trigger: ' + v.error);
-    // The frozen time for the tx being edited, if any — only a
-    // check-in rule reads it (checkTriggerNow takes it as the
-    // clock's live offset); a price or UTXO rule ignores it.
+    // The edited tx's frozen time, used only by check-in rules.
     let liveOff = 0;
     if (typeof body.txId === 'string' && body.txId) {
       const etx = (state.bitcoin.txs || []).find((t) => t.id === body.txId);
@@ -202,9 +167,8 @@ module.exports = async function stateRoutes(ctx) {
       const r = await checkTriggerNow(v.trigger, state, now, { liveOffsetMs: liveOff });
       return sendJson(res, 200, { ...r, trigger: store.serveTrigger(v.trigger) });
     } catch (e) {
-      // Belt-and-braces: checkTriggerNow already answers 'unknown'
-      // on a fetch failure, so a throw here is a bug — but it must
-      // still answer 'unknown', never crash the check.
+      // checkTriggerNow already answers unknown on fetch failures; a throw
+      // is a bug, still answered as unknown.
       return sendJson(res, 200, { valid: true, fire: false, status: 'unknown', reason: 'could not check the trigger — will retry', warning: null, detail: { error: e.message }, trigger: store.serveTrigger(v.trigger) });
     }
   }

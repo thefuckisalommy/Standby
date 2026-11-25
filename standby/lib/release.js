@@ -12,20 +12,16 @@ const { fallbackDeadline, releaseTriggerFor, setMembers, triggerTypesLabel } = r
 const { validPublicFallbackDays } = require('./util');
 const { findingFor, recordFindings } = require('./verdicts');
 
-// a plain 'already in progress' skip. The flag is set and cleared
-// synchronously around the awaited work, in a finally, so it can never
-// stick — and Node's single thread makes the check-and-set atomic.
+// Single flight: only one release evaluation runs at a time (the tick and
+// the manual check could otherwise broadcast the same tx twice); a second
+// caller gets an 'already in progress' skip. Set and cleared around the
+// awaited work with no await in between, in a finally, so it never sticks.
 let releaseEvaluationInFlight = false;
-// Broadcast backoff: an automatic evaluation does not
-// re-attempt a broadcast for a tx within an hour of its last
-// failed broadcast attempt (see the guard in
-// evaluateReleaseInner). One hour, hard-coded — the retry
-// cadence is a safety property, not a user setting.
+// Broadcast backoff: one hour between automatic attempts after a failure.
+// Fixed: it is a safety property, not a setting.
 const BROADCAST_BACKOFF_MS = 60 * 60 * 1000;
-// Archived confirmations: a broadcast
-// transaction at this many confirmations is done — its count is
-// final, so the hourly confirmation refresh never re-queries it,
-// and the tick never evaluates it (see terminalSkipReason below).
+// A broadcast at this many confirmations is final: never re-queried or
+// evaluated again.
 const ARCHIVED_CONFIRMATIONS = 6;
 // A tx that can no longer broadcast is not evaluated (no node requests;
 // its slice freezes): broadcast (any state), stale, submitted to
@@ -63,12 +59,9 @@ async function evaluateRelease(options) {
       console.error('release withheld: external check-in state is unreadable — not broadcasting until it can be read (see GET /api/status checkinReadError)');
       return { action: 'skipped', reason: 'check-in state unreadable', results: [] };
     }
-    // The grace: judged on the stored "I was
-    // online" stamp (the tick refreshes it; a manual release check
-    // does not). Sets + saves a grace when the gap is past the
-    // threshold and none is active, so the evaluation below sees
-    // the held rules. Best-effort — a failure here must not block
-    // the evaluation (the grace is a hold, not a gate).
+    // Judge the grace on the stored liveness stamp and set one if due, so
+    // the evaluation sees the held rules. Best-effort: a failure must not
+    // block the evaluation.
     try {
       const stH = store.loadState(DATA_DIR);
       let changed = false;
@@ -83,11 +76,9 @@ async function evaluateRelease(options) {
   }
 }
 
-// The set's combined outcome from its STORED slices only (no
-// network) — what the set read as the last time it was evaluated.
-// A rule never evaluated reads 'not-evaluated', which maps to
-// unknown (fail-safe). Used for the 'fired' history transition:
-// the set was already due before this tick.
+// The set's outcome from its stored slices only (never-evaluated rules
+// count as unknown); tells whether it was already due, for the 'fired'
+// transition.
 function storedRuleOutcomes(tx) {
   const set = store.triggerOf(tx);
   return set.rules.map((rule, i) => {
@@ -113,9 +104,7 @@ async function evaluateReleaseInner(automatic) {
   const all = state.bitcoin.txs || [];
   if (!all.length) return { action: 'skipped', reason: 'no transactions', results: [] };
 
-  // Endpoints: the primary node first, the secondary if the primary
-  // does not answer. (The MEMPOOL_* env vars can override the primary
-  // — see lib/bitcoin.js.)
+  // Endpoints: primary first, secondary if it does not answer.
   const endpoints = bitcoin.endpointsFor(s);
   const results = [];
 
@@ -161,10 +150,8 @@ async function evaluateReleaseInner(automatic) {
   let disarmedFired = false;
   const wasDueById = new Map();
   const evById = new Map();
-  // A set member is never evaluated on its own trigger:
-  // the set's trigger is evaluated once for all its members, in
-  // the set loop below. A member's own triggerState freezes while
-  // it is attached, and resumes when it leaves the set.
+  // Set members are evaluated through their set, once for all members; a
+  // member's own slice freezes while attached.
   const setByTxId = new Map();
   for (const set of (state.bitcoin.sets || [])) {
     for (const id of (set.txIds || [])) setByTxId.set(id, set);
@@ -174,11 +161,9 @@ async function evaluateReleaseInner(automatic) {
   const firingSets = [];
   for (const tx of all) {
     if (setByTxId.has(tx.id)) continue;
-    // Terminal first: a tx that can no longer broadcast
-    // is not evaluated at all — no tip fetch, no outspend check,
-    // no fee/price evaluation attributable to it. Its slice
-    // freezes; its card still reads its settled state from the
-    // broadcasted/release facts (txStatus), not the frozen slice.
+    // A tx that can no longer broadcast is not evaluated at all (no
+    // requests); its card reads its settled state from the broadcast and
+    // release records.
     const terminalReason = terminalSkipReason(tx);
     if (terminalReason) {
       results.push({ id: tx.id, txid: tx.txid, label: tx.label || '', action: 'skipped', reason: terminalReason, trigger: triggerTypesLabel(tx) });
@@ -188,10 +173,8 @@ async function evaluateReleaseInner(automatic) {
     let ev;
     try { ev = await rules.evaluateTrigger(state, tx, now, utxoBatch); }
     catch (e) {
-      // An evaluator must never take the whole run down with it:
-      // a throw is the same as 'unknown' — do not fire, and say so.
-      // Every rule gets an unknown slice (the ones already
-      // evaluated keep theirs).
+      // An evaluator that throws counts as unknown: do not fire, and say
+      // so.
       console.error('trigger evaluation failed for ' + (tx.label || tx.id) + ':', e);
       const set = store.triggerOf(tx);
       set.rules.forEach((rule, i) => {
@@ -201,10 +184,7 @@ async function evaluateReleaseInner(automatic) {
     }
     evById.set(tx.id, ev);
     if (!tx.enabled) {
-      // Evaluated for display only — never broadcast, and
-      // no 'fired' history event (nothing fired in the release
-      // sense). The slice is still written below, so the pill
-      // reads the live status.
+      // Disarmed: evaluated for display only (slice written, no 'fired').
       if (ev.fire) disarmedFired = true;
       results.push({ id: tx.id, txid: tx.txid, label: tx.label || '', action: 'skipped', reason: 'disarmed — ' + ev.reason, trigger: triggerTypesLabel(tx), triggerStatus: ev.status });
       continue;
@@ -215,11 +195,8 @@ async function evaluateReleaseInner(automatic) {
     }
     firing.push(tx);
   }
-  // Trigger sets: each set's trigger set is evaluated
-  // ONCE per tick, shared across all its members — that is the
-  // point of a set. A firing set broadcasts every live member (the
-  // firing loop below); a disarmed set is evaluated for display
-  // only, like a disarmed tx.
+  // Each set's rules are evaluated once per tick for all members; a firing
+  // set broadcasts every live member, a disarmed one is display only.
   for (const set of (state.bitcoin.sets || [])) {
     const members = setMembers(state, set);
     if (!members.length) continue;
@@ -257,9 +234,7 @@ async function evaluateReleaseInner(automatic) {
     firingSets.push({ set, ev: sev });
   }
   const firingIds = new Set(firing.map((f) => f.id));
-  // Whether any firing tx was held back by the broadcast
-  // backoff below — so the top-level reason says so instead of
-  // 'no trigger fired' when nothing else happened.
+  // Whether the backoff held a firing tx back, so the reason says so.
   let backedOff = false;
   // Merge the slices into fresh state: the evaluations waited on the
   // network, so a user edit meanwhile must not be overwritten. The
@@ -279,10 +254,8 @@ async function evaluateReleaseInner(automatic) {
         pushHistory(ftx, 'fired', firedDetail(store.triggerOf(tx), ev.ruleResults, ev.firedIndexes));
       }
     }
-    // The same merge for sets: each set's triggerState
-    // rides into fresh state, and the 'fired' event logs on the
-    // transition into due only — armed sets only (a disarmed set
-    // never reaches the firing set, so it never logs one here).
+    // The same merge for sets; 'fired' only on the transition into due,
+    // armed sets only.
     const firingSetIds = new Set(firingSets.map((fs) => fs.set.id));
     for (const set of (state.bitcoin.sets || [])) {
       const fset = (fresh.bitcoin.sets || []).find((s) => s.id === set.id);
@@ -310,11 +283,8 @@ async function evaluateReleaseInner(automatic) {
       results.push({ id: tx.id, txid: tx.txid, label: tx.label || '', action: 'skipped', reason: 'transaction is stale — replace it to re-arm' });
       continue;
     }
-    // Already submitted to Slipstream and waiting on MARA:
-    // it is not re-submitted. refreshMaraWaiting (run after this
-    // evaluation, on the tick and on the manual release check) is
-    // what moves it on — to 'broadcast' once the public nodes see
-    // it, or back to 'failed' if MARA drops it.
+    // Already submitted to Slipstream: not re-submitted;
+    // refreshMaraWaiting moves it on.
     if (tx.release && tx.release.status === 'submitted-slipstream') {
       results.push({ id: tx.id, txid: tx.txid, label: tx.label || '', action: 'skipped', reason: 'submitted to Slipstream — waiting on MARA' });
       continue;
@@ -333,12 +303,8 @@ async function evaluateReleaseInner(automatic) {
         continue;
       }
     }
-    // The release decision was made once, above — a check-in landing
-    // mid-run is recorded but does not stop the remaining
-    // transactions (all-or-none). The fired rules ride along
-    // so the broadcast path knows which of the set's rules fired
-    // (the vacation guard only blocks a firing CHECK-IN rule; a
-    // price rule firing during vacation broadcasts).
+    // The decision was made above (all-or-none). The fired rules ride
+    // along so vacation only blocks a firing check-in rule.
     const firedRuleTypes = (evById.get(tx.id) || {}).firedRuleTypes || store.triggerTypesOf(tx);
     results.push(await rules.broadcastOne(state, tx, endpoints, now, 'release', { firedRuleTypes }));
   }
@@ -358,7 +324,7 @@ async function evaluateReleaseInner(automatic) {
       let chk = null;
       try { chk = await bitcoin.checkInputsUnspent(bitcoin.parseTx(m.hex), endpoints, checkCadenceSecondsOf(state.settings) * 1000); }
       catch (e) { chk = null; } // unknown: rules.broadcastOne decides below
-      const f = chk && findingFor(m.id, chk, { staleOnly: true });
+      const f = chk && findingFor(m, chk, { staleOnly: true });
       if (f) staleFound.push({ member: m, f });
     }
     if (staleFound.length) {
@@ -384,11 +350,8 @@ async function evaluateReleaseInner(automatic) {
       }
       const r = await rules.broadcastOne(state, m, endpoints, now, 'release', { firedRuleTypes: fs.ev.firedRuleTypes, setId: set.id });
       results.push(r);
-      // A member that went stale mid-run is marked stale inside
-      // broadcastOne — but only itself. The remaining members
-      // are still broadcastable, so the loop carries on (the old
-      // any-stale-archives rule broke here; the revised rule
-      // does not).
+      // A member that went stale mid-run marks only itself; the rest carry
+      // on.
     }
   }
 
@@ -400,18 +363,12 @@ async function evaluateReleaseInner(automatic) {
   return out;
 }
 
-// Refresh the confirmation count for every broadcast transaction.
-// `maxAgeSec`: only re-query a tx whose last check is older than this
-// (0 = always re-query). Returns [{ id, txid, confirmations,
-// blockHeight, found, checkedAt }]. Best-effort per tx: a failed
-// lookup keeps the last known value, and the checkedAt stays old so the
-// UI can tell the number is stale.
+// Refresh confirmation counts for broadcast txs not checked within
+// maxAgeSec (0 = always). Best-effort per tx: a failure keeps the last
+// value and its old checkedAt, so the UI shows it is stale.
 async function refreshConfirmations(state, maxAgeSec) {
-  // Collect the network results first, then merge ONLY the
-  // confirmation fields into FRESH state before saving. Mutating
-  // this (stale) state object while the lookups are on the network
-  // and saving it would clobber a user edit landing during the
-  // hourly tick — disable, delete, or change a transaction.
+  // Collect network results first, then merge only the confirmation fields
+  // into fresh state, so an edit during the refresh is not overwritten.
   const endpoints = bitcoin.endpointsFor(state.settings);
   const nowMs = Date.now();
   const out = [];
@@ -540,12 +497,8 @@ async function refreshConfirmations(state, maxAgeSec) {
 async function refreshStagedFreshness(state) {
   const endpoints = bitcoin.endpointsFor(state.settings);
   const now = new Date();
-  // Live staged txs only: never broadcast, not terminal (a stale
-  // record is terminal — see terminalSkipReason), and armed — a
-  // standalone tx's own enabled, or its set's enabled for a
-  // member (the set's arm gates every member). Disarmed txs are
-  // not checked: they cannot broadcast, and the next hourly tick
-  // after re-arming picks them up.
+  // Live staged txs only: never broadcast, not terminal, and armed (a
+  // member through its set). Disarmed ones are checked after re-arming.
   const setByTxId = new Map();
   for (const set of (state.bitcoin.sets || [])) {
     for (const id of (set.txIds || [])) setByTxId.set(id, set);
@@ -563,11 +516,11 @@ async function refreshStagedFreshness(state) {
     let chk = null;
     try { chk = await bitcoin.checkInputsUnspent(bitcoin.parseTx(tx.hex), endpoints, checkCadenceSecondsOf(state.settings) * 1000); }
     catch (e) { console.error('staged freshness check failed for', (tx.label || tx.id) + ':', e.message); continue; }
-    const f = chk && findingFor(tx.id, chk, { staleOnly: true });
-    if (f) findings.push({ f, txid: tx.txid });
+    const f = chk && findingFor(tx, chk, { staleOnly: true });
+    if (f) findings.push(f);
   }
-  recordFindings(findings.map((x) => x.f), now, 'release');
-  return findings.map((x) => ({ id: x.f.id, txid: x.txid, action: 'stale', error: x.f.stale.error }));
+  recordFindings(findings, now, 'release');
+  return findings.map((f) => ({ id: f.id, txid: f.txid, action: 'stale', error: f.stale.error }));
 }
 
 // MARA-waiting txs ('submitted-slipstream'): (a) visible on the public
@@ -618,18 +571,15 @@ async function refreshMaraWaiting(state) {
     out.push({ id: tx.id, txid: tx.txid, action: 'unchanged' });
   }
   if (updates.length) {
-    // Merge into FRESH state (see refreshConfirmations): an edit
-    // landing while the lookups were on the network would otherwise
-    // be clobbered by the save of this stale copy.
+    // Merge into fresh state (see refreshConfirmations).
     const fresh = store.loadState(DATA_DIR);
     let changed = false;
     for (const u of updates) {
       const tx = (fresh.bitcoin.txs || []).find((t) => t.id === u.id && t.release && t.release.status === 'submitted-slipstream');
       if (!tx) continue;
       if (u.kind === 'broadcast') {
-        // Keep the record's kind ('release' vs 'broadcast'): the
-        // check-in status turns 'broadcasted' only for a release
-        // kind, exactly as for a public broadcast.
+        // Keep the record's kind: the check-in status turns 'broadcasted'
+        // only for a release.
         const kind = tx.release.kind || 'release';
         tx.release = { status: 'broadcast', kind, trigger: releaseTriggerFor(fresh, tx), txid: u.txid, method: 'slipstream', broadcastedAt: now.toISOString() };
         tx.broadcasted = {
@@ -691,12 +641,9 @@ async function refreshPublicFallbacks(state) {
     if (tx.release && (tx.release.status === 'stale' || tx.release.status === 'broadcast')) continue;
     const deadline = fallbackDeadline(tx);
     if (!deadline || now.getTime() < deadline.getTime()) continue;
-    // Public visibility first: if the nodes already see it, it is
-    // out there — mark it broadcast, do not send it again. (For a
-    // submitted-slipstream tx refreshMaraWaiting normally gets here
-    // first; this branch is mostly for a release-due tx whose submit
-    // kept failing but which is visible anyway — someone else sent
-    // it, or MARA mined it without the status endpoint knowing.)
+    // Visible already: mark it broadcast, do not send again (mostly for a
+    // release-due tx whose submits kept failing but that is out there
+    // anyway).
     let conf = null;
     try { conf = await bitcoin.getConfirmations(tx.txid, endpoints); } catch (e) { conf = null; }
     if (conf && conf.found) {
@@ -719,11 +666,9 @@ async function refreshPublicFallbacks(state) {
       out.push({ id: tx.id, txid: tx.txid, action: 'broadcast', alreadyVisible: true });
       continue;
     }
-    // Not visible: broadcast it publicly. The fallback's own deadline
-    // is the trigger, not the check-in clock; forcePublic forces the
-    // public route past the 'submitted-slipstream' block, sets the
-    // stored route to 'public' on success, and skips the 'failed'
-    // record on failure. fallbackDays marks the log entry.
+    // Not visible: send it publicly. forcePublic gets past the Slipstream
+    // block, sets the route to public on success and writes no 'failed'
+    // record on failure; fallbackDays marks the log entry.
     const r = await rules.broadcastOne(state, tx, endpoints, now, 'release', { forcePublic: true, fallbackDays: tx.publicFallbackDays });
     out.push({ id: tx.id, txid: tx.txid, action: r.action, method: r.method, error: r.error, reason: r.reason });
   }
@@ -743,11 +688,8 @@ async function recordFeeHistoryObservation(state) {
     console.error('fee-history observation skipped (no usable economy fee):', combined.reason || 'no reading');
     return false;
   }
-  // Merge into FRESH state (see testNodes, refreshConfirmations):
-  // an edit landing while the node fetch was on the network — a
-  // disarm, a trigger change — would otherwise be clobbered by
-  // saving the pre-fetch copy this function was handed. The
-  // passed-in state is used only for the endpoints/settings read.
+  // Merge into fresh state; the passed-in state only supplies endpoints
+  // and settings.
   const fresh = store.loadState(DATA_DIR);
   fresh.feeHistory = bitcoin.appendFeeHistoryObservation(fresh.feeHistory, combined.fee, Date.now());
   store.saveState(DATA_DIR, fresh);
@@ -773,10 +715,8 @@ async function refreshCurrentFeesIfStale() {
   }
 }
 
-// The current recommended fees to serve with the state: the cached
-// object, or null when there is nothing cached or the cached value
-// is too old to present as current. The fetched-at timestamp rides
-// along so the value is clearly labelled, never silently stale.
+// The current fees to serve, or null when none are cached or they are too
+// old; fetchedAt keeps them labelled.
 function currentFeesForState() {
   if (!caches.currentFees.fees || !caches.currentFees.fetchedAt) return { fees: null, fetchedAt: null };
   if ((Date.now() - caches.currentFees.fetchedAt) > FEE_CURRENT_MAX_AGE_MS) return { fees: null, fetchedAt: null };
@@ -799,21 +739,15 @@ function feePeakForState(state) {
 // runHourlyTick.
 async function runFullTick() {
   const now = new Date();
-  // The grace: judged on the "I was
-  // online" stamp as it stands BEFORE this tick refreshes it —
-  // refreshing first would shrink the gap to zero and the grace
-  // could never be set. The stamp is then refreshed (so the gap is
-  // measured from this tick onward) and recorded even when the
-  // evaluation below is skipped.
+  // Judge the grace on the liveness stamp before this tick refreshes it
+  // (refreshing first would hide the gap), then refresh it, even when the
+  // evaluation is skipped.
   try {
     const st0 = store.loadState(DATA_DIR);
     mergeExternalCheckin(st0, now);
     applyGrace(st0, now); // the grace for all triggers — judged on the same stale stamp, before it is refreshed; the save below persists it when it sets one
-    // Vacation expiry: a dated vacation ends at the end
-    // of its last day — the clock resumes from its frozen count.
-    // Judged here on the full tick (and on every release
-    // evaluation, see evaluateRelease), so a lapsed vacation
-    // never lingers past the next tick.
+    // A dated vacation ends at the end of its last day; checked on every
+    // tick and evaluation.
     expireVacation(st0, now);
     // Liveness is recorded in the heartbeat file (at most every 5 minutes)
     // and merged on read, so applyGrace sees a fresh stamp; the save below
@@ -822,21 +756,13 @@ async function runFullTick() {
     mergeNodeStamps(st0);
     store.saveState(DATA_DIR, st0);
   } catch (e) { console.error('grace / lastOnlineAt update failed:', e); }
-  // A receiver check-in lands in the clock before the release is
-  // evaluated, so a check-in that arrived between ticks is honoured
-  // even if nobody opened the app.
-  // The price cache refresh runs first, so the price rule's
-  // "currently $X" line stays fresh even while its trigger is held
-  // by a grace.
+  // Merge a receiver check-in before evaluating, and refresh prices first
+  // so the "currently $X" line stays fresh even under a grace.
   try {
     await refreshPriceIfStale();
     const st = store.loadState(DATA_DIR);
-    // Any tx with a non-manual rule keeps the tick
-    // evaluating — armed or not — so disarmed txs' statuses stay
-    // live. A manual-only setup still makes no extra API calls.
-    // A set with a non-manual rule keeps it evaluating
-    // too — a set's triggers are evaluated once per tick, like a
-    // tx's.
+    // Any tx or set with a non-manual rule keeps the tick evaluating
+    // (armed or not); a manual-only setup makes no extra calls.
     const hasWork = (st.bitcoin.txs || []).some((t) => store.triggerTypesOf(t).some((ty) => ty !== 'manual'))
       || (st.bitcoin.sets || []).some((s) => store.triggerOf(s).rules.some((r) => r.type !== 'manual'));
     if (!hasWork) return;
@@ -859,44 +785,28 @@ async function runHourlyTick() {
     const st = store.loadState(DATA_DIR);
     await refreshConfirmations(st, 0);
   } catch (e) { console.error('confirmations refresh failed:', e); }
-  // Staged freshness: a staged tx whose inputs were
-  // spent elsewhere reads stale on its own now, instead of
-  // waiting for a dry run or a firing trigger to notice.
+  // Staged freshness (see refreshStagedFreshness).
   try {
     const st = store.loadState(DATA_DIR);
     await refreshStagedFreshness(st);
   } catch (e) { console.error('staged freshness refresh failed:', e); }
-  // MARA-waiting transactions: a Slipstream submission
-  // that is not yet visible publicly needs its status kept current
-  // even while the clock is on-track — the refresh runs regardless
-  // of the clock.
+  // MARA-waiting txs, refreshed whatever the clock.
   try {
     const st = store.loadState(DATA_DIR);
     await refreshMaraWaiting(st);
   } catch (e) { console.error('MARA-waiting refresh failed:', e); }
-  // Public fallback: a Slipstream transaction whose
-  // fallback deadline has passed goes public — after the MARA
-  // refresh above, so a tx MARA just confirmed as visible is not
-  // also fallback-broadcast. Runs regardless of the clock, like
-  // the MARA refresh.
+  // Public fallback, after the MARA refresh so a tx just seen publicly is
+  // not also sent.
   try {
     const st = store.loadState(DATA_DIR);
     await refreshPublicFallbacks(st);
   } catch (e) { console.error('public-fallback refresh failed:', e); }
-  // Fee verdict: record one hourly economy-fee
-  // observation, so the peak keeps building from the nodes'
-  // own readings. Best-effort — a failed recording never breaks
-  // the tick (an hour with no usable fee simply adds no
-  // observation and leaves the peak unchanged).
+  // Record one economy-fee reading for the peak. Best-effort.
   try {
     const st = store.loadState(DATA_DIR);
     await recordFeeHistoryObservation(st);
   } catch (e) { console.error('fee-history observation failed:', e); }
-  // Fee verdict: refresh the current recommended fees when
-  // they are older than an hour, so the Critical Risk check judges
-  // a live fee against a live market. Best-effort — a failed
-  // refresh never breaks the tick (the Critical check is skipped
-  // until the fees come back).
+  // Refresh the current fees when over an hour old. Best-effort.
   try { await refreshCurrentFeesIfStale(); } catch (e) { console.error('current-fees refresh failed:', e); }
 }
 
@@ -921,39 +831,24 @@ function mergeNodeStamps(state) {
   }
 }
 
-// Test both nodes and save the per-endpoint results, so the Dashboard
-// can show each node's own status. The full result (endpoint, base,
-// ok, detail) is stored — the Dashboard only trusts a result measured
-// against the endpoint as currently configured.
+// Test both nodes and save each result with its endpoint; the Dashboard
+// only trusts a result for the endpoint as currently configured.
 async function testNodes() {
   const state = store.loadState(DATA_DIR);
-  // The hourly tick does NOT probe output lookup (see
-  // testConnection): it reuses the last probed check for each
-  // endpoint, from the stored connection results, so the tick
-  // costs no outspend request and never warms the negotiation's
-  // shape record. A fresh probe happens on the Test connection
-  // button instead.
+  // The tick does not probe output lookup; it reuses each endpoint's last
+  // probe (no outspend request, no change to the learned route).
   const prevResults = (state.bitcoin.connection && Array.isArray(state.bitcoin.connection.results)) ? state.bitcoin.connection.results : [];
   const r = await bitcoin.testConnection(bitcoin.endpointsFor(state.settings), { probeOutputLookup: false, prevResults });
-  // Merge into FRESH state (see refreshConfirmations): an edit landing
-  // while the node test was on the network would otherwise be
-  // clobbered by the save of this stale copy. The Dashboard only
-  // trusts a result measured against the endpoints as currently
-  // configured, so a result measured against just-replaced endpoints
+  // Merge into fresh state. A result for endpoints that have since changed
   // is ignored, not misattributed.
   const fresh = store.loadState(DATA_DIR);
-  // A Test connection that finished while this tick was on the
-  // network saved a newer result — with a fresh Output lookup
-  // probe this tick does not have. Keep it; this tick's result is
-  // the older one.
+  // A Test connection that finished meanwhile saved a newer result (with a
+  // fresh output lookup): keep it.
   const startedFrom = state.bitcoin.connection ? state.bitcoin.connection.checkedAt : null;
   const current = fresh.bitcoin.connection ? fresh.bitcoin.connection.checkedAt : null;
   if (current !== startedFrom) return;
-  // The connection object is rebuilt, so the per-endpoint
-  // stamps ride over explicitly — a test that could not reach an
-  // endpoint keeps that endpoint's last-answered time instead of
-  // losing it. The live stamps (the test just asked both
-  // endpoints) overwrite them below.
+  // Carry the per-endpoint stamps over, so an unreachable endpoint keeps
+  // its last-answered time; live stamps overwrite them below.
   const prevStamps = (fresh.bitcoin.connection && fresh.bitcoin.connection.nodeCheckedAt) || null;
   fresh.bitcoin.connection = { ok: r.ok, checkedAt: new Date().toISOString(), detail: r.detail, results: r.results };
   if (prevStamps) fresh.bitcoin.connection.nodeCheckedAt = { primary: prevStamps.primary || null, secondary: prevStamps.secondary || null };

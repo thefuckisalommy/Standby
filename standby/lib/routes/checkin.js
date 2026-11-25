@@ -27,12 +27,8 @@ module.exports = async function checkinRoutes(ctx) {
         if (!store.hasTriggerType(t, 'checkin')) continue;
         if (t.release && t.release.status === 'stale') continue;
         t.release = null;
-        // The clock restarts at this check-in: any frozen time is
-        // wiped, then a tx that is still inactive (disarmed, or on
-        // vacation) is re-marked inactive from now — it stays frozen
-        // at 0 instead of counting while inactive. Checking in does
-        // NOT re-arm anything: there is no global pause to
-        // auto-resume.
+        // The clock restarts here: frozen time is wiped and still-inactive
+        // txs are re-marked from now. A check-in never re-arms anything.
         t.checkinOffsetMs = 0;
         t.checkinInactiveSince = null;
       }
@@ -77,9 +73,7 @@ module.exports = async function checkinRoutes(ctx) {
       f.checkinKeys.push(key);
     });
     writeReceiverKeys(fresh);
-    // Key creates are logged (id + label only — never the
-    // hash or plaintext), so a lost key can be traced to when it
-    // was created or revoked.
+    // Key creation and revocation are logged (id and label only).
     console.log('Standby: check-in key created: ' + key.id + ' (' + key.label + ')');
     return sendJson(res, 201, { key: publicCheckinKey(key), plain });
   }

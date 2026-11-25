@@ -9,12 +9,9 @@ const path = require('path');
 
 const PROBE = '.standby-write-test';
 
-// Problems with one directory: it cannot be created, a file cannot
-// be created in it, or an existing regular file in it cannot be
-// written. `create` false means a missing directory is fine (the
-// app's check-in directory on a bare run, where the feature is
-// dormant). Returns a list of human-readable problems, empty when
-// all is well.
+// Problems with one directory (cannot create it, create a file in it, or
+// write an existing file). create false allows it to be missing. Returns
+// readable problems, empty when fine.
 function writeProblems(dir, { create, mode }) {
   const problems = [];
   if (!fs.existsSync(dir)) {

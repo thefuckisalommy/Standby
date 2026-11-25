@@ -20,11 +20,9 @@ const { refreshPriceIfStale } = require('./lib/prices');
 const { handleApi } = require('./lib/api');
 const { serveStatic, sendError, setSecurityHeaders, hostAllowed, describeAllowedHosts, startupSecurityNotes } = require('./lib/http');
 
-// Before anything else touches the disk: the data
-// directory (and the check-in directory, when it exists) must be
-// writable, or the app exits with the fix — see lib/startup.js.
-// Then tighten an older install's permissions: the signed
-// transactions are bearer, so the data files are owner-only.
+// Before anything touches the disk: the data (and check-in) directories
+// must be writable, or the app exits with the fix (lib/startup.js). Then
+// tighten an older install's permissions.
 requireWritable([
   { dir: DATA_DIR, create: true, mode: store.DATA_DIR_MODE },
   { dir: CHECKIN_DIR, create: false },
@@ -54,12 +52,10 @@ process.on('SIGTERM', flushHeartbeatAndExit);
 process.on('SIGINT', flushHeartbeatAndExit);
 
 const server = http.createServer((req, res) => {
-  // Host allowlist — first, before the URL
-  // parse, routing, and auth: a request whose Host is not an IP
-  // literal, localhost, a *.local name, or a name in
-  // STANDBY_ALLOWED_HOSTS is a DNS-rebinding probe, not a client.
-  // 421, plain text, and a log line naming the rejected Host so a
-  // lockout is diagnosable instead of silent.
+  // Host allowlist first, before parsing, routing or auth: anything but an
+  // IP, localhost, *.local or a STANDBY_ALLOWED_HOSTS name is a DNS-
+  // rebinding probe. 421, with a log line naming the Host so a lockout is
+  // diagnosable.
   if (!hostAllowed(req.headers.host)) {
     console.warn('Standby: rejected request with unrecognised Host header: ' + JSON.stringify(req.headers.host));
     setSecurityHeaders(res);
@@ -71,9 +67,7 @@ const server = http.createServer((req, res) => {
   try {
     url = new URL(req.url, 'http://localhost');
   } catch (e) {
-    // A malformed request target (e.g. `GET // [`) must not throw
-    // out of the handler and kill the process: answer 400 and keep
-    // serving.
+    // A malformed request target answers 400 instead of throwing.
     setSecurityHeaders(res);
     res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('Bad request URL');
@@ -82,9 +76,8 @@ const server = http.createServer((req, res) => {
   const pathname = url.pathname;
   if (pathname.startsWith('/api/')) {
     handleApi(req, res, pathname).catch((e) => {
-      // A client error (bad JSON, too large) is answered as itself;
-      // anything else is logged in full and answered generically, so
-      // internal details never reach the browser.
+      // Client errors are answered as themselves; anything else is logged
+      // in full and answered generically.
       if (e && e.expose) {
         if (!res.headersSent) sendError(res, e.statusCode, e.message);
         return;

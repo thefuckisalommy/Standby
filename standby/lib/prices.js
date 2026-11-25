@@ -21,19 +21,15 @@ function priceSourcesOf(settings) {
   return { source1: v1, source2: v2 };
 }
 
-// The 400 message for a price-source value the validator
-// rejects: an unknown provider id, or a custom object without a
-// valid http(s) URL and a well-formed JSON path.
+// The 400 message for a rejected price source.
 function priceSourceError(v) {
   if (v && typeof v === 'object') return 'custom price source needs a valid http(s) URL and a JSON path to the price (e.g. data.amount)';
   return 'unknown price provider: ' + v;
 }
 
-// The user controls, read defensively like
-// priceSourcesOf above: the settings validator (PUT
-// /api/settings, restore) rejects out-of-range values, but a
-// hand-edited or restored state must never break an evaluation
-// — an unusable value falls back to its default.
+// User controls, read defensively: settings reject bad values, but hand-
+// edited or restored state falls back to the defaults instead of breaking
+// an evaluation.
 function priceAgreementPctOf(settings) {
   const v = settings && settings.priceAgreementPct;
   return (typeof v === 'number' && Number.isFinite(v) && v >= PRICE_AGREEMENT_PCT_MIN && v <= PRICE_AGREEMENT_PCT_MAX) ? v : PRICE_AGREEMENT_PCT_DEFAULT;
@@ -43,12 +39,8 @@ function checkCadenceSecondsOf(settings) {
   return (typeof v === 'number' && Number.isFinite(v) && v >= CHECK_CADENCE_SECONDS_MIN && v <= CHECK_CADENCE_SECONDS_MAX) ? v : CHECK_CADENCE_SECONDS_DEFAULT;
 }
 
-// The price cache holds BOTH readings (per source, TTL = the
-// check cadence — Settings: Check cadence, default 60 seconds)
-// plus which sources they were fetched for — a settings change
-// makes the cache stale, so the next read fetches the new
-// sources instead of serving the old ones. readings is
-// { [sourceId]: { provider, price|null, error|null } }.
+// The price cache: both readings plus the sources they were fetched for
+// (TTL = check cadence), so a settings change refetches.
 
 // Current price readings per source: from the cache while fresh (TTL =
 // check cadence), else both sources fetched in parallel. The caller

@@ -3,10 +3,8 @@
 const { MAX_BODY } = require('./config');
 
 function sendJson(res, status, obj) {
-  // Security headers live in lib/http.js and
-  // are required lazily: http.js requires this module (for
-  // sendError), so a top-level require here would be a load-time
-  // cycle and capture undefined exports.
+  // Required lazily: http.js requires this module, so a top-level require
+  // would be a load cycle.
   require('./http').setSecurityHeaders(res);
   const body = JSON.stringify(obj);
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body) });
@@ -17,10 +15,8 @@ function sendError(res, status, message) {
   sendJson(res, status, { error: message });
 }
 
-// An error that is the CLIENT's fault, safe to show it: the request
-// dispatcher answers it with its own status and message. Any other
-// error is logged in full and answered with a bare 'internal error'
-// — internal details (paths, stack-derived text) stay in the log.
+// A client's own error, safe to show: answered with its status and
+// message. Anything else is logged and answered as 'internal error'.
 function clientError(status, message) {
   const e = new Error(message);
   e.statusCode = status;
@@ -77,17 +73,12 @@ function validPublicFallbackDays(v) {
 // Only the dropdown values are accepted; anything else is a 400, so a bad
 // value never silently becomes another.
 const GRACE_OFFLINE_DAYS = [1, 3, 7, 14, 30];
-// 0 = off, kept for back-compat: the grace is never set, so every
-// trigger evaluates normally. null (indefinite) is separate —
-// it is not in this list because the dropdown sends it as the
-// string 'indefinite', which the save handler maps to null.
+// 0 means off (kept for old state). Indefinite arrives as the string
+// 'indefinite' and is mapped to null.
 const GRACE_DURATION_DAYS = [0, 1, 3, 7, 14, 30];
 
-// User controls: the Settings cards for price agreement,
-// check cadence, and fee verdict. Each is a number input with a
-// min/max bound — anything outside is a 400 at PUT /api/settings
-// and at restore, never a silent clamp (a bad value must not
-// silently become a different one).
+// Bounded number settings: out of range is a 400 (settings and restore),
+// never clamped.
 const PRICE_AGREEMENT_PCT_MIN = 1, PRICE_AGREEMENT_PCT_MAX = 20, PRICE_AGREEMENT_PCT_DEFAULT = 5;
 const CHECK_CADENCE_SECONDS_MIN = 10, CHECK_CADENCE_SECONDS_MAX = 3600, CHECK_CADENCE_SECONDS_DEFAULT = 60;
 const FEE_LOW_MULT_MIN = 1, FEE_LOW_MULT_MAX = 10, FEE_LOW_MULT_DEFAULT = 2;

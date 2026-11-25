@@ -51,18 +51,14 @@ module.exports = async function settingsRoutes(ctx) {
     return sendJson(res, 200, { results });
   }
 
-  // PUT /api/settings. There is no global broadcast threshold —
-  // each check-in transaction carries its own threshold ("Days of
-  // silence", set when the tx is added/edited). A thresholdDays in
-  // the body is a 400, not a silent no-op: a stale client must not
-  // believe the setting saved. The danger-zone reset is per tx
-  // (PUT /api/bitcoin/txs/:id, add / import / arm).
+  // PUT /api/settings. There is no global threshold (each check-in rule
+  // has its own): thresholdDays is a 400, so a stale client does not think
+  // it saved.
   if (req.method === 'PUT' && pathname === '/api/settings') {
     const body = await readBody(req);
     const s = state.settings;
-    // Snapshot for the fresh-state merge
-    // below: only the settings this request changed are copied
-    // into fresh state at save time.
+    // Snapshot: only the settings this request changes are copied into
+    // fresh state.
     const origSettings = { ...s };
     if (body.thresholdDays !== undefined) {
       return sendError(res, 400, 'thresholdDays is no longer a setting — set "Days of silence" on each check-in transaction instead');
@@ -82,9 +78,8 @@ module.exports = async function settingsRoutes(ctx) {
       try { s.secondaryApiUrl = v ? bitcoin.normalizePublicApiUrl(v) : ''; }
       catch (e) { return sendError(res, 400, e.message); }
     }
-    // Secondary node on/off (Settings: Secondary node
-    // toggle): a boolean; off means primary only, no fallback
-    // anywhere. Missing in old state means enabled (the default).
+    // Secondary on/off (boolean); off means primary only. Missing means
+    // on.
     if (body.secondaryEnabled !== undefined) {
       if (typeof body.secondaryEnabled !== 'boolean') return sendError(res, 400, 'secondaryEnabled must be true or false');
       s.secondaryEnabled = body.secondaryEnabled;
@@ -120,11 +115,8 @@ module.exports = async function settingsRoutes(ctx) {
       }
       s.graceDurationDays = body.graceDurationDays;
     }
-    // User controls: each is a number input with a
-    // min/max bound — anything outside is a 400, never a silent
-    // clamp. The fee pair is validated together (using the new
-    // value where given, the saved value otherwise) so a partial
-    // update cannot break the Low-above-Medium invariant.
+    // Bounded number inputs: out of range is a 400, never clamped. The fee
+    // pair is validated together (new value or saved one).
     if (body.priceAgreementPct !== undefined) {
       if (typeof body.priceAgreementPct !== 'number' || !Number.isFinite(body.priceAgreementPct) || body.priceAgreementPct < PRICE_AGREEMENT_PCT_MIN || body.priceAgreementPct > PRICE_AGREEMENT_PCT_MAX) {
         return sendError(res, 400, 'priceAgreementPct must be a number from ' + PRICE_AGREEMENT_PCT_MIN + ' to ' + PRICE_AGREEMENT_PCT_MAX + ' (%)');
@@ -154,20 +146,14 @@ module.exports = async function settingsRoutes(ctx) {
       if (body.feeLowMultiplier !== undefined) s.feeLowMultiplier = body.feeLowMultiplier;
       if (body.feeMediumMultiplier !== undefined) s.feeMediumMultiplier = body.feeMediumMultiplier;
     }
-    // Vacation mode: check-in-only — while it is on, the
-    // check-in countdown freezes. vacationUntil is the last away
-    // day ('YYYY-MM-DD'); null (or '' from an older client) means
-    // indefinite, until the owner says they're back. A change to
-    // vacationMode re-syncs the freeze on every check-in tx, so
-    // the days away start / stop counting exactly here.
+    // Vacation (check-in only) freezes the countdown; vacationUntil is the
+    // last day away, null (or a legacy '') until back. A change re-syncs
+    // every check-in tx's freeze.
     if (body.vacationMode !== undefined) s.vacationMode = !!body.vacationMode;
     if (body.vacationUntil === null) s.vacationUntil = null;
     else if (body.vacationUntil !== undefined) s.vacationUntil = asStr(body.vacationUntil, 10) || null;
-    // The assignments above mutated the
-    // request's snapshot; only the CHANGED settings ride into fresh
-    // state, so a concurrent save is not clobbered. The fee pair is
-    // re-checked on the fresh values when this request touched it
-    // (a concurrent save could have moved the half it did not set).
+    // Only the changed settings are saved into fresh state; the fee pair
+    // is re-checked there if this request set half of it.
     const fresh = saveMutation((f) => {
       for (const k of Object.keys(s)) {
         if (JSON.stringify(s[k]) !== JSON.stringify(origSettings[k])) f.settings[k] = s[k];
