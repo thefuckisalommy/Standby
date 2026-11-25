@@ -41,6 +41,12 @@ function settingBase(r) {
   try { return rpcBaseFor(r.url); } catch { return null; }
 }
 
+// HTTP 403: this host is not in rpcallowip, or the call is not in the
+// user's rpcwhitelist.
+class RpcForbidden extends Error {
+  constructor() { super('RPC refused this request — check rpcallowip, and rpcwhitelist if set'); }
+}
+
 class RpcError extends Error {
   constructor(code, message) { super(message); this.code = code; }
 }
@@ -65,7 +71,7 @@ async function post(base, payload, timeoutMs) {
     timeoutMs,
   });
   if (res.status === 401) throw new Error('RPC login failed — check the username and password');
-  if (res.status === 403) throw new Error('RPC refused this connection — allow this host with rpcallowip');
+  if (res.status === 403) throw new RpcForbidden();
   let data;
   try { data = JSON.parse(res.body); } catch { throw new Error('RPC answered HTTP ' + res.status + ' without JSON'); }
   return data;
@@ -213,7 +219,7 @@ async function answer(path, method, body, base, timeoutMs, feeTargets) {
 
 // A node's RPC setting from a save or a restore: { enabled, url, user,
 // password }. A blank password keeps the stored one (the browser never
-// sees it). Throws on anything unusable.
+// sees it); RPC off clears the login. Throws on anything unusable.
 function normalizeSetting(input, stored) {
   if (!input || typeof input !== 'object') throw new Error('RPC setting must be an object');
   if (typeof input.enabled !== 'boolean') throw new Error('RPC enabled must be true or false');
@@ -231,7 +237,9 @@ function normalizeSetting(input, stored) {
     rpcBaseFor(url);
     if (!user || !password) throw new Error('RPC needs a username and password');
   }
-  return { enabled: input.enabled, url: url ? (input.enabled ? rpcBaseFor(url).replace(/^rpc/, 'http') : url) : '', user, password };
+  // Off forgets the login (the address is kept).
+  if (!input.enabled) return { enabled: false, url, user: '', password: '' };
+  return { enabled: true, url: rpcBaseFor(url).replace(/^rpc/, 'http'), user, password };
 }
 
 // What the browser sees: everything but the password.
@@ -240,4 +248,16 @@ function publicSetting(r) {
   return { enabled: r.enabled === true, url: r.url || '', user: r.user || '', hasPassword: !!r.password };
 }
 
-module.exports = { isRpcBase, rpcBaseFor, settingBase, register, answer, call, normalizeSetting, publicSetting };
+// Whether this login can make calls Standby never needs: Standby asks
+// for uptime, which a restricted user's rpcwhitelist leaves out. true,
+// false, or null when the node could not be asked.
+async function loginUnrestricted(base, timeoutMs) {
+  try {
+    await call(base, 'uptime', [], timeoutMs);
+    return true;
+  } catch (e) {
+    return e instanceof RpcForbidden ? false : null;
+  }
+}
+
+module.exports = { loginUnrestricted, isRpcBase, rpcBaseFor, settingBase, register, answer, call, normalizeSetting, publicSetting };

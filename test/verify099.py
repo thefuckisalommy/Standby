@@ -5867,6 +5867,15 @@ def main():
         check('45 test: the broadcast probe sent nothing', calls.get('sendrawtransaction', 0) >= 1, calls)
         s, sent = req('GET', '/__test__/sent', base=_rpc_base)
         check('45 test: ... and nothing was accepted', sent == [], sent)
+        check('45 rpc user: a whitelisted login reads Restricted',
+              (ck.get('rpcUser') or {}).get('value') == 'Restricted', ck.get('rpcUser'))
+        req('POST', '/__test__/restricted', {'enabled': False}, base=_rpc_base)
+        pr = _test45()
+        ru = (pr.get('checks') or {}).get('rpcUser') or {}
+        check('45 rpc user: an unrestricted login reads Unrestricted with advice, and the node stays OK',
+              pr.get('status') == 'ok' and ru.get('value') == 'Unrestricted' and ru.get('warn') is True
+              and 'restricted user' in (ru.get('note') or ''), pr)
+        req('POST', '/__test__/restricted', {'enabled': True}, base=_rpc_base)
         req('POST', '/__test__/txindex', {'enabled': False}, base=_rpc_base)
         _clear45()
         pr = _test45()
@@ -5964,6 +5973,9 @@ def main():
         s, st = req('GET', '/api/state', base=_ab43)
         check('45 settings: RPC off uses the mempool URL again',
               s == 200 and not (st['settings']['primaryRpc'] or {}).get('enabled') and not st['bitcoin']['nodeBases']['primary'].startswith('rpc'), st['bitcoin'].get('nodeBases'))
+        with open(os.path.join(_bind_data, 'state.json')) as f:
+            check('45 settings: RPC off forgets the login, keeping the address',
+                  json.load(f)['settings']['primaryRpc'] == {'enabled': False, 'url': _rpc_base, 'user': '', 'password': ''})
         stop(_app45)
         stop(_stub45)
 

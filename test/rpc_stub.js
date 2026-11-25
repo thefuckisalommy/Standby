@@ -11,6 +11,7 @@
 //   knows mempool transactions only
 // - POST /__test__/mempool-spend { txid, vout, spender }: a mempool spend
 // - POST /__test__/old-core { enabled }: no gettxspendingprevout
+// - POST /__test__/restricted { enabled }: whitelist Standby's calls (default on)
 // - POST /__test__/spender-index { mode: 'off'|'synced'|'behind' }: like
 //   -txospenderindex (confirmed spenders found, or an error while behind)
 // - POST /__test__/send-mode { mode: 'confirm'|'mempool' }
@@ -30,7 +31,7 @@ const TIP = 900000;
 let world;
 function reset() {
   world = {
-    txindex: true, txindexSynced: true, spenderIndex: 'off', oldCore: false, sendMode: 'confirm', economyFee: 1,
+    txindex: true, txindexSynced: true, spenderIndex: 'off', restricted: true, oldCore: false, sendMode: 'confirm', economyFee: 1,
     // txid -> { vouts: [sats], height: number|null (null: mempool), hex }
     txs: new Map([[FINNEY, { vouts: [200000, 150000], height: 899000 }], [SECOND, { vouts: [200000], height: 899000 }]]),
     // 'txid:vout' -> { spender, confirmed }
@@ -78,6 +79,9 @@ function parseTx(hex) {
   return { inputs, vouts, txid: txidOf(hex) }; // legacy txid; the suites send legacy transactions
 }
 
+// The whitelist SECURITY.md recommends.
+const STANDBY_CALLS = ['getblockcount', 'getindexinfo', 'gettxout', 'gettxspendingprevout', 'getrawtransaction', 'getblockheader', 'estimatesmartfee', 'sendrawtransaction'];
+
 class RpcErr { constructor(code, message) { this.code = code; this.message = message; } }
 const btc = (s) => s / 1e8;
 
@@ -91,6 +95,7 @@ function utxo(txid, vout, includeMempool) {
 }
 
 const methods = {
+  uptime: () => 1234,
   getblockcount: () => TIP,
   getindexinfo: ([name]) => {
     if (world.oldCore) throw new RpcErr(-32601, 'Method not found');
@@ -179,6 +184,7 @@ http.createServer((req, res) => {
       if (p === '/__test__/reset') reset();
       else if (p === '/__test__/txindex') { world.txindex = b.enabled !== false; world.txindexSynced = b.synced !== false; }
       else if (p === '/__test__/old-core') world.oldCore = b.enabled === true;
+      else if (p === '/__test__/restricted') world.restricted = b.enabled !== false;
       else if (p === '/__test__/spender-index') world.spenderIndex = ['synced', 'behind'].includes(b.mode) ? b.mode : 'off';
       else if (p === '/__test__/send-mode') world.sendMode = b.mode === 'mempool' ? 'mempool' : 'confirm';
       else if (p === '/__test__/fees') world.economyFee = Number(b.economyFee) || 1;
@@ -195,6 +201,9 @@ http.createServer((req, res) => {
   }
   readJson(req, (body) => {
     if (body === null) return send(res, 500, { result: null, error: { code: -32700, message: 'Parse error' }, id: null });
+    // A restricted user (rpcwhitelist of Standby's calls): anything else is HTTP 403.
+    const asked = Array.isArray(body) ? body.map((c) => c.method) : [body.method];
+    if (world.restricted && asked.some((m) => !STANDBY_CALLS.includes(m))) { res.writeHead(403); return res.end(); }
     if (Array.isArray(body)) return send(res, 200, body.map(run));
     const out = run(body);
     // Legacy JSON-RPC 1.0: an error reply is HTTP 500 (404 for an unknown method).

@@ -2069,6 +2069,11 @@ async function testOnePath(apiBase, probeOutputLookup, prevOutputLookup) {
   const outputLookup = probeOutputLookup ? await testNodeOutputLookup(apiBase) : (prevOutputLookup || null);
   const checks = { height, fees, broadcast };
   if (outputLookup) checks.outputLookup = outputLookup;
+  // Advice only: an unrestricted RPC login does not change the status.
+  if (rpc.isRpcBase(apiBase)) {
+    const rpcUser = await testRpcUser(apiBase);
+    if (rpcUser) checks.rpcUser = rpcUser;
+  }
   const allOk = fees.ok && broadcast.ok && (outputLookup ? outputLookup.ok : true);
   let detail;
   if (outputLookup && outputLookup.warn && outputLookup.kind === 'rpc' && fees.ok && broadcast.ok) {
@@ -2262,6 +2267,14 @@ const PROBE_TXID = 'f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e
 function forgetProbeOutspends(apiBase) {
   for (const vout of [0, 1]) outspendCache.delete(outspendCacheKey(apiBase, PROBE_TXID, vout));
 }
+async function testRpcUser(apiBase) {
+  const open = await rpc.loginUnrestricted(apiBase);
+  if (open === null) return null;
+  if (!open) return { ok: true, detail: 'restricted by rpcwhitelist', value: 'Restricted' };
+  return { ok: false, warn: true, kind: 'rpc-user', detail: 'this RPC login can make any call, including wallet and node control', value: 'Unrestricted',
+    note: 'This RPC login can do anything on the node, including spending from a loaded wallet. Give Standby a restricted user (see SECURITY.md).' };
+}
+
 // RPC: ask Bitcoin Core whether txindex is on (getindexinfo, Core 0.21+)
 // so the owner is told to enable it. null when the node cannot say.
 const TXINDEX_OFF = { ok: false, warn: true, kind: 'rpc', detail: 'txindex is off — add txindex=1 to bitcoin.conf and restart Bitcoin Core. Until then an input spent by a confirmed transaction reads unknown (never stale), and a UTXO rule on a spent output never fires.', value: 'txindex off',

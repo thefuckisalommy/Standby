@@ -1640,8 +1640,9 @@ function check(name, cond, detail) {
   await new Promise((r) => setTimeout(r, 1500));
   await waitForRender();
   const stRpcOff = await (await fetch('/api/state')).json();
-  check('rpc toggle: off saves back to the mempool node, keeping the RPC details',
-    stRpcOff.settings.primaryRpc.enabled === false && stRpcOff.settings.primaryRpc.user === 'standby'
+  check('rpc toggle: off saves back to the mempool node and forgets the login',
+    stRpcOff.settings.primaryRpc.enabled === false && stRpcOff.settings.primaryRpc.user === ''
+    && stRpcOff.settings.primaryRpc.hasPassword === false
     && els['btc-primary'].textContent === '127.0.0.1:18275', JSON.stringify(stRpcOff.settings.primaryRpc) + ' ' + els['btc-primary'].textContent);
 
   // --- 11. Staged Transactions card ---
