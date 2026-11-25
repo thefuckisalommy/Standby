@@ -1,62 +1,61 @@
-# Standby — security notes
+# Security
 
 Standby holds presigned Bitcoin transactions. Read this before arming one.
 
-## Logging in
+## Signed transactions are bearer
 
-Standby has its own login (since 0.8.11.1), checked by the app itself on every API request.
+Whoever holds a signed transaction can broadcast it, with or without Standby, and it reveals destinations and amounts. Standby stores them unencrypted (it must read them unattended to broadcast), in a data directory readable only by the app's user (UID 1000). Root, anyone with Docker access, or a stolen drive can read them: protect the device.
 
-- **On Umbrel** the password is the one shown on Standby's page in the Umbrel dashboard (Umbrel's per-install app password). Umbrel's own login still guards the way in through the dashboard — keep it on — but Umbrel's login is enforced by its proxy, and every Umbrel app shares one Docker network: without Standby's own login, any other installed app (or a bug in one) could reach Standby's API directly and read or broadcast your transactions.
-- **On Linux (Docker or plain Node)** the login is optional: set `STANDBY_PASSWORD`. Without it, anything that can reach port 3100 controls the app. The Docker install maps the port to localhost only, so that means anything running on the machine itself; use a password if the machine has other users, and always before opening the port further. The app logs a warning at startup when it is reachable from the network with no password.
+## Login
 
-You log in once per browser. The session lasts 30 days, and Settings → Session → Log out signs out every browser at once. The session token is kept in the browser's storage for this one address (host and port), never in a cookie — a cookie on `umbrel.local` would be sent to every other app on `umbrel.local`. Ten wrong passwords in a minute lock the login for the rest of that minute. Scripts can send the password as `Authorization: Bearer <password>`.
+Every API request is checked against the app's own login.
 
-Standby does not encrypt its own connection. Over plain `http://`, the password and the session token travel unencrypted, so anyone who can watch that network traffic could capture them and take over the app. Use an encrypted path wherever the network is not fully yours: HTTPS (umbrelOS 2.0 serves apps over HTTPS too), SSH or Tailscale, or your own reverse proxy with HTTPS. The generic Docker install listens on localhost only by default.
+- **Umbrel:** the password shown on Standby's app page. Umbrel's login only guards its proxy, and all Umbrel apps share one Docker network, so Standby's own login keeps other apps out of its API.
+- **Docker or Node:** set `STANDBY_PASSWORD`. Without it, anything that can reach port 3100 controls the app (by default only the machine itself). Standby warns at startup if it is reachable from the network without one.
 
-## Requests from other sites are refused
+Sessions last 30 days; Settings → Session → Log out ends them all. The token is kept in the browser's storage for this address, not in a cookie (a cookie on `umbrel.local` would reach every app there). Ten wrong passwords in a minute lock the login for that minute.
 
-State-changing API requests must come from the app's own page: if the browser sends an Origin, it must match the address the app was reached on, and the request must use a JSON content type. Every API request a browser marks as coming from another site — or from another port on the same host, such as another Umbrel app — is refused too (the `Sec-Fetch-Site` header). So a website you visit, or another app's page, cannot use your browser to read your transactions or trigger a check-in, a pause, or a broadcast. Requests by an unrecognised hostname are refused (421), which stops DNS-rebinding attacks; see the README for adding your own hostnames.
+Standby does not encrypt its own connection. Over plain `http://` the password and session token can be captured on the network: use HTTPS, SSH or Tailscale where the network is not yours.
 
-## Your signed transactions are stored unencrypted — and they are bearer
+## Requests from other sites
 
-Standby stores your signed transactions unencrypted in the app's data directory on the device. A signed transaction is bearer: whoever holds the signed hex can broadcast it, with or without Standby. The data directory and every file in it are readable by the app's own user only (UID 1000 — the app no longer runs as root), so other users on the machine cannot read them — but root, anyone with Docker access, or a stolen drive can. Protect access to the device itself.
-
-A signed hex also reveals the destination addresses and amounts.
+A request a browser marks as coming from another site or another port (another Umbrel app) is refused. State-changing requests must also come from the app's own origin with a JSON content type. Unknown hostnames get 421, which blocks DNS rebinding.
 
 ## Broadcasts are real
 
-The dry-run buttons only check whether the inputs are still unspent — they never broadcast. A release broadcasts for real, so keep the inputs unspent (spend one and the transaction goes stale and is never broadcast), use RBF so the heir can fee-bump, and remember a false-positive release moves real funds. If this device is down, nothing broadcasts.
+Dry runs never broadcast; a release does. Before each release the inputs are re-checked and a transaction whose input was spent elsewhere is never sent. A false release moves real funds. Disarming stops automatic release only; a disarmed transaction can still be broadcast by hand. If the device is down, nothing broadcasts.
 
-A release re-checks every armed transaction's inputs first — a spent input means stale, never broadcast — and a broadcast has a 15-second deadline. Releases are evaluated on every check-cadence tick (about once a minute by default) and on demand.
+## Check-in keys
 
-## Disarming stops automatic release, not manual broadcasts
+A key can only record a check-in: it cannot read transactions, broadcast or change settings. A stolen key can still keep check-in triggers from ever firing, so revoke it at once if you suspect a leak, and give each service its own key. Keys are stored only as hashes.
 
-Disarming a transaction only stops it firing on its own — the release and Broadcast Armed both skip disarmed transactions. You can still broadcast a disarmed transaction by hand, from its own card.
+The receiver (port 3101) is plain HTTP and has two routes (`GET /health`, `POST /checkin`), access only to the check-in directory, and a generic 401 for every bad key. Keep it on your LAN or Tailscale; never expose it to the internet. Each check-in records the caller's address in the log.
 
-## Check-in keys and the receiver (port 3101)
+## Bitcoin Core RPC
 
-A check-in key can only record a check-in: it cannot read your transactions, broadcast anything, or change settings. Give each service its own key so you can revoke one without touching the others. The key is shown once, when it is created — copy it then.
+An RPC node's username and password are stored in the app's state (owner-only), included in backups, never sent back to the browser and never logged. RPC credentials control the whole node, and its wallets if any are loaded, so give Standby a restricted user. Generate one with Bitcoin Core's `share/rpcauth/rpcauth.py` and limit it in `bitcoin.conf`:
 
-The check-in connection is plain HTTP: the key travels unencrypted. On the generic Docker install the receiver runs on its own Docker network, with no route to the web API. Keep port 3101 on your trusted LAN and Tailscale network only — never port-forward it or expose it to the internet. A stolen key can only check in, but it can keep the switch from ever triggering, so revoke a key the moment you suspect it leaked.
+```
+rpcauth=standby:<salt>$<hash>
+rpcwhitelist=standby:getblockcount,getindexinfo,gettxout,gettxspendingprevout,getrawtransaction,getblockheader,estimatesmartfee,sendrawtransaction
+```
 
-The receiver holds no transaction data: it has two routes (`GET /health`, `POST /checkin`), mounts only the checkin directory, and cannot read, generate, or broadcast anything. It answers every bad key with the same generic 401, so a caller learns nothing about the setup. Each check-in records the caller's address, shown in the Recent check-ins log, so a check-in you didn't make is visible.
+RPC is plain HTTP unless you put TLS in front of it: keep it on your LAN or Tailscale.
 
-## Backups: encrypt them
+## Backups
 
-A backup holds everything needed to restore the setup: every signed transaction (hex included), your settings and the check-in clock, plus the check-in and broadcast history and the check-in key hashes. Download Backup offers two choices:
+A backup contains every signed transaction, your settings (RPC login included), the check-in clock and key hashes, and recent logs.
 
-- **Encrypted with a password you choose** (the default, recommended). The file is useless without the password. Standby cannot recover a lost password, so write it down somewhere other than the device. The dialog can generate a strong passphrase for you.
-- **Unencrypted.** Anyone who gets the file can broadcast your transactions and see where they send funds. Treat it like the transactions themselves.
+- **Encrypted** (default): useless without the password, which Standby cannot recover. Encryption happens on the device.
+- **Unencrypted:** treat the file like the transactions themselves.
 
-Encryption happens on the device, before the backup is sent to your browser, so an encrypted backup never crosses your network unencrypted. Restoring an encrypted backup asks for its password.
-
-**Opening a backup without Standby.** `tools/decrypt-backup.js` in this repository decrypts a backup with nothing but Node.js 18+ — for when the device is gone, or for anyone you have given the file and password to:
+`tools/decrypt-backup.js` decrypts a backup with only Node.js 18+:
 
 ```sh
 node decrypt-backup.js standby-backup-2026-11-24.encrypted.json > backup.json
 ```
 
-**Format** (version 1), for anyone writing their own decryptor: a JSON file
+Format (version 1):
 
 ```json
 { "format": "standby-backup-encrypted", "version": 1,
@@ -65,10 +64,8 @@ node decrypt-backup.js standby-backup-2026-11-24.encrypted.json > backup.json
   "data":   "<base64: ciphertext followed by the 16-byte GCM tag>" }
 ```
 
-The key is scrypt(password as UTF-8, salt, N, r, p), 32 bytes. The GCM additional data is the UTF-8 JSON array `[format, version, kdf.name, kdf.N, kdf.r, kdf.p, kdf.salt, cipher.name, cipher.iv]` (compact, no spaces). The decrypted bytes are a gzipped plain `standby-backup` JSON document.
-
-The copies kept on the device itself (`state.json` and its daily snapshots) are not encrypted: Standby has to read them unattended to broadcast, so the key would have to sit next to them. They are readable by the app's own user only.
+The key is scrypt(password as UTF-8, salt, N, r, p), 32 bytes. The GCM additional data is the compact UTF-8 JSON array `[format, version, kdf.name, kdf.N, kdf.r, kdf.p, kdf.salt, cipher.name, cipher.iv]`. The plaintext is a gzipped `standby-backup` JSON document.
 
 ## What leaves the device
 
-Your keys never leave your wallet — the app never sees them. The app queries your mempool nodes with your transaction IDs to check the inputs (mempool.space as primary, blockstream.info as fallback), and sends the full signed hex to a node only when it broadcasts. Nothing else leaves the device: no keys, no recipient, no messages.
+Standby asks your nodes about the transactions' inputs and txids, sends the signed hex to a node (or Slipstream) only to broadcast, and fetches BTC prices from the sources you choose. Nothing else leaves: no keys and no messages.

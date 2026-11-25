@@ -1,18 +1,22 @@
 'use strict';
 // Standby — check-in keys, grace, vacation, check-in clock.
 const store = require('./store');
+const rpc = require('./rpc');
 const fs = require('fs');
 const crypto = require('crypto');
 const path = require('path');
 const { CHECKIN_DIR, DATA_DIR } = require('./config');
 const { GRACE_DURATION_DAYS, GRACE_OFFLINE_DAYS, days } = require('./util');
 
-// State as served: a deep copy without the check-in key hashes (the UI
-// never needs them). Only the backup carries them, so restored keys keep
-// working.
+// State as served: a deep copy without the check-in key hashes or RPC
+// passwords (the UI never needs them). Only the backup carries them, so a
+// restore keeps working.
 function sanitizeState(state) {
   const copy = JSON.parse(JSON.stringify(state));
   if (Array.isArray(copy.checkinKeys)) copy.checkinKeys = copy.checkinKeys.map(publicCheckinKey);
+  if (copy.settings) {
+    for (const key of ['primaryRpc', 'secondaryRpc']) copy.settings[key] = rpc.publicSetting(copy.settings[key]);
+  }
   return copy;
 }
 

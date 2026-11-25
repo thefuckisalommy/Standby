@@ -1,6 +1,7 @@
 'use strict';
 const store = require('../store');
 const bitcoin = require('../bitcoin');
+const rpc = require('../rpc');
 const { sanitizeState, startupWarnings, syncCheckinFreeze, writeReceiverKeys } = require('../checkin');
 const { DATA_DIR, RESTORE_CHECK_MS } = require('../config');
 const backupcrypto = require('../backupcrypto');
@@ -94,6 +95,11 @@ module.exports = async function backupRoutes(ctx) {
     if (typeof bsSettings.secondaryApiUrl === 'string' && bsSettings.secondaryApiUrl.trim()) {
       try { settings.secondaryApiUrl = bitcoin.normalizePublicApiUrl(bsSettings.secondaryApiUrl); }
       catch (e) { return sendError(res, 400, 'backup secondary node URL: ' + e.message); }
+    }
+    for (const key of ['primaryRpc', 'secondaryRpc']) {
+      if (bsSettings[key] === undefined || bsSettings[key] === null) continue;
+      try { settings[key] = rpc.normalizeSetting(bsSettings[key], null); }
+      catch (e) { return sendError(res, 400, 'backup ' + (key === 'primaryRpc' ? 'primary' : 'secondary') + ' node: ' + e.message); }
     }
     // The secondary toggle rides along (missing means enabled; a non-
     // boolean rejects the restore).
