@@ -53,7 +53,7 @@ Both run read-only, without Linux capabilities, with `no-new-privileges`.
 
 **Updating:** change the image tag (or download the new compose file), then `docker compose pull && docker compose up -d`. Data lives in `./data` and `./checkin`.
 
-**Without Docker** (Linux, macOS or Windows): Node 26+, `cd standby && node server.js` (localhost:3100, data in `./data`). The check-in receiver is `node checkin-receiver/server.js` (port 3101). On Windows, Ctrl+C or Ctrl+Break stops it cleanly.
+**Without Docker** (Linux, macOS or Windows): Node 26+, `cd standby && node server.js` (localhost:3100, data in `./data`). The check-in receiver is `node checkin-receiver/server.js` (port 3101). On Windows, Ctrl+C or Ctrl+Break stops it cleanly. Only one copy runs per data folder; a second refuses to start.
 
 ### Configuration
 
@@ -67,6 +67,7 @@ All optional; see `standby/lib/config.js`.
 | `STANDBY_WEB_PORT`, `STANDBY_CHECKIN_PORT` | `3100`, `3101` | Host ports in `docker-compose.yml`. |
 | `PORT`, `DATA_DIR`, `CHECKIN_DIR` | `3100`, `./data`, `./data/checkin` | Listen port and data locations (Docker and Umbrel set `/data` and `/checkin`). |
 | `MEMPOOL_HOST`, `MEMPOOL_PORT`, `MEMPOOL_PROTOCOL` | unset | Override a mempool primary node. |
+| `STANDBY_LOG_FILE` | unset | Also write the log to this file (rotates at 1 MB). Give the receiver its own file. |
 
 ## Check-ins
 

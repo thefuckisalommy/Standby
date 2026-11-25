@@ -11,7 +11,9 @@
 // the app merges.
 
 const http = require('http');
-const { PORT, BIND, VERSION, DATA_DIR, CHECKIN_DIR, STARTUP_TICK_MS, DEPLOYMENT, PASSWORD, MEMPOOL_OVERRIDE, IGNORED_TEST_OVERRIDES } = require('./lib/config');
+const { PORT, BIND, VERSION, DATA_DIR, CHECKIN_DIR, LOG_FILE, STARTUP_TICK_MS, DEPLOYMENT, PASSWORD, MEMPOOL_OVERRIDE, IGNORED_TEST_OVERRIDES } = require('./lib/config');
+require('./lib/logfile').install(LOG_FILE);
+const instance = require('./lib/instance');
 const { requireWritable } = require('./lib/startup');
 const store = require('./lib/store');
 const { verifyCheckinKeyStore } = require('./lib/checkin');
@@ -30,6 +32,16 @@ requireWritable([
 {
   const tightened = store.secureDataDir(DATA_DIR);
   if (tightened) console.log('Standby: made ' + tightened + ' data path(s) owner-only (0700 directory, 0600 files)');
+}
+// One copy per data folder (lib/instance.js): a second would also
+// evaluate triggers and could broadcast twice.
+{
+  const lock = instance.acquire(DATA_DIR, store.DATA_FILE_MODE);
+  if (!lock.ok) {
+    console.error('Standby: another copy is already running on this data folder (' + DATA_DIR + ', pid ' + lock.pid + ').'
+      + ' Stop it first, or give this copy its own DATA_DIR. Two copies could both broadcast.');
+    process.exit(1);
+  }
 }
 
 // An uncaught exception is a crash, not something to serve through: for an
@@ -93,6 +105,13 @@ const server = http.createServer((req, res) => {
   catch (e) { console.error(e); if (!res.headersSent) sendError(res, 500, 'static file error'); }
 });
 
+server.on('error', (e) => {
+  if (e.code === 'EADDRINUSE') {
+    console.error('Standby: port ' + PORT + ' is already in use on ' + BIND + ' (another program, or another Standby). Set PORT to a free port.');
+    process.exit(1);
+  }
+  throw e;
+});
 server.listen(PORT, BIND, () => {
   console.log(`Standby ${VERSION} listening on ${BIND}:${PORT} (data: ${DATA_DIR}, deployment: ${DEPLOYMENT})`);
   console.log('Standby allowed Hosts: ' + describeAllowedHosts());

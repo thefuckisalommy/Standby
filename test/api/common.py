@@ -5,6 +5,7 @@ import http.client
 import json
 import os
 import platform
+import re
 import shutil
 import signal
 import socket

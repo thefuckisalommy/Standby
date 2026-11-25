@@ -875,3 +875,52 @@ def run():
     check('36 uncaught: receiver log records the exception',
           'uncaught exception:' in _rc_log, _rc_log[-300:] if _rc_log else None)
     check('36 uncaught: scratch receiver port is closed again', port_closed(3441))
+
+    # --- 47. one copy per data folder; port in use; log file ---
+    one_data = TMP + '/standby-test099-onecopy'
+    one_log = TMP + '/standby-test099-onecopy.log'
+    one_file = TMP + '/standby-test099-onecopy-file.log'
+    for pth in (one_data,):
+        shutil.rmtree(pth, ignore_errors=True)
+    for pth in (one_log, one_file, one_file + '.1'):
+        try:
+            os.remove(pth)
+        except OSError:
+            pass
+    one_env = dict(APP_ENV)
+    one_env.update({'PORT': '3440', 'DATA_DIR': one_data, 'CHECKIN_DIR': one_data + '/checkin', 'STANDBY_LOG_FILE': one_file})
+    check('47 one copy: port 3440 free', port_closed(3440))
+    one_app = start(['node', 'server.js'], env=one_env, cwd=APP, log=one_log)
+    check('47 one copy: first copy comes up', wait_up('http://127.0.0.1:3440'))
+    lock = json.load(open(os.path.join(one_data, 'standby.lock')))
+    check('47 one copy: the lock names the running copy', lock.get('pid') == one_app.pid, lock)
+    # A second copy on the same data folder (another port) refuses.
+    two = subprocess.run(['node', 'server.js'], env=dict(os.environ, **dict(one_env, PORT='3441', STANDBY_TEST_MODE='1')),
+                         cwd=APP, capture_output=True, text=True, timeout=20)
+    check('47 one copy: a second copy on the same data folder refuses to start',
+          two.returncode == 1 and 'another copy is already running on this data folder' in two.stdout + two.stderr,
+          (two.returncode, (two.stdout + two.stderr)[-300:]))
+    check('47 one copy: ... and never listened', port_closed(3441))
+    # A copy on a taken port says so.
+    busy = subprocess.run(['node', 'server.js'], env=dict(os.environ, **dict(one_env, DATA_DIR=one_data + '-other', STANDBY_TEST_MODE='1')),
+                          cwd=APP, capture_output=True, text=True, timeout=20)
+    shutil.rmtree(one_data + '-other', ignore_errors=True)
+    check('47 port: a taken port is a clear error, not a crash',
+          busy.returncode == 1 and 'port 3440 is already in use' in busy.stdout + busy.stderr,
+          (busy.returncode, (busy.stdout + busy.stderr)[-300:]))
+    # The log file holds the console lines, timestamped.
+    try:
+        log_text = open(one_file).read()
+    except OSError:
+        log_text = ''
+    check('47 log file: STANDBY_LOG_FILE gets the console lines, timestamped',
+          re.search(r'^\d{4}-\d\d-\d\dT[\d:.]+Z INFO Standby \S+ listening on ', log_text, re.M) is not None, log_text[:300])
+    # A lock left by a dead copy is taken over.
+    stop(one_app)
+    with open(os.path.join(one_data, 'standby.lock'), 'w') as f:
+        json.dump({'pid': 999999, 'refreshedAt': datetime.now(timezone.utc).isoformat()}, f)
+    one_app = start(['node', 'server.js'], env=one_env, cwd=APP, log=one_log)
+    check('47 one copy: a lock left by a dead copy is taken over', wait_up('http://127.0.0.1:3440'))
+    stop(one_app)
+    check('47 one copy: port 3440 closed again', port_closed(3440))
+

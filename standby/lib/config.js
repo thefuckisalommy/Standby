@@ -32,6 +32,9 @@ const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 // last.json in). Docker and Umbrel set it; a bare run (Linux, macOS or
 // Windows) uses the checkin folder inside the data directory.
 const CHECKIN_DIR = process.env.CHECKIN_DIR || path.join(DATA_DIR, 'checkin');
+// Also write the log to this file (relative to the working directory);
+// empty means console only.
+const LOG_FILE = (process.env.STANDBY_LOG_FILE || '').trim();
 // One source of truth for the version: package.json.
 const VERSION = require('../package.json').version;
 const MAX_BODY = 1024 * 1024; // 1 MB
@@ -74,6 +77,6 @@ const ALLOWED_HOSTS_EXTRA = (process.env.STANDBY_ALLOWED_HOSTS || '').split(',')
 
 module.exports = {
   PORT, BIND, DEPLOYMENT, DEPLOYMENTS, PASSWORD, TEST_MODE, STARTUP_TICK_MS, RESTORE_CHECK_MS, OFFLINE_REFRESH_MS, DATA_DIR, PUBLIC_DIR,
-  CHECKIN_DIR, VERSION, MAX_BODY, MEMPOOL_OVERRIDE, PRICE_API_URL_OVERRIDE,
+  CHECKIN_DIR, LOG_FILE, VERSION, MAX_BODY, MEMPOOL_OVERRIDE, PRICE_API_URL_OVERRIDE,
   SLIPSTREAM_API_URL_OVERRIDE, IGNORED_TEST_OVERRIDES, ALLOWED_HOSTS_EXTRA,
 };
