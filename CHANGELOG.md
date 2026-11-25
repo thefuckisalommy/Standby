@@ -6,7 +6,7 @@ Code comments describe how the app works now; the history of why it changed live
 
 ## 0.8.14
 
-Bitcoin Core RPC. Each node in Settings → Bitcoin nodes now has a Bitcoin Core RPC toggle: turn it on and enter the node's RPC address, username and password to use Bitcoin Core directly instead of a mempool API. The password is stored on the device and never shown again in the app. Test connection checks whether the node has txindex turned on and, if not, says how to enable it — without txindex Standby cannot tell when an input was spent in a block. Fees for new transactions are worked out from the node even without txindex. Also in 0.8.14: the README and security notes are shorter and cover RPC setup, including a restricted RPC user.
+Bitcoin Core RPC. Each node in Settings → Bitcoin nodes now has a Bitcoin Core RPC toggle: turn it on and enter the node's RPC address, username and password to use Bitcoin Core directly instead of a mempool API. The password is stored on the device and never shown again in the app. Test connection checks whether the node has txindex turned on and, if not, says how to enable it — without txindex Standby cannot tell when an input was spent in a block. Fees for new transactions are worked out from the node even without txindex, and a node running -txospenderindex is read correctly (a confirmed spend names its spender and block). IPv6 node addresses (like http://[::1]:8332) now work, for mempool nodes too. Also in 0.8.14: the README and security notes are shorter and cover RPC setup, including a restricted RPC user.
 
 ## 0.8.13.1
 

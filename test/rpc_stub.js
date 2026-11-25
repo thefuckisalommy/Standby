@@ -11,6 +11,8 @@
 //   knows mempool transactions only
 // - POST /__test__/mempool-spend { txid, vout, spender }: a mempool spend
 // - POST /__test__/old-core { enabled }: no gettxspendingprevout
+// - POST /__test__/spender-index { mode: 'off'|'synced'|'behind' }: like
+//   -txospenderindex (confirmed spenders found, or an error while behind)
 // - POST /__test__/send-mode { mode: 'confirm'|'mempool' }
 // - POST /__test__/fees { economyFee } (sat/vB)
 // - POST /__test__/reset
@@ -28,11 +30,11 @@ const TIP = 900000;
 let world;
 function reset() {
   world = {
-    txindex: true, txindexSynced: true, oldCore: false, sendMode: 'confirm', economyFee: 1,
+    txindex: true, txindexSynced: true, spenderIndex: 'off', oldCore: false, sendMode: 'confirm', economyFee: 1,
     // txid -> { vouts: [sats], height: number|null (null: mempool), hex }
     txs: new Map([[FINNEY, { vouts: [200000, 150000], height: 899000 }], [SECOND, { vouts: [200000], height: 899000 }]]),
     // 'txid:vout' -> { spender, confirmed }
-    spends: new Map([[FINNEY + ':0', { spender: 'bb'.repeat(32), confirmed: true }]]),
+    spends: new Map([[FINNEY + ':0', { spender: 'bb'.repeat(32), confirmed: true, height: 899990 }]]),
     calls: {}, sent: [],
   };
 }
@@ -99,7 +101,12 @@ const methods = {
     if (world.oldCore) throw new RpcErr(-32601, 'Method not found');
     return outpoints.map(({ txid, vout }) => {
       const sp = world.spends.get(txid + ':' + vout);
-      return sp && !sp.confirmed ? { txid, vout, spendingtxid: sp.spender } : { txid, vout };
+      if (sp && !sp.confirmed) return { txid, vout, spendingtxid: sp.spender };
+      // Like Core with -txospenderindex: confirmed spenders too, with
+      // their block; an index not caught up throws.
+      if (sp && world.spenderIndex === 'synced') return { txid, vout, spendingtxid: sp.spender, blockhash: 'blk' + sp.height };
+      if (sp && world.spenderIndex === 'behind') throw new RpcErr(-1, 'Mempool lacks a relevant spend, and txospenderindex is unavailable.');
+      return { txid, vout };
     });
   },
   getrawtransaction: ([txid]) => {
@@ -133,7 +140,7 @@ const methods = {
     }
     const confirm = world.sendMode === 'confirm';
     world.txs.set(tx.txid, { vouts: tx.vouts, height: confirm ? 899995 : null });
-    for (const i of tx.inputs) world.spends.set(i.txid + ':' + i.vout, { spender: tx.txid, confirmed: confirm });
+    for (const i of tx.inputs) world.spends.set(i.txid + ':' + i.vout, { spender: tx.txid, confirmed: confirm, height: confirm ? 899995 : null });
     world.sent.push(hex);
     return tx.txid;
   },
@@ -172,6 +179,7 @@ http.createServer((req, res) => {
       if (p === '/__test__/reset') reset();
       else if (p === '/__test__/txindex') { world.txindex = b.enabled !== false; world.txindexSynced = b.synced !== false; }
       else if (p === '/__test__/old-core') world.oldCore = b.enabled === true;
+      else if (p === '/__test__/spender-index') world.spenderIndex = ['synced', 'behind'].includes(b.mode) ? b.mode : 'off';
       else if (p === '/__test__/send-mode') world.sendMode = b.mode === 'mempool' ? 'mempool' : 'confirm';
       else if (p === '/__test__/fees') world.economyFee = Number(b.economyFee) || 1;
       else if (p === '/__test__/mempool-spend') world.spends.set(b.txid + ':' + b.vout, { spender: b.spender, confirmed: false });

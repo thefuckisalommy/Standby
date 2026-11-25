@@ -27,7 +27,8 @@ function requestText({ protocol, hostname, port, path: p, method, headers, body,
     if (timer.unref) timer.unref(); // don't keep the process alive for this alone
     const lib = protocol === 'https:' ? https : http;
     const req = lib.request(
-      { hostname, port, path: p, method, headers },
+      // An IPv6 literal arrives bracketed from URL parsing; the socket wants it bare.
+      { hostname: String(hostname).replace(/^\[(.*)\]$/, '$1'), port, path: p, method, headers },
       (res) => {
         const chunks = [];
         let received = 0;

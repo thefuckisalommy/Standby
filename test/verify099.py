@@ -5901,6 +5901,29 @@ def main():
         check('45 dry run: an input spent in a block reads stale', s == 200 and one.get('verdict') == 'blocked' and len(one.get('spent', [])) == 1, one)
         s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'utxo', 'params': {'outpoint': v.FINNEY + ':0', 'confirmations': 0}}}, base=_ab43)
         check('45 utxo: a spent outpoint fires', s == 200 and r.get('fire') is True, r)
+        # With -txospenderindex Core names a confirmed spender and its
+        # block: still stale, now with the spender and height. While the
+        # index is behind it errors, and the spend reads as without it.
+        req('POST', '/__test__/spender-index', {'mode': 'synced'}, base=_rpc_base)
+        _clear45()
+        s, one = _dry45(_stale45)
+        sp = (one.get('spent') or [{}])[0]
+        check('45 spender index: a confirmed spend is stale, naming the spender and block',
+              s == 200 and one.get('verdict') == 'blocked' and sp.get('spentBy') == 'bb' * 32 and sp.get('blockHeight') == 899990, one)
+        s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'utxo', 'params': {'outpoint': v.FINNEY + ':0', 'confirmations': 6}}}, base=_ab43)
+        check('45 spender index: a UTXO rule counts confirmations from the spend block (11 >= 6, fires)', s == 200 and r.get('fire') is True, r)
+        req('POST', '/__test__/spender-index', {'mode': 'behind'}, base=_rpc_base)
+        _clear45()
+        s, one = _dry45(_stale45)
+        check('45 spender index: while the index is behind, the spend still reads stale (via txindex)',
+              s == 200 and one.get('verdict') == 'blocked' and len(one.get('spent', [])) == 1, one)
+        req('POST', '/__test__/spender-index', {'mode': 'off'}, base=_rpc_base)
+        # The same RPC node in both slots is asked once, with the primary's
+        # login (the secondary's must not replace it).
+        s, r = req('PUT', '/api/settings', {'secondaryEnabled': True, 'secondaryRpc': dict(_rpc_on, user='other', password='otherpass')}, base=_ab43)
+        pr = _test45()
+        check('45 same node twice: the primary keeps its own login (OK)', s == 200 and pr.get('status') == 'ok', (s, pr.get('detail')))
+        req('PUT', '/api/settings', {'secondaryEnabled': False, 'secondaryRpc': dict(_rpc_on, enabled=False)}, base=_ab43)
         # A mempool spend by someone else: a conflict naming the spender.
         req('POST', '/__test__/mempool-spend', {'txid': v.SECOND, 'vout': 0, 'spender': 'cd' * 32}, base=_rpc_base)
         s, r = req('POST', '/api/bitcoin/txs', {'txHex': v.craft_prev(v.SECOND, 0, 120002), 'label': 'RPC conflict', 'trigger': {'type': 'manual', 'params': {}}}, base=_ab43)

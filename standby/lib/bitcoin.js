@@ -74,33 +74,32 @@ function timelockedUntil(tx, tipHeight, now) {
 // The endpoints in the order they are tried. A secondary identical to
 // the primary is dropped — trying the same server twice buys nothing.
 function endpointsFor(settings) {
-  const eps = [{ label: 'primary', base: rpcEndpointBase(settings && settings.primaryRpc) || mempoolBase(settings) }];
+  const s = settings || {};
+  const primaryRpc = rpc.settingBase(s.primaryRpc);
+  if (primaryRpc) rpc.register(primaryRpc, s.primaryRpc.user, s.primaryRpc.password);
+  const eps = [{ label: 'primary', base: primaryRpc || mempoolBase(s) }];
   // Secondary disabled: return the primary alone. Every endpoint consumer
   // reads from here, so this is the whole enforcement. A missing flag
   // means enabled.
-  if (settings && settings.secondaryEnabled === false) return eps;
-  const sec = rpcEndpointBase(settings && settings.secondaryRpc) || mempoolSecondaryBase(settings);
-  if (sec && sec !== eps[0].base) eps.push({ label: 'secondary', base: sec });
+  if (s.secondaryEnabled === false) return eps;
+  const secondaryRpc = rpc.settingBase(s.secondaryRpc);
+  const sec = secondaryRpc || mempoolSecondaryBase(s);
+  // The same node twice is tried once, with the primary's login.
+  if (sec && sec !== eps[0].base) {
+    if (secondaryRpc) rpc.register(secondaryRpc, s.secondaryRpc.user, s.secondaryRpc.password);
+    eps.push({ label: 'secondary', base: sec });
+  }
   return eps;
 }
 
 // Each node slot's base as configured (the secondary even while it is
 // switched off), for the UI to match test results to its rows.
 function nodeBases(settings) {
+  const s = settings || {};
   return {
-    primary: rpcEndpointBase(settings && settings.primaryRpc) || mempoolBase(settings),
-    secondary: rpcEndpointBase(settings && settings.secondaryRpc) || mempoolSecondaryBase(settings),
+    primary: rpc.settingBase(s.primaryRpc) || mempoolBase(s),
+    secondary: rpc.settingBase(s.secondaryRpc) || mempoolSecondaryBase(s),
   };
-}
-
-// An enabled RPC node's base, with its login registered for requests; null
-// when RPC is off for this node or its address is unusable.
-function rpcEndpointBase(r) {
-  if (!r || r.enabled !== true) return null;
-  let base;
-  try { base = rpc.rpcBaseFor(r.url); } catch { return null; }
-  rpc.register(base, r.user, r.password);
-  return base;
 }
 
 // "host[:port]" for messages and log notes (never the full URL twice).

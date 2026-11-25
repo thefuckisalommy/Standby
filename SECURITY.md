@@ -33,7 +33,7 @@ The receiver (port 3101) is plain HTTP and has two routes (`GET /health`, `POST 
 
 ## Bitcoin Core RPC
 
-An RPC node's username and password are stored in the app's state (owner-only), included in backups, never sent back to the browser and never logged. RPC credentials control the whole node, and its wallets if any are loaded, so give Standby a restricted user. Generate one with Bitcoin Core's `share/rpcauth/rpcauth.py` and limit it in `bitcoin.conf`:
+An RPC node's username and password are stored in the app's state (owner-only) and never logged. The app never shows the password again after you save it; the only thing that carries it is a backup, and an unencrypted backup carries it in plain text. RPC credentials control the whole node, and its wallets if any are loaded, so give Standby a restricted user. Generate one with Bitcoin Core's `share/rpcauth/rpcauth.py` and limit it in `bitcoin.conf`:
 
 ```
 rpcauth=standby:<salt>$<hash>

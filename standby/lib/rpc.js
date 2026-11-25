@@ -34,6 +34,13 @@ function register(base, user, password) {
   logins.set(base, { user: String(user || ''), password: String(password || '') });
 }
 
+// An enabled RPC setting's base, or null when RPC is off or the address
+// is unusable. Registers nothing.
+function settingBase(r) {
+  if (!r || r.enabled !== true) return null;
+  try { return rpcBaseFor(r.url); } catch { return null; }
+}
+
 class RpcError extends Error {
   constructor(code, message) { super(message); this.code = code; }
 }
@@ -88,6 +95,7 @@ async function batch(base, calls, timeoutMs) {
 
 const NOT_FOUND = -5; // RPC_INVALID_ADDRESS_OR_KEY: no such transaction
 const METHOD_NOT_FOUND = -32601;
+const MISC_ERROR = -1;
 
 const sats = (btc) => Math.round(btc * 1e8);
 const reply = (status, body) => ({ status, body: typeof body === 'string' ? body : JSON.stringify(body) });
@@ -120,10 +128,18 @@ async function outspend(base, txid, vout, timeoutMs) {
   const out = await call(base, 'gettxout', [txid, vout, true], timeoutMs);
   if (out) return { spent: false };
   try {
+    // With -txospenderindex this also finds confirmed spenders, with
+    // their block hash.
     const [hit] = await call(base, 'gettxspendingprevout', [[{ txid, vout }]], timeoutMs);
+    if (hit && hit.spendingtxid && hit.blockhash) {
+      const header = await call(base, 'getblockheader', [hit.blockhash], timeoutMs);
+      return { spent: true, txid: hit.spendingtxid, vin: null, status: { confirmed: true, block_height: header.height, block_hash: hit.blockhash } };
+    }
     if (hit && hit.spendingtxid) return { spent: true, txid: hit.spendingtxid, vin: null, status: { confirmed: false } };
   } catch (e) {
-    if (e.code !== METHOD_NOT_FOUND) throw e; // Bitcoin Core before 24: no mempool spender
+    // Before Core 24 there is no such call; an index that is not caught up
+    // answers RPC_MISC_ERROR. Either way, read the spend as below.
+    if (e.code !== METHOD_NOT_FOUND && e.code !== MISC_ERROR) throw e;
   }
   const parent = await txInfo(base, txid, timeoutMs);
   if (!parent || vout >= parent.vout.length) return null;
@@ -224,4 +240,4 @@ function publicSetting(r) {
   return { enabled: r.enabled === true, url: r.url || '', user: r.user || '', hasPassword: !!r.password };
 }
 
-module.exports = { isRpcBase, rpcBaseFor, register, answer, call, normalizeSetting, publicSetting };
+module.exports = { isRpcBase, rpcBaseFor, settingBase, register, answer, call, normalizeSetting, publicSetting };
