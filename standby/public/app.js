@@ -480,14 +480,20 @@
     if (!file) return;
     try {
       var r = await restoreBackupFile(file, $('state-error-msg'));
+      // The card stays up so the restore summary (what the node check
+      // found) can be read; Continue reloads into the restored app.
       setMsg($('state-error-msg'), restoreMessage(r), true);
       $('state-restore-file').value = '';
-      location.reload();
+      $('btn-state-restore').style.display = 'none';
+      $('btn-state-reset').style.display = 'none';
+      $('btn-state-continue').style.display = '';
     } catch (e) {
       if (e.message !== 'cancelled') setMsg($('state-error-msg'), e.message, false);
       $('state-restore-file').value = '';
     }
   });
+
+  $('btn-state-continue').addEventListener('click', function () { location.reload(); });
 
   $('btn-state-reset').addEventListener('click', function () {
     showConfirm('Start fresh?',

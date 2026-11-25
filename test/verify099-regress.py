@@ -101,8 +101,7 @@ state, and fee caches.
 
 Ports: app 3448, receiver 3449, stubs 18245/18246 — no collision
 with the 094 suite (app 3378, receiver 3379, stubs 18159/18160/18161).
-Reuses the 094 helpers (import verify094 — importing does not run
-main()) and never touches the 094 files or the main app/ copy.
+Reuses the shared test helpers (test/helpers.py) and never touches the 094 files or the main app/ copy.
 """
 import copy
 import json
@@ -115,15 +114,14 @@ import time
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import verify094 as v
+import helpers as v
 
 check = v.check
 
 
 def req(method, path, body=None, base=None, timeout=20, headers=None):
-    # verify094.req defaults to ITS base (port 3378); this suite's
-    # app is on 3448, so default to our BASE here instead. base=None
-    # resolves at call time (BASE is defined below).
+    # helpers.req needs a base; this suite's app is on 3448, so
+    # default to our BASE (resolved at call time — defined below).
     return v.req(method, path, body, base=base or BASE, timeout=timeout, headers=headers)
 
 
@@ -973,7 +971,7 @@ def main():
               (txs9[txr9low].get('release'), txs9[txr9m].get('release')))
 
         # --- 10. restore carries trigger/triggerState, refreshes clock --
-        s, bak = req('GET', '/api/backup')
+        s, bak = req('POST', '/api/backup', {})
         check('10 backup taken (5 txs)', s == 200 and len(bak.get('state', {}).get('bitcoin', {}).get('txs', [])) == 5, len(bak.get('state', {}).get('bitcoin', {}).get('txs', [])))
         bak_triggers = {t['id']: t.get('trigger') for t in bak['state']['bitcoin']['txs']}
         bak_states = {t['id']: t.get('triggerState') for t in bak['state']['bitcoin']['txs']}
@@ -1933,7 +1931,7 @@ def main():
               'thresholdDays' not in st.get('settings', {}), st.get('settings'))
         # A pre-0.8.0 backup carrying settings.thresholdDays
         # restores without it.
-        s, bak = req('GET', '/api/backup')
+        s, bak = req('POST', '/api/backup', {})
         bak['state']['settings']['thresholdDays'] = 90
         s, r = req('POST', '/api/restore', bak)
         check('16 restore of a backup carrying thresholdDays lands', s == 200, r)
@@ -2351,7 +2349,7 @@ def main():
         s, r = req('PUT', '/api/settings', {'graceOfflineDays': 14, 'graceDurationDays': 30,
                                             'priceSources': {'source1': 'kraken', 'source2': 'bitstamp'}})
         check('18 restore: non-default grace + price-source settings save', s == 200, (s, r))
-        s, bak = req('GET', '/api/backup')
+        s, bak = req('POST', '/api/backup', {})
         check('18 restore: the backup carries the grace settings (14 / 30)',
               bak.get('state', {}).get('settings', {}).get('graceOfflineDays') == 14
               and bak.get('state', {}).get('settings', {}).get('graceDurationDays') == 30,
@@ -2626,7 +2624,7 @@ def main():
         # and a pre-0.8.0 backup without them gets the defaults.
         s, r = req('PUT', '/api/settings', {'priceAgreementPct': 2, 'checkCadenceSeconds': 10, 'feeLowMultiplier': 3, 'feeMediumMultiplier': 1.5})
         check('20 restore: non-default values saved for the backup', s == 200, (s, r))
-        s, bak = req('GET', '/api/backup')
+        s, bak = req('POST', '/api/backup', {})
         check('20 restore: the backup carries all four values',
               s == 200
               and bak.get('state', {}).get('settings', {}).get('priceAgreementPct') == 2
@@ -3077,7 +3075,7 @@ def main():
         check('21h setup: the 25d check-in tx added', s == 201, r)
         s, r = req('PUT', '/api/bitcoin/txs/' + txv21h, {'enabled': False})
         check('21h disarming the tx (so it carries an open inactive period)', s == 200, r)
-        s, bak = req('GET', '/api/backup')
+        s, bak = req('POST', '/api/backup', {})
         bak_tx = [t for t in bak.get('state', {}).get('bitcoin', {}).get('txs', []) if t.get('id') == txv21h]
         check('21h the backup carries the freeze fields on the tx',
               s == 200 and len(bak_tx) == 1 and bak_tx[0].get('checkinOffsetMs') == 0

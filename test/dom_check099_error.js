@@ -195,7 +195,7 @@ function selectValues(html, id) {
   return [...block.matchAll(/value="([^"]+)"/g)].map((m) => m[1]);
 }
 // A minimal 1-in/1-out tx spending Finney vout 1 (the same shape
-// as verify094.craft) — so the DOM test can add transactions via
+// as helpers.craft) — so the DOM test can add transactions via
 // the API without importing the Python helpers.
 function craftHex(vout, value) {
   const FINNEY = 'f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16';
@@ -214,8 +214,8 @@ function craftHex(vout, value) {
 }
 function craftLocktimeHex(vout, locktime, value) {
   // Same shape as craftHex, but with an explicit locktime and a
-  // non-maxed sequence (0), so the locktime applies — mirrors
-  // verify094.craft_locktime. A block-height locktime above the
+  // non-maxed sequence (0), so the locktime applies. A block-height
+  // locktime above the
   // stub tip (900000) makes the dry-run verdict 'timelocked'.
   const FINNEY = 'f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16';
   const prev = Buffer.from(FINNEY, 'hex').reverse();
@@ -537,7 +537,7 @@ function errorCardVisible() {
   check('error: error card hidden on a healthy app', !errorCardVisible(), '');
   const st0 = await (await fetch('/api/state')).json();
   check('error: seeded tx present before breaking', (st0.bitcoin.txs || []).length === 1, (st0.bitcoin.txs || []).length);
-  const backup = await (await fetch('/api/backup')).text();
+  const backup = await (await fetch('/api/backup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).text();
   check('error: backup downloads before breaking', backup.indexOf('Dom Error') !== -1, backup.slice(0, 120));
 
   // --- break the state, restart, the error view shows -----------------
@@ -568,7 +568,13 @@ function errorCardVisible() {
   check('error: restore message says the transactions were checked against the node',
     (document.getElementById('state-error-msg').textContent || '').indexOf('Checked against the node') !== -1,
     document.getElementById('state-error-msg').textContent || '');
-  check('error: restore reloads the page', global.__reloaded === true, '');
+  check('error: the card stays up so the restore summary can be read (no reload yet)', global.__reloaded === false, '');
+  check('error: after a restore only Continue is offered',
+    document.getElementById('btn-state-continue').style.display === ''
+    && document.getElementById('btn-state-restore').style.display === 'none'
+    && document.getElementById('btn-state-reset').style.display === 'none', '');
+  document.getElementById('btn-state-continue').click();
+  check('error: Continue reloads the page', global.__reloaded === true, '');
   check('error: health 200 again after restore', (await waitHealth(200)) === 200, '');
   const st1 = await (await fetch('/api/state')).json();
   check('error: the seeded tx is back after restore',

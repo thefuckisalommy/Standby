@@ -285,7 +285,7 @@ async function handleApi(req, res, pathname) {
   // it to handleApi (a bare /__test__/ path would fall through to
   // the static file server and 404). Gated on
   // STANDBY_TEST_MODE=1, which only the test harness sets
-  // (verify094.start); without it the route 404s exactly like any
+  // (test/helpers.py start); without it the route 404s exactly like any
   // unknown path, so it cannot run in production. The caches are
   // reset to their initial shapes, so the next read fetches fresh
   // from the (stub) sources.
@@ -1799,7 +1799,7 @@ async function handleApi(req, res, pathname) {
     return sendJson(res, 200, { confirmations: refreshed });
   }
 
-  // GET /api/backup — the whole setup as one JSON document: settings,
+  // POST /api/backup — the whole setup as one JSON document: settings,
   // every signed transaction (hex included), the check-in clock, and
   // the recent check-in + broadcast history. Restoring it (POST
   // /api/restore) puts the app back exactly where the backup was taken.
@@ -1807,11 +1807,10 @@ async function handleApi(req, res, pathname) {
   // addresses and amounts — treat it like the transactions themselves.
   // It also carries the check-in key hashes (not the keys — those were
   // never stored), so a restored setup keeps its keys working.
-  // GET /api/backup — the plain (unencrypted) backup document.
-  // POST /api/backup {password?} — the same document, or,
-  // with a password, encrypted with it (lib/backupcrypto.js). The
-  // UI uses POST so a password never appears in a URL; GET stays
-  // for scripts.
+  // POST /api/backup {password?} — the plain backup document, or,
+  // with a password, encrypted with it (lib/backupcrypto.js). POST
+  // only, so a password never appears in a URL; there is no GET
+  // route, so the plain backup is never one link away.
   const buildBackup = () => {
     // The backup carries the SERVED form of each tx (a
     // one-rule set as its single rule) — restore accepts both
@@ -1831,9 +1830,6 @@ async function handleApi(req, res, pathname) {
       broadcastLog: store.readBroadcastLog(DATA_DIR, 200),
     };
   };
-  if (req.method === 'GET' && pathname === '/api/backup') {
-    return sendJson(res, 200, buildBackup());
-  }
   if (req.method === 'POST' && pathname === '/api/backup') {
     const body = await readBody(req);
     const password = body && body.password;

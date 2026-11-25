@@ -246,8 +246,7 @@ Boots the branch-0.8.5 app (port 3438), the check-in receiver
 Ports: app 3438, receiver 3439, stubs 18235/18236 — no collision
 with the 095 suite (app 3388, receiver 3389, stubs 18175/18176) or
 the 096 suite (app 3398, receiver 3399, stubs 18185/18186).
-Reuses the 094 helpers (import verify094 — importing does not run
-main()) and never touches the 095 files or the main app/ copy.
+Reuses the shared test helpers (test/helpers.py) and never touches the 095 files or the main app/ copy.
 """
 import base64
 import copy
@@ -267,7 +266,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import verify094 as v
+import helpers as v
 
 check = v.check
 
@@ -1253,7 +1252,7 @@ def main():
         # Backup/restore: a backup carrying a heldUntil — even a
         # garbage one — restores without a 400, and the restored
         # state carries no heldUntil.
-        s, bak = req('GET', '/api/backup')
+        s, bak = req('POST', '/api/backup', {})
         check('6c unify: backup fetched', s == 200 and 'state' in bak, (s, list(bak.keys()) if isinstance(bak, dict) else bak))
         bak['state']['checkin']['heldUntil'] = 'not-a-date'
         s, r = req('POST', '/api/restore', bak)
@@ -1718,7 +1717,7 @@ def main():
         r_sd = r['tx']['id'] if s == 201 else None
         s, r = add_tx('R feemarket', {'type': 'feemarket', 'params': {'maxFeeRate': 0.5}}, 111004)
         r_fm = r['tx']['id'] if s == 201 else None
-        s, bak = req('GET', '/api/backup')
+        s, bak = req('POST', '/api/backup', {})
         check('9 restore: backup fetched', s == 200, (s, r))
         delete_all_txs()
         s, st = req('GET', '/api/state')
@@ -2055,7 +2054,7 @@ def main():
         # Restore carries the custom source.
         s, r = req('PUT', '/api/settings', {'priceSources': {'source1': custom_cg, 'source2': 'coinbase'}})
         check('12 custom restored as the configured sources (200)', s == 200, (s, r))
-        s, bak = req('GET', '/api/backup')
+        s, bak = req('POST', '/api/backup', {})
         check('12 restore: backup fetched', s == 200, (s, bak))
         s, r = req('PUT', '/api/settings', {'priceSources': {'source1': 'coingecko', 'source2': 'coinbase'}})
         check('12 restore: sources reset to defaults first', s == 200, (s, r))
@@ -2201,7 +2200,7 @@ def main():
               h[0] if isinstance(h, list) and len(h) >= 1 else h)
 
         # Restore: a backup whose tx carries no history seeds one.
-        s, bak = req('GET', '/api/backup')
+        s, bak = req('POST', '/api/backup', {})
         check('15 restore: backup fetched', s == 200, (s, r))
         bak3 = copy.deepcopy(bak)
         for tx3 in bak3['state']['bitcoin']['txs']:
@@ -3221,7 +3220,7 @@ def main():
         # stays up answering 500s — but POST /api/restore with a
         # valid backup still works, and POST /api/state/reset
         # with {confirm:true} starts fresh.
-        s, backup_doc = req('GET', '/api/backup')
+        s, backup_doc = req('POST', '/api/backup', {})
         check('20 rescue: backup downloads before breaking (200)',
               s == 200 and backup_doc.get('format') == 'standby-backup'
               and isinstance(backup_doc.get('state'), dict), (s, backup_doc.get('format')))
@@ -5198,7 +5197,7 @@ def main():
             # (i) Restore round-trip: the backup carries the
             # history, so restoring it keeps the peak — the verdict
             # does not reset to "still building" for a day.
-            s, bak = req('GET', '/api/backup', base=lp_base)
+            s, bak = req('POST', '/api/backup', {}, base=lp_base)
             check('31 restore: the backup carries the 25-observation history',
                   s == 200 and len((bak.get('state', {}) or {}).get('feeHistory') or []) == 25, s)
             s, r = req('POST', '/api/restore', bak, base=lp_base)
@@ -6404,13 +6403,14 @@ def main():
         # POST /api/backup {password} returns the backup encrypted
         # (scrypt + AES-256-GCM, lib/backupcrypto.js); restore asks
         # for the password; tools/decrypt-backup.js opens the file
-        # with no Standby. Plain backups (GET, or POST without a
-        # password) are unchanged.
+        # with no Standby. A plain backup is POST without a password;
+        # there is no GET route (0.8.13).
         _bpw = 'a long enough backup passphrase'
         s, r = req('POST', '/api/backup', {'password': 'short'})
         check('41 backup: a password under 12 characters is 400', s == 400 and '12 characters' in r.get('error', ''), (s, r))
-        s, plain = req('GET', '/api/backup')
-        check('41 backup: GET still returns the plain backup', s == 200 and plain.get('format') == 'standby-backup', s)
+        s, r = req('GET', '/api/backup')
+        check('41 backup: there is no GET backup route (404)', s == 404, (s, r))
+        s, plain = req('POST', '/api/backup', {})
         s, r = req('POST', '/api/backup', {})
         check('41 backup: POST without a password returns the plain backup', s == 200 and r.get('format') == 'standby-backup', s)
         s, enc = req('POST', '/api/backup', {'password': _bpw}, timeout=60)
@@ -6465,7 +6465,7 @@ def main():
         check('41 restore: an altered header (N) fails authentication', s == 400 and 'damaged' in r.get('error', ''), (s, r))
         s, r = req('POST', '/api/restore', dict(enc, password=_bpw), timeout=60)
         check('41 restore: the right password restores', s == 200 and r.get('ok') is True, (s, r))
-        s, after = req('GET', '/api/backup')
+        s, after = req('POST', '/api/backup', {})
         check('41 restore: the restored transactions match the backup',
               sorted(t.get('id') for t in after['state']['bitcoin']['txs']) == _txids, '')
 
@@ -6634,7 +6634,7 @@ def main():
         # goes back to Archived instead of reading Active.
         def _by_label44(st, label):
             return next((t for t in (st.get('bitcoin') or {}).get('txs', []) if t.get('label') == label), None)
-        s, bak44 = req('GET', '/api/backup', base=_ab43)
+        s, bak44 = req('POST', '/api/backup', {}, base=_ab43)
         check('44 restore: backup fetched', s == 200 and 'state' in bak44, s)
         check('44 restore: caches cleared before the restore', _clear43())
         s, r = req('POST', '/api/restore', bak44, base=_ab43, timeout=60)

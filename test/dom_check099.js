@@ -421,7 +421,7 @@ function selectValues(html, id) {
   return [...block.matchAll(/value="([^"]+)"/g)].map((m) => m[1]);
 }
 // A minimal 1-in/1-out tx spending Finney vout 1 (the same shape
-// as verify094.craft) — so the DOM test can add transactions via
+// as helpers.craft) — so the DOM test can add transactions via
 // the API without importing the Python helpers.
 function craftHex(vout, value) {
   const FINNEY = 'f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16';
@@ -440,8 +440,8 @@ function craftHex(vout, value) {
 }
 function craftLocktimeHex(vout, locktime, value) {
   // Same shape as craftHex, but with an explicit locktime and a
-  // non-maxed sequence (0), so the locktime applies — mirrors
-  // verify094.craft_locktime. A block-height locktime above the
+  // non-maxed sequence (0), so the locktime applies. A block-height
+  // locktime above the
   // stub tip (900000) makes the dry-run verdict 'timelocked'.
   const FINNEY = 'f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16';
   const prev = Buffer.from(FINNEY, 'hex').reverse();
