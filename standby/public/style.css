@@ -64,7 +64,9 @@ header .spacer { flex: 1; }
 .burger nav a:hover { background: #2f3540; }
 main { max-width: 880px; margin: 0 auto; padding: 0 20px 20px; }
 nav.tabs {
-  display: flex; gap: 4px; flex-wrap: wrap; justify-content: center;
+  /* No gap: the buttons' own padding spaces them, and the four still fit
+     one row at 390px with a wider font. */
+  display: flex; gap: 0; flex-wrap: wrap; justify-content: center;
   margin-bottom: 20px;
   border-bottom: 1px solid var(--line);
   /* Sticky tab bar, just below the sticky appbar (~59px tall). The

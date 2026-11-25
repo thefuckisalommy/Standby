@@ -6,7 +6,7 @@ Code comments describe how the app works now; the history of why it changed live
 
 ## 0.8.15
 
-Maintenance release with no change to how the app works. The API test suite is split into eight groups that run in parallel, so each change is checked in about a third of the time.
+Maintenance release with no change to how the app works. The API test suite is split into eight groups that run in parallel, so each change is checked in about a third of the time. Also: the four tabs no longer wrap onto a second row on narrow phones with a wider system font.
 
 ## 0.8.14
 
