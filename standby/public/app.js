@@ -1724,10 +1724,11 @@
   function setNodeCheckValue(id, check) {
     var val = $(id);
     if (!val) return;
-    if (!check) { val.textContent = ''; val.classList.remove('failed'); return; }
+    if (!check) { val.textContent = ''; val.classList.remove('failed'); val.classList.remove('warn'); return; }
     val.textContent = check.value || '';
-    if (check.ok) val.classList.remove('failed');
-    else val.classList.add('failed');
+    // A limited capability (warn) is amber, a failed one red.
+    val.classList.toggle('warn', !check.ok && !!check.warn);
+    val.classList.toggle('failed', !check.ok && !check.warn);
   }
   // After a connection test, open the details of any node that is
   // not OK so the failure is visible without a tap — and never

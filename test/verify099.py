@@ -1790,7 +1790,7 @@ def main():
               res.get('primary', {}).get('checks', {}).get('height', {}).get('value') == 'Height 900,000'
               and res.get('primary', {}).get('checks', {}).get('fees', {}).get('value') == '1 sat/vB'
               and res.get('primary', {}).get('checks', {}).get('broadcast', {}).get('value') == 'Reachable'
-              and res.get('primary', {}).get('checks', {}).get('outputLookup', {}).get('value') == 'Batch',
+              and res.get('primary', {}).get('checks', {}).get('outputLookup', {}).get('value') == 'Full answers (batch)',
               res.get('primary', {}).get('checks'))
         check('10 nodes: secondary is OK too', res.get('secondary', {}).get('status') == 'ok', res.get('secondary'))
         check('10 nodes: overall ok is true', r.get('ok') is True, r.get('ok'))
@@ -6076,11 +6076,11 @@ def main():
         delete_all_txs()
         # --- 38. Output lookup node status check (0.8.10) --------------
         # The connection test gains a fourth capability, Output
-        # lookup: the probe asks the node for the spend status of
-        # the genesis coinbase output (a fixed, well-known outpoint
-        # every synced node knows), through the §37 negotiation —
-        # batch first, singular as fallback — and reports which
-        # shape answered. Cadence is parked at 3600 s so no tick
+        # lookup: the probe asks the node for the spend status of an
+        # output of Hal Finney's first transaction (long spent),
+        # through the §37 negotiation — batch first, singular as
+        # fallback — and reports the answer type and the shape that
+        # answered. Cadence is parked at 3600 s so no tick
         # fires mid-section and moves the outspend counters; the
         # caches are cleared before each shape flip so the probe
         # fetches fresh (the shape record survives a cache clear —
@@ -6095,13 +6095,13 @@ def main():
         s, r = req('POST', '/api/bitcoin/connection/test', {})
         check('38 baseline: connection test returns 200', s == 200, (s, r))
         res = {x.get('endpoint'): x for x in r.get('results', [])}
-        check('38 baseline: primary output lookup reads Batch and the node is OK',
+        check('38 baseline: primary output lookup reads Full answers (batch) and the node is OK',
               res.get('primary', {}).get('status') == 'ok'
               and res.get('primary', {}).get('checks', {}).get('outputLookup', {}).get('ok') is True
-              and res.get('primary', {}).get('checks', {}).get('outputLookup', {}).get('value') == 'Batch',
+              and res.get('primary', {}).get('checks', {}).get('outputLookup', {}).get('value') == 'Full answers (batch)',
               res.get('primary', {}).get('checks', {}).get('outputLookup'))
-        check('38 baseline: secondary output lookup reads Batch too',
-              res.get('secondary', {}).get('checks', {}).get('outputLookup', {}).get('value') == 'Batch',
+        check('38 baseline: secondary output lookup reads Full answers (batch) too',
+              res.get('secondary', {}).get('checks', {}).get('outputLookup', {}).get('value') == 'Full answers (batch)',
               res.get('secondary', {}).get('checks', {}).get('outputLookup'))
         p1, s1, bp1, bs1 = outspend_counts()
         check('38 baseline: the probe costs ONE batch request per node, zero singular',
@@ -6114,23 +6114,23 @@ def main():
         p0, s0, bp0, bs0 = outspend_counts()
         s, r = req('POST', '/api/bitcoin/connection/test', {})
         res = {x.get('endpoint'): x for x in r.get('results', [])}
-        check('38 singular-only: primary output lookup reads Singular and the node stays OK',
+        check('38 singular-only: primary output lookup reads Full answers (singular) and the node stays OK',
               res.get('primary', {}).get('status') == 'ok'
               and res.get('primary', {}).get('checks', {}).get('outputLookup', {}).get('ok') is True
-              and res.get('primary', {}).get('checks', {}).get('outputLookup', {}).get('value') == 'Singular',
+              and res.get('primary', {}).get('checks', {}).get('outputLookup', {}).get('value') == 'Full answers (singular)',
               res.get('primary', {}).get('checks', {}).get('outputLookup'))
         p1, s1, bp1, bs1 = outspend_counts()
         check('38 singular-only: the probe costs ONE batch 404 + ONE singular on the primary, ONE batch on the secondary',
               (p1, s1, bp1, bs1) == (p0 + 1, s0, bp0 + 1, bs0 + 1), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
         # The learned shape survives a cache clear: the second
         # probe goes singular-first — ONE singular, ZERO batch on
-        # the primary — and still reads Singular.
+        # the primary — and still reads Full answers (singular).
         check('38 singular-only: caches cleared again (shape record survives)', clear_caches())
         p0, s0, bp0, bs0 = outspend_counts()
         s, r = req('POST', '/api/bitcoin/connection/test', {})
         res = {x.get('endpoint'): x for x in r.get('results', [])}
-        check('38 singular-only: the second probe still reads Singular',
-              res.get('primary', {}).get('checks', {}).get('outputLookup', {}).get('value') == 'Singular',
+        check('38 singular-only: the second probe still reads Full answers (singular)',
+              res.get('primary', {}).get('checks', {}).get('outputLookup', {}).get('value') == 'Full answers (singular)',
               res.get('primary', {}).get('checks', {}).get('outputLookup'))
         p1, s1, bp1, bs1 = outspend_counts()
         check('38 singular-only: the second probe costs ONE singular, ZERO batch on the primary',
@@ -6498,9 +6498,9 @@ def main():
             res = ((st.get('bitcoin') or {}).get('connection') or {}).get('results') or [{}]
             return ((res[0].get('checks') or {}).get('outputLookup') or {}).get('value')
 
-        check('42 race: the Test connection result carries an Output lookup value', _lookup_value() == 'Batch', _lookup_value())
+        check('42 race: the Test connection result carries an Output lookup value', _lookup_value() == 'Full answers (batch)', _lookup_value())
         time.sleep(4)  # the tick finishes its node test and saves
-        check('42 race: the tick that was on the network does not overwrite it', _lookup_value() == 'Batch', _lookup_value())
+        check('42 race: the tick that was on the network does not overwrite it', _lookup_value() == 'Full answers (batch)', _lookup_value())
         stop(_race_app)
 
         # --- 43. bare spends from a bitcoind-backed mempool (0.8.13) ---
@@ -6533,6 +6533,29 @@ def main():
         s, r = req('GET', '/api/tx/' + v.FINNEY + '/outspends', base=_bs_base)
         check('43 bare: the stub batch answer is bare (no txid, no status)',
               s == 200 and r[0] == {'spent': True}, r)
+        # Test connection names the node type: bare answers with the
+        # confirmation check, then — with /api/prevouts gone — bare
+        # only, which is limited (CAUTION, amber).
+        def _lookup43():
+            s, r = req('POST', '/api/bitcoin/connection/test', {}, base=_ab43)
+            res = {x.get('endpoint'): x for x in r.get('results', [])}
+            return s, res.get('primary', {})
+        check('43 lookup: caches cleared for the probe', req('POST', '/api/__test__/clear-caches', {'only': ['outspend', 'nodeTip']}, base=_ab43)[0] == 200)
+        s, pr = _lookup43()
+        ol = (pr.get('checks') or {}).get('outputLookup') or {}
+        check('43 lookup: a bitcoind-backed mempool with /api/prevouts reads Bare + confirmation check, node OK',
+              s == 200 and ol.get('ok') is True and ol.get('kind') == 'bare-verified'
+              and ol.get('value') == 'Bare + confirmation check (batch)' and pr.get('status') == 'ok', (s, pr))
+        req('POST', '/__test__/prevouts-route', {'enabled': False}, base=_bs_base)
+        check('43 lookup: caches cleared again', req('POST', '/api/__test__/clear-caches', {'only': ['outspend', 'nodeTip']}, base=_ab43)[0] == 200)
+        s, pr = _lookup43()
+        ol = (pr.get('checks') or {}).get('outputLookup') or {}
+        check('43 lookup: without /api/prevouts it reads Bare only, a warning (not a failure)',
+              ol.get('ok') is False and ol.get('warn') is True and ol.get('kind') == 'bare'
+              and ol.get('value') == 'Bare only \u2014 can\u2019t tell confirmed spends', ol)
+        check('43 lookup: ... the node is CAUTION and says why',
+              pr.get('status') == 'caution' and 'not whether the spend is confirmed' in (pr.get('detail') or ''), pr.get('detail'))
+        req('POST', '/__test__/prevouts-route', {'enabled': True}, base=_bs_base)
 
         def _dry43(tx_id):
             s, r = req('POST', '/api/broadcast/test', {'id': tx_id}, base=_ab43)

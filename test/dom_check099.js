@@ -1765,8 +1765,8 @@ function check(name, cond, detail) {
     check('node checks: the ' + lbl + ' Block height value reads Height 900,000',
       els['btc-' + lbl + '-height-value'] && els['btc-' + lbl + '-height-value'].textContent === 'Height 900,000',
       els['btc-' + lbl + '-height-value'] && els['btc-' + lbl + '-height-value'].textContent);
-    check('node checks: the ' + lbl + ' Output lookup value reads Batch',
-      els['btc-' + lbl + '-outputLookup-value'] && els['btc-' + lbl + '-outputLookup-value'].textContent === 'Batch',
+    check('node checks: the ' + lbl + ' Output lookup value reads Full answers (batch)',
+      els['btc-' + lbl + '-outputLookup-value'] && els['btc-' + lbl + '-outputLookup-value'].textContent === 'Full answers (batch)',
       els['btc-' + lbl + '-outputLookup-value'] && els['btc-' + lbl + '-outputLookup-value'].textContent);
     check('node checks: the Dashboard Node Status ' + lbl + ' pill reads OK too',
       els['readiness-' + lbl + '-status'] && els['readiness-' + lbl + '-status'].textContent === 'OK',

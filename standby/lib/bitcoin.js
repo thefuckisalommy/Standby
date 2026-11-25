@@ -2694,7 +2694,9 @@ async function testOnePath(apiBase, probeOutputLookup, prevOutputLookup) {
   if (outputLookup) checks.outputLookup = outputLookup;
   const allOk = fees.ok && broadcast.ok && (outputLookup ? outputLookup.ok : true);
   let detail;
-  if (outputLookup && !outputLookup.ok && fees.ok && broadcast.ok) {
+  if (outputLookup && outputLookup.warn && fees.ok && broadcast.ok) {
+    detail = 'Height OK, but this node says only that an output is spent, not whether the spend is confirmed — a spent input warns instead of going stale.';
+  } else if (outputLookup && !outputLookup.ok && fees.ok && broadcast.ok) {
     detail = 'Height OK, but output lookup is unavailable — UTXO rules cannot be evaluated against this node.';
   } else {
     const parts = ['height ' + height.detail, 'fees: ' + fees.detail, 'broadcast: ' + broadcast.detail];
@@ -2928,32 +2930,51 @@ async function testNodeBroadcast(apiBase) {
   }
 }
 
-// Output lookup: the outspend status of the genesis coinbase
-// output — a fixed, well-known outpoint every synced node knows
-// (the genesis block's only output is unspent), so a node that
-// cannot answer it serves no outspend shape at all. Read-only:
-// a lookup, never a broadcast, and no funds move. The lookup
-// goes through the generic outspend negotiation (mempoolOutspend):
-// batch first, singular as fallback — and the value names the
-// shape that answered, from the per-base shape record the
-// negotiation keeps (singular-only, or batch by default). A null
-// answer (neither shape) is unavailable: UTXO rules cannot be
-// evaluated against this node. A server error throws and is
-// reported as the reason, never disguised as unavailable. The
-// shape record is trusted once learned (a node upgraded to serve
-// the batch still reads Singular until a restart re-learns it) —
-// the value names the learned capability, which is what the
-// status row reports. On failure the value IS the reason, like
-// the other checks.
-const GENESIS_COINBASE_TXID = '4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b';
+// Output lookup: what kind of spend answer this node gives, which
+// decides how Standby reads UTXO spends from it. The probe asks for
+// the outputs of Hal Finney's first transaction (block 170, the
+// first payment between two people). Both are long spent, so any
+// synced node must answer "spent" — and how it says so is the
+// node's type:
+//   - full: the answer names the spending transaction and its
+//     status (mempool.space, Blockstream, Esplora, a mempool with
+//     BACKEND=esplora). Exact.
+//   - bare, verified: the answer is only {spent: true} (a mempool
+//     running directly on Bitcoin Core), and the node's
+//     /api/prevouts tells a confirmed spend from a mempool one.
+//   - bare, unverified: {spent: true} and no /api/prevouts (an older
+//     Core-backed mempool). Limited: a confirmed spend cannot be told
+//     from a mempool one, so it is reported as a warning (ok false,
+//     warn true — the node is CAUTION, the value amber).
+// The lookup goes through the generic outspend negotiation (batch
+// first, singular as fallback) and the shape that answered is named
+// in brackets. A null answer (neither shape) is unavailable; a
+// server error is reported as the reason. Read-only: a lookup,
+// never a broadcast, and no funds move.
+const PROBE_TXID = 'f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16';
 async function testNodeOutputLookup(apiBase) {
   try {
-    const out = await mempoolOutspend(GENESIS_COINBASE_TXID, 0, apiBase);
-    if (out === null) {
-      return { ok: false, detail: 'unavailable — UTXO rules cannot be evaluated against this node', value: 'Unavailable — UTXO rules can\u2019t be evaluated' };
+    let entry = null;
+    for (const vout of [0, 1]) {
+      const out = await mempoolOutspend(PROBE_TXID, vout, apiBase);
+      if (out === null) {
+        return { ok: false, detail: 'unavailable — UTXO rules cannot be evaluated against this node', value: 'Unavailable — UTXO rules can\u2019t be evaluated' };
+      }
+      if (out.spent) { entry = out; break; }
     }
-    const shape = singularOnlyBases.has(apiBase) ? 'Singular' : 'Batch';
-    return { ok: true, detail: 'ready (' + shape.toLowerCase() + ')', value: shape };
+    const shape = singularOnlyBases.has(apiBase) ? 'singular' : 'batch';
+    if (!entry) {
+      // Both outputs read unspent: the node answers, but not with
+      // a spend this probe can read the type from.
+      return { ok: true, detail: 'ready (' + shape + '; answer type unknown)', value: 'Answers (' + shape + ')' };
+    }
+    if (!entry.bare) {
+      return { ok: true, kind: 'full', detail: 'ready — names the spending transaction and its confirmations (' + shape + ')', value: 'Full answers (' + shape + ')' };
+    }
+    if (entry.verified) {
+      return { ok: true, kind: 'bare-verified', detail: 'ready — says only \u201cspent\u201d; /api/prevouts tells a confirmed spend from a mempool one (' + shape + ')', value: 'Bare + confirmation check (' + shape + ')' };
+    }
+    return { ok: false, warn: true, kind: 'bare', detail: 'limited — says only \u201cspent\u201d and has no /api/prevouts, so a confirmed spend cannot be told from a mempool one', value: 'Bare only \u2014 can\u2019t tell confirmed spends' };
   } catch (e) {
     const msg = e.message || String(e);
     return { ok: false, detail: msg, value: msg };

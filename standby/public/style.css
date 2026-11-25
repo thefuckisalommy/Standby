@@ -284,6 +284,7 @@ button.btn-checkin-big { width: 100%; padding: 16px 20px; font-size: 19px; }
 .node-check-line .node-check-label { color: var(--muted); flex-shrink: 0; white-space: nowrap; }
 .node-checks .node-check-detail { color: var(--ink); font-weight: 600; white-space: normal; }
 .node-checks .node-check-detail.failed { color: var(--bad); }
+.node-checks .node-check-detail.warn { color: var(--warn); }
 /* The measured value next to a capability pill — e.g.
    "Height 976,200" or "1 sat/vB" — muted, same size as the
    surrounding text. */
