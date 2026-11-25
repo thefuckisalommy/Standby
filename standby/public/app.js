@@ -448,13 +448,29 @@
   });
   $('restore-pw-x').addEventListener('click', function () { closeRestorePw(new Error('cancelled')); });
   $('btn-restore-pw-cancel').addEventListener('click', function () { closeRestorePw(new Error('cancelled')); });
-  async function restoreBackupFile(file) {
+  async function restoreBackupFile(file, msgEl) {
     var backup;
     try { backup = JSON.parse(await readFileText(file)); } catch (e) { throw new Error('this is not a Standby backup file (not JSON)'); }
     if (backup && backup.format === 'standby-backup-encrypted') {
       backup.password = await askBackupPassword();
     }
+    setMsg(msgEl, 'Restoring, then checking each transaction against the node\u2026', true);
     return api('POST', '/api/restore', backup);
+  }
+  // The restore re-checks every restored transaction against the node
+  // (a backup's broadcast and stale records are not trusted); the
+  // message says what that check found.
+  function restoreMessage(r) {
+    var msg = 'Restored ' + r.restoredTxs + ' transaction(s) and settings from the backup.';
+    var c = r.recheck;
+    if (!c || !r.restoredTxs) return msg;
+    var found = [];
+    if (c.broadcast) found.push(c.broadcast + ' already broadcast');
+    if (c.stale) found.push(c.stale + ' stale');
+    if (c.conflict) found.push(c.conflict + ' in conflict');
+    msg += ' Checked against the node: ' + (found.length ? found.join(', ') + '.' : 'none broadcast or stale.');
+    if (c.unchecked) msg += ' ' + c.unchecked + ' could not be checked \u2014 run Dry-run all once the node answers.';
+    return msg;
   }
 
   $('btn-state-restore').addEventListener('click', function () { $('state-restore-file').click(); });
@@ -463,15 +479,21 @@
     var file = $('state-restore-file').files && $('state-restore-file').files[0];
     if (!file) return;
     try {
-      var r = await restoreBackupFile(file);
-      setMsg($('state-error-msg'), 'Restored ' + r.restoredTxs + ' transaction(s) and settings from the backup.', true);
+      var r = await restoreBackupFile(file, $('state-error-msg'));
+      // The card stays up so the restore summary (what the node check
+      // found) can be read; Continue reloads into the restored app.
+      setMsg($('state-error-msg'), restoreMessage(r), true);
       $('state-restore-file').value = '';
-      location.reload();
+      $('btn-state-restore').style.display = 'none';
+      $('btn-state-reset').style.display = 'none';
+      $('btn-state-continue').style.display = '';
     } catch (e) {
       if (e.message !== 'cancelled') setMsg($('state-error-msg'), e.message, false);
       $('state-restore-file').value = '';
     }
   });
+
+  $('btn-state-continue').addEventListener('click', function () { location.reload(); });
 
   $('btn-state-reset').addEventListener('click', function () {
     showConfirm('Start fresh?',
@@ -1702,10 +1724,14 @@
   function setNodeCheckValue(id, check) {
     var val = $(id);
     if (!val) return;
-    if (!check) { val.textContent = ''; val.classList.remove('failed'); return; }
+    if (!check) { val.textContent = ''; val.title = ''; val.classList.remove('failed'); val.classList.remove('warn'); return; }
     val.textContent = check.value || '';
-    if (check.ok) val.classList.remove('failed');
-    else val.classList.add('failed');
+    // The longer detail (e.g. which request shape answered) is the
+    // hover text.
+    val.title = check.detail || '';
+    // A limited capability (warn) is amber, a failed one red.
+    val.classList.toggle('warn', !check.ok && !!check.warn);
+    val.classList.toggle('failed', !check.ok && !check.warn);
   }
   // After a connection test, open the details of any node that is
   // not OK so the failure is visible without a tap — and never
@@ -1768,10 +1794,13 @@
         ? b.confirmations + (b.confirmations === 1 ? ' confirmation' : ' confirmations')
         : 'confirmed in block ' + Number(b.blockHeight).toLocaleString('en-US');
     } else if (b.staleInput) {
-      conf = 'stale — input spent by ' + shortTxid16(b.staleInput.spentBy)
+      // A bitcoind-backed node proves the spend confirmed without
+      // naming the spender — say so instead of an empty name.
+      conf = 'stale — input spent by ' + (b.staleInput.spentBy ? shortTxid16(b.staleInput.spentBy) : 'a confirmed transaction (the node does not name it)')
         + ((b.staleInput.blockHeight != null) ? ' (block ' + Number(b.staleInput.blockHeight).toLocaleString('en-US') + ')' : '');
     } else if (b.conflictInput) {
-      conf = 'not found on the network — its input is spent by ' + shortTxid16(b.conflictInput.spentBy) + ', but that spend is not confirmed yet';
+      conf = 'not found on the network — its input is spent by ' + (b.conflictInput.spentBy ? shortTxid16(b.conflictInput.spentBy) : 'another transaction')
+        + (b.conflictInput.unverified ? ', and the node cannot say whether that spend is confirmed' : ', but that spend is not confirmed yet');
     } else if (b.found === false) {
       // `found` is the verdict — a stale confirmation
       // count (0, from before the tx dropped out) must not read
@@ -3091,10 +3120,10 @@
       : 'Moved to Archived Transactions';
     var parts = [];
     if (pend.length) parts.push(pend.length + ' transaction' + (pend.length === 1 ? '' : 's') + ' moved to Pending Transactions — ' + (broadcast
-      ? 'already out there (the network reports its own txid), so recorded as broadcast, waiting for its first confirmation.'
+      ? 'already out there (the node knows its txid), so recorded as broadcast, waiting for its first confirmation.'
       : (pend.length === 1 ? 'its' : 'their') + ' inputs are spent.'));
     if (arch.length) parts.push(arch.length + ' transaction' + (arch.length === 1 ? '' : 's') + ' moved to Archived Transactions — ' + (broadcast
-      ? 'already out there (the network reports its own txid), so recorded as broadcast.'
+      ? 'already out there (the node knows its txid), so recorded as broadcast.'
       : (arch.length === 1 ? 'its' : 'their') + ' inputs are spent.'));
     showDetails(title, parts.join(' '),
       '<ul class="plain-list">' + fresh.map(function (m) {
@@ -5861,7 +5890,7 @@
     },
     nodes: {
       title: 'Bitcoin nodes',
-      body: 'The Bitcoin nodes Standby talks to. The primary is tried first; if it fails, the secondary is used.\n\nToggle the secondary off to use the primary alone with no fallback if it is down or unreachable.\n\nThe address is a mempool instance \u2014 mempool.space by default, another public instance, or your own mempool on the LAN.\n\nUTXO, block-height, and fee-market triggers read the node, and broadcasts go through it.',
+      body: 'The Bitcoin nodes Standby talks to. The primary is tried first; if it fails, the secondary is used.\n\nToggle the secondary off to use the primary alone with no fallback if it is down or unreachable.\n\nThe address is a mempool instance \u2014 mempool.space by default, another public instance, or your own mempool on the LAN.\n\nUTXO, block-height, and fee-market triggers read the node, and broadcasts go through it.\n\nA mempool running directly on Bitcoin Core reports that an input is spent but not by whom. Standby asks it whether that spend is confirmed instead, and counts a UTXO trigger\u2019s confirmations from when it first sees the confirmed spend.',
       triggers: ['general'],
     },
     'price-sources': {
@@ -5896,7 +5925,7 @@
     },
     backup: {
       title: 'Data backup',
-      body: 'Back up or restore everything Standby knows. A backup is a file holding all your staged transactions, triggers, and settings.\n\nRestoring replaces the current state with the backup\u2019s \u2014 a restore counts as a check-in and clears any active grace period.\n\nDownload it encrypted with a password you choose (recommended) or unencrypted. Encrypted, the file is useless without the password \u2014 and Standby cannot recover a lost password, so write it down somewhere other than this device. Unencrypted, it contains the signed hexes, which anyone can broadcast and which reveal the destination addresses and amounts, so treat it like the transactions themselves.\n\nAn encrypted backup can also be opened without Standby, using tools/decrypt-backup.js from the Standby repository.',
+      body: 'Back up or restore everything Standby knows. A backup is a file holding all your staged transactions, triggers, and settings.\n\nRestoring replaces the current state with the backup\u2019s \u2014 a restore counts as a check-in and clears any active grace period. After restoring, Standby checks each transaction against your node (nothing is broadcast), so one that was already broadcast or went stale goes back to Archived.\n\nDownload it encrypted with a password you choose (recommended) or unencrypted. Encrypted, the file is useless without the password \u2014 and Standby cannot recover a lost password, so write it down somewhere other than this device. Unencrypted, it contains the signed hexes, which anyone can broadcast and which reveal the destination addresses and amounts, so treat it like the transactions themselves.\n\nAn encrypted backup can also be opened without Standby, using tools/decrypt-backup.js from the Standby repository.',
       triggers: ['general'],
     },
     // No title/body: the version card has no "?" button and no
@@ -6116,12 +6145,14 @@
   // password the owner chooses (the default), or unencrypted after a
   // warning. The server encrypts (POST /api/backup {password}), so the
   // plain backup never crosses the network when encrypted.
-  function backupMode() { return $('backup-mode-plain').checked ? 'plain' : 'encrypted'; }
+  function backupMode() { return $('backup-encrypt').checked ? 'encrypted' : 'plain'; }
   function syncBackupMode() {
     var enc = backupMode() === 'encrypted';
     $('backup-encrypted-fields').style.display = enc ? '' : 'none';
     $('backup-plain-fields').style.display = enc ? 'none' : '';
-    $('btn-backup-modal-download').textContent = enc ? 'Download encrypted backup' : 'Download unencrypted backup';
+    // The write-it-down warning belongs to a generated passphrase, so
+    // it goes away while encryption is off and comes back with it.
+    setMsg($('backup-modal-msg'), enc && generatedPassphrase ? 'Write this passphrase down now \u2014 it is not stored anywhere.' : '', 'warn');
   }
   function closeBackupModal() {
     $('backup-modal').classList.remove('open');
@@ -6130,34 +6161,37 @@
     useTypedPassword();
     setMsg($('backup-modal-msg'), '', true);
   }
-  // Two ways to set the password: typed twice, or generated. A
-  // generated passphrase replaces the typing fields and is shown once,
-  // in full (it wraps on a phone) — nothing to repeat or confirm.
+  // Two ways to set the password, picked by the switch above the
+  // fields: typed twice, or generated. A generated passphrase replaces
+  // the typing fields and is shown once, in full (it wraps on a phone)
+  // — nothing to repeat or confirm. Turning the switch on again makes
+  // a fresh one.
   var generatedPassphrase = null;
   function useTypedPassword() {
     generatedPassphrase = null;
+    $('backup-generate').checked = false;
     $('backup-generated').textContent = '';
     $('backup-generated-fields').style.display = 'none';
     $('backup-typed-fields').style.display = '';
   }
-  $('btn-backup-own').addEventListener('click', function () {
-    useTypedPassword();
-    setMsg($('backup-modal-msg'), '', true);
-    $('backup-password').focus();
-  });
-  $('backup-mode-encrypted').addEventListener('change', syncBackupMode);
-  $('backup-mode-plain').addEventListener('change', syncBackupMode);
+  $('backup-encrypt').addEventListener('change', syncBackupMode);
   $('backup-modal-x').addEventListener('click', closeBackupModal);
   $('btn-backup-modal-cancel').addEventListener('click', closeBackupModal);
   $('btn-backup-download').addEventListener('click', function () {
-    $('backup-mode-encrypted').checked = true;
+    $('backup-encrypt').checked = true;
     syncBackupMode();
     $('backup-modal').classList.add('open');
   });
   // A random passphrase: 6 groups of 5 from an unambiguous alphabet
   // (no 0/o, 1/l/i) — about 145 bits. Shown in the clear so it can be
   // written down.
-  $('btn-backup-generate').addEventListener('click', function () {
+  $('backup-generate').addEventListener('change', function () {
+    if (!this.checked) {
+      useTypedPassword();
+      setMsg($('backup-modal-msg'), '', true);
+      $('backup-password').focus();
+      return;
+    }
     var alphabet = 'abcdefghjkmnpqrstuvwxyz23456789';
     var bytes = new Uint32Array(30);
     window.crypto.getRandomValues(bytes);
@@ -6215,8 +6249,8 @@
     var file = $('backup-file').files && $('backup-file').files[0];
     if (!file) return;
     try {
-      var r = await restoreBackupFile(file);
-      setMsg($('backup-msg'), 'Restored ' + r.restoredTxs + ' transaction(s) and settings from the backup.', true);
+      var r = await restoreBackupFile(file, $('backup-msg'));
+      setMsg($('backup-msg'), restoreMessage(r), true);
       $('backup-file').value = '';
       await load();
     } catch (e) {

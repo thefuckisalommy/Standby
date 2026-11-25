@@ -421,7 +421,7 @@ function selectValues(html, id) {
   return [...block.matchAll(/value="([^"]+)"/g)].map((m) => m[1]);
 }
 // A minimal 1-in/1-out tx spending Finney vout 1 (the same shape
-// as verify094.craft) — so the DOM test can add transactions via
+// as helpers.craft) — so the DOM test can add transactions via
 // the API without importing the Python helpers.
 function craftHex(vout, value) {
   const FINNEY = 'f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16';
@@ -440,8 +440,8 @@ function craftHex(vout, value) {
 }
 function craftLocktimeHex(vout, locktime, value) {
   // Same shape as craftHex, but with an explicit locktime and a
-  // non-maxed sequence (0), so the locktime applies — mirrors
-  // verify094.craft_locktime. A block-height locktime above the
+  // non-maxed sequence (0), so the locktime applies. A block-height
+  // locktime above the
   // stub tip (900000) makes the dry-run verdict 'timelocked'.
   const FINNEY = 'f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16';
   const prev = Buffer.from(FINNEY, 'hex').reverse();
@@ -1765,8 +1765,8 @@ function check(name, cond, detail) {
     check('node checks: the ' + lbl + ' Block height value reads Height 900,000',
       els['btc-' + lbl + '-height-value'] && els['btc-' + lbl + '-height-value'].textContent === 'Height 900,000',
       els['btc-' + lbl + '-height-value'] && els['btc-' + lbl + '-height-value'].textContent);
-    check('node checks: the ' + lbl + ' Output lookup value reads Batch',
-      els['btc-' + lbl + '-outputLookup-value'] && els['btc-' + lbl + '-outputLookup-value'].textContent === 'Batch',
+    check('node checks: the ' + lbl + ' Output lookup value reads Full answers',
+      els['btc-' + lbl + '-outputLookup-value'] && els['btc-' + lbl + '-outputLookup-value'].textContent === 'Full answers',
       els['btc-' + lbl + '-outputLookup-value'] && els['btc-' + lbl + '-outputLookup-value'].textContent);
     check('node checks: the Dashboard Node Status ' + lbl + ' pill reads OK too',
       els['readiness-' + lbl + '-status'] && els['readiness-' + lbl + '-status'].textContent === 'OK',
@@ -3457,8 +3457,8 @@ function check(name, cond, detail) {
     && idx.indexOf('Installed version:') !== -1 && idx.indexOf('id="app-version"') !== -1, '');
   check('app version static: the card has no "?" button and no details (just the version line)',
     idx.indexOf('id="help-version"') === -1, '');
-  check('app version: the installed version reads 0.8.12.1 (from /api/health)',
-    els['app-version'] && els['app-version'].textContent === '0.8.12.1',
+  check('app version: the installed version reads 0.8.13 (from /api/health)',
+    els['app-version'] && els['app-version'].textContent === '0.8.13',
     els['app-version'] && els['app-version'].textContent);
   setFilter('general');
   check('app version: the card is visible under General',

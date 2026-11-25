@@ -246,8 +246,7 @@ Boots the branch-0.8.5 app (port 3438), the check-in receiver
 Ports: app 3438, receiver 3439, stubs 18235/18236 — no collision
 with the 095 suite (app 3388, receiver 3389, stubs 18175/18176) or
 the 096 suite (app 3398, receiver 3399, stubs 18185/18186).
-Reuses the 094 helpers (import verify094 — importing does not run
-main()) and never touches the 095 files or the main app/ copy.
+Reuses the shared test helpers (test/helpers.py) and never touches the 095 files or the main app/ copy.
 """
 import base64
 import copy
@@ -267,7 +266,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import verify094 as v
+import helpers as v
 
 check = v.check
 
@@ -648,7 +647,7 @@ def main():
 
         # --- 1. health + version ----------------------------------------
         s, h = req('GET', '/api/health')
-        check('1 health reports version 0.8.12.1', h.get('version') == '0.8.12.1', h)
+        check('1 health reports version 0.8.13', h.get('version') == '0.8.13', h)
 
         # --- 2. block-height trigger --------------------------------------
         # Validation at add: bad heights rejected, good ones accepted.
@@ -1253,7 +1252,7 @@ def main():
         # Backup/restore: a backup carrying a heldUntil — even a
         # garbage one — restores without a 400, and the restored
         # state carries no heldUntil.
-        s, bak = req('GET', '/api/backup')
+        s, bak = req('POST', '/api/backup', {})
         check('6c unify: backup fetched', s == 200 and 'state' in bak, (s, list(bak.keys()) if isinstance(bak, dict) else bak))
         bak['state']['checkin']['heldUntil'] = 'not-a-date'
         s, r = req('POST', '/api/restore', bak)
@@ -1718,7 +1717,7 @@ def main():
         r_sd = r['tx']['id'] if s == 201 else None
         s, r = add_tx('R feemarket', {'type': 'feemarket', 'params': {'maxFeeRate': 0.5}}, 111004)
         r_fm = r['tx']['id'] if s == 201 else None
-        s, bak = req('GET', '/api/backup')
+        s, bak = req('POST', '/api/backup', {})
         check('9 restore: backup fetched', s == 200, (s, r))
         delete_all_txs()
         s, st = req('GET', '/api/state')
@@ -1791,7 +1790,7 @@ def main():
               res.get('primary', {}).get('checks', {}).get('height', {}).get('value') == 'Height 900,000'
               and res.get('primary', {}).get('checks', {}).get('fees', {}).get('value') == '1 sat/vB'
               and res.get('primary', {}).get('checks', {}).get('broadcast', {}).get('value') == 'Reachable'
-              and res.get('primary', {}).get('checks', {}).get('outputLookup', {}).get('value') == 'Batch',
+              and res.get('primary', {}).get('checks', {}).get('outputLookup', {}).get('value') == 'Full answers',
               res.get('primary', {}).get('checks'))
         check('10 nodes: secondary is OK too', res.get('secondary', {}).get('status') == 'ok', res.get('secondary'))
         check('10 nodes: overall ok is true', r.get('ok') is True, r.get('ok'))
@@ -2055,7 +2054,7 @@ def main():
         # Restore carries the custom source.
         s, r = req('PUT', '/api/settings', {'priceSources': {'source1': custom_cg, 'source2': 'coinbase'}})
         check('12 custom restored as the configured sources (200)', s == 200, (s, r))
-        s, bak = req('GET', '/api/backup')
+        s, bak = req('POST', '/api/backup', {})
         check('12 restore: backup fetched', s == 200, (s, bak))
         s, r = req('PUT', '/api/settings', {'priceSources': {'source1': 'coingecko', 'source2': 'coinbase'}})
         check('12 restore: sources reset to defaults first', s == 200, (s, r))
@@ -2201,7 +2200,7 @@ def main():
               h[0] if isinstance(h, list) and len(h) >= 1 else h)
 
         # Restore: a backup whose tx carries no history seeds one.
-        s, bak = req('GET', '/api/backup')
+        s, bak = req('POST', '/api/backup', {})
         check('15 restore: backup fetched', s == 200, (s, r))
         bak3 = copy.deepcopy(bak)
         for tx3 in bak3['state']['bitcoin']['txs']:
@@ -3221,7 +3220,7 @@ def main():
         # stays up answering 500s — but POST /api/restore with a
         # valid backup still works, and POST /api/state/reset
         # with {confirm:true} starts fresh.
-        s, backup_doc = req('GET', '/api/backup')
+        s, backup_doc = req('POST', '/api/backup', {})
         check('20 rescue: backup downloads before breaking (200)',
               s == 200 and backup_doc.get('format') == 'standby-backup'
               and isinstance(backup_doc.get('state'), dict), (s, backup_doc.get('format')))
@@ -5198,7 +5197,7 @@ def main():
             # (i) Restore round-trip: the backup carries the
             # history, so restoring it keeps the peak — the verdict
             # does not reset to "still building" for a day.
-            s, bak = req('GET', '/api/backup', base=lp_base)
+            s, bak = req('POST', '/api/backup', {}, base=lp_base)
             check('31 restore: the backup carries the 25-observation history',
                   s == 200 and len((bak.get('state', {}) or {}).get('feeHistory') or []) == 25, s)
             s, r = req('POST', '/api/restore', bak, base=lp_base)
@@ -5441,7 +5440,7 @@ def main():
               s == 400 and body == b'Bad request URL', (s, body))
         s, r = req('GET', '/api/health')
         check('32 crash: app still answers after the malformed request',
-              s == 200 and r.get('version') == '0.8.12.1', (s, r))
+              s == 200 and r.get('version') == '0.8.13', (s, r))
         s, body = raw_get('//[', RBASE)
         check('32 crash: malformed request line to the receiver gets 400',
               s == 400 and body == b'Bad request URL', (s, body))
@@ -6077,11 +6076,11 @@ def main():
         delete_all_txs()
         # --- 38. Output lookup node status check (0.8.10) --------------
         # The connection test gains a fourth capability, Output
-        # lookup: the probe asks the node for the spend status of
-        # the genesis coinbase output (a fixed, well-known outpoint
-        # every synced node knows), through the §37 negotiation —
-        # batch first, singular as fallback — and reports which
-        # shape answered. Cadence is parked at 3600 s so no tick
+        # lookup: the probe asks the node for the spend status of an
+        # output of Hal Finney's first transaction (long spent),
+        # through the §37 negotiation — batch first, singular as
+        # fallback — and reports the answer type and the shape that
+        # answered. Cadence is parked at 3600 s so no tick
         # fires mid-section and moves the outspend counters; the
         # caches are cleared before each shape flip so the probe
         # fetches fresh (the shape record survives a cache clear —
@@ -6096,17 +6095,30 @@ def main():
         s, r = req('POST', '/api/bitcoin/connection/test', {})
         check('38 baseline: connection test returns 200', s == 200, (s, r))
         res = {x.get('endpoint'): x for x in r.get('results', [])}
-        check('38 baseline: primary output lookup reads Batch and the node is OK',
+        check('38 baseline: primary output lookup reads Full answers and the node is OK',
               res.get('primary', {}).get('status') == 'ok'
               and res.get('primary', {}).get('checks', {}).get('outputLookup', {}).get('ok') is True
-              and res.get('primary', {}).get('checks', {}).get('outputLookup', {}).get('value') == 'Batch',
+              and res.get('primary', {}).get('checks', {}).get('outputLookup', {}).get('value') == 'Full answers',
               res.get('primary', {}).get('checks', {}).get('outputLookup'))
-        check('38 baseline: secondary output lookup reads Batch too',
-              res.get('secondary', {}).get('checks', {}).get('outputLookup', {}).get('value') == 'Batch',
+        check('38 baseline: secondary output lookup reads Full answers too',
+              res.get('secondary', {}).get('checks', {}).get('outputLookup', {}).get('value') == 'Full answers',
               res.get('secondary', {}).get('checks', {}).get('outputLookup'))
         p1, s1, bp1, bs1 = outspend_counts()
         check('38 baseline: the probe costs ONE batch request per node, zero singular',
               (p1, s1, bp1, bs1) == (p0, s0, bp0 + 1, bs0 + 1), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        # The probe leaves nothing in the outspend cache: it asks about
+        # FINNEY's outputs, and a UTXO rule watching FINNEY:0 must read
+        # the node's current answer right after a connection test, not
+        # the probe's. The stubs now say FINNEY:0 confirmed at the tip
+        # (1 confirmation), so a 3-confirmation rule must not fire.
+        for _b in (STUB_BASE_P, STUB_BASE_S):
+            req('POST', '/__test__/outspend', {'txid': v.FINNEY, 'vout': 0, 'blockHeight': STUB_TIP}, base=_b)
+        s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'utxo', 'params': {'outpoint': v.FINNEY + ':0', 'confirmations': 3}}})
+        check('38 baseline: a UTXO rule on the probed output reads the node, not the probe (1 of 3, no fire)',
+              s == 200 and r.get('fire') is False, (s, r))
+        for _b in (STUB_BASE_P, STUB_BASE_S):
+            req('POST', '/__test__/outspend', {'txid': v.FINNEY, 'vout': 0, 'clear': True}, base=_b)
+        check('38 baseline: caches cleared after the probe-cache check', clear_caches())
         # Singular-only node (the shape a node serves when it has
         # no batch route): the batch 404s, the singular answers,
         # and the value names it — the node is still OK.
@@ -6115,23 +6127,25 @@ def main():
         p0, s0, bp0, bs0 = outspend_counts()
         s, r = req('POST', '/api/bitcoin/connection/test', {})
         res = {x.get('endpoint'): x for x in r.get('results', [])}
-        check('38 singular-only: primary output lookup reads Singular and the node stays OK',
+        check('38 singular-only: primary output lookup reads Full answers, singular in its detail and the node stays OK',
               res.get('primary', {}).get('status') == 'ok'
               and res.get('primary', {}).get('checks', {}).get('outputLookup', {}).get('ok') is True
-              and res.get('primary', {}).get('checks', {}).get('outputLookup', {}).get('value') == 'Singular',
+              and res.get('primary', {}).get('checks', {}).get('outputLookup', {}).get('value') == 'Full answers'
+              and '(singular)' in (res.get('primary', {}).get('checks', {}).get('outputLookup', {}).get('detail') or ''),
               res.get('primary', {}).get('checks', {}).get('outputLookup'))
         p1, s1, bp1, bs1 = outspend_counts()
         check('38 singular-only: the probe costs ONE batch 404 + ONE singular on the primary, ONE batch on the secondary',
               (p1, s1, bp1, bs1) == (p0 + 1, s0, bp0 + 1, bs0 + 1), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
         # The learned shape survives a cache clear: the second
         # probe goes singular-first — ONE singular, ZERO batch on
-        # the primary — and still reads Singular.
+        # the primary — and still reads Full answers, singular in its detail.
         check('38 singular-only: caches cleared again (shape record survives)', clear_caches())
         p0, s0, bp0, bs0 = outspend_counts()
         s, r = req('POST', '/api/bitcoin/connection/test', {})
         res = {x.get('endpoint'): x for x in r.get('results', [])}
-        check('38 singular-only: the second probe still reads Singular',
-              res.get('primary', {}).get('checks', {}).get('outputLookup', {}).get('value') == 'Singular',
+        check('38 singular-only: the second probe still reads Full answers, singular in its detail',
+              res.get('primary', {}).get('checks', {}).get('outputLookup', {}).get('value') == 'Full answers'
+              and '(singular)' in (res.get('primary', {}).get('checks', {}).get('outputLookup', {}).get('detail') or ''),
               res.get('primary', {}).get('checks', {}).get('outputLookup'))
         p1, s1, bp1, bs1 = outspend_counts()
         check('38 singular-only: the second probe costs ONE singular, ZERO batch on the primary',
@@ -6188,7 +6202,7 @@ def main():
         _bind_checkin = '/tmp/standby-test099-bind-checkin'
         _expected_bind = APP_ENV.get('STANDBY_BIND', '127.0.0.1')
         check('39 bind: main instance listen line names the profile bind',
-              ('Standby 0.8.12.1 listening on %s:%d (data: ' % (_expected_bind, PORT)) in read_log(),
+              ('Standby 0.8.13 listening on %s:%d (data: ' % (_expected_bind, PORT)) in read_log(),
               read_log()[-500:])
 
         def _bind_log_text():
@@ -6301,7 +6315,7 @@ def main():
         _auth_app = _bind_instance({'STANDBY_PASSWORD': _pw})
         check('40 auth: instance comes up', wait_up(_ab))
         s, r = req('GET', '/api/health', base=_ab)
-        check('40 auth: health is public', s == 200 and r.get('version') == '0.8.12.1', (s, r))
+        check('40 auth: health is public', s == 200 and r.get('version') == '0.8.13', (s, r))
         s, r = req('GET', '/api/auth/status', base=_ab)
         check('40 auth: status says required, not authenticated',
               s == 200 and r == {'required': True, 'authenticated': False}, (s, r))
@@ -6404,13 +6418,14 @@ def main():
         # POST /api/backup {password} returns the backup encrypted
         # (scrypt + AES-256-GCM, lib/backupcrypto.js); restore asks
         # for the password; tools/decrypt-backup.js opens the file
-        # with no Standby. Plain backups (GET, or POST without a
-        # password) are unchanged.
+        # with no Standby. A plain backup is POST without a password;
+        # there is no GET route (0.8.13).
         _bpw = 'a long enough backup passphrase'
         s, r = req('POST', '/api/backup', {'password': 'short'})
         check('41 backup: a password under 12 characters is 400', s == 400 and '12 characters' in r.get('error', ''), (s, r))
-        s, plain = req('GET', '/api/backup')
-        check('41 backup: GET still returns the plain backup', s == 200 and plain.get('format') == 'standby-backup', s)
+        s, r = req('GET', '/api/backup')
+        check('41 backup: there is no GET backup route (404)', s == 404, (s, r))
+        s, plain = req('POST', '/api/backup', {})
         s, r = req('POST', '/api/backup', {})
         check('41 backup: POST without a password returns the plain backup', s == 200 and r.get('format') == 'standby-backup', s)
         s, enc = req('POST', '/api/backup', {'password': _bpw}, timeout=60)
@@ -6465,7 +6480,7 @@ def main():
         check('41 restore: an altered header (N) fails authentication', s == 400 and 'damaged' in r.get('error', ''), (s, r))
         s, r = req('POST', '/api/restore', dict(enc, password=_bpw), timeout=60)
         check('41 restore: the right password restores', s == 200 and r.get('ok') is True, (s, r))
-        s, after = req('GET', '/api/backup')
+        s, after = req('POST', '/api/backup', {})
         check('41 restore: the restored transactions match the backup',
               sorted(t.get('id') for t in after['state']['bitcoin']['txs']) == _txids, '')
 
@@ -6498,17 +6513,211 @@ def main():
             res = ((st.get('bitcoin') or {}).get('connection') or {}).get('results') or [{}]
             return ((res[0].get('checks') or {}).get('outputLookup') or {}).get('value')
 
-        check('42 race: the Test connection result carries an Output lookup value', _lookup_value() == 'Batch', _lookup_value())
+        check('42 race: the Test connection result carries an Output lookup value', _lookup_value() == 'Full answers', _lookup_value())
         time.sleep(4)  # the tick finishes its node test and saves
-        check('42 race: the tick that was on the network does not overwrite it', _lookup_value() == 'Batch', _lookup_value())
+        check('42 race: the tick that was on the network does not overwrite it', _lookup_value() == 'Full answers', _lookup_value())
         stop(_race_app)
+
+        # --- 43. bare spends from a bitcoind-backed mempool (0.8.13) ---
+        # A mempool backed directly by bitcoind answers outspends with
+        # a bare {spent: true}: no spender, no status. The app asks the
+        # same node's POST /api/prevouts (confirmed UTXO set only) to
+        # tell a confirmed spend (stale) from a mempool one (warning),
+        # asks about its own txid to recognise its own spend, and
+        # counts a UTXO rule's confirmations from first sighting.
+        # A dedicated stub (bitcoind style) and app instance, so the
+        # rest of the suite never sees bare answers.
+        _bs_port = 18197
+        _bs_base = 'http://127.0.0.1:%d' % _bs_port
+        _ab43 = 'http://127.0.0.1:3440'
+        _stub43 = start(['node', STUB, str(_bs_port)], env={'SENTINEL_TXID': SENTINEL_TXID}, log=_bind_log)
+        check('43 bare: stub comes up', wait_up(_bs_base, path='/api/blocks/tip/height'))
+        s, r = req('POST', '/__test__/outspend-style', {'style': 'bitcoind'}, base=_bs_base)
+        check('43 bare: stub answers like a bitcoind-backed mempool', s == 200 and r.get('style') == 'bitcoind', r)
+        shutil.rmtree(_bind_data, ignore_errors=True)
+        shutil.rmtree(_bind_checkin, ignore_errors=True)
+        _e43 = dict(APP_ENV)
+        _e43.update({'PORT': '3440', 'DATA_DIR': _bind_data, 'CHECKIN_DIR': _bind_checkin,
+                     'STANDBY_TEST_STARTUP_TICK_MS': '600000'})
+        _e43.pop('STANDBY_PASSWORD', None)
+        _app43 = start(['node', 'server.js'], env=_e43, cwd=APP, log=_bind_log)
+        check('43 bare: instance comes up', wait_up(_ab43))
+        s, r = req('PUT', '/api/settings', {'primaryApiUrl': _bs_base, 'secondaryEnabled': False}, base=_ab43)
+        check('43 bare: primary node is the bitcoind-style stub, secondary off', s == 200, (s, r))
+        # The raw answer really is bare.
+        s, r = req('GET', '/api/tx/' + v.FINNEY + '/outspends', base=_bs_base)
+        check('43 bare: the stub batch answer is bare (no txid, no status)',
+              s == 200 and r[0] == {'spent': True}, r)
+        # Test connection names the node type: bare answers with the
+        # confirmation check, then — with /api/prevouts gone — bare
+        # only, which is limited (CAUTION, amber).
+        def _lookup43():
+            s, r = req('POST', '/api/bitcoin/connection/test', {}, base=_ab43)
+            res = {x.get('endpoint'): x for x in r.get('results', [])}
+            return s, res.get('primary', {})
+        check('43 lookup: caches cleared for the probe', req('POST', '/api/__test__/clear-caches', {'only': ['outspend', 'nodeTip']}, base=_ab43)[0] == 200)
+        s, pr = _lookup43()
+        ol = (pr.get('checks') or {}).get('outputLookup') or {}
+        check('43 lookup: a bitcoind-backed mempool with /api/prevouts reads Bare + confirmation check, node OK',
+              s == 200 and ol.get('ok') is True and ol.get('kind') == 'bare-verified'
+              and ol.get('value') == 'Bare + confirmation check' and pr.get('status') == 'ok', (s, pr))
+        req('POST', '/__test__/prevouts-route', {'enabled': False}, base=_bs_base)
+        check('43 lookup: caches cleared again', req('POST', '/api/__test__/clear-caches', {'only': ['outspend', 'nodeTip']}, base=_ab43)[0] == 200)
+        s, pr = _lookup43()
+        ol = (pr.get('checks') or {}).get('outputLookup') or {}
+        check('43 lookup: without /api/prevouts it reads Bare only, a warning (not a failure)',
+              ol.get('ok') is False and ol.get('warn') is True and ol.get('kind') == 'bare'
+              and ol.get('value') == 'Bare only \u2014 can\u2019t tell confirmed spends', ol)
+        check('43 lookup: ... the node is CAUTION and says why',
+              pr.get('status') == 'caution' and 'not whether the spend is confirmed' in (pr.get('detail') or ''), pr.get('detail'))
+        req('POST', '/__test__/prevouts-route', {'enabled': True}, base=_bs_base)
+
+        def _dry43(tx_id):
+            s, r = req('POST', '/api/broadcast/test', {'id': tx_id}, base=_ab43)
+            return s, (r.get('results') or [{}])[0]
+
+        def _clear43():
+            return req('POST', '/api/__test__/clear-caches', {'only': ['outspend', 'nodeTip']}, base=_ab43)[0] == 200
+
+        # Confirmed foreign spend (FINNEY:0, confirmed in the stub) —
+        # first with no prevouts route: unverifiable, so the old
+        # reading stands (unconfirmed — a warning, never stale).
+        s, r = req('POST', '/api/bitcoin/txs', {'txHex': v.craft(0, 114001), 'label': 'Bare confirmed', 'trigger': {'type': 'manual', 'params': {}}}, base=_ab43)
+        check('43 bare: tx spending a confirmed-spent input added', s == 201, (s, r))
+        _conf43 = r['tx']['id'] if s == 201 else None
+        req('POST', '/__test__/prevouts-route', {'enabled': False}, base=_bs_base)
+        check('43 bare: caches cleared', _clear43())
+        s, one = _dry43(_conf43)
+        check('43 bare: without /api/prevouts a bare spend reads unconfirmed, as before (conflict, not stale)',
+              s == 200 and one.get('verdict') == 'conflict' and len(one.get('spent', [])) == 0, one)
+        check('43 notes: the unverified note says the node cannot tell, not that the spend is unconfirmed',
+              'cannot say whether that spend is confirmed' in (one.get('note') or '')
+              and 'not confirmed yet' not in (one.get('note') or ''), one.get('note'))
+        t = state_tx(_conf43, base=_ab43)
+        check('43 bare: ... and the transaction stays active (not stale)',
+              t and (t.get('release') or {}).get('status') != 'stale', t and t.get('release'))
+        # With the route: proven confirmed, so stale.
+        req('POST', '/__test__/prevouts-route', {'enabled': True}, base=_bs_base)
+        check('43 bare: caches cleared again', _clear43())
+        s, one = _dry43(_conf43)
+        check('43 bare: /api/prevouts proves the spend confirmed — the dry run says stale (blocked)',
+              s == 200 and one.get('verdict') == 'blocked' and len(one.get('spent', [])) == 1, one)
+        check('43 notes: the stale note says the spend is confirmed',
+              'spent by another transaction that is confirmed' in (one.get('note') or ''), one.get('note'))
+        check('43 bare: the spender is not named (the node cannot say)',
+              (one.get('spent') or [{}])[0].get('spentBy') is None, one.get('spent'))
+        t = state_tx(_conf43, base=_ab43)
+        check('43 bare: the transaction is recorded stale',
+              t and (t.get('release') or {}).get('status') == 'stale', t and t.get('release'))
+        # Mempool-only foreign spend (CONFLICT, unconfirmed in the stub).
+        s, r = req('POST', '/api/bitcoin/txs', {'txHex': v.craft_prev('cc' * 32, 0, 114002), 'label': 'Bare mempool', 'trigger': {'type': 'manual', 'params': {}}}, base=_ab43)
+        check('43 bare: tx spending a mempool-spent input added', s == 201, (s, r))
+        s, one = _dry43(r['tx']['id'] if s == 201 else None)
+        check('43 bare: a mempool-only bare spend stays a warning (conflict, not stale)',
+              s == 200 and one.get('verdict') == 'conflict' and len(one.get('conflict', [])) == 1, one)
+        check('43 notes: a verified mempool-only spend is called not confirmed yet',
+              'not confirmed yet' in (one.get('note') or '') and 'cannot say' not in (one.get('note') or ''), one.get('note'))
+        # Our own transaction already out: SECOND:0 spent (confirmed),
+        # and the node knows our txid.
+        req('POST', '/__test__/outspend', {'txid': 'aa' * 32, 'vout': 0, 'blockHeight': STUB_TIP}, base=_bs_base)
+        _own_hex = v.craft_prev('aa' * 32, 0, 114003)
+        s, r = req('POST', '/api/bitcoin/txs', {'txHex': _own_hex, 'label': 'Bare own', 'trigger': {'type': 'manual', 'params': {}}}, base=_ab43)
+        check('43 bare: own-spend tx added', s == 201, (s, r))
+        _own43 = r['tx']['id'] if s == 201 else None
+        s, body = raw_req('POST', '/api/tx', _bs_base, host='127.0.0.1:%d' % _bs_port,
+                          headers={'Content-Type': 'text/plain'}, body=_own_hex.encode())
+        check('43 bare: our transaction is known to the node', s == 200, (s, body))
+        check('43 bare: caches cleared for the own check', _clear43())
+        s, one = _dry43(_own43)
+        check('43 bare: a bare spend by our own txid is recognised as broadcast, not stale',
+              s == 200 and one.get('verdict') == 'broadcast'
+              and (one.get('own') or [{}])[0].get('spentBy') == v.txid_of(_own_hex), one)
+        check('43 notes: the own-spend note says the node knows our txid',
+              'the node knows its txid' in (one.get('note') or ''), one.get('note'))
+        # UTXO rule, N=1: a confirmed bare spend fires at once.
+        s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'utxo', 'params': {'outpoint': 'aa' * 32 + ':0', 'confirmations': 1}}}, base=_ab43)
+        check('43 utxo: N=1 fires on a confirmed bare spend', s == 200 and r.get('fire') is True, r)
+        # UTXO rule, N=3: counted from first sighting (tip 900,000),
+        # so it waits, then fires once the tip is two blocks higher.
+        s, r = req('POST', '/api/bitcoin/txs', {'txHex': v.craft(1, 114004), 'label': 'Bare N3',
+                   'trigger': {'type': 'utxo', 'params': {'outpoint': 'aa' * 32 + ':0', 'confirmations': 3}},
+                   'triggerConfirmed': True}, base=_ab43)
+        check('43 utxo: N=3 tx added', s == 201, (s, r))
+        _n3 = r['tx']['id'] if s == 201 else None
+        s, r = req('POST', '/api/release/check', {}, base=_ab43)
+        t = state_tx(_n3, base=_ab43)
+        sl = rule_slice(t) if t else {}
+        lo = (sl or {}).get('lastOutspend') or {}
+        check('43 utxo: N=3 first sighting stamps the tip height', lo.get('firstSeenConfirmedHeight') == STUB_TIP, lo)
+        check('43 utxo: N=3 waits at 1 of 3 confirmations', lo.get('confirmations') == 1 and not t.get('broadcasted'), (lo, t.get('broadcasted')))
+        check('43 notes: the count from first sighting reads as a minimum',
+              (sl.get('reason') or '').startswith('spent — at least 1 of 3 confirmations'), sl.get('reason'))
+        req('POST', '/__test__/tip', {'height': STUB_TIP + 1}, base=_bs_base)
+        check('43 utxo: caches cleared after one block', _clear43())
+        req('POST', '/api/release/check', {}, base=_ab43)
+        t = state_tx(_n3, base=_ab43)
+        lo = (rule_slice(t) or {}).get('lastOutspend') or {}
+        check('43 utxo: one block later it reads 2 of 3, first sighting unchanged',
+              lo.get('confirmations') == 2 and lo.get('firstSeenConfirmedHeight') == STUB_TIP and not t.get('broadcasted'), lo)
+        req('POST', '/__test__/tip', {'height': STUB_TIP + 2}, base=_bs_base)
+        check('43 utxo: caches cleared after two blocks', _clear43())
+        req('POST', '/api/release/check', {}, base=_ab43)
+        t = state_tx(_n3, base=_ab43)
+        check('43 utxo: at 3 confirmations from first sighting it fires and broadcasts', t and t.get('broadcasted'), t and t.get('release'))
+
+        # --- 44. restore re-checks every card against the node (0.8.13) ---
+        # A backup's broadcast and stale records are not trusted, so
+        # restore drops them — and then runs the dry-run check on every
+        # restored transaction, so a card already broadcast or stale
+        # goes back to Archived instead of reading Active.
+        def _by_label44(st, label):
+            return next((t for t in (st.get('bitcoin') or {}).get('txs', []) if t.get('label') == label), None)
+        s, bak44 = req('POST', '/api/backup', {}, base=_ab43)
+        check('44 restore: backup fetched', s == 200 and 'state' in bak44, s)
+        check('44 restore: caches cleared before the restore', _clear43())
+        s, r = req('POST', '/api/restore', bak44, base=_ab43, timeout=60)
+        check('44 restore: restore succeeds', s == 200 and r.get('ok') is True, (s, r))
+        rc = r.get('recheck') or {}
+        check('44 restore: the response says what the check found',
+              rc.get('checked') == r.get('restoredTxs') and rc.get('stale', 0) >= 1 and rc.get('broadcast', 0) >= 1
+              and rc.get('conflict', 0) >= 1 and rc.get('unchecked') == 0, rc)
+        t = _by_label44(r.get('state') or {}, 'Bare confirmed')
+        check('44 restore: the restore response already carries the re-derived status',
+              t and (t.get('release') or {}).get('status') == 'stale', t and t.get('release'))
+        s, st = req('GET', '/api/state', base=_ab43)
+        t = _by_label44(st, 'Bare confirmed')
+        check('44 restore: a stale transaction is stale again (Archived), not Active',
+              t and (t.get('release') or {}).get('status') == 'stale', t and t.get('release'))
+        check('44 restore: ... with a stale line in its history',
+              t and any(h.get('type') == 'stale' for h in (t.get('history') or [])), t and t.get('history'))
+        t = _by_label44(st, 'Bare own')
+        check('44 restore: our own broadcast transaction is broadcast again (Archived)',
+              t and t.get('broadcasted') and (t.get('release') or {}).get('status') == 'broadcast',
+              t and (t.get('broadcasted'), t.get('release')))
+        t = _by_label44(st, 'Bare mempool')
+        check('44 restore: an unconfirmed conflict keeps its warning',
+              t and (t.get('release') or {}).get('status') == 'conflict', t and t.get('release'))
+        # The node cannot answer: nothing is recorded, the restore still
+        # succeeds, and the response says how many went unchecked.
+        bak44['state']['settings']['primaryApiUrl'] = 'http://127.0.0.1:18199'
+        s, r = req('POST', '/api/restore', bak44, base=_ab43, timeout=60)
+        rc = r.get('recheck') or {}
+        check('44 restore: with the node unreachable the restore still succeeds', s == 200 and r.get('ok') is True, (s, r))
+        check('44 restore: ... and says every transaction went unchecked',
+              rc.get('unchecked') == r.get('restoredTxs') and rc.get('stale') == 0 and rc.get('broadcast') == 0, rc)
+        s, st = req('GET', '/api/state', base=_ab43)
+        t = _by_label44(st, 'Bare confirmed')
+        check('44 restore: ... and records nothing it could not check',
+              t and (t.get('release') or {}).get('status') != 'stale', t and t.get('release'))
+        stop(_app43)
+        stop(_stub43)
 
     finally:
         for p in list(v.procs):
             stop(p)
 
     # --- 11. no server left running -------------------------------------
-    for port in (PORT, RECEIVER_PORT, STUB_P, STUB_S, 18190, 18191, 3440, 3441):
+    for port in (PORT, RECEIVER_PORT, STUB_P, STUB_S, 18190, 18191, 18197, 3440, 3441):
         check('11 no server left running on port %d' % port, port_closed(port))
 
     print()

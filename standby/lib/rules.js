@@ -221,15 +221,31 @@ async function checkUtxoRule(state, rule, now, ctx) {
   if (!res.confirmed) {
     lastOutspend.confirmations = 0;
     const noun = needConfs === 1 ? ' confirmation' : ' confirmations';
+    // An unverified bare spend (the node could not say whether it is
+    // confirmed) is treated like an unconfirmed one, but not called one.
+    const what = res.unverified ? 'spend not confirmed by the node' : 'spend unconfirmed';
     return {
-      fire: false, status: 'watching', reason: 'spend unconfirmed — waiting for ' + needConfs + noun,
-      slice: { ...freshTriggerState(now, 'watching', 'spend unconfirmed — waiting for ' + needConfs + noun), lastOutspend, lastError: null },
+      fire: false, status: 'watching', reason: what + ' — waiting for ' + needConfs + noun,
+      slice: { ...freshTriggerState(now, 'watching', what + ' — waiting for ' + needConfs + noun), lastOutspend, lastError: null },
       detail: { spent: true, confirmed: false, txid: res.txid, confirmations: 0 },
-      warning: 'This UTXO is already spent (unconfirmed) — it would fire once the spend reaches ' + needConfs + noun + '.',
+      warning: res.unverified
+        ? 'This UTXO is already spent, but the node cannot say whether the spend is confirmed — it would fire once the spend is confirmed with ' + needConfs + noun + '.'
+        : 'This UTXO is already spent (unconfirmed) — it would fire once the spend reaches ' + needConfs + noun + '.',
     };
   }
   // A confirmed spend: count its confirmations from the tip.
-  if (res.blockHeight === null || res.blockHeight === undefined || !Number.isFinite(res.blockHeight)) {
+  // A bare answer (a bitcoind-backed mempool — see resolveBareSpends
+  // in lib/bitcoin.js) proves the spend is confirmed but cannot say
+  // in which block. Then the count runs from the tip height at which
+  // this rule FIRST saw the confirmed spend, carried forward in
+  // lastOutspend.firstSeenConfirmedHeight. That never fires early;
+  // it is exact while the app is watching, and fires late only for a
+  // spend that confirmed before the rule existed or while the app
+  // was offline. A spend that reads unconfirmed again (a reorg)
+  // drops the stamp, so the count restarts.
+  const bareCount = res.bare === true
+    && (res.blockHeight === null || res.blockHeight === undefined || !Number.isFinite(res.blockHeight));
+  if (!bareCount && (res.blockHeight === null || res.blockHeight === undefined || !Number.isFinite(res.blockHeight))) {
     return {
       fire: false, status: 'unknown', reason: 'spend confirmed but its block height is unknown — will retry',
       slice: { ...freshTriggerState(now, 'unknown', 'spend confirmed but its block height is unknown — will retry'), lastOutspend, lastError: 'spend block height unknown' },
@@ -253,19 +269,31 @@ async function checkUtxoRule(state, rule, now, ctx) {
       detail: { spent: true, confirmed: true, txid: res.txid, error: e.message }, warning: null,
     };
   }
-  const confs = Math.max(0, tip - res.blockHeight + 1);
+  let countFrom = res.blockHeight;
+  if (bareCount) {
+    const seen = prev.lastOutspend && Number.isFinite(prev.lastOutspend.firstSeenConfirmedHeight)
+      ? prev.lastOutspend.firstSeenConfirmedHeight : tip;
+    lastOutspend.firstSeenConfirmedHeight = seen;
+    countFrom = seen;
+  }
+  const confs = Math.max(0, tip - countFrom + 1);
   lastOutspend.confirmations = confs;
+  // Counted from first sighting, the number is a minimum — the spend
+  // may have confirmed earlier — so the wording says "at least".
+  const atLeast = bareCount ? 'at least ' : '';
+  const seenNote = bareCount ? ' (counted from when Standby first saw the confirmed spend)' : '';
+  const confWord = confs === 1 ? ' confirmation' : ' confirmations';
   if (confs >= needConfs) {
     return {
-      fire: true, status: 'due', reason: 'spent — ' + confs + (confs === 1 ? ' confirmation' : ' confirmations') + ' — firing',
-      slice: { ...freshTriggerState(now, 'due', 'spent — ' + confs + (confs === 1 ? ' confirmation' : ' confirmations') + ' — firing'), lastOutspend, lastError: null },
+      fire: true, status: 'due', reason: 'spent — ' + atLeast + confs + confWord + ' — firing',
+      slice: { ...freshTriggerState(now, 'due', 'spent — ' + atLeast + confs + confWord + ' — firing'), lastOutspend, lastError: null },
       detail: { spent: true, confirmed: true, txid: res.txid, confirmations: confs, blockHeight: res.blockHeight },
-      warning: 'This UTXO is already spent (' + confs + ' confirmations) — it would fire on the next evaluation.',
+      warning: 'This UTXO is already spent (' + atLeast + confs + confWord + seenNote + ') — it would fire on the next evaluation.',
     };
   }
   return {
-    fire: false, status: 'watching', reason: 'spent — ' + confs + ' of ' + needConfs + ' confirmations',
-    slice: { ...freshTriggerState(now, 'watching', 'spent — ' + confs + ' of ' + needConfs + ' confirmations'), lastOutspend, lastError: null },
+    fire: false, status: 'watching', reason: 'spent — ' + atLeast + confs + ' of ' + needConfs + ' confirmations' + seenNote,
+    slice: { ...freshTriggerState(now, 'watching', 'spent — ' + atLeast + confs + ' of ' + needConfs + ' confirmations' + seenNote), lastOutspend, lastError: null },
     detail: { spent: true, confirmed: true, txid: res.txid, confirmations: confs, blockHeight: res.blockHeight }, warning: null,
   };
 }
@@ -1066,7 +1094,7 @@ async function broadcastOneInner(state, tx, endpoints, now, logKind, opts) {
       }
       recordRelease(fresh, ftx, record, {
         ts: now.toISOString(), kind: logKind, status: 'broadcast', method: check.checkedVia, txid: tx.txid,
-        hexPreview: tx.hex.slice(0, 64), note: 'Transaction is already out there — the node reports its own txid as the spending transaction. Recorded as broadcast; nothing was sent.',
+        hexPreview: tx.hex.slice(0, 64), note: 'Transaction is already out there — the node knows its txid, in the mempool or a block. Recorded as broadcast; nothing was sent.',
       });
     }
     return { id: tx.id, txid: tx.txid, label: tx.label || '', action: 'broadcast', method: check.checkedVia, alreadyOut: true };

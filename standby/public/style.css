@@ -284,6 +284,7 @@ button.btn-checkin-big { width: 100%; padding: 16px 20px; font-size: 19px; }
 .node-check-line .node-check-label { color: var(--muted); flex-shrink: 0; white-space: nowrap; }
 .node-checks .node-check-detail { color: var(--ink); font-weight: 600; white-space: normal; }
 .node-checks .node-check-detail.failed { color: var(--bad); }
+.node-checks .node-check-detail.warn { color: var(--warn); }
 /* The measured value next to a capability pill — e.g.
    "Height 976,200" or "1 sat/vB" — muted, same size as the
    surrounding text. */
@@ -758,9 +759,9 @@ p.inline-btns { display: flex; gap: 8px; flex-wrap: nowrap; align-items: center;
    item with min-width: auto) grows wider than a phone screen to fit
    it. Wrap the hex and keep the scroll for tall content. */
 .modal pre { white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-all; max-height: 240px; overflow-y: auto; }
-/* Backup dialog: the two mode choices, one per line. */
-.radio-line { display: flex; align-items: center; gap: 8px; font-weight: 500; margin: 8px 0; }
-.radio-line input { width: 18px; height: 18px; margin: 0; }
 #backup-modal, #restore-pw-modal { z-index: 105; }
+/* Backup dialog: a switch on its own row — the text on the left,
+   the switch on the right, the whole row clickable. */
+.switch-row { display: flex; justify-content: space-between; width: 100%; margin: 14px 0; font-weight: 500; }
 /* The generated passphrase, shown in full so it can be written down. */
 .generated-pass { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 16px; overflow-wrap: anywhere; user-select: all; font-feature-settings: "calt" 0, "liga" 0; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; margin: 4px 0 8px; }

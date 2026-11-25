@@ -33,7 +33,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
-spec = importlib.util.spec_from_file_location('v70', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'verify094.py'))
+spec = importlib.util.spec_from_file_location('helpers', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'helpers.py'))
 v = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(v)
 
@@ -118,7 +118,7 @@ try:
     assert v.wait_up(BASE), 'app did not come up'
     assert v.wait_up(RBASE, path='/health'), 'receiver did not come up'
     s, h = v.req('GET', '/api/health', base=BASE)
-    assert h.get('version') == '0.8.12.1', h
+    assert h.get('version') == '0.8.13', h
     s, r = v.req('PUT', '/api/settings', {'primaryApiUrl': 'http://127.0.0.1:18275',
                                           'secondaryApiUrl': 'http://127.0.0.1:18276'}, base=BASE)
     assert s == 200, r

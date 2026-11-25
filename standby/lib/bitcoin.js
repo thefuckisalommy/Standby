@@ -714,7 +714,7 @@ function requestText({ protocol, hostname, port, path: p, method, headers, body,
   });
 }
 
-function mempoolReq(path, method, body, base, timeoutMs) {
+function mempoolReq(path, method, body, base, timeoutMs, contentType) {
   const u = new URL(base || DEFAULT_PUBLIC_API_URL);
   const key = base || DEFAULT_PUBLIC_API_URL;
   const p = requestText({
@@ -723,7 +723,7 @@ function mempoolReq(path, method, body, base, timeoutMs) {
     port: u.port ? parseInt(u.port, 10) : (u.protocol === 'https:' ? 443 : 80),
     path,
     method: method || 'GET',
-    headers: body !== undefined ? { 'Content-Type': 'text/plain' } : {},
+    headers: body !== undefined ? { 'Content-Type': contentType || 'text/plain' } : {},
     body,
     timeoutMs,
   });
@@ -1616,6 +1616,50 @@ function outspendCachePut(apiBase, prevTxid, prevVout, result) {
 // The shape record is trusted once learned — a singular 404 on a
 // recorded base means the parent is unknown, not that the route
 // vanished — and a restart re-learns it from scratch.
+// Bare spent answers. A mempool backed directly by bitcoind
+// (BACKEND=none) answers outspends from bitcoind's gettxout, which
+// cannot name the spender: a spent output comes back as just
+// {spent: true} — no txid, no status — whether the spend is
+// confirmed or only in the mempool. Read as-is, every such spend
+// would look unconfirmed, so a transaction whose input is gone for
+// good would never go stale.
+// The same node answers the missing half through POST /api/prevouts,
+// which looks the output up in the CONFIRMED UTXO set only
+// (gettxout without the mempool): null means the output is gone
+// from the chain — spent by a confirmed transaction; a value means
+// it is still unspent on chain — the spend is mempool-only.
+// Any spent answer without a spender txid is verified this way, even
+// one that claims a status: a mempool singular route has been seen
+// to hardcode confirmed: true. An answer that cannot be verified
+// (route missing, node error) is treated as unconfirmed — exactly
+// what an unverified bare answer meant before — never as confirmed,
+// which would make the transaction stale for good.
+// Resolved entries are marked `bare: true` (the spender is unknown).
+const PREVOUTS_MAX = 100; // the route's per-request limit
+function isBareSpent(entry) {
+  return !!entry && typeof entry === 'object' && entry.spent === true && !entry.txid;
+}
+async function resolveBareSpends(prevTxid, entries, apiBase) {
+  const bare = entries.filter(([, e]) => isBareSpent(e));
+  for (let i = 0; i < bare.length; i += PREVOUTS_MAX) {
+    const chunk = bare.slice(i, i + PREVOUTS_MAX);
+    let answers = null;
+    try {
+      const body = JSON.stringify(chunk.map(([vout]) => ({ txid: prevTxid, vout: Number(vout) })));
+      const res = await mempoolReq('/api/prevouts', 'POST', body, apiBase, undefined, 'application/json');
+      if (res.status === 200) {
+        const parsed = JSON.parse(res.body);
+        if (Array.isArray(parsed) && parsed.length === chunk.length) answers = parsed;
+      }
+    } catch (e) { /* unverifiable — treated as unconfirmed below */ }
+    chunk.forEach(([, entry], j) => {
+      entry.bare = true;
+      entry.verified = answers !== null; // false: the node could not say — read as unconfirmed, but say so
+      entry.status = { confirmed: answers !== null && answers[j] === null };
+    });
+  }
+}
+
 async function mempoolOutspend(prevTxid, prevVout, apiBase, ttlMs, skipBatch) {
   const cached = outspendCacheGet(apiBase, prevTxid, prevVout, ttlMs);
   if (cached !== undefined) return cached;
@@ -1655,6 +1699,7 @@ async function mempoolOutspend(prevTxid, prevVout, apiBase, ttlMs, skipBatch) {
       if (res.status === 405 || res.status === 501) continue; // singular route missing here — try the batch
       if (res.status !== 200) throw new Error('mempool outspend check failed (HTTP ' + res.status + ')');
       const parsed = JSON.parse(res.body);
+      await resolveBareSpends(prevTxid, [[prevVout, parsed]], apiBase);
       // The singular answered while the batch did not, so the
       // batch route is missing on this base — remember it.
       if (!batchAnswered) singularOnlyBases.add(apiBase);
@@ -1696,6 +1741,7 @@ async function mempoolOutspends(prevTxid, apiBase, ttlMs, cacheVout) {
     if (res.status === 404 || res.status === 405 || res.status === 501) return null; // unknown, or route missing — NEVER cached
     if (res.status !== 200) throw new Error('mempool outspends check failed (HTTP ' + res.status + ')');
     const arr = JSON.parse(res.body);
+    if (Array.isArray(arr)) await resolveBareSpends(prevTxid, arr.map((e, i) => [i, e]), apiBase);
     if (Array.isArray(arr)) {
       const only = (cacheVout === undefined || cacheVout === null) ? null : Number(cacheVout);
       arr.forEach((entry, i) => {
@@ -1801,7 +1847,7 @@ function outspendEntryToResult(outpoint, entry, checkedVia, checkedBase) {
   const spent = !!entry.spent;
   const confirmed = !!(entry.status && entry.status.confirmed === true);
   const blockHeight = (confirmed && entry.status && Number.isFinite(entry.status.block_height)) ? entry.status.block_height : null;
-  return { outpoint, spent, confirmed, txid: spent ? (entry.txid || null) : null, blockHeight, unknown: false, checkedVia, checkedBase };
+  return { outpoint, spent, confirmed, txid: spent ? (entry.txid || null) : null, blockHeight, bare: !!entry.bare, unverified: !!entry.bare && entry.verified === false, unknown: false, checkedVia, checkedBase };
 }
 
 // One input-freshness check against a single endpoint. A spent input
@@ -1825,16 +1871,41 @@ async function checkInputsUnspentVia(parsed, apiBase, ttlMs) {
   const conflict = [];
   const own = [];
   const unknown = [];
+  // A bare spend (no spender txid — see resolveBareSpends) cannot be
+  // matched against our txid, so ask the node about our own txid
+  // instead: if it knows it, the spender is us. Asked at most once
+  // per transaction, and only when a bare spend appears. A failed
+  // lookup leaves the input unknown — never stale, which is
+  // permanent and would be wrong if our transaction is out there.
+  let ownLookup; // undefined = not asked; null = not known; 'error'; else the tx status
+  const ownStatus = async () => {
+    if (ownLookup === undefined) {
+      try {
+        const t = await mempoolTxStatus(parsed.txid, apiBase);
+        ownLookup = t ? (t.status || {}) : null;
+      } catch (e) { ownLookup = 'error'; }
+    }
+    return ownLookup;
+  };
   for (const inp of parsed.inputs) {
     const out = await mempoolOutspend(inp.prevTxid, inp.prevVout, apiBase, ttlMs);
-    if (out === null) unknown.push(inp);
-    else if (!out.spent) unspent.push(inp);
+    if (out === null) { unknown.push(inp); continue; }
+    if (out.spent && out.bare) {
+      const mine = await ownStatus();
+      if (mine === 'error') { unknown.push(inp); continue; }
+      if (mine) {
+        own.push({ ...inp, spentBy: parsed.txid, confirmed: mine.confirmed === true,
+          blockHeight: Number.isFinite(mine.block_height) ? mine.block_height : null });
+        continue;
+      }
+    }
+    if (!out.spent) unspent.push(inp);
     else if (out.txid && out.txid.toLowerCase() === parsed.txid.toLowerCase()) {
       own.push({ ...inp, spentBy: out.txid, confirmed: !!(out.status && out.status.confirmed),
         blockHeight: (out.status && Number.isFinite(out.status.block_height)) ? out.status.block_height : null });
     } else if (out.status && out.status.confirmed === true) spent.push({ ...inp, spentBy: out.txid || null,
       blockHeight: (out.status && Number.isFinite(out.status.block_height)) ? out.status.block_height : null });
-    else conflict.push({ ...inp, spentBy: out.txid || null });
+    else conflict.push({ ...inp, spentBy: out.txid || null, unverified: !!(out.bare && out.verified === false) });
   }
   return { checked: parsed.inputs.length, unspent, spent, conflict, own, unknown };
 }
@@ -2039,13 +2110,15 @@ async function dryRun(dataDir, { tx, endpoints, ttlMs }) {
   const note = verdict === 'ready'
     ? 'All ' + check.checked + ' input(s) unspent — ' + attempt + ' would be attempted. ' + viaNote
     : verdict === 'blocked'
-      ? check.spent.length + ' input(s) no longer unspent — this transaction is stale and will not be ' + (viaSlipstream ? 'submitted to Slipstream' : 'broadcast') + '. ' + viaNote
+      ? check.spent.length + ' input(s) spent by another transaction that is confirmed — this transaction is stale and will not be ' + (viaSlipstream ? 'submitted to Slipstream' : 'broadcast') + '. ' + viaNote
       : verdict === 'broadcast'
-        ? 'This transaction is already out there — the node reports its own txid as the spending transaction — so it is recorded as broadcast. Nothing was sent. ' + viaNote
+        ? 'This transaction is already out there — the node knows its txid, in the mempool or a block — so it is recorded as broadcast. Nothing was sent. ' + viaNote
         : verdict === 'timelocked'
           ? 'This transaction is timelocked until ' + (typeof timelock.until === 'number' ? 'block ' + timelock.until : timelock.until.toISOString()) + ' — ' + rejecter + ' would reject it as non-final until then, so ' + attempt + ' would be attempted and rejected; it will be retried on the next hourly check. ' + viaNote
           : verdict === 'conflict'
-          ? check.conflict.length + ' input(s) are spent by another transaction that is not confirmed yet — the spend may still be evicted, so this transaction stays active with a warning and ' + attempt + ' will still be attempted. ' + viaNote
+          ? check.conflict.some((c) => c.unverified)
+            ? check.conflict.length + ' input(s) are spent by another transaction, and this node cannot say whether that spend is confirmed, so it is treated as unconfirmed — this transaction stays active with a warning and ' + attempt + ' will still be attempted. ' + viaNote
+            : check.conflict.length + ' input(s) are spent by another transaction that is not confirmed yet — the spend may still be evicted, so this transaction stays active with a warning and ' + attempt + ' will still be attempted. ' + viaNote
           : check.unknown.length + ' input(s) could not be verified — ' + attempt + ' would be attempted, but the network is the arbiter. ' + viaNote;
   // The fee: the input values come from the parent txs,
   // fetched best-effort from the node. Always computed fresh — the
@@ -2621,7 +2694,9 @@ async function testOnePath(apiBase, probeOutputLookup, prevOutputLookup) {
   if (outputLookup) checks.outputLookup = outputLookup;
   const allOk = fees.ok && broadcast.ok && (outputLookup ? outputLookup.ok : true);
   let detail;
-  if (outputLookup && !outputLookup.ok && fees.ok && broadcast.ok) {
+  if (outputLookup && outputLookup.warn && fees.ok && broadcast.ok) {
+    detail = 'Height OK, but this node says only that an output is spent, not whether the spend is confirmed — a spent input warns instead of going stale.';
+  } else if (outputLookup && !outputLookup.ok && fees.ok && broadcast.ok) {
     detail = 'Height OK, but output lookup is unavailable — UTXO rules cannot be evaluated against this node.';
   } else {
     const parts = ['height ' + height.detail, 'fees: ' + fees.detail, 'broadcast: ' + broadcast.detail];
@@ -2855,35 +2930,63 @@ async function testNodeBroadcast(apiBase) {
   }
 }
 
-// Output lookup: the outspend status of the genesis coinbase
-// output — a fixed, well-known outpoint every synced node knows
-// (the genesis block's only output is unspent), so a node that
-// cannot answer it serves no outspend shape at all. Read-only:
-// a lookup, never a broadcast, and no funds move. The lookup
-// goes through the generic outspend negotiation (mempoolOutspend):
-// batch first, singular as fallback — and the value names the
-// shape that answered, from the per-base shape record the
-// negotiation keeps (singular-only, or batch by default). A null
-// answer (neither shape) is unavailable: UTXO rules cannot be
-// evaluated against this node. A server error throws and is
-// reported as the reason, never disguised as unavailable. The
-// shape record is trusted once learned (a node upgraded to serve
-// the batch still reads Singular until a restart re-learns it) —
-// the value names the learned capability, which is what the
-// status row reports. On failure the value IS the reason, like
-// the other checks.
-const GENESIS_COINBASE_TXID = '4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b';
+// Output lookup: what kind of spend answer this node gives, which
+// decides how Standby reads UTXO spends from it. The probe asks for
+// the outputs of Hal Finney's first transaction (block 170, the
+// first payment between two people). Both are long spent, so any
+// synced node must answer "spent" — and how it says so is the
+// node's type:
+//   - full: the answer names the spending transaction and its
+//     status (mempool.space, Blockstream, Esplora, a mempool with
+//     BACKEND=esplora). Exact.
+//   - bare, verified: the answer is only {spent: true} (a mempool
+//     running directly on Bitcoin Core), and the node's
+//     /api/prevouts tells a confirmed spend from a mempool one.
+//   - bare, unverified: {spent: true} and no /api/prevouts (an older
+//     Core-backed mempool). Limited: a confirmed spend cannot be told
+//     from a mempool one, so it is reported as a warning (ok false,
+//     warn true — the node is CAUTION, the value amber).
+// The lookup goes through the generic outspend negotiation (batch
+// first, singular as fallback) and the shape that answered is named
+// in the detail (the hover text). A null answer (neither shape) is unavailable; a
+// server error is reported as the reason. Read-only: a lookup,
+// never a broadcast, and no funds move.
+const PROBE_TXID = 'f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16';
+// The probe asks the node fresh and leaves nothing in the outspend
+// cache: a connection test must not change what a UTXO rule watching
+// the same outputs reads.
+function forgetProbeOutspends(apiBase) {
+  for (const vout of [0, 1]) outspendCache.delete(outspendCacheKey(apiBase, PROBE_TXID, vout));
+}
 async function testNodeOutputLookup(apiBase) {
+  forgetProbeOutspends(apiBase);
   try {
-    const out = await mempoolOutspend(GENESIS_COINBASE_TXID, 0, apiBase);
-    if (out === null) {
-      return { ok: false, detail: 'unavailable — UTXO rules cannot be evaluated against this node', value: 'Unavailable — UTXO rules can\u2019t be evaluated' };
+    let entry = null;
+    for (const vout of [0, 1]) {
+      const out = await mempoolOutspend(PROBE_TXID, vout, apiBase);
+      if (out === null) {
+        return { ok: false, detail: 'unavailable — UTXO rules cannot be evaluated against this node', value: 'Unavailable — UTXO rules can\u2019t be evaluated' };
+      }
+      if (out.spent) { entry = out; break; }
     }
-    const shape = singularOnlyBases.has(apiBase) ? 'Singular' : 'Batch';
-    return { ok: true, detail: 'ready (' + shape.toLowerCase() + ')', value: shape };
+    const shape = singularOnlyBases.has(apiBase) ? 'singular' : 'batch';
+    if (!entry) {
+      // Both outputs read unspent: the node answers, but not with
+      // a spend this probe can read the type from.
+      return { ok: true, detail: 'ready (' + shape + '; answer type unknown)', value: 'Answers' };
+    }
+    if (!entry.bare) {
+      return { ok: true, kind: 'full', detail: 'ready — names the spending transaction and its confirmations (' + shape + ')', value: 'Full answers' };
+    }
+    if (entry.verified) {
+      return { ok: true, kind: 'bare-verified', detail: 'ready — says only \u201cspent\u201d; /api/prevouts tells a confirmed spend from a mempool one (' + shape + ')', value: 'Bare + confirmation check' };
+    }
+    return { ok: false, warn: true, kind: 'bare', detail: 'limited — says only \u201cspent\u201d and has no /api/prevouts, so a confirmed spend cannot be told from a mempool one', value: 'Bare only \u2014 can\u2019t tell confirmed spends' };
   } catch (e) {
     const msg = e.message || String(e);
     return { ok: false, detail: msg, value: msg };
+  } finally {
+    forgetProbeOutspends(apiBase);
   }
 }
 

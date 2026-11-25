@@ -584,7 +584,7 @@ async function refreshConfirmations(state, maxAgeSec) {
             conflictInput = null;
             staleError = 'inputs spent: ' + chk.spent.map((i) => String(i.prevTxid || '').slice(0, 12) + ':' + i.prevVout).join(', ');
           } else if (chk.conflict.length) {
-            conflictInput = { spentBy: chk.conflict[0].spentBy || null };
+            conflictInput = { spentBy: chk.conflict[0].spentBy || null, unverified: !!chk.conflict[0].unverified };
           } else {
             conflictInput = null;
           }

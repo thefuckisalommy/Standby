@@ -156,6 +156,18 @@ let outspendFail = false;
 // Mutable per stub via POST /__test__/outspend-mode {mode};
 // restarting the stub resets it to 'both'.
 let outspendMode = 'both';
+// Test hook (0.8.13, bare spends): outspendStyle is HOW the stub
+// answers outspends — 'full' (default: {spent, txid, vin, status},
+// like Esplora) or 'bitcoind' (like a mempool backed directly by
+// bitcoind, BACKEND=none: the batch answers a bare {spent} with no
+// spender and no status, and the singular route does not exist).
+// POST /api/prevouts (below) answers in both styles, as the real
+// mempool backend does. prevoutsRoute false makes it 404, as an
+// older backend without the route would. Mutable via POST
+// /__test__/outspend-style {style} and /__test__/prevouts-route
+// {enabled}.
+let outspendStyle = 'full';
+let prevoutsRoute = true;
 // Test hook (0.8.0, UA fix): the User-Agent each price feed was
 // last fetched with, so a suite can prove the app identifies
 // itself (CoinGecko 403s a missing/non-descriptive UA).
@@ -501,6 +513,19 @@ const server = http.createServer((req, res) => {
   // POST /__test__/outspend-mode { mode: 'both'|'batch'|
   // 'singular'|'neither' } — see the outspendMode declaration
   // above. Answers the current mode.
+  if (req.method === 'POST' && (p === '/__test__/outspend-style' || p === '/__test__/prevouts-route')) {
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => {
+      let b = {};
+      try { b = JSON.parse(raw || '{}'); } catch { b = {}; }
+      if (p === '/__test__/outspend-style' && (b.style === 'full' || b.style === 'bitcoind')) outspendStyle = b.style;
+      if (p === '/__test__/prevouts-route' && typeof b.enabled === 'boolean') prevoutsRoute = b.enabled;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ ok: true, style: outspendStyle, prevoutsRoute }));
+    });
+    return;
+  }
   if (req.method === 'POST' && p === '/__test__/outspend-mode') {
     let body = '';
     req.on('data', (c) => { body += c; });
@@ -613,13 +638,10 @@ const server = http.createServer((req, res) => {
   // has never seen, or one flagged unknown via
   // /__test__/unknown-parent). Shared by the singular route below
   // and the batch route above it, so both answer identically.
-  // GENESIS is the genesis block's coinbase txid (0.8.10): the
-  // node-test output-lookup probe asks for its only output
-  // (vout 0), which is unspent in reality — the stub answers
-  // {spent: false}, exactly as a real node does.
-  const GENESIS = '4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b';
+  // The node-test output-lookup probe asks for FINNEY:0, spent
+  // in the stub as in reality, and reads the answer type from it.
   function outspendEntry(txid, vout) {
-    if (txid !== FINNEY && txid !== SECOND && txid !== CONFLICT && txid !== OWN_SPEND && txid !== GENESIS) return null;
+    if (txid !== FINNEY && txid !== SECOND && txid !== CONFLICT && txid !== OWN_SPEND) return null;
     if (unknownParents.has(txid)) return null;
     const okey = txid + ':' + vout;
     if (outspendOverride[okey] !== undefined) {
@@ -658,16 +680,40 @@ const server = http.createServer((req, res) => {
       for (let i = 0; i < nouts; i++) entries.push(outspendEntry(txid, String(i)));
       if (entries.some((e) => e === null)) { res.writeHead(404); return res.end(); }
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify(entries));
+      return res.end(JSON.stringify(outspendStyle === 'bitcoind' ? entries.map((e) => ({ spent: !!e.spent })) : entries));
     };
     if (outspendDelayMs > 0) return setTimeout(answer, outspendDelayMs);
     return answer();
+  }
+  // POST /api/prevouts (0.8.13): [{txid, vout}] -> one answer per
+  // outpoint, from the CONFIRMED UTXO set only, as the real backend's
+  // gettxout(txid, vout, false): an output with no spend, or only a
+  // mempool spend, is still there (its value); one spent by a
+  // confirmed transaction — or unknown — is null.
+  if (req.method === 'POST' && p === '/api/prevouts') {
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => {
+      if (!prevoutsRoute) { res.writeHead(404); return res.end(); }
+      let list;
+      try { list = JSON.parse(raw); } catch { list = null; }
+      if (!Array.isArray(list)) { res.writeHead(400); return res.end('Invalid outpoints format'); }
+      const answers = list.map((o) => {
+        const e = outspendEntry(String(o.txid || '').toLowerCase(), String(o.vout));
+        if (e === null) return null;
+        if (e.spent && e.status && e.status.confirmed) return null;
+        return { prevout: { value: 100000, scriptpubkey: '0014' + '00'.repeat(20) }, unconfirmed: false };
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(answers));
+    });
+    return;
   }
   const out = p.match(/^\/api\/tx\/([0-9a-fA-F]+)\/outspend\/(\d+)$/);
   if (req.method === 'GET' && out) {
     outspendRequests++;
     if (outspendFail) { res.writeHead(500, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: 'outspend down (stub)' })); }
-    if (outspendMode === 'batch' || outspendMode === 'neither') { res.writeHead(404); return res.end(); }
+    if (outspendMode === 'batch' || outspendMode === 'neither' || outspendStyle === 'bitcoind') { res.writeHead(404); return res.end(); }
     const txid = out[1].toLowerCase();
     const vout = out[2];
     const answer = () => {
