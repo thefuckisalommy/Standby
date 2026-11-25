@@ -4,6 +4,7 @@ import copy
 import http.client
 import json
 import os
+import platform
 import shutil
 import signal
 import socket

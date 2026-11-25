@@ -465,7 +465,7 @@ def run():
     check('33 hosts: IP literal Host passes', s == 200, (s, body))
     s, body = raw_req('GET', '/api/health', BASE, host='umbrel.local')
     check('33 hosts: umbrel.local passes', s == 200, (s, body))
-    s, body = raw_req('GET', '/api/health', BASE, host=os.uname().nodename.lower())
+    s, body = raw_req('GET', '/api/health', BASE, host=platform.node().lower())
     check('33 hosts: machine hostname is rejected without an allowlist (0.8.11)',
           s == 421 and body == b'Unrecognised Host header', (s, body))
     check('33 hosts: missing Host header is rejected',
@@ -631,25 +631,27 @@ def run():
     sig_env = dict(APP_ENV)
     sig_env.update({'PORT': '3440', 'DATA_DIR': sig_data, 'CHECKIN_DIR': sig_checkin})
     sig_base = 'http://127.0.0.1:3440'
-    sig_app = start(['node', 'server.js'], env=sig_env, cwd=APP, log=LOG)
+    # Windows has no SIGTERM; Ctrl+Break (SIGBREAK) is its stand-in.
+    sig_name = 'SIGBREAK' if os.name == 'nt' else 'SIGTERM'
+    sig_app = start(['node', 'server.js'], env=sig_env, cwd=APP, log=LOG, signal_group=True)
     check('34 sigterm: instance comes up', wait_up(sig_base))
     try:
         os.remove(os.path.join(sig_data, 'heartbeat.json'))
     except OSError:
         pass
-    sig_app.send_signal(signal.SIGTERM)
+    sig_app.send_signal(signal.CTRL_BREAK_EVENT if os.name == 'nt' else signal.SIGTERM)
     try:
         sig_code = sig_app.wait(timeout=5)
     except subprocess.TimeoutExpired:
         sig_code = None
         stop(sig_app)
-    check('34 sigterm: process exits 0 on SIGTERM', sig_code == 0, sig_code)
+    check('34 sigterm: process exits 0 on ' + sig_name, sig_code == 0, sig_code)
     try:
         hb_sig = json.load(open(os.path.join(sig_data, 'heartbeat.json')))
         hb_sig_at = hb_sig.get('lastOnlineAt')
     except Exception:
         hb_sig_at = None
-    check('34 sigterm: SIGTERM flush lands the heartbeat',
+    check('34 sigterm: ' + sig_name + ' flush lands the heartbeat',
           isinstance(hb_sig_at, str)
           and abs((datetime.now(timezone.utc) - datetime.fromisoformat(hb_sig_at.replace('Z', '+00:00'))).total_seconds()) < 30, hb_sig_at)
     # (e) A missing or corrupt heartbeat falls back to the state's
