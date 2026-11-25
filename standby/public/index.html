@@ -35,7 +35,6 @@
     <p>
       <button id="btn-state-restore" class="primary">Restore from a backup file</button>
       <button id="btn-state-reset" class="danger">Start fresh</button>
-      <button id="btn-state-continue" class="primary" style="display:none">Continue to Standby</button>
     </p>
     <input type="file" id="state-restore-file" accept="application/json,.json" style="display:none">
     <p id="state-error-msg" class="muted"></p>
@@ -438,6 +437,34 @@
 <!-- Confirmation dialog (Broadcast Now / Broadcast Armed / Delete) and
      details pop-out (a broadcast log entry). A native confirm() would
      work, but this keeps the warning inside the app and testable. -->
+<!-- Restore progress: shown while a restore runs (the node check can
+     take up to a minute), then switches to the result. -->
+<div id="restore-progress-modal" class="modal-overlay">
+  <div class="modal restore-progress" role="dialog" aria-modal="true" aria-labelledby="restore-progress-title" aria-live="polite">
+    <svg class="logo-loader" id="restore-progress-logo" viewBox="17 29 86 58" aria-hidden="true">
+      <g class="waves" fill="none" stroke-width="5" stroke-linecap="round">
+        <path class="wave w1" d="M35 48.3 A14 14 0 0 0 35 67.7"/>
+        <path class="wave w2" d="M27 41 A24 24 0 0 0 27 75"/>
+        <path class="wave w1" d="M85 48.3 A14 14 0 0 1 85 67.7"/>
+        <path class="wave w2" d="M93 41 A24 24 0 0 1 93 75"/>
+      </g>
+      <path class="doc" d="M48 33 H69 L78 42 V80 a4 4 0 0 1 -4 4 H48 a4 4 0 0 1 -4 -4 V37 a4 4 0 0 1 4 -4 Z"/>
+      <path class="fold" d="M69 33 V40 a2 2 0 0 0 2 2 H78 Z"/>
+      <g class="btc">
+        <rect x="55.6" y="40.5" width="2" height="4.5" rx="0.6"/><rect x="59.6" y="40.5" width="2" height="4.5" rx="0.6"/>
+        <rect x="55.6" y="58" width="2" height="4.5" rx="0.6"/><rect x="59.6" y="58" width="2" height="4.5" rx="0.6"/>
+        <text x="59.5" y="59" text-anchor="middle">B</text>
+      </g>
+      <g class="lines"><rect x="50" y="67" width="22" height="2.6" rx="1.3"/><rect x="50" y="72" width="11" height="2.6" rx="1.3"/><rect x="50" y="77" width="8" height="2.6" rx="1.3"/></g>
+      <polyline class="check" points="63,76 66.5,79.5 74,72"/>
+    </svg>
+    <h3 id="restore-progress-title">Restoring backup…</h3>
+    <p id="restore-progress-body" class="muted">Checking each transaction with your node. This can take up to a minute.</p>
+    <ul id="restore-progress-list" class="muted" style="display:none"></ul>
+    <p class="inline-btns" id="restore-progress-actions" style="display:none"><button type="button" class="primary" id="btn-restore-progress-close">Done</button></p>
+  </div>
+</div>
+
 <div id="confirm-modal" class="modal-overlay">
   <div class="modal" role="dialog" aria-modal="true">
     <button id="modal-x" class="modal-x" aria-label="Close">×</button>

@@ -390,29 +390,75 @@
   });
   $('restore-pw-x').addEventListener('click', function () { closeRestorePw(new Error('cancelled')); });
   $('btn-restore-pw-cancel').addEventListener('click', function () { closeRestorePw(new Error('cancelled')); });
-  async function restoreBackupFile(file, msgEl) {
+  async function restoreBackupFile(file) {
     var backup;
     try { backup = JSON.parse(await readFileText(file)); } catch (e) { throw new Error('this is not a Standby backup file (not JSON)'); }
     if (backup && backup.format === 'standby-backup-encrypted') {
       backup.password = await askBackupPassword();
     }
-    setMsg(msgEl, 'Restoring, then checking each transaction against the node\u2026', true);
-    return api('POST', '/api/restore', backup);
+    showRestoreProgress();
+    try { return await api('POST', '/api/restore', backup); }
+    catch (e) { showRestoreFailed(e.message); throw e; }
   }
-  // The restore re-checks every restored transaction against the node
-  // (a backup's broadcast and stale records are not trusted); the
-  // message says what that check found.
-  function restoreMessage(r) {
-    var msg = 'Restored ' + r.restoredTxs + ' transaction(s) and settings from the backup.';
+
+  // The restore pop-out: the logo animates while the restore and its
+  // node check run (up to a minute), then the pop-out shows the result.
+  var restoreDone = null;
+  function setRestoreView(logoCls, title, body, items, actions) {
+    $('restore-progress-logo').setAttribute('class', 'logo-loader' + (logoCls ? ' ' + logoCls : ''));
+    $('restore-progress-title').textContent = title;
+    $('restore-progress-body').textContent = body;
+    var list = $('restore-progress-list');
+    list.innerHTML = '';
+    (items || []).forEach(function (it) {
+      var li = document.createElement('li');
+      li.textContent = it.text;
+      if (it.warn) li.className = 'warn';
+      list.appendChild(li);
+    });
+    list.style.display = items && items.length ? '' : 'none';
+    $('restore-progress-body').style.display = body ? '' : 'none';
+    $('restore-progress-actions').style.display = actions ? '' : 'none';
+  }
+  function showRestoreProgress() {
+    restoreDone = null;
+    setRestoreView('', 'Restoring backup\u2026', 'Checking each transaction with your node. This can take up to a minute.', null, false);
+    $('restore-progress-modal').classList.add('open');
+  }
+  function restoreSummary(r) {
+    var n = r.restoredTxs || 0;
+    var items = [{ text: n + (n === 1 ? ' transaction restored' : ' transactions restored') }];
     var c = r.recheck;
-    if (!c || !r.restoredTxs) return msg;
+    if (!c || !n) return items;
     var found = [];
     if (c.broadcast) found.push(c.broadcast + ' already broadcast');
     if (c.stale) found.push(c.stale + ' stale');
-    if (c.conflict) found.push(c.conflict + ' in conflict');
-    msg += ' Checked against the node: ' + (found.length ? found.join(', ') + '.' : 'none broadcast or stale.');
-    if (c.unchecked) msg += ' ' + c.unchecked + ' could not be checked \u2014 run Dry-run all once the node answers.';
-    return msg;
+    if (found.length) items.push({ text: found.join(', ') + ' \u2014 moved to Archived' });
+    if (c.conflict) items.push({ text: c.conflict + ' in conflict (a warning)' });
+    var staged = c.checked - c.unchecked - c.broadcast - c.stale;
+    if (staged > 0) items.push({ text: staged + ' staged' });
+    if (c.unchecked) items.push({ text: c.unchecked + ' not checked \u2014 run Dry-run all later', warn: true });
+    return items;
+  }
+  function showRestoreResult(r, onDone) {
+    restoreDone = onDone || null;
+    var partial = !!(r.recheck && r.recheck.unchecked);
+    setRestoreView(partial ? 'done partial' : 'done', 'Backup restored', '', restoreSummary(r), true);
+  }
+  function showRestoreFailed(message) {
+    restoreDone = null;
+    setRestoreView('', 'Restore failed', message, null, true);
+    $('restore-progress-logo').setAttribute('class', 'logo-loader failed');
+  }
+  $('btn-restore-progress-close').addEventListener('click', function () {
+    $('restore-progress-modal').classList.remove('open');
+    var then = restoreDone;
+    restoreDone = null;
+    if (then) then();
+  });
+  // The short form for the Backup card's message line.
+  function restoreMessage(r) {
+    return restoreSummary(r).map(function (it) { return it.text; }).join(' \u00b7 ') + '.';
   }
 
   $('btn-state-restore').addEventListener('click', function () { $('state-restore-file').click(); });
@@ -421,21 +467,15 @@
     var file = $('state-restore-file').files && $('state-restore-file').files[0];
     if (!file) return;
     try {
-      var r = await restoreBackupFile(file, $('state-error-msg'));
-      // The card stays up so the restore summary (what the node check
-      // found) can be read; Continue reloads into the restored app.
-      setMsg($('state-error-msg'), restoreMessage(r), true);
+      var r = await restoreBackupFile(file);
       $('state-restore-file').value = '';
-      $('btn-state-restore').style.display = 'none';
-      $('btn-state-reset').style.display = 'none';
-      $('btn-state-continue').style.display = '';
+      // Done reloads into the restored app.
+      showRestoreResult(r, function () { location.reload(); });
     } catch (e) {
       if (e.message !== 'cancelled') setMsg($('state-error-msg'), e.message, false);
       $('state-restore-file').value = '';
     }
   });
-
-  $('btn-state-continue').addEventListener('click', function () { location.reload(); });
 
   $('btn-state-reset').addEventListener('click', function () {
     showConfirm('Start fresh?',
@@ -5272,10 +5312,11 @@
     var file = $('backup-file').files && $('backup-file').files[0];
     if (!file) return;
     try {
-      var r = await restoreBackupFile(file, $('backup-msg'));
+      var r = await restoreBackupFile(file);
       setMsg($('backup-msg'), restoreMessage(r), true);
       $('backup-file').value = '';
       await load();
+      showRestoreResult(r);
     } catch (e) {
       if (e.message !== 'cancelled') setMsg($('backup-msg'), e.message, false);
       $('backup-file').value = '';

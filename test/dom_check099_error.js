@@ -562,19 +562,17 @@ function errorCardVisible() {
   fileInput.files = [{ __content: backup }];
   fileInput.change();
   await sleep(800);
-  check('error: restore reports the restored transaction',
-    (document.getElementById('state-error-msg').textContent || '').indexOf('Restored 1 transaction') !== -1,
-    document.getElementById('state-error-msg').textContent || '');
-  check('error: restore message says the transactions were checked against the node',
-    (document.getElementById('state-error-msg').textContent || '').indexOf('Checked against the node') !== -1,
-    document.getElementById('state-error-msg').textContent || '');
-  check('error: the card stays up so the restore summary can be read (no reload yet)', global.__reloaded === false, '');
-  check('error: after a restore only Continue is offered',
-    document.getElementById('btn-state-continue').style.display === ''
-    && document.getElementById('btn-state-restore').style.display === 'none'
-    && document.getElementById('btn-state-reset').style.display === 'none', '');
-  document.getElementById('btn-state-continue').click();
-  check('error: Continue reloads the page', global.__reloaded === true, '');
+  const rpTitle = () => document.getElementById('restore-progress-title').textContent || '';
+  const rpItems = () => (document.getElementById('restore-progress-list').children || []).map((li) => li.textContent).join(' | ');
+  check('error: the restore pop-out opens and ends on "Backup restored"',
+    document.getElementById('restore-progress-modal').classList.contains('open') && rpTitle() === 'Backup restored', rpTitle());
+  check('error: the pop-out lists the restored transaction',
+    rpItems().indexOf('1 transaction restored') !== -1, rpItems());
+  check('error: the pop-out offers Done', document.getElementById('restore-progress-actions').style.display === '', '');
+  check('error: no reload until Done is pressed', global.__reloaded === false, '');
+  document.getElementById('btn-restore-progress-close').click();
+  check('error: Done closes the pop-out and reloads the page',
+    !document.getElementById('restore-progress-modal').classList.contains('open') && global.__reloaded === true, '');
   check('error: health 200 again after restore', (await waitHealth(200)) === 200, '');
   const st1 = await (await fetch('/api/state')).json();
   check('error: the seeded tx is back after restore',
