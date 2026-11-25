@@ -856,33 +856,63 @@ def run():
           all(res.get(t, {}).get('action') != 'broadcast' for t in res), res)
     delete_all_txs()
 
-    # --- 48. a wrong device clock holds date-based triggers ---
-    # The stubs answer with a Date two hours behind, so this device reads
-    # two hours ahead: a due set-date tx is held (not broadcast) with the
-    # reason on its card; once the clocks agree it fires.
+    # --- 48. date triggers fire only on a verified device clock ---
+    # The stubs' Date header sets the node time. A due date trigger is held
+    # (reason on its card) while this device is off by more than 10 minutes
+    # either way, or while no node has answered (unverified, fails closed);
+    # once the clocks agree it fires.
     delete_all_txs()
-    for b in (STUB_BASE_P, STUB_BASE_S):
-        req('POST', '/__test__/date-offset', {'seconds': -7200}, base=b)
-    req('POST', '/api/__test__/clear-caches', {'only': ['clock', 'nodeTip', 'price']})
-    s, r = req('POST', '/api/bitcoin/connection/test', {})
-    check('48 clock: the nodes answer (their clock reads two hours behind)', s == 200, (s, r))
+    def skew48(seconds):
+        for b in (STUB_BASE_P, STUB_BASE_S):
+            req('POST', '/__test__/date-offset', {'seconds': seconds}, base=b)
+        req('POST', '/api/__test__/clear-caches', {'only': ['clock', 'nodeTip', 'price']})
+    def held48(tx_id):
+        t = state_tx(tx_id) or {}
+        return t.get('broadcasted') is None and (t.get('triggerStatus') or {}).get('status') == 'held', (t.get('triggerStatus'), t.get('broadcasted'))
+    skew48(-7200)
     s, r = add_tx('Clock 48', {'type': 'setdate', 'params': {'fireAt': iso_ago(minutes=5)}}, 111300, trigger_confirmed=True)
     c48 = r['tx']['id'] if s == 201 else None
     check('48 clock: a set-date tx already due adds', s == 201, (s, r))
     s, r, res = release_results()
-    check('48 clock: the due set-date tx is held, not broadcast',
-          s == 200 and res.get(c48, {}).get('action') != 'broadcast' and (state_tx(c48) or {}).get('broadcasted') is None,
-          (res.get(c48), (state_tx(c48) or {}).get('broadcasted')))
-    ts48 = (state_tx(c48) or {}).get('triggerStatus') or {}
+    ok48, d48 = held48(c48)
+    check('48 clock: device 2 hours ahead — the due set-date tx is held, not broadcast', ok48, d48)
     check('48 clock: its card says the device clock is 2 hours ahead',
-          ts48.get('status') == 'held' and "clock is 2 hours ahead" in (ts48.get('reason') or ''), ts48)
-    for b in (STUB_BASE_P, STUB_BASE_S):
-        req('POST', '/__test__/date-offset', {'seconds': 0}, base=b)
-    req('POST', '/api/__test__/clear-caches', {'only': ['clock']})
-    s, r = req('POST', '/api/bitcoin/connection/test', {})
+          "clock is 2 hours ahead" in ((state_tx(c48) or {}).get('triggerStatus') or {}).get('reason', ''), d48)
+    skew48(7200)
     s, r, res = release_results()
-    check('48 clock: once the clocks agree, the set-date tx fires',
-          res.get(c48, {}).get('action') == 'broadcast' or ((state_tx(c48) or {}).get('release') or {}).get('status') == 'broadcast',
-          (res.get(c48), (state_tx(c48) or {}).get('release')))
+    ok48, d48 = held48(c48)
+    check('48 clock: device 2 hours behind — still held, and the card says behind',
+          ok48 and "clock is 2 hours behind" in ((state_tx(c48) or {}).get('triggerStatus') or {}).get('reason', ''), d48)
+    # A past-due check-in is held the same way (seeded two days old; the
+    # restart starts unverified, asks the node, and finds the skew).
     delete_all_txs()
-
+    s, r = add_tx('Clock 48 checkin', {'type': 'checkin', 'params': {'thresholdDays': 1}}, 111302, trigger_confirmed=True)
+    k48 = r['tx']['id'] if s == 201 else None
+    def seed48():
+        stj = load_state_file()
+        stj['checkin']['lastCheckinAt'] = iso_ago(days=2)
+        save_state_file(stj)
+    skew48(-7200)
+    check('48 clock: restarted with a 2-day-old check-in and the device 2 hours ahead', restart(before_start=seed48))
+    s, r, res = release_results()
+    ok48, d48 = held48(k48)
+    check('48 clock: the past-due check-in tx is held too', ok48, d48)
+    # No node answers: the time cannot be checked, so a due date trigger is
+    # held (fails closed).
+    delete_all_txs()
+    skew48(0)
+    req('PUT', '/api/settings', {'primaryApiUrl': 'http://127.0.0.1:18199', 'secondaryEnabled': False})
+    req('POST', '/api/__test__/clear-caches', {'only': ['clock']})
+    s, r = add_tx('Clock 48 unverified', {'type': 'setdate', 'params': {'fireAt': iso_ago(minutes=5)}}, 111304, trigger_confirmed=True)
+    u48 = r['tx']['id'] if s == 201 else None
+    s, r, res = release_results()
+    ok48, d48 = held48(u48)
+    check('48 clock: no node reachable — the due set-date tx is held (time unverified)',
+          ok48 and 'could not be checked' in ((state_tx(u48) or {}).get('triggerStatus') or {}).get('reason', ''), d48)
+    req('PUT', '/api/settings', {'primaryApiUrl': STUB_BASE_P, 'secondaryEnabled': True})
+    req('POST', '/api/__test__/clear-caches', {'only': ['clock']})
+    s, r, res = release_results()
+    check('48 clock: once a node answers with the right time, it fires',
+          res.get(u48, {}).get('action') == 'broadcast' or ((state_tx(u48) or {}).get('release') or {}).get('status') == 'broadcast',
+          (res.get(u48), (state_tx(u48) or {}).get('release')))
+    delete_all_txs()

@@ -924,3 +924,73 @@ def run():
     stop(one_app)
     check('47 one copy: port 3440 closed again', port_closed(3440))
 
+    # --- 47b. the lock under pressure (refresh every second) ---
+    fast_env = dict(one_env, STANDBY_TEST_LOCK_REFRESH_MS='1000')
+    fast_env.pop('STANDBY_LOG_FILE', None)
+    shutil.rmtree(one_data, ignore_errors=True)
+    def lock_now():
+        try:
+            return json.load(open(os.path.join(one_data, 'standby.lock')))
+        except Exception:
+            return {}
+    def serving(port):
+        try:
+            return req('GET', '/api/health', base='http://127.0.0.1:%d' % port, timeout=2)[0] == 200
+        except Exception:
+            return False
+    # Two copies started at the same moment: exactly one runs.
+    pa = start(['node', 'server.js'], env=dict(fast_env, PORT='3440'), cwd=APP, log=one_log)
+    pb = start(['node', 'server.js'], env=dict(fast_env, PORT='3441'), cwd=APP, log=one_log)
+    time.sleep(5)
+    up = [p for p, port in ((pa, 3440), (pb, 3441)) if p.poll() is None and serving(port)]
+    check('47b race: two copies started together — exactly one runs', len(up) == 1,
+          [(p.poll(), serving(port)) for p, port in ((pa, 3440), (pb, 3441))])
+    winner = up[0] if up else pa
+    check('47b race: the lock names the one that runs', lock_now().get('pid') == winner.pid, lock_now())
+    # Killed outright (no clean exit): a new copy takes over at once.
+    for p in (pa, pb):
+        try:
+            p.kill(); p.wait(timeout=5)
+        except Exception:
+            pass
+    check('47b crash: the lock outlives a hard kill', bool(lock_now()), lock_now())
+    pc = start(['node', 'server.js'], env=dict(fast_env, PORT='3440'), cwd=APP, log=one_log)
+    check('47b crash: a new copy takes over the dead copy\'s lock', wait_up('http://127.0.0.1:3440') and lock_now().get('pid') == pc.pid, lock_now())
+    # A live copy whose lock looks old (just woken from sleep) keeps it: the
+    # new copy waits one interval, sees it refresh, and refuses.
+    held = lock_now()
+    held['refreshedAt'] = iso_ago(minutes=10)
+    with open(os.path.join(one_data, 'standby.lock'), 'w') as f:
+        json.dump(held, f)
+    woke = subprocess.run(['node', 'server.js'], env=dict(os.environ, **dict(fast_env, PORT='3441', STANDBY_TEST_MODE='1')),
+                          cwd=APP, capture_output=True, text=True, timeout=30)
+    check('47b sleep: a live copy with an old lock keeps it (the new copy refuses)',
+          woke.returncode == 1 and pc.poll() is None and lock_now().get('pid') == pc.pid, (woke.returncode, lock_now()))
+    stop(pc)
+    # A pid reused by another program (alive, but no Standby refreshing the
+    # lock) is taken over after one interval.
+    with open(os.path.join(one_data, 'standby.lock'), 'w') as f:
+        json.dump({'pid': os.getpid(), 'id': 'not-standby', 'refreshedAt': iso_ago(minutes=10)}, f)
+    pd = start(['node', 'server.js'], env=dict(fast_env, PORT='3440'), cwd=APP, log=one_log)
+    check('47b reuse: a reused pid (alive, never refreshing) is taken over', wait_up('http://127.0.0.1:3440') and lock_now().get('pid') == pd.pid, lock_now())
+    # A paused copy is taken over; when it resumes it exits before it can
+    # evaluate or broadcast. Pausing a process is POSIX-only.
+    if os.name == 'nt':
+        check('47b paused: pausing a process is POSIX-only (covered on Linux)', True)
+        stop(pd)
+    else:
+        os.kill(pd.pid, signal.SIGSTOP)
+        time.sleep(3.5)
+        pe = start(['node', 'server.js'], env=dict(fast_env, PORT='3441'), cwd=APP, log=one_log)
+        check('47b paused: a new copy takes over from a paused one', wait_up('http://127.0.0.1:3441') and lock_now().get('pid') == pe.pid, lock_now())
+        os.kill(pd.pid, signal.SIGCONT)
+        try:
+            pd_code = pd.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pd_code = None
+        check('47b paused: on resuming, the old copy sees the lock is gone and exits', pd_code == 1, pd_code)
+        check('47b paused: the new copy keeps running', pe.poll() is None and serving(3441))
+        stop(pe)
+    for port in (3440, 3441):
+        check('47b: port %d closed again' % port, port_closed(port))
+

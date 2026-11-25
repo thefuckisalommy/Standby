@@ -61,6 +61,12 @@ const OFFLINE_REFRESH_MS = (() => {
   const ms = TEST_MODE ? parseInt(process.env.STANDBY_TEST_OFFLINE_REFRESH_MS || '', 10) : NaN;
   return Number.isFinite(ms) && ms > 0 ? ms : 24 * 60 * 60 * 1000;
 })();
+// How often the running copy refreshes standby.lock (lib/instance.js);
+// STANDBY_TEST_LOCK_REFRESH_MS shortens it in tests.
+const LOCK_REFRESH_MS = (() => {
+  const ms = TEST_MODE ? parseInt(process.env.STANDBY_TEST_LOCK_REFRESH_MS || '', 10) : NaN;
+  return Number.isFinite(ms) && ms > 0 ? ms : 30 * 1000;
+})();
 // Test-only endpoint overrides (test mode only): PRICE_API_URL points every
 // built-in price provider at one stub, which outside tests would collapse
 // the two-source agreement into one source. SLIPSTREAM_API_URL likewise.
@@ -76,7 +82,7 @@ const ALLOWED_HOSTS_EXTRA = (process.env.STANDBY_ALLOWED_HOSTS || '').split(',')
   .filter(Boolean);
 
 module.exports = {
-  PORT, BIND, DEPLOYMENT, DEPLOYMENTS, PASSWORD, TEST_MODE, STARTUP_TICK_MS, RESTORE_CHECK_MS, OFFLINE_REFRESH_MS, DATA_DIR, PUBLIC_DIR,
+  PORT, BIND, DEPLOYMENT, DEPLOYMENTS, PASSWORD, TEST_MODE, STARTUP_TICK_MS, RESTORE_CHECK_MS, OFFLINE_REFRESH_MS, LOCK_REFRESH_MS, DATA_DIR, PUBLIC_DIR,
   CHECKIN_DIR, LOG_FILE, VERSION, MAX_BODY, MEMPOOL_OVERRIDE, PRICE_API_URL_OVERRIDE,
   SLIPSTREAM_API_URL_OVERRIDE, IGNORED_TEST_OVERRIDES, ALLOWED_HOSTS_EXTRA,
 };

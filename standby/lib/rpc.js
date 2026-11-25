@@ -9,6 +9,7 @@
 // confirmed from mempool spends with /api/prevouts, as for a mempool on
 // Bitcoin Core. Without txindex a confirmed parent is unknown (404).
 const { requestText } = require('./net');
+const clock = require('./clock');
 
 const logins = new Map(); // base -> { user, password }
 
@@ -70,6 +71,7 @@ async function post(base, payload, timeoutMs) {
     body: JSON.stringify(payload),
     timeoutMs,
   });
+  clock.observe(res.date);
   if (res.status === 401) throw new Error('RPC login failed — check the username and password');
   if (res.status === 403) throw new RpcForbidden();
   let data;

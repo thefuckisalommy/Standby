@@ -1,10 +1,10 @@
 'use strict';
 // Is this device's clock right? Set-date and check-in triggers trust it, so
-// a clock far ahead could fire one early (common on a desktop that just
-// woke, or one with a dead clock battery). Every HTTP answer Standby gets
-// (nodes, RPC, price sources) carries the server's time in its Date
+// a clock far off could fire one early (a desktop just woken, a dead clock
+// battery). Node and RPC answers carry the node's time in their Date
 // header; the median offset over the last hour is the device's error.
-// No answers in the last hour: unknown, which holds nothing.
+// Fails closed: with no recent node answer the clock is unverified, and a
+// date trigger that would fire is held until a node answers.
 
 const MAX_SKEW_MS = 10 * 60 * 1000;
 const WINDOW_MS = 60 * 60 * 1000;
@@ -29,18 +29,35 @@ function offsetMs() {
   return recent[Math.floor(recent.length / 2)];
 }
 
-// The reason to hold set-date and check-in triggers, or null when the clock
-// is fine or unknown.
+// 'verified', 'off' or 'unverified' (no node answer in the last hour).
+function status() {
+  const off = offsetMs();
+  if (off === null) return 'unverified';
+  return Math.abs(off) <= MAX_SKEW_MS ? 'verified' : 'off';
+}
+
+// The reason to hold a set-date or check-in trigger that would fire, or
+// null when the clock is verified.
 function problem() {
   const off = offsetMs();
-  if (off === null || Math.abs(off) <= MAX_SKEW_MS) return null;
+  if (off === null) return "this device's time could not be checked against a node yet — date and check-in triggers are held until a node answers";
+  if (Math.abs(off) <= MAX_SKEW_MS) return null;
   const mins = Math.round(Math.abs(off) / 60000);
   const span = mins >= 120 ? Math.round(mins / 60) + ' hours' : mins + ' minutes';
   return "this device's clock is " + span + ' ' + (off > 0 ? 'ahead' : 'behind')
     + ' — date and check-in triggers are held until it is corrected';
 }
 
-// Test only.
-function reset() { samples.length = 0; }
+// Whether to ask a node for its time now: unverified, and not asked in the
+// last minute.
+let lastAskMs = 0;
+function shouldAsk() {
+  if (status() !== 'unverified' || Date.now() - lastAskMs < 60000) return false;
+  lastAskMs = Date.now();
+  return true;
+}
 
-module.exports = { observe, offsetMs, problem, reset, MAX_SKEW_MS };
+// Test only.
+function reset() { samples.length = 0; lastAskMs = 0; }
+
+module.exports = { observe, offsetMs, status, problem, shouldAsk, reset, MAX_SKEW_MS };

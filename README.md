@@ -16,7 +16,7 @@ Runs on Umbrel (community app store) or any Linux machine with Docker (arm64 and
   - **Manual only**: never fires on its own.
 - **Releases**: every tick (about once a minute), each armed set whose trigger fires is broadcast. Inputs are re-checked first; a transaction whose input was spent elsewhere is marked stale and never sent.
 - **Grace after being offline**: after more than 7 days offline, every trigger pauses for 7 days (or until you resume), so nothing fires on conditions that changed while you were away. Can be turned off.
-- **Clock check**: set-date and check-in triggers are held while this device's clock is more than 10 minutes off the time the nodes report, so a wrong clock cannot fire one early.
+- **Clock check**: a due set-date or check-in trigger fires only once a node confirms this device's clock is within 10 minutes of its own time; otherwise it is held, with the reason on the card.
 - **Vacation and disarm**: vacation freezes check-in countdowns; a disarmed set never fires on its own but can still be broadcast by hand.
 - **Fee risk**: each transaction's fee rate compared with the 90-day peak of observed fees (Low, Medium, High, Critical). Informational only.
 - **Dry run**: checks inputs and timelocks without broadcasting.

@@ -5,6 +5,7 @@ const bitcoin = require('./bitcoin');
 const { caches } = require('./caches');
 const { applyGrace, expireVacation, mergeExternalCheckin } = require('./checkin');
 const { DATA_DIR, OFFLINE_REFRESH_MS } = require('./config');
+const instance = require('./instance');
 const { firedDetail, forwardMemberHistory, noteSetMemberStale, pushHistory, shortTxid } = require('./history');
 const { checkCadenceSecondsOf, fetchTipHeightsCached, refreshPriceIfStale } = require('./prices');
 const rules = require('./rules');
@@ -40,6 +41,7 @@ function terminalSkipReason(tx) {
 // broadcast backoff (a manual check always attempts). Every rule type is
 // evaluated every time, so the check-in merge below always gates the run.
 async function evaluateRelease(options) {
+  instance.assertOwner(); // never evaluate (or broadcast) if another copy holds the data folder
   const automatic = !!(options && options.automatic);
   if (releaseEvaluationInFlight) {
     return { action: 'skipped', reason: 'release evaluation already in progress', results: [] };

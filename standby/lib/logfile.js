@@ -17,12 +17,13 @@ function install(file) {
   const write = (level, args) => {
     try {
       const line = new Date().toISOString() + ' ' + level + ' ' + util.format(...args) + '\n';
-      if (size + line.length > MAX_BYTES) {
+      const bytes = Buffer.byteLength(line);
+      if (size + bytes > MAX_BYTES) {
         try { fs.renameSync(full, full + '.1'); } catch { /* nothing to rotate */ }
         size = 0;
       }
       fs.appendFileSync(full, line, { mode: 0o600 });
-      size += Buffer.byteLength(line);
+      size += bytes;
     } catch { /* never fail the app over its log */ }
   };
   for (const [method, level] of [['log', 'INFO'], ['info', 'INFO'], ['warn', 'WARN'], ['error', 'ERROR']]) {
