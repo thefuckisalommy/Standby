@@ -816,6 +816,29 @@
   // Member line: "Tx N — <txid prefix>…" left, amount right. N is the
   // member's position in the set, so it stays put if a member goes stale.
   // No pill on member lines.
+  // A shortened txid that opens the full one (the same pop-out as a
+  // card's TXID row).
+  function txidLink(tx) {
+    var a = document.createElement('span');
+    a.className = 'txid-link';
+    a.textContent = shortTxid16(tx.txid);
+    a.title = 'Show full TXID';
+    a.txRef = tx;
+    a.addEventListener('click', function () { showTxidPopout(a.txRef); });
+    return a;
+  }
+  // A readiness member line's left side: "Tx N — " and the txid link.
+  // The tick updates the same two spans in place.
+  function fillMemberLeft(el, tx, index) {
+    var pre = el.children[0];
+    var link = el.children[1];
+    if (!pre) { pre = document.createElement('span'); el.appendChild(pre); }
+    pre.textContent = 'Tx ' + index + (tx.txid ? ' \u2014 ' : '');
+    if (!tx.txid) return;
+    if (!link) { el.appendChild(txidLink(tx)); return; }
+    link.textContent = shortTxid16(tx.txid);
+    link.txRef = tx;
+  }
   function readinessMemberParts(tx, index) {
     var short = (tx.txid || '').slice(0, 16);
     var left = 'Tx ' + index + (short ? ' \u2014 ' + short + '\u2026' : '');
@@ -966,7 +989,9 @@
         } else {
           key = e.tx.id;
           item.dataset.txId = e.tx.id;
-          label.textContent = txDisplayName(e.tx);
+          // A label-less tx is named by its short txid, which opens the full one.
+          if (!e.tx.label && e.tx.txid) label.appendChild(txidLink(e.tx));
+          else label.textContent = txDisplayName(e.tx);
           var st = txStatus(e.tx);
           pill.className = 'pill ' + st.cls;
           pill.textContent = txPillText(e.tx, st);
@@ -997,7 +1022,7 @@
             mrow.dataset.txId = m.id;
             var mleft = document.createElement('span');
             mleft.className = 'readiness-tx-member-label';
-            mleft.textContent = parts.left;
+            fillMemberLeft(mleft, m, i + 1);
             var mamt = document.createElement('span');
             mamt.className = 'readiness-tx-member-amt';
             mamt.textContent = parts.amt;
@@ -3612,6 +3637,19 @@
   // The secondary settings hide or show at once; the value saves with Save
   // nodes.
   $('btc-secondary-enabled').addEventListener('change', syncSecondaryEnabled);
+  // Show/hide on every password box.
+  ['btc-primary-rpc-password', 'btc-secondary-rpc-password', 'login-password', 'backup-password', 'backup-password2', 'restore-password'].forEach(function (id) {
+    var btn = $(id + '-show');
+    if (!btn) return;
+    btn.addEventListener('click', function () {
+      var input = $(id);
+      var show = input.type === 'password';
+      input.type = show ? 'text' : 'password';
+      btn.classList.toggle('on', show);
+      btn.title = show ? 'Hide password' : 'Show password';
+      btn.setAttribute('aria-label', btn.title);
+    });
+  });
   $('btc-primary-rpc').addEventListener('change', function () { syncRpc('primary'); });
   $('btc-secondary-rpc').addEventListener('change', function () { syncRpc('secondary'); });
 
@@ -4258,7 +4296,7 @@
           var ment = readinessEls[m.id];
           if (!ment) return;
           var parts = readinessMemberParts(m, i + 1);
-          if (ment.left) ment.left.textContent = parts.left;
+          if (ment.left) fillMemberLeft(ment.left, m, i + 1);
           if (ment.amt) ment.amt.textContent = parts.amt;
         });
         return;

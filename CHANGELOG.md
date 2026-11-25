@@ -4,6 +4,10 @@ What changed in each Standby release, newest first. The same notes appear in the
 
 Code comments describe how the app works now; the history of why it changed lives here and in git.
 
+## 0.8.16
+
+Back online after a day: when Standby hears from a node again after more than 24 hours without an answer (the device was off or the network down), it re-checks every transaction once, the same as Dry-run all, so stale, already-broadcast and conflicting ones show correctly again. Nothing is broadcast, and this is separate from the grace period. Also in 0.8.16: every password box has an eye button to show or hide what you type; the shortened txids on the Release readiness card open the full txid, as on the transaction cards; and node and price lookups give up after 8 seconds instead of 15, so a hung node fails over to the secondary sooner (broadcasts still wait 15).
+
 ## 0.8.15
 
 Maintenance release with no change to how the app works. The API test suite is split into eight groups that run in parallel, so each change is checked in about a third of the time. Also: the four tabs no longer wrap onto a second row on narrow phones with a wider system font.
