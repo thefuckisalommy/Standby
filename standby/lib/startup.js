@@ -7,7 +7,8 @@
 const fs = require('fs');
 const path = require('path');
 
-const PROBE = '.standby-write-test';
+// Per process, so two copies starting at once never share the probe.
+const PROBE = '.standby-write-test-' + process.pid;
 
 // Problems with one directory (cannot create it, create a file in it, or
 // write an existing file). create false allows it to be missing. Returns
@@ -37,6 +38,9 @@ function writeProblems(dir, { create, mode }) {
       if (!fs.lstatSync(file).isFile()) continue;
       fs.accessSync(file, fs.constants.W_OK);
     } catch (e) {
+      // Gone since the listing (a running copy's temp file swapped into
+      // place): not a write problem.
+      if (e.code === 'ENOENT') continue;
       problems.push('cannot write ' + file + ' (' + e.code + ')');
     }
   }
