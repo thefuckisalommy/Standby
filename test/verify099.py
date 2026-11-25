@@ -5974,8 +5974,9 @@ def main():
         check('45 settings: RPC off uses the mempool URL again',
               s == 200 and not (st['settings']['primaryRpc'] or {}).get('enabled') and not st['bitcoin']['nodeBases']['primary'].startswith('rpc'), st['bitcoin'].get('nodeBases'))
         with open(os.path.join(_bind_data, 'state.json')) as f:
+            _off45 = json.load(f)['settings']['primaryRpc']
             check('45 settings: RPC off forgets the login, keeping the address',
-                  json.load(f)['settings']['primaryRpc'] == {'enabled': False, 'url': _rpc_base, 'user': '', 'password': ''})
+                  _off45 == {'enabled': False, 'url': _rpc_base, 'user': '', 'password': ''}, _off45)
         stop(_app45)
         stop(_stub45)
 

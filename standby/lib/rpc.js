@@ -237,8 +237,12 @@ function normalizeSetting(input, stored) {
     rpcBaseFor(url);
     if (!user || !password) throw new Error('RPC needs a username and password');
   }
-  // Off forgets the login (the address is kept).
-  if (!input.enabled) return { enabled: false, url, user: '', password: '' };
+  // Off forgets the login and keeps the address (tidied when valid).
+  if (!input.enabled) {
+    let kept = url;
+    try { if (url) kept = rpcBaseFor(url).replace(/^rpc/, 'http'); } catch { /* keep as typed */ }
+    return { enabled: false, url: kept, user: '', password: '' };
+  }
   return { enabled: true, url: rpcBaseFor(url).replace(/^rpc/, 'http'), user, password };
 }
 
