@@ -6106,6 +6106,19 @@ def main():
         p1, s1, bp1, bs1 = outspend_counts()
         check('38 baseline: the probe costs ONE batch request per node, zero singular',
               (p1, s1, bp1, bs1) == (p0, s0, bp0 + 1, bs0 + 1), ((p0, s0, bp0, bs0), (p1, s1, bp1, bs1)))
+        # The probe leaves nothing in the outspend cache: it asks about
+        # FINNEY's outputs, and a UTXO rule watching FINNEY:0 must read
+        # the node's current answer right after a connection test, not
+        # the probe's. The stubs now say FINNEY:0 confirmed at the tip
+        # (1 confirmation), so a 3-confirmation rule must not fire.
+        for _b in (STUB_BASE_P, STUB_BASE_S):
+            req('POST', '/__test__/outspend', {'txid': v.FINNEY, 'vout': 0, 'blockHeight': STUB_TIP}, base=_b)
+        s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'utxo', 'params': {'outpoint': v.FINNEY + ':0', 'confirmations': 3}}})
+        check('38 baseline: a UTXO rule on the probed output reads the node, not the probe (1 of 3, no fire)',
+              s == 200 and r.get('fire') is False, (s, r))
+        for _b in (STUB_BASE_P, STUB_BASE_S):
+            req('POST', '/__test__/outspend', {'txid': v.FINNEY, 'vout': 0, 'clear': True}, base=_b)
+        check('38 baseline: caches cleared after the probe-cache check', clear_caches())
         # Singular-only node (the shape a node serves when it has
         # no batch route): the batch 404s, the singular answers,
         # and the value names it — the node is still OK.

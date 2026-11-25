@@ -2952,7 +2952,14 @@ async function testNodeBroadcast(apiBase) {
 // server error is reported as the reason. Read-only: a lookup,
 // never a broadcast, and no funds move.
 const PROBE_TXID = 'f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16';
+// The probe asks the node fresh and leaves nothing in the outspend
+// cache: a connection test must not change what a UTXO rule watching
+// the same outputs reads.
+function forgetProbeOutspends(apiBase) {
+  for (const vout of [0, 1]) outspendCache.delete(outspendCacheKey(apiBase, PROBE_TXID, vout));
+}
 async function testNodeOutputLookup(apiBase) {
+  forgetProbeOutspends(apiBase);
   try {
     let entry = null;
     for (const vout of [0, 1]) {
@@ -2978,6 +2985,8 @@ async function testNodeOutputLookup(apiBase) {
   } catch (e) {
     const msg = e.message || String(e);
     return { ok: false, detail: msg, value: msg };
+  } finally {
+    forgetProbeOutspends(apiBase);
   }
 }
 
