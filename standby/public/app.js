@@ -6135,12 +6135,14 @@
   // password the owner chooses (the default), or unencrypted after a
   // warning. The server encrypts (POST /api/backup {password}), so the
   // plain backup never crosses the network when encrypted.
-  function backupMode() { return $('backup-mode-plain').checked ? 'plain' : 'encrypted'; }
+  function backupMode() { return $('backup-encrypt').checked ? 'encrypted' : 'plain'; }
   function syncBackupMode() {
     var enc = backupMode() === 'encrypted';
     $('backup-encrypted-fields').style.display = enc ? '' : 'none';
     $('backup-plain-fields').style.display = enc ? 'none' : '';
-    $('btn-backup-modal-download').textContent = enc ? 'Download encrypted backup' : 'Download unencrypted backup';
+    // The write-it-down warning belongs to a generated passphrase, so
+    // it goes away while encryption is off and comes back with it.
+    setMsg($('backup-modal-msg'), enc && generatedPassphrase ? 'Write this passphrase down now \u2014 it is not stored anywhere.' : '', 'warn');
   }
   function closeBackupModal() {
     $('backup-modal').classList.remove('open');
@@ -6149,34 +6151,37 @@
     useTypedPassword();
     setMsg($('backup-modal-msg'), '', true);
   }
-  // Two ways to set the password: typed twice, or generated. A
-  // generated passphrase replaces the typing fields and is shown once,
-  // in full (it wraps on a phone) — nothing to repeat or confirm.
+  // Two ways to set the password, picked by the switch above the
+  // fields: typed twice, or generated. A generated passphrase replaces
+  // the typing fields and is shown once, in full (it wraps on a phone)
+  // — nothing to repeat or confirm. Turning the switch on again makes
+  // a fresh one.
   var generatedPassphrase = null;
   function useTypedPassword() {
     generatedPassphrase = null;
+    $('backup-generate').checked = false;
     $('backup-generated').textContent = '';
     $('backup-generated-fields').style.display = 'none';
     $('backup-typed-fields').style.display = '';
   }
-  $('btn-backup-own').addEventListener('click', function () {
-    useTypedPassword();
-    setMsg($('backup-modal-msg'), '', true);
-    $('backup-password').focus();
-  });
-  $('backup-mode-encrypted').addEventListener('change', syncBackupMode);
-  $('backup-mode-plain').addEventListener('change', syncBackupMode);
+  $('backup-encrypt').addEventListener('change', syncBackupMode);
   $('backup-modal-x').addEventListener('click', closeBackupModal);
   $('btn-backup-modal-cancel').addEventListener('click', closeBackupModal);
   $('btn-backup-download').addEventListener('click', function () {
-    $('backup-mode-encrypted').checked = true;
+    $('backup-encrypt').checked = true;
     syncBackupMode();
     $('backup-modal').classList.add('open');
   });
   // A random passphrase: 6 groups of 5 from an unambiguous alphabet
   // (no 0/o, 1/l/i) — about 145 bits. Shown in the clear so it can be
   // written down.
-  $('btn-backup-generate').addEventListener('click', function () {
+  $('backup-generate').addEventListener('change', function () {
+    if (!this.checked) {
+      useTypedPassword();
+      setMsg($('backup-modal-msg'), '', true);
+      $('backup-password').focus();
+      return;
+    }
     var alphabet = 'abcdefghjkmnpqrstuvwxyz23456789';
     var bytes = new Uint32Array(30);
     window.crypto.getRandomValues(bytes);

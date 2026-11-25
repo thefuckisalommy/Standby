@@ -670,29 +670,30 @@
 </div>
 
 <!-- Backup download: encrypted with a password the owner
-     chooses (the default), or unencrypted after a warning. -->
+     chooses (the default), or unencrypted after a warning. The two
+     choices are the app's usual on/off switches. -->
 <div id="backup-modal" class="modal-overlay">
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="backup-modal-title">
     <button id="backup-modal-x" class="modal-x" aria-label="Close">×</button>
     <h3 id="backup-modal-title">Download backup</h3>
     <p class="muted">A backup holds every signed transaction. Anyone with an unencrypted backup can broadcast them.</p>
-    <label class="radio-line"><input type="radio" name="backup-mode" id="backup-mode-encrypted" value="encrypted" checked> Encrypted with a password (recommended)</label>
-    <label class="radio-line"><input type="radio" name="backup-mode" id="backup-mode-plain" value="plain"> Unencrypted</label>
+    <label class="switch green switch-row"><span>Encrypted (recommended)</span>
+      <input type="checkbox" id="backup-encrypt" checked><span class="slider"></span></label>
     <div id="backup-encrypted-fields">
       <!-- Either the owner types a password twice, or Standby
-           generates one: then the typing fields go and the generated
+           generates one: the switch picks which. A generated
            passphrase is shown once, in full, to be written down. -->
+      <label class="switch green switch-row"><span>Generate a passphrase for me</span>
+        <input type="checkbox" id="backup-generate"><span class="slider"></span></label>
       <div id="backup-typed-fields">
         <label for="backup-password">Backup password (at least 12 characters)</label>
         <input type="password" id="backup-password" autocomplete="new-password">
         <label for="backup-password2">Repeat the password</label>
         <input type="password" id="backup-password2" autocomplete="new-password">
-        <p class="inline-btns"><button type="button" id="btn-backup-generate">Generate a passphrase instead</button></p>
       </div>
       <div id="backup-generated-fields" style="display:none">
         <label>Your backup passphrase — write it down</label>
         <p id="backup-generated" class="generated-pass"></p>
-        <p class="inline-btns"><button type="button" id="btn-backup-own">Type my own password instead</button></p>
       </div>
       <p class="muted">Write the password down somewhere other than this device. Standby cannot recover it — without it, the backup cannot be restored.</p>
     </div>
@@ -700,7 +701,7 @@
       <p class="notice bad">Unencrypted: anyone who gets this file can broadcast your transactions and see where they send funds. Keep it somewhere only you can reach.</p>
     </div>
     <p class="inline-btns">
-      <button type="button" class="primary" id="btn-backup-modal-download">Download</button>
+      <button type="button" class="primary" id="btn-backup-modal-download">Download backup</button>
       <button type="button" id="btn-backup-modal-cancel">Cancel</button>
     </p>
     <p id="backup-modal-msg" class="muted"></p>
