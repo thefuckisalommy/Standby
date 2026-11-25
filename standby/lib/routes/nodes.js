@@ -32,26 +32,12 @@ module.exports = async function nodesRoutes(ctx) {
     return sendJson(res, 200, { ok: r.ok, detail: r.detail, results: r.results });
   }
 
-  // POST /api/broadcast/test — DRY-RUN validation. Checks the stored
-  // txs' inputs are still unspent via the primary node (falling back to
-  // the secondary) and reports whether a broadcast would be attempted.
-  // Never broadcasts anything.
-  // Body { id } dry-runs one transaction; no id dry-runs all stored
-  // ones. Every transaction is checked, armed or not — a dry-run is a
-  // read-only test, and a signed transaction should be testable the
-  // moment it is stored. The aggregate "would broadcast" count stays
-  // armed-only (that is the release-relevant number). A failed check on
-  // one tx does not stop the others.
-  // A dry-run all only tests the transactions that could still
-  // broadcast. One that has already been broadcast, or whose inputs
-  // were already declared spent, is left out of the results and the
-  // aggregate — the run gives it no new status. (A single dry-run of
-  // one transaction still tests it: the owner asked for that one.)
-  // A spent verdict is recorded on the transaction (a stale release
-  // record, kind 'dryrun'): staleness is a fact about the inputs, so
-  // the card stays Stale — and stays in the Archived Transactions
-  // card — across refreshes and check-ins (a verdict kept only in
-  // the page's memory would pop back to Ready on every refresh).
+  // POST /api/broadcast/test: dry run, never broadcasts. { id } tests one
+  // tx (whatever its state), { setId } a set's members, no body every tx
+  // that could still broadcast (armed or not). Each tx's inputs are
+  // checked and the findings recorded on its card (lib/verdicts.js), so a
+  // stale verdict survives refreshes. One failure does not stop the rest;
+  // the summary counts armed txs only.
   if (req.method === 'POST' && pathname === '/api/broadcast/test') {
     const body = await readBody(req).catch(() => ({}));
     let txs = state.bitcoin.txs || [];
@@ -70,28 +56,15 @@ module.exports = async function nodesRoutes(ctx) {
     if (!txs.length) return sendError(res, 400, 'no transactions stored — paste a signed transaction hex first');
     const results = await dryRunAndRecord(state, txs, now, { drySet, checkDone: !!(body && body.id), priceNotes: true });
     const armed = results.filter((r) => r.enabled);
-    // 'would broadcast' counts the transactions that would actually
-    // land: a timelocked transaction is attempted (its per-result
-    // wouldBroadcast is true — the release will try it) but the node
-    // will reject it as non-final until the locktime passes, so it is
-    // not counted here. It is named separately, so the summary never
-    // implies it will successfully broadcast right now. A
-    // Slipstream-route transaction is named separately too:
-    // it would be submitted to MARA, not broadcast to the public
-    // mempool — so if every would-be transaction is Slipstream, the
-    // summary says "would submit to Slipstream"; if only some are,
-    // it says how many are via Slipstream.
+    // 'Would broadcast' counts txs that would actually land: timelocked
+    // ones are attempted but named separately, and Slipstream ones are
+    // named as submissions.
     const would = armed.filter((r) => r.wouldBroadcast && r.verdict !== 'timelocked').length;
     const slipstream = armed.filter((r) => r.wouldBroadcast && r.verdict !== 'timelocked' && r.broadcastVia === 'slipstream').length;
     const stale = armed.filter((r) => r.spent && r.spent.length).length;
     const timelocked = armed.filter((r) => r.verdict === 'timelocked').length;
-    // Dry-run all also checks that no input is spent by two stored
-    // transactions: only one of them can ever be confirmed, so the shared
-    // input is flagged on both cards. A single dry-run does not run
-    // this check — it is a property of the whole list. Archived
-    // transactions are excluded from the check: their fate
-    // is decided, so a live transaction sharing an input with an
-    // archived one is not warned about it.
+    // Dry-run all also flags inputs shared by two stored txs (only one can
+    // confirm); archived txs are left out.
     const overlaps = body && body.id ? [] : bitcoin.findSharedInputs(state.bitcoin.txs || []);
     const overlapNote = overlaps.length
       ? ' Warning: ' + overlaps.length + ' input(s) are shared across transactions — only one transaction per shared input can ever be confirmed: '

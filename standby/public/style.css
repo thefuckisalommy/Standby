@@ -70,15 +70,9 @@ nav.tabs {
   display: flex; gap: 4px; flex-wrap: wrap; justify-content: center;
   margin-bottom: 20px;
   border-bottom: 1px solid var(--line);
-  /* Sticky tab bar: the tabs follow the page down, pinned
-     just below the sticky appbar (top: 60px — the appbar is ~59px
-     tall, so this leaves at most a ~1px gap showing the page
-     background, invisible against the tabs' own background, and
-     never overlaps the appbar's 1px bottom border). The background
-     is required: the buttons themselves have background: none, so
-     without it scrolling content would show through the tabs.
-     z-index 40 keeps the tabs below the appbar (50) but above the
-     scrolling content. */
+  /* Sticky tab bar, just below the sticky appbar (~59px tall). The
+     background is needed (the buttons have none); z-index 40 keeps it
+     under the appbar (50). */
   position: sticky; top: 60px; z-index: 40; background: var(--bg);
 }
 nav.tabs button {
@@ -112,26 +106,17 @@ input[type="url"], input[type="datetime-local"], input[type="password"], textare
   border: 1px solid var(--line); border-radius: 6px; background: #0f1115; color: var(--ink);
   color-scheme: dark;
 }
-/* A <select> must never be wider than its container. Its intrinsic
-   width is the longest <option> ("Slipstream (MARA)"), and on a
-   phone the native dropdown popout can force the select — and the
-   modal and page around it — wider than the viewport when it opens.
-   width: 100% alone does not cap that in every mobile browser; the
-   max-width does. Applies to all four selects (Add-form route +
-   fallback, Edit-popup route + fallback). */
+/* A select must never be wider than its container: on a phone the native
+   popout could otherwise widen the modal and page. width: 100% alone does
+   not cap it everywhere; max-width does. */
 select { max-width: 100%; }
 textarea { min-height: 110px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13.5px; }
 textarea.plain { font-family: inherit; }
 input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent); border-color: var(--accent); }
 .row { display: flex; gap: 12px; flex-wrap: wrap; }
 .row > * { flex: 1 1 160px; }
-/* Input + inline unit, e.g. Days of silence [ 35 ] days. The
-   input's min-width: 0 lets it shrink below its intrinsic size
-   inside the flex row — without it, a number input's min-width:
-   auto stops it shrinking, and the price row (op select + $ +
-   input) pushes the $ amount off the right edge on a 390px
-   phone. Applies to the Add and Edit pickers, and to the
-   check-in threshold row too. */
+/* Input with inline unit. min-width: 0 lets the input shrink inside the
+   flex row, so the price row fits a 390px phone. */
 .inline-unit { display: flex; align-items: center; gap: 8px; }
 /* The two selects in an inline-unit row (the price >=/<= and the
    UTXO fire-on) also carry the base `width: 100%` — without this
@@ -159,14 +144,10 @@ button:disabled { opacity: 0.5; cursor: default; }
    tappable (full height, ~100px wide each). */
 .card p.btc-actions { display: flex; gap: 6px; flex-wrap: nowrap; margin-top: 14px; }
 .btc-actions button { flex: 0 1 auto; min-width: 0; padding: 9px 8px; font-size: 14px; white-space: nowrap; }
-/* The "+ Add Tx" oval in the Staged Transactions header:
-   an accent-outlined pill, small enough to sit beside the 18px
-   heading without crowding it. It opens the Add-transaction popup
-   (same form as the Getting Started button). The button lives inside
-   the <summary>, so its click must not toggle the card — app.js
-   stops the event. The summary itself is the flex row (title + pill);
-   the native disclosure marker is replaced by a CSS triangle that
-   rotates when the card is closed, so the header stays one line. */
+/* The "+ Add Tx" pill in the Staged Transactions header. It sits inside
+   the <summary>, so app.js stops its click from toggling the card; the
+   native marker is replaced by a rotating CSS triangle so the header stays
+   one line. */
 #tab-bitcoin details.staged > summary { display: flex; align-items: center; gap: 8px; list-style: none; }
 #tab-bitcoin details.staged > summary::-webkit-details-marker { display: none; }
 #tab-bitcoin details.staged > summary::before { content: '\25bc'; font-size: 14px; flex: 0 0 auto; transition: transform 0.15s ease; }
@@ -299,29 +280,17 @@ button.btn-checkin-big { width: 100%; padding: 16px 20px; font-size: 19px; }
 .tx-row + .tx-row { border-top: 1px solid var(--line); }
 .tx-row b { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; font-size: 15px; font-weight: 400; }
 .tx-row .pill { flex-shrink: 0; }
-/* The readiness list's per-transaction block:
-   one block per armed rule — the label + the status pill (and the
-   fee pill) on the first line, the trigger's level and current
-   value on the second line, so the dashboard reads as a list of
-   RULES, not just transactions. Each block is its own sub-card
-   (lighter than the card, full border, 8px radius) so the rows
-   stop blending into the card. The first line never wraps: the
-   label is truncated with an ellipsis so a long label cannot push
-   the status pill onto a second line. The 6px row gap (not 10px)
-   and 8px side padding are what keep the longest two-pill label
-   ("Blue wallet move" + Low Fee Risk) on one line at 390px. */
+/* Readiness blocks: one sub-card per armed rule, label and pills on the
+   first line (never wrapping: the label truncates), the trigger and value
+   below. The 6px gap and 8px padding keep the longest two-pill label on
+   one line at 390px. */
 .readiness-tx { background: #22252d; border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; margin: 10px 0; }
 .readiness-tx-row { display: flex; align-items: baseline; gap: 6px; flex-wrap: nowrap; }
 .readiness-tx-row b { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; font-weight: 400; }
 .readiness-tx-row .pill { flex-shrink: 0; }
 .readiness-tx-state { color: var(--muted); font-size: 13px; margin-top: 2px; overflow-wrap: anywhere; }
-/* The per-member lines under a set's readiness header:
-   "Tx N — <short txid>…" left, the amount pinned
-   to the right edge, indented under the header — the same row
-   shape as the header, one size smaller. No pill on member
-   lines at all: the status pill lives only on the set header
-   row. The left text truncates with an ellipsis so the amount
-   never wraps. */
+/* Member lines under a set's readiness header: "Tx N — <txid>…" left,
+   amount right, one size smaller, no pill; the left text truncates. */
 .readiness-tx-member { display: flex; align-items: baseline; gap: 6px; flex-wrap: nowrap; margin: 4px 0 0 12px; }
 .readiness-tx-member-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
 .readiness-tx-member-amt { flex-shrink: 0; font-size: 14px; }
@@ -362,23 +331,13 @@ button.btn-checkin-big { width: 100%; padding: 16px 20px; font-size: 19px; }
 #tab-dashboard .node-lines > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 #tab-dashboard .node-lines > div > span:first-child { min-width: 0; overflow-wrap: anywhere; }
 #tab-dashboard .node-lines .pill { flex-shrink: 0; }
-/* Exchange Status rows: label left, then the price in
-   small muted text, then the status pill pinned to the right
-   edge — the same right-aligned pill column as the Node Status
-   rows above them. The price span's margin-left: auto absorbs
-   the free space, so the label stays left and price + pill sit
-   right. This rule must stay AFTER the space-between rule above
-   (equal specificity, source order wins). */
+/* Exchange rows: the price's margin-left: auto pushes price and pill
+   right, into the same column as the node pills. Must stay after the
+   space-between rule (source order wins). */
 #readiness-exchange-item .node-lines > div { justify-content: flex-start; }
 #readiness-exchange-item .node-lines .node-check-detail { margin-left: auto; }
-/* Node Status rows: the same right-aligned checked-time
-   column as the Exchange Status rows above — the checked span's
-   margin-left: auto absorbs the free space, so the host stays
-   left and checked time + pill sit right, adjacent. Without it
-   the space-between row left the checked time floating mid-row
-   instead of pinned against the pill, the way the price is.
-   Same specificity as the exchange rules above, and placed after
-   the space-between rule, so source order wins. */
+/* Node rows: the same right-aligned column for checked time and pill; also
+   placed after the space-between rule. */
 #readiness-node-item .node-lines > div { justify-content: flex-start; }
 #readiness-node-item .node-lines .node-check-detail { margin-left: auto; }
 a { color: #f59e0b; }
@@ -464,16 +423,9 @@ a { color: #f59e0b; }
 .scroll-table thead th { position: sticky; top: 0; background: var(--card); }
 /* A collapsed message card shows only its header row + toggle. */
 .card.collapsed > :not(.section-head) { display: none; }
-/* The transaction card head: one row, never wrapping — the label
-   takes the space that is left and wraps inside it, the status pill
-   is pinned to the top-right, and the arm/disarm toggle sits
-   immediately to the right of the pill, always in the same spot, no
-   matter how long the label is, and the label can never run over
-   them. The pill carries the armed state in words ("armed" when
-   healthy, "Label + armed" for a problem state, "unarmed" when
-   disarmed); the toggle is the control. Settled and pending
-   cards have no toggle. The card body lives in a collapsible Details,
-   collapsed by default. */
+/* Transaction card head: one row; the label wraps in the remaining space,
+   the pill is pinned top-right with the arm toggle beside it (settled and
+   pending cards have no toggle). The body is a collapsed Details. */
 /* The Archived Transactions card is a <details>, collapsed by default,
    so it takes little space until the owner opens it. The summary reads
    like the other cards' headings. The child combinator (>) matters:
@@ -481,13 +433,9 @@ a { color: #f59e0b; }
    inside an archived tx card and inflate it to 18px — the nested
    summaries stay at their own 14px (see .tx-details summary). */
 details.archived > summary { cursor: pointer; font-size: 18px; font-weight: 700; margin: 0 0 6px; }
-/* Every card header on the Transactions tab reads the same size:
-   the Pending, Archived and Staged summaries and the Add card's
-   heading match the main "Staged Transactions" summary (18px,
-   bold). Scoped to the Transactions tab — the other tabs keep
-   their own heading sizes. The child combinator (>) again: only
-   the OUTER summary is a header; the nested Details summaries
-   inside the tx cards are not, and keep their 14px. */
+/* Every card header on the Transactions tab matches the main summary
+   (18px, bold); the child combinator keeps nested Details summaries at
+   14px. */
 #tab-bitcoin details.pending > summary,
 #tab-bitcoin details.archived > summary,
 #tab-bitcoin details.staged > summary,
@@ -561,17 +509,9 @@ details.archived > summary { cursor: pointer; font-size: 18px; font-weight: 700;
    is already block; the condition and the state line are inline
    by default, which ran them together on one row. */
 .tx-trigger span { display: block; }
-/* The rule list: the Add / Edit forms carry a list of
-   rules instead of one trigger picker. The "How the rules
-   combine" section sits above the list — two large
-   cards, one per mode, each with a plain description, visible
-   from the first rule on; each rule is a boxed panel with its
-   own trigger picker and param rows; "+ Add rule" appends a
-   panel (up to 5). The combination line above a multi-rule
-   card's subcards names the mode ("Fires when ANY rule
-   fires"). A per-rule subcard header ("Rule 1 — BTC Price")
-   is NOT uppercased, unlike the single-rule "TRIGGER - TYPE"
-   header above. */
+/* Rule list in the Add and Edit forms: the "How the rules combine" cards
+   above, one boxed panel per rule (up to 5). A per-rule subcard header is
+   not uppercased, unlike the single-rule header. */
 .rules-label-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 12px 0 4px; }
 .rules-label-row label { margin: 0; }
 .op-section { border: 1px solid var(--line); border-radius: 8px; background: #14171d; padding: 12px; margin: 12px 0 4px; }
@@ -603,24 +543,13 @@ details.archived > summary { cursor: pointer; font-size: 18px; font-weight: 700;
 .tx-rules-combo + .tx-trigger { margin-top: 5px; }
 .tx-rules-combo strong { color: var(--ink); }
 .tx-trigger-k.rule-k { text-transform: none; }
-/* A label/value row inside a card's Details: the label is muted and
-   held to a fixed 120px column so the values line up; the value
-   takes the rest and wraps inside its own column instead of running
-   under the label. The row is flex: with the old
-   inline layout the TXID's monospace leading space was ~4px wider
-   than the other rows' sans space, so its first glyph sat right of
-   the rest — and an expanded TXID wrapped under the label. One
-   element per row, so its text reads "Label: value". */
+/* Details label/value row: a fixed 120px muted label column so values line
+   up and wrap in their own column. One element per row, so its text reads
+   "Label: value". */
 .tx-kv { display: flex; font-size: 14px; margin: 4px 0; overflow-wrap: anywhere; }
 .tx-kv-k { color: var(--muted); flex: 0 0 120px; min-width: 120px; }
 .tx-kv-v { flex: 1; min-width: 0; overflow-wrap: anywhere; }
-/* The Fee row uses the same 120px label column as every other
-   Details kv row: the fee's value starts exactly
-   where the other rows' values start. Round 6 had zeroed the
-   label column here (min-width: 0) to stop the value wrapping,
-   but that put the fee value ~90px left of the other values.
-   The wrapping it fixed was caused by the old buggy fee (trillions
-   of sats); the corrected fee is short and fits in the column. */
+/* The Fee row uses the same 120px label column as the other rows. */
 /* A check-in API key row: label left, dates muted, Revoke right. */
 .api-key-row { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap;
   padding: 10px 0; border-bottom: 1px solid var(--line); }
@@ -654,19 +583,10 @@ p.inline-btns { display: flex; gap: 8px; flex-wrap: nowrap; align-items: center;
 .tx-card .timeline .ev { font-size: 14px; font-weight: 600; }
 .tx-card .timeline .ev .t { float: right; color: var(--muted); font-size: 12px; font-weight: 400; margin-top: 2px; }
 .tx-card .timeline .det { color: var(--muted); font-size: 13px; margin-top: 1px; }
-/* The Inputs and Outputs drop-downs nested inside a card's
-   Details: two separate <details>, one per side — each summary
-   reads like the Details summary (14px, muted) — the header
-   rules above must not leak into it. Each entry is a kv row
-   (label in the 120px column, content in the value column, no
-   indent — round 8), its content truncated to one line and
-   clickable to open a pop-out with the full info. The summary's
-   disclosure arrow sits on the RIGHT, after the count
-   ("Inputs: 2 >" — round 10): the default left marker is
-   hidden, and a ">" is drawn at the right edge via ::after, so
-   the "Inputs"/"Outputs" text starts flush at the left,
-   aligned with the other Details labels. The arrow rotates
-   90° (points down) while the drop-down is open. */
+/* Inputs and Outputs drop-downs inside Details, styled like the Details
+   summary. Each entry is a kv row truncated to one line that opens a pop-
+   out. The disclosure arrow is drawn on the right ("Inputs: 2 >") and
+   turns down when open. */
 .tx-card .tx-io { margin: 4px 0; }
 .tx-card .tx-io summary { display: flex; cursor: pointer; color: var(--muted); font-size: 14px; list-style: none; }
 .tx-card .tx-io summary::-webkit-details-marker { display: none; }

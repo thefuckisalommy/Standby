@@ -32,14 +32,9 @@ async function handleApi(req, res, pathname) {
   }
   const pre = await authRoutes({ req, res, pathname, now });
   if (pre !== NEXT) return pre;
-  // A state file that cannot be loaded — corrupt or
-  // missing with no usable backup — throws loudly by design, but
-  // it must not take the whole API down with it: the two rescue
-  // endpoints do not need the current state (restore validates
-  // the uploaded backup from the body alone; reset starts fresh),
-  // so they still run. Everything else answers with the load
-  // error, exactly as before — including /api/health, which keeps
-  // 500ing in this state.
+  // A state file that cannot load must not take the API down: the two
+  // rescue routes (restore, reset) still run; everything else, health
+  // included, answers with the load error.
   let state = null;
   let stateError = null;
   try {

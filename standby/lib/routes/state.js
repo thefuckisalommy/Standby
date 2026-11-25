@@ -13,13 +13,9 @@ module.exports = async function stateRoutes(ctx) {
   const { req, res, pathname, now } = ctx;
   let state = ctx.state;
 
-  // GET /api/state — full state (no secrets live in state).
-  // Also carries the shared inputs, derived from the stored
-  // transactions on every read (findSharedInputs parses the hexes,
-  // no network): the UI renders the shared-input warning from this,
-  // so the warning persists across refreshes and clears the moment a
-  // transaction is edited away from the shared input. It is derived,
-  // not stored — the state file holds only the transactions.
+  // GET /api/state: the full state (it holds no secrets), plus derived
+  // values such as the shared inputs (parsed from the stored hexes, no
+  // network), so warnings persist and clear without being stored.
   if (req.method === 'GET' && pathname === '/api/state') {
     // A receiver check-in that landed since the last read is merged
     // first, so the state served is current.
@@ -49,17 +45,9 @@ module.exports = async function stateRoutes(ctx) {
     served.warnings = startupWarnings.concat(store.getStateWarnings());
     served.grace = graceStatus(state, now); // the grace: null when none is active, else { active, indefinite, graceUntil, triggeredAt, offlineGapDays }
     served.bitcoin.overlaps = bitcoin.findSharedInputs(state.bitcoin.txs || []);
-    // The fee verdict's peak: computed
-    // from the recorded fee history in this state — the 90th
-    // percentile of the hourly economy-fee observations, with the
-    // window they span in days, how many there are, and the basis
-    // (always fee estimates: one consistent day-scale measurement
-    // across mempool, Esplora, and RPC modes). Derived on every
-    // read, like the overlaps — the peak itself is never stored,
-    // only the observations are. A null peak means the history is
-    // still building (fewer than 24 observations) and there is no
-    // verdict anywhere; the frontend compares each active tx's own
-    // fee rate to this peak.
+    // The fee peak, derived from the stored readings on every read (never
+    // stored). Null while fewer than 24 readings exist: no verdict
+    // anywhere.
     const fp = feePeakForState(state);
     served.bitcoin.feePeak = fp.peak;
     served.bitcoin.feePeakWindowDays = fp.windowDays;
@@ -98,17 +86,10 @@ module.exports = async function stateRoutes(ctx) {
     for (const t of served.bitcoin.txs || []) {
       try { t.detail = bitcoin.txIoDetail(bitcoin.parseTx(t.hex)); }
       catch { t.detail = null; }
-      // The trigger: normalized (so the UI always sees a
-      // valid one — a legacy tx reads as the check-in trigger) and
-      // its current status, computed from the stored evaluation
-      // (no network on a read) — except the check-in trigger,
-      // whose state is live clock math. The served trigger
-      // is the legacy single-rule shape for a one-rule set and the
-      // set for a multi-rule set (see serveTrigger); the served
-      // triggerState matches — a flat slice for one rule, the
-      // per-rule array for several. The status is computed first,
-      // on the stored form, so a one-rule set reads exactly as it
-      // did before rule sets.
+      // The trigger, normalized (a legacy tx reads as check-in), with its
+      // status from the stored evaluation (no network; check-in is live
+      // clock math). A one-rule set is served as its single rule, with a
+      // flat slice.
       t.triggerStatus = triggerStatusFor(state, t, now);
       const servedSet = store.triggerOf(t);
       t.trigger = store.serveTrigger(servedSet);
@@ -198,22 +179,11 @@ module.exports = async function stateRoutes(ctx) {
     });
   }
 
-  // POST /api/triggers/check — evaluate a trigger ONCE, live, WITHOUT
-  // changing any state. The UI calls this when the owner picks
-  // a trigger in the Add/Edit form, so the already-true guard can warn
-  // before the rule is added ("this condition is already satisfied —
-  // it would fire on the next evaluation"). Body { trigger, txId? } — the
-  // same shape POST /api/bitcoin/txs accepts, plus an optional txId
-  // naming the transaction being edited: for a check-in rule its
-  // frozen time (disarmed / vacation) counts, so the guard measures
-  // the same effective clock the evaluator uses. A new tx (no txId)
-  // has no frozen time. An invalid trigger is
-  // a 400 with the reason. A price trigger whose price is already
-  // past the threshold (both sources agree) reports fire=true.
-  // A UTXO trigger whose outpoint is already spent (confirmed)
-  // reports fire=true. A trigger that cannot be read (a feed
-  // outage, an outpoint no node can say about) is 'unknown',
-  // never a fire.
+  // POST /api/triggers/check { trigger, txId? }: evaluate once, live,
+  // without changing state, so the form can warn that a condition is
+  // already satisfied. txId makes a check-in rule use that tx's frozen
+  // time. Invalid triggers are a 400; unreadable ones are unknown, never a
+  // fire.
   if (req.method === 'POST' && pathname === '/api/triggers/check') {
     const body = await readBody(req).catch(() => ({}));
     const v = store.normalizeTrigger(body.trigger);

@@ -25,14 +25,8 @@ function triggerLabel(trigger) {
   }
 }
 
-// The condition in plain words, as shown in the trigger subcard:
-// "Fires when you don't check in for 35 days",
-// "Fires when BTC price ≥ $150,000", "Fires when UTXO 4a74…:0 is spent",
-// "Never fires — manual only". `trigger` is a normalized rule SET
-// (see triggerOf) — a one-rule set reads exactly as its single rule
-// did; a multi-rule set joins its rules with AND / OR. The
-// single-rule text is unchanged, so a one-rule tx's 'added' history
-// detail and subcard read exactly as before.
+// The condition in plain words ("Fires when BTC price ≥ $150,000"). A one-
+// rule set reads as its rule; a multi-rule set joins them with AND / OR.
 function triggerConditionText(trigger) {
   const set = toTriggerSet(trigger);
   if (set.rules.length === 1) return singleTriggerConditionText(set.rules[0]);
@@ -115,13 +109,9 @@ function singleTriggerConditionText(trigger) {
   }
 }
 
-// The rule types that fired this broadcast, joined — the type
-// stamped on a release record: the rule(s) that fired it,
-// or the tx's current rule types when nothing fired it (a manual
-// broadcast, a dry-run verdict, a confirmation refresh). One rule
-// reads as its type, exactly as before ('price', 'checkin'); several
-// join with '+' ('price+setdate'), so the record still says which
-// rules it came from.
+// The rule types stamped on a release record: those that fired, or the
+// tx's current types when nothing fired (manual broadcast, dry run,
+// refresh); several join with '+'.
 function releaseTriggerFor(state, tx, firedRuleTypes) {
   const types = (Array.isArray(firedRuleTypes) && firedRuleTypes.length)
     ? firedRuleTypes
@@ -146,23 +136,11 @@ function setMembers(state, set) {
   return (set.txIds || []).map((id) => txs.find((t) => t.id === id)).filter(Boolean);
 }
 
-// The deadline a Slipstream transaction's public fallback fires at —
-// or null when there is none. Two anchors, by the transaction's
-// state (the owner's rule):
-//   (a) 'submitted-slipstream' (MARA accepted it): the deadline runs
-//       from when MARA first accepted it — release.submittedAt. A
-//       change of duration while pending re-times the deadline from
-//       that same submittedAt; it does NOT restart the clock.
-//   (b) still 'release-due' because the submit keeps failing (never
-//       got the 200+success): the deadline runs from the FIRST
-//       Slipstream broadcast attempt — slipstreamFirstAttemptAt,
-//       set on the first attempt whether it succeeds or fails, never
-//       overwritten after. If no attempt has been made yet, there is
-//       no deadline (nothing to fall back from).
-// A tx that succeeded on the first try has firstAttemptAt ==
-// submittedAt, so the two anchors agree there; a tx that failed
-// first and succeeded later anchors on (a), the acceptance — the
-// fallback is about MARA holding it, not about our first try.
+// When a Slipstream tx's public fallback fires, or null:
+// (a) accepted by MARA: from release.submittedAt (changing the duration
+// re-times from it)
+// (b) still release-due because submits keep failing: from
+// slipstreamFirstAttemptAt (no attempt yet, no deadline)
 function fallbackDeadline(tx) {
   if (!tx || tx.broadcastVia !== 'slipstream') return null;
   const days = validPublicFallbackDays(tx.publicFallbackDays);
@@ -180,15 +158,9 @@ function fallbackDeadline(tx) {
   return new Date(at + days * 86400000);
 }
 
-// The tx as the API serves it:
-// a one-rule set is served as its single rule with its triggerState
-// as the single slice (the single-rule shape clients and tests
-// expect for one-rule txs); a multi-rule set
-// is served as the set, with the per-rule state array. The stored
-// form is always the set — this only shapes what leaves the server.
-// A shallow copy: the stored record keeps its set. Remove this when
-// the UI build lands (the new frontend normalizes both shapes on
-// read).
+// The tx as served: a one-rule set as its single rule with a flat slice, a
+// multi-rule set as the set with the per-rule array. The stored form is
+// always the set.
 function serveTx(tx) {
   if (!tx || typeof tx !== 'object') return tx;
   const set = store.triggerOf(tx);

@@ -6,13 +6,9 @@
 const path = require('path');
 
 const PORT = parseInt(process.env.PORT || '3100', 10);
-// The bind address. Default 127.0.0.1:
-// a bare `node server.js` run listens on loopback only, so the
-// UI is not exposed to the LAN by accident. Docker installs set
-// STANDBY_BIND=0.0.0.0 in their compose file — a loopback bind
-// inside a container would never receive traffic forwarded to the
-// container's IP — and the exposure boundary there is the
-// host-side port mapping / proxy (plus the app login, when set).
+// Bind address, default 127.0.0.1 so a bare run is not exposed to the LAN.
+// Docker sets 0.0.0.0 (a loopback bind would never see forwarded traffic);
+// there the port mapping or proxy, plus the app login, is the boundary.
 const BIND = process.env.STANDBY_BIND || '127.0.0.1';
 // Where this process is running, so startup checks and
 // messages can be specific instead of guessing:
@@ -61,18 +57,16 @@ const MEMPOOL_OVERRIDE = (() => {
   const port = parseInt(process.env.MEMPOOL_PORT || (proto === 'https:' ? '443' : '80'), 10);
   return proto + '//' + process.env.MEMPOOL_HOST + ':' + port;
 })();
-// Test-only endpoint overrides. PRICE_API_URL points
-// EVERY built-in price provider at one base (so a stub can answer
-// all of them) — outside tests that would quietly collapse the
-// two-source price agreement into one source, so it is honored
-// only in test mode. SLIPSTREAM_API_URL likewise.
-// How long a restore waits for its node check of the restored
-// transactions; any not checked by then are reported unchecked. Tests
-// shorten it with STANDBY_TEST_RESTORE_CHECK_MS (test mode only).
+// How long a restore waits for its node check; transactions not checked by
+// then are reported unchecked. Tests shorten it with
+// STANDBY_TEST_RESTORE_CHECK_MS (test mode only).
 const RESTORE_CHECK_MS = (() => {
   const ms = TEST_MODE ? parseInt(process.env.STANDBY_TEST_RESTORE_CHECK_MS || '', 10) : NaN;
   return Number.isFinite(ms) && ms > 0 ? ms : 60000;
 })();
+// Test-only endpoint overrides (test mode only): PRICE_API_URL points every
+// built-in price provider at one stub, which outside tests would collapse
+// the two-source agreement into one source. SLIPSTREAM_API_URL likewise.
 const PRICE_API_URL_OVERRIDE = TEST_MODE ? (process.env.PRICE_API_URL || '').trim() : '';
 const SLIPSTREAM_API_URL_OVERRIDE = TEST_MODE ? (process.env.SLIPSTREAM_API_URL || '').trim() : '';
 // Ignored-in-production overrides, named for the startup log.

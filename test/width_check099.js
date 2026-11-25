@@ -1,51 +1,11 @@
-// Standby 0.8.0 width check — the price $ amount field and every
-// guard-note in the Add and Edit forms, at 390px (Pixel 7).
-// The price row (op select + $ + number input) pushed the $ amount
-// off the right edge: .inline-unit input { flex: 1 } plus the base
-// input { width: 100% } left the input's min-width: auto (intrinsic
-// size) stopping it shrinking in the flex row. The fix is
-// min-width: 0 on .inline-unit input. This script proves the fix
-// and that no note in either form overflows or is cut off.
-//
-// Runs against the app the dom launcher boots on :3478 (seeded
-// with 4 armed txs). It does NOT start or stop any server — the
-// launcher runs it after dom_check099.js, while the app is up.
-// The Settings tab's BTC price sources card (two provider selects,
-// the 5% note, the per-source last-price lines) is covered at the
-// end, at the same 390px width.
-// The Dashboard tab's readiness rows are covered too: every
-// .readiness-tx-row must be a single line at 390px (label
-// truncated with an ellipsis, status pill never wrapping), and the
-// fee-verdict pill must still be present where it applies.
-// The Settings tab's reworked Vacation mode card and the new
-// Global Arm/Disarm card are covered too: both cards, the date
-// input, the Save / Arm all / Disarm all buttons and their msg
-// lines all fit at 390px.
-// The tab bar is covered too: main's top padding is 0 (no gap
-// above the tabs — the default matches the scrolled height, where
-// the tabs stick at top 60px), nav.tabs is sticky at
-// top 60px with z-index 40 and an opaque background, the appbar
-// stays sticky at top 0 with z-index 50, and scrolled 800px the
-// tabs sit directly below the appbar with no gap or overlap.
-// The "?" help button on every Settings card is covered too:
-// each one fits at 390px, sits in the header row to the right
-// of its heading without overlapping it, and stays a small
-// circle that does not compete with the Save button.
-// The Settings filter dropdown is covered too: one row at the
-// top of the tab, inside the 390px viewport, sitting above the
-// first card with no overlap.
-// The trimmed cards still fit — the existing per-card checks
-// above cover the inputs, buttons and msg lines that remain.
-// The Exchange vs Node status alignment is covered too: the
-// per-exchange rows' pills must share the Node rows' pills'
-// right-edge x position at 390px (one aligned column).
-// Usage (from the launcher, or by hand with the app already up):
-//   node width_check099.js
-// (Playwright resolves from test/node_modules — `npm install
-// playwright` in test/ — and the browsers from
-// PLAYWRIGHT_BROWSERS_PATH or Playwright's default cache.)
-// Exits 0 when every check passes, 1 otherwise. Prints one
-// PASS/FAIL line per check, then FAILURES: N.
+// Standby width check: real Chromium (Playwright) at 390px against the app
+// the DOM launcher runs on :3478 (it starts no server). Checks that the
+// Add and Edit forms, guard notes, Settings cards, help buttons and filter
+// fit; readiness rows stay one line with the label truncated; exchange and
+// node pills share one right edge; and the tab bar sticks directly under
+// the appbar.
+// Usage: node width_check099.js (Playwright from test/node_modules). Exits
+// 0 when every check passes; prints PASS/FAIL per check, then FAILURES: N.
 'use strict';
 const { chromium, devices } = require('playwright');
 
@@ -432,21 +392,10 @@ function check(name, cond, detail) {
   await checkEl('width settings: arm-all msg line fits', '#arm-all-msg');
   await checkPage('width settings: document has no horizontal overflow (vacation + arm/disarm)');
 
-  // --- Tab bar: sticky below the appbar, trimmed space above (0.8.0) ---
-  // The tab menu (Dashboard / Transactions / Settings / Logs)
-  // is sticky below the appbar so it stays visible while
-  // scrolling, and main's top padding is 0 so the tabs sit
-  // directly below the appbar at the top of the page — the same
-  // height as when scrolled (the old 14px padding scrolled away
-  // and made the header look taller at the top). The appbar is
-  // sticky at top 0 with z-index 50 and ~59px tall, so the tabs
-  // stick at top 60px with z-index 40 and an opaque background
-  // (the buttons themselves have background: none, so without it
-  // scrolling content would show through).
-  // Scroll to the very top first: earlier sections scrolled
-  // elements into view, and with the page scrolled the tabs
-  // are already stuck at 60px — the at-top measurement below
-  // needs the tabs in normal flow.
+  // --- Tab bar ---
+  // main has no top padding, so the tabs sit right under the appbar at the
+  // top and when scrolled (sticky at 60px, z-index 40, opaque). Scroll to
+  // the top first so the at-top measurement sees the tabs in normal flow.
   await page.evaluate(() => window.scrollTo(0, 0));
   await page.waitForTimeout(300);
   const tabBar = await page.evaluate(() => {
@@ -668,13 +617,8 @@ function check(name, cond, detail) {
   await checkEl('width dashboard: Exchange Status Coinbase row pill fits', '#readiness-exchange-2-status');
   await checkEl('width dashboard: Exchange Status CoinGecko row price fits', '#readiness-exchange-1-price');
   await checkEl('width dashboard: Exchange Status Coinbase row price fits', '#readiness-exchange-2-price');
-  // --- Dashboard tab: Exchange vs Node status alignment (0.8.2) ---
-  // The Exchange Status rows' status pills sit in the same
-  // right-aligned column as the Node Status rows' pills — label
-  // left, price in small muted text, pill pinned to the right
-  // edge — so all four pills share one right-edge x position.
-  // The price span's margin-left: auto is what pins the
-  // price + pill group to the right.
+  // --- Exchange vs Node alignment ---
+  // All four status pills share one right-edge x position.
   const align = await page.evaluate(() => {
     const out = {};
     for (const id of ['readiness-primary-status', 'readiness-secondary-status', 'readiness-exchange-1-status', 'readiness-exchange-1-price', 'readiness-exchange-2-status', 'readiness-exchange-2-price']) {
@@ -703,14 +647,10 @@ function check(name, cond, detail) {
       && align['readiness-exchange-2-price'].right <= align['readiness-exchange-2-status'].left,
     'price right=' + (align['readiness-exchange-2-price'] ? align['readiness-exchange-2-price'].right : 'null') + ' pill left=' + (align['readiness-exchange-2-status'] ? align['readiness-exchange-2-status'].left : 'null'));
 
-  // --- Dashboard tab: readiness rows stay one line (0.8.0) ---
-  // Every .readiness-tx-row is a single line at 390px: the label
-  // truncates with an ellipsis and the status pill never wraps
-  // below it. A wrapped row would be ~2x the height (~46px), so
-  // a 30px ceiling cleanly separates one line from two. The long-
-  // label tx (added by the DOM check's section 13) is the hard
-  // case: its label must actually be truncated (scrollWidth >
-  // clientWidth) with text-overflow: ellipsis.
+  // --- Readiness rows stay one line ---
+  // A 30px height ceiling separates one line from two (~46px). The long-
+  // label tx must actually truncate (scrollWidth > clientWidth) with an
+  // ellipsis.
   const rows = await page.evaluate(() => {
     const out = [];
     document.querySelectorAll('.readiness-tx-row').forEach((row) => {

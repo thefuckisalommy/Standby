@@ -12,14 +12,10 @@ const { NEXT } = require('./shared');
 module.exports = async function adminRoutes(ctx) {
   const { req, res, pathname } = ctx;
 
-  // POST /api/state/reset — start fresh after an unrecoverable
-  // state-load failure. This sits above the endpoints
-  // that need state because it must run while state fails to
-  // load (see the rescue gate above): it deletes the state file
-  // and every local backup, empties the audit logs, clears the
-  // receiver keys, and writes a fresh default state. The body
-  // must be {confirm:true} — anything else is a 400, so a stray
-  // or accidental call cannot erase anything.
+  // POST /api/state/reset { confirm: true }: start fresh after an
+  // unrecoverable load failure (it runs while state cannot load). Deletes
+  // the state file and every backup, empties the logs and receiver keys,
+  // writes a default state. Anything but { confirm: true } is a 400.
   if (req.method === 'POST' && pathname === '/api/state/reset') {
     const body = await readBody(req);
     if (!body || body.confirm !== true) {
@@ -43,24 +39,9 @@ module.exports = async function adminRoutes(ctx) {
     return sendJson(res, 200, { ok: true });
   }
 
-  // POST /api/__test__/clear-caches (test-only, speedup): drop every
-  // in-memory cache a restart would cold — price, node fee, tip,
-  // fee peak, current fees, and the UTXO outspend caches — WITHOUT
-  // restarting (no state re-read, no tick-timer reset, no 7 s
-  // startup wait). It lives under /api/ so the dispatcher routes
-  // it to handleApi (a bare /__test__/ path would fall through to
-  // the static file server and 404). Gated on
-  // STANDBY_TEST_MODE=1, which only the test harness sets
-  // (test/helpers.py start); without it the route 404s exactly like any
-  // unknown path, so it cannot run in production. The caches are
-  // reset to their initial shapes, so the next read fetches fresh
-  // from the (stub) sources.
-  // A body of { only: [...] } clears just
-  // the named caches — the DOM suite clears only 'price', so the
-  // fee-peak cache (re-fetched only by the startup refresh and the
-  // hourly tick) survives and the fee-verdict pill keeps working.
-  // With no `only` array the call clears everything, as before
-  // (the API and regression suites rely on the full clear).
+  // POST /api/__test__/clear-caches: drop the in-memory caches without a
+  // restart. Test mode only (STANDBY_TEST_MODE=1); otherwise it 404s like
+  // any unknown route. { only: [...] } clears just the named caches.
   if (req.method === 'POST' && pathname === '/api/__test__/clear-caches') {
     if (!TEST_MODE) return sendError(res, 404, 'not found');
     const clearBody = await readBody(req).catch(() => ({}));
@@ -68,13 +49,8 @@ module.exports = async function adminRoutes(ctx) {
     return sendJson(res, 200, { ok: true, cleared: clearCaches(only) });
   }
 
-  // POST /api/__test__/throw-uncaught (test-only): throw an
-  // uncaught exception on the next tick, outside any handler, so
-  // the suite can prove the process terminates instead of serving
-  // through it. Gated on STANDBY_TEST_MODE=1
-  // like clear-caches above. Answers 200 first — the throw lands
-  // after the response, so the caller observes the 200 and then
-  // the exit.
+  // POST /api/__test__/throw-uncaught: answer 200, then throw outside any
+  // handler, so the suite can prove the process exits. Test mode only.
   if (req.method === 'POST' && pathname === '/api/__test__/throw-uncaught') {
     if (!TEST_MODE) return sendError(res, 404, 'not found');
     setTimeout(() => { throw new Error('test-only uncaught exception'); }, 0);

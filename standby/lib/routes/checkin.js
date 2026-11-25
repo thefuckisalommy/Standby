@@ -11,20 +11,12 @@ module.exports = async function checkinRoutes(ctx) {
   const { req, res, pathname, now } = ctx;
   let state = ctx.state;
 
-  // POST /api/checkin — clears the CHECK-IN rules' cycle-scoped release records:
-  // a new cycle starts for them. A price or UTXO rule's record belongs
-  // to its own trigger's cycle, not the check-in clock, so a check-in does
-  // not clear it — and does not reset its trigger. A stale record is NOT
-  // cleared: spent inputs are a fact about the transaction, not the cycle, so
-  // a stale transaction stays stale (and archived) across check-ins — only
-  // replacing the hex re-arms it. (If a broadcast already went out, the funds
-  // have already moved.) A 'submitted-slipstream' record IS
-  // cleared, like any other non-stale cycle record: the check-in ends
-  // the cycle, and the card goes back to Ready — but the transaction
-  // is still sitting in MARA's private mempool, and a check-in cannot
-  // recall it. If MARA mines it, the public-node lookup (or a fresh
-  // dry-run) recognises the tx's own txid out there and records it
-  // broadcast; if MARA drops it, the next release re-submits it.
+  // POST /api/checkin: starts a new cycle for check-in rules by clearing
+  // their cycle records. Price and UTXO records belong to their own
+  // triggers and stay; stale records stay (spent inputs are a fact). A
+  // 'submitted-slipstream' record is cleared too, but the tx is still with
+  // MARA: if mined it is recognised as broadcast, if dropped the next
+  // release re-submits it.
   if (req.method === 'POST' && pathname === '/api/checkin') {
     const body = await readBody(req).catch(() => ({}));
     const method = body.method === 'telegram' ? 'telegram' : 'app';
@@ -50,19 +42,9 @@ module.exports = async function checkinRoutes(ctx) {
     return sendJson(res, 200, { ok: true, status: checkinStatus(fresh, now) });
   }
 
-  // POST /api/grace/resume — end the grace period
-  // immediately. The dashboard's Grace period card
-  // offers this while a grace is active; an indefinite grace
-  // can only end this way (saving new grace settings never
-  // changes an active one). Idempotent: resuming with no grace
-  // active is a 200 no-op. Returns the grace state after the
-  // resume (null when no grace is active). A check-in does NOT
-  // clear the grace — this endpoint is the only way.
-  // The resume also refreshes lastOnlineAt to now: the owner
-  // just used the live app, so it is online now, and the next
-  // read / tick must not re-set a grace on the same stale gap
-  // (without this, resuming while the stamp is still stale
-  // re-sets the grace on the very next read).
+  // POST /api/grace/resume: end the grace now (the only way, other than
+  // expiry; idempotent). Also refreshes lastOnlineAt, so the next read
+  // does not re-set a grace on the same old gap. Returns the grace state.
   if (req.method === 'POST' && pathname === '/api/grace/resume') {
     const fresh = saveMutation((f) => {
       f.grace = { graceUntil: null, triggeredAt: null, offlineGapDays: null };
@@ -71,17 +53,13 @@ module.exports = async function checkinRoutes(ctx) {
     return sendJson(res, 200, { ok: true, grace: graceStatus(fresh, now) });
   }
 
-  // Check-in API keys — managed here, used by the check-in
-  // receiver. A key is created with a label; the plaintext is returned
-  // ONCE in the response and never stored — only its hash is kept, and
-  // the hashes are published to the receiver (keys.json) on every
-  // change. The list never carries the hash (the UI has no use for
-  // it). Revoking a key removes it from state and from the receiver's
-  // list, so the next check-in with it is refused.
-  //
-  // GET    /api/checkin-keys     — list { id, label, createdAt, lastUsedAt }
-  // POST   /api/checkin-keys     — create { label } -> 201 { key, plain }
-  // DELETE /api/checkin-keys/:id — revoke
+  // Check-in API keys, used by the receiver. The plaintext is returned
+  // once on creation; only the hash is kept and published to the receiver
+  // on every change. The list never carries hashes; revoking takes effect
+  // on the next check-in.
+  // GET /api/checkin-keys: list { id, label, createdAt, lastUsedAt }
+  // POST /api/checkin-keys { label }: 201 { key, plain }
+  // DELETE /api/checkin-keys/:id: revoke
   if (req.method === 'GET' && pathname === '/api/checkin-keys') {
     mergeExternalCheckin(state, now);
     return sendJson(res, 200, (state.checkinKeys || []).map(publicCheckinKey));

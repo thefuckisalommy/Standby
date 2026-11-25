@@ -461,13 +461,9 @@
     <p id="edit-locked-note" class="muted" style="display:none">The hex and broadcast route cannot be changed once the transaction has been broadcast.</p>
     <label for="edit-label">Label (optional)</label>
     <input id="edit-label" type="text" placeholder="e.g. Move 0.5 BTC to the heir's wallet">
-    <!-- One construct: every card is a
-         trigger set, so this modal is the same shape as the set
-         modal — a Transactions section (the transaction being
-         edited, as a member entry, plus blank entries appended
-         with "+ Add transaction") above a Triggers section. The
-         label above is the card's label. Saving with new
-         entries promotes the card to a set holding them all. -->
+    <!-- Edit popup: every card is a trigger set, so it mirrors the set
+         popup: the transaction(s) above, the triggers below. Saving with new
+         entries turns the card into a set holding them all. -->
     <div id="edit-txs-section" class="tx-trigger tx-item">
       <span class="tx-trigger-k">Transactions</span>
       <div id="edit-members-list">
@@ -526,15 +522,9 @@
   </div>
 </div>
 
-<!-- Edit trigger-set popup: one label and the ONE
-     rule set that drives the set's transactions. The
-     Transactions section lists the current members — each
-     with a remove button (removed members return to
-     standalone on save) — and "+ Add transaction" appends a
-     blank entry (notes + hex), created on save with the set's
-     shared trigger and attached to the set. The rule form
-     reuses the same machinery as the Add/Edit modals, with
-     the prefix 'set'. -->
+<!-- Set popup: one label and one rule set for its members. Members can be
+     removed (they return to standalone); "+ Add transaction" appends new
+     entries, created on save with the set's trigger. Rule form prefix 'set'. -->
 <div id="set-modal" class="modal-overlay">
   <div class="modal" role="dialog" aria-modal="true">
     <button id="set-modal-x" class="modal-x" aria-label="Close">×</button>
@@ -589,17 +579,10 @@
   <div class="modal" role="dialog" aria-modal="true">
     <button id="add-modal-x" class="modal-x" aria-label="Close">×</button>
     <h3 id="btc-form-title">Add a transaction</h3>
-    <!-- "+ Add Tx" IS "add trigger set":
-         one save creates a COMPLETE INDEPENDENT new trigger
-         set — ONE label for the set, above the transaction
-         inputs; repeatable tx entries (notes + hex each) inside
-         #btc-tx-list, appended with "+ Add another
-         transaction"; then the shared triggers / route below.
-         No set picker: the entries always become a NEW set.
-         The first entry keeps the old static ids (btc-notes,
-         btc-hex) so the import-file path and the untouched-form
-         check keep working; extra entries are built in JS with
-         the same field classes. -->
+    <!-- "+ Add Tx" creates one new trigger set: one label, repeatable
+         entries in #btc-tx-list, shared triggers and route below. The first
+         entry keeps the static ids btc-notes / btc-hex (used by file
+         import); extra entries are built in JS with the same classes. -->
     <label for="btc-set-label">Label (optional)</label>
     <input id="btc-set-label" type="text" placeholder="e.g. Move everything to the heir's wallet">
     <div id="btc-tx-list">

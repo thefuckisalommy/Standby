@@ -81,8 +81,8 @@ Both containers run as UID 1000 with a read-only filesystem, no Linux capabiliti
 ```sh
 mkdir -p data checkin && sudo chown -R 1000:1000 data checkin
 docker network create standby-web && docker network create standby-checkin
-docker run -d --name standby-web --restart on-failure --network standby-web -p 127.0.0.1:3100:3100 -v "$PWD/data:/data" -v "$PWD/checkin:/checkin" -e STANDBY_BIND=0.0.0.0 -e STANDBY_PASSWORD="<your password>" ghcr.io/thefuckisalommy/standby:0.8.13
-docker run -d --name standby-checkin --restart on-failure --network standby-checkin -p 3101:3101 -v "$PWD/checkin:/checkin" -e PORT=3101 -e CHECKIN_DIR=/checkin -e STANDBY_BIND=0.0.0.0 ghcr.io/thefuckisalommy/standby:0.8.13 node checkin-receiver/server.js
+docker run -d --name standby-web --restart on-failure --network standby-web -p 127.0.0.1:3100:3100 -v "$PWD/data:/data" -v "$PWD/checkin:/checkin" -e STANDBY_BIND=0.0.0.0 -e STANDBY_PASSWORD="<your password>" ghcr.io/thefuckisalommy/standby:0.8.13.1
+docker run -d --name standby-checkin --restart on-failure --network standby-checkin -p 3101:3101 -v "$PWD/checkin:/checkin" -e PORT=3101 -e CHECKIN_DIR=/checkin -e STANDBY_BIND=0.0.0.0 ghcr.io/thefuckisalommy/standby:0.8.13.1 node checkin-receiver/server.js
 # open http://localhost:3100
 ```
 (`-e STANDBY_BIND=0.0.0.0` is required here: the app binds localhost by default, and a loopback bind inside a container never receives traffic forwarded to the container's IP. The image runs as UID 1000, hence the `chown`.)

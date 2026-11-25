@@ -16,37 +16,20 @@ module.exports = async function txsRoutes(ctx) {
   // There is no POST /api/pause or /api/resume: Global Arm/Disarm
   // (POST /api/bitcoin/txs/arm-all) is the control. Those paths 404.
 
-  // Transactions — the pre-signed list. Adding one arms it (the toggle
-  // disarms it). The hex is validated (structure + txid) before
-  // storing. The server never sees keys — only the signed hex. Replacing
-  // a tx's hex clears its release record and its broadcasted fact (both
-  // belong to the old hex — the new one has never been broadcast); the
-  // broadcast log keeps the history. Deleting a tx drops its release
-  // record with it.
-  //
-  // POST   /api/bitcoin/txs      — add { txHex, label, notes, broadcastVia? }
-  // PUT    /api/bitcoin/txs/:id  — update { txHex?, label?, notes?, enabled?, broadcastVia? }
-  // DELETE /api/bitcoin/txs/:id  — remove
+  // Transactions. Adding one arms it. The hex is validated before storing;
+  // the server never sees keys. Replacing the hex clears the release
+  // record and broadcasted fact (they belong to the old tx); the broadcast
+  // log keeps the history.
+  // POST /api/bitcoin/txs { txHex, label, notes, broadcastVia? }
+  // PUT /api/bitcoin/txs/:id { txHex?, label?, notes?, enabled?,
+  // broadcastVia? }
+  // DELETE /api/bitcoin/txs/:id
   const txsMatch = pathname.match(/^\/api\/bitcoin\/txs\/([^/]+)$/);
-  // One stored-transaction record, from a parsed tx and its hex —
-  // shared by the paste path (POST /api/bitcoin/txs) and the file
-  // import path (POST /api/bitcoin/txs/import), so the two cannot
-  // drift apart. broadcastVia is the route the transaction goes out
-  // on ('public' or 'slipstream') — default 'public'.
-  // publicFallbackDays is the opt-in public-fallback
-  // duration in days, or null for Never (the default).
-  // slipstreamFirstAttemptAt is the ISO timestamp of the
-  // first Slipstream broadcast attempt, success or fail — the
-  // deadline anchor for a tx whose submit keeps failing. It is set
-  // by broadcastOneInner, never by the client, and never overwritten
-  // once set.
-  // feeSats / feeRateSatVb are the transaction fee in
-  // satoshis and the fee rate in sat/vB, computed from the parent
-  // txs on the node at add time (and refreshed by a dry-run, and
-  // recomputed at startup — see recomputeStoredFees).
-  // null when the parents could not be fetched — the fee is
-  // display-only, never a gate, so an unknown fee never blocks an
-  // add.
+  // One new tx record, shared by the paste and file-import paths.
+  // broadcastVia defaults to 'public'; publicFallbackDays null means
+  // Never; slipstreamFirstAttemptAt is set once by the broadcast path (the
+  // fallback anchor). The fee is computed from the parents at add time
+  // (also on dry run and startup); null when unknown, and never a gate.
   function newTxRecord(parsed, hex, label, notes, broadcastVia, publicFallbackDays, trigger) {
     return {
       id: store.newTxId(),
@@ -141,27 +124,11 @@ module.exports = async function txsRoutes(ctx) {
     const tx = newTxRecord(parsed, hex, body.label, body.notes, body.broadcastVia, body.publicFallbackDays, trig.trigger);
     const fee = await feeFor(parsed);
     if (fee) { tx.feeSats = fee.feeSats; tx.feeRateSatVb = fee.feeRateSatVb; }
-    // The already-satisfied check for a
-    // price, UTXO, block-height, set-date, or fee-market rule: a
-    // condition that is ALREADY met would fire on the next
-    // evaluation, so adding it is a mistake unless the owner
-    // confirms it (triggerConfirmed: true). What "met" means
-    // depends on the rule: for a price rule both sources must
-    // agree the price is past the threshold — a single-source or
-    // disagreeing reading is not a fire (checkTriggerNow answers
-    // fire: false), so it never blocks the add; for a UTXO rule
-    // it depends on the confirmation mode: any spend in
-    // unconfirmed mode (0), or a spend with at least N
-    // confirmations in N-confirmation mode. For a block-height
-    // rule the tip is already at or past the height; for a
-    // set-date rule the date has already passed; for a fee-market
-    // rule the economy fee is already at or below the threshold.
-    // The check is best-effort — a reading no source can say
-    // about (unknown) does not block the add; the tick will
-    // evaluate it. A UTXO spend that is unconfirmed, or confirmed
-    // but below N, is a warning at most, not a block. The warning
-    // still rides on the response when the condition is NOT
-    // already satisfied, so the UI can say what it found.
+    // Already-satisfied gate for price, UTXO, block-height, set-date and
+    // fee-market rules: a met condition would fire on the next evaluation,
+    // so the add needs triggerConfirmed. Price needs both sources to
+    // agree; UTXO depends on its confirmation mode. Unknown readings never
+    // block, and the check's warning rides on the response either way.
     let triggerWarning = null;
     try {
       const gate = await setGateCheck(trig.trigger, state, now, 'add');
@@ -170,21 +137,10 @@ module.exports = async function txsRoutes(ctx) {
         return sendError(res, 400, gate.message);
       }
     } catch (e) { /* best-effort: the add proceeds without the warning */ }
-    // A new tx is armed by default — adding
-    // a CHECK-IN rule while the clock is in the danger zone (the
-    // last 25% of ITS window, including already past due) would
-    // let the release fire soon after, so the add resets the
-    // check-in the same way arming does (server-side, a direct API
-    // call cannot bypass it). A price, UTXO, or manual rule does
-    // not touch the check-in clock. The zone is measured against
-    // the new rule's own threshold, not the global one. Adding
-    // with more than 25% of the window left does not reset.
-    // The push + the reset ride into
-    // FRESH state: the fee and trigger checks above awaited the
-    // network, so a second request may have saved in between. The
-    // duplicate-txid check is re-run on fresh state too — a
-    // concurrent add of the same txid would otherwise slip past
-    // the stale-side check.
+    // A new tx is armed, so a check-in rule added inside its danger zone
+    // resets the check-in (server-side, so the API cannot bypass it);
+    // other rule types never touch the clock. The add and reset are saved
+    // into fresh state, re-checking for a duplicate txid there.
     let checkinReset = false;
     let dupTx = null;
     const fresh = saveMutation((f) => {
@@ -212,14 +168,9 @@ module.exports = async function txsRoutes(ctx) {
     return sendJson(res, 201, out);
   }
 
-  // POST /api/bitcoin/txs/preview — finalize a file's contents and
-  // return the raw hex WITHOUT storing anything. The UI calls this
-  // when a PSBT file is imported, so the extracted hex can be put
-  // in the textarea for the user to label and add via the normal
-  // paste path. Body { format: 'hex'|'psbt', data }. Hex is
-  // validated exactly like the paste path; a PSBT is finalized
-  // exactly like the import path (same errors, including the
-  // clearer "not a PSBT file" one). No state change.
+  // POST /api/bitcoin/txs/preview { format: 'hex'|'psbt', data }: validate
+  // or finalize a file and return the raw hex without storing anything
+  // (the UI then adds it via the paste path).
   if (req.method === 'POST' && pathname === '/api/bitcoin/txs/preview') {
     const body = await readBody(req);
     if (body.format !== 'hex' && body.format !== 'psbt') return sendError(res, 400, 'import format must be hex or psbt');
@@ -239,17 +190,10 @@ module.exports = async function txsRoutes(ctx) {
     return sendJson(res, 200, { hex, txid: parsed.txid });
   }
 
-  // POST /api/bitcoin/txs/import — add a signed transaction from a
-  // FILE instead of a paste. Body { format: 'hex'|'psbt', data,
-  // label?, notes? }. A hex file is a text file holding the raw
-  // transaction hex; it is validated exactly like the paste path
-  // (same errors). A PSBT file (.psbt, base64 or raw binary) is
-  // finalized server-side — the PSBT must be fully signed, or it is
-  // rejected with a clear error naming the inputs that are missing
-  // signatures; a partially signed PSBT is never stored. The
-  // extracted raw hex is validated by parseTx exactly like a paste
-  // before it is stored. The body is capped at 1 MB (MAX_BODY), and
-  // the PSBT parser caps the decoded PSBT at 1 MB too.
+  // POST /api/bitcoin/txs/import { format: 'hex'|'psbt', data, label?,
+  // notes? }: add from a file. Hex is validated like a paste; a PSBT must
+  // be fully signed (missing signatures are named) and the extracted hex
+  // is validated too. Body and PSBT are capped at 1 MB.
   if (req.method === 'POST' && pathname === '/api/bitcoin/txs/import') {
     const body = await readBody(req);
     if (body.format !== 'hex' && body.format !== 'psbt') return sendError(res, 400, 'import format must be hex or psbt');
@@ -349,15 +293,10 @@ module.exports = async function txsRoutes(ctx) {
       let parsed;
       try { parsed = bitcoin.parseTx(hex); }
       catch (e) { return sendError(res, 400, 'invalid transaction: ' + e.message); }
-      // The hex is immutable once the transaction is out the door:
-      // a broadcasted tx, one submitted to
-      // Slipstream and waiting on MARA, a stale tx, or a
-      // restore-carried 'broadcast' record — all Pending or Archived
-      // — cannot be replaced with a DIFFERENT transaction, because
-      // that would be a different on-chain tx. Sending the same hex
-      // back (unchanged, same txid) is a no-op, not a change, so it
-      // is allowed and changes nothing. A 'failed' or 'conflict'
-      // record is Active, not locked: its hex can still change.
+      // Once a tx is out the door (broadcast, waiting on MARA, stale, or a
+      // broadcast record), its hex cannot become a different transaction;
+      // the same hex back is a no-op. Failed and conflict txs are still
+      // active, so their hex can change.
       const locked = !!(tx.broadcasted || (tx.release
         && (tx.release.status === 'submitted-slipstream' || tx.release.status === 'stale' || tx.release.status === 'broadcast')));
       if (locked && parsed.txid !== tx.txid) {
@@ -393,15 +332,9 @@ module.exports = async function txsRoutes(ctx) {
     }
     if (typeof body.label === 'string') tx.label = asStr(body.label, 80);
     if (typeof body.notes === 'string') tx.notes = asStr(body.notes, 500);
-    // The trigger: changing it re-rules the transaction.
-    // Validated server-side (an invalid one is a 400). A changed
-    // trigger starts fresh — the old triggerState (a price's
-    // last price, a UTXO's last outspend) belongs to the old
-    // condition and must not carry over. The already-satisfied
-    // gate (price or UTXO) applies here too (same rule as the add
-    // path). Nothing is saved until the end of this handler, so a
-    // 400 here discards the label / notes / hex changes above
-    // with it.
+    // A changed trigger is validated, starts with a fresh triggerState,
+    // and goes through the already-satisfied gate. Nothing is saved until
+    // the end, so a 400 discards the whole edit.
     let triggerWarning = null;
     if (body.trigger !== undefined) {
       const v = store.normalizeTrigger(body.trigger);
@@ -428,42 +361,23 @@ module.exports = async function txsRoutes(ctx) {
         tx.triggerState = null;
       }
     }
-    // Arming a CHECK-IN transaction while
-    // the clock is in the danger zone (the last 25% of ITS window,
-    // including already past due) would let the release fire soon
-    // after — a present owner arming a tx should not get a surprise
-    // broadcast. A disarmed→armed transition on a live tx (not
-    // already broadcasted, not stale — one the release could
-    // actually broadcast) resets the check-in instead, server-side
-    // so a direct API call cannot bypass it. Arming a price, UTXO,
-    // or manual rule does not touch the clock. Disarming, arming
-    // outside the zone, and arming a broadcasted / stale tx leave
-    // the clock untouched. The zone is measured against the tx's
-    // own threshold (after a trigger change above, the new one).
+    // Arming a live check-in tx inside its danger zone resets the check-in
+    // (server-side), measured against its own (possibly new) threshold.
+    // Other rule types, disarming, and arming outside the zone leave the
+    // clock alone.
     if (typeof body.enabled === 'boolean') tx.enabled = body.enabled;
     // The route toggle on the card: switching the route
     // applies to the NEXT broadcast attempt — a transaction already
     // submitted to Slipstream is not re-submitted by toggling it
     // (preBroadcastCheck blocks a re-submit while it waits on MARA).
     if (typeof body.broadcastVia === 'string') tx.broadcastVia = validBroadcastVia(body.broadcastVia);
-    // The public-fallback duration: changeable on the card
-    // and in the edit popup, for Active and Pending txs. It is
-    // validated leniently (invalid → Never, never a 400), like the
-    // route above. A change while the tx waits on MARA re-times the
-    // deadline from the original submittedAt — the deadline is
-    // computed from submittedAt at evaluation time (see
-    // fallbackDeadline), so no clock is restarted here.
+    // Public-fallback duration: editable for active and pending txs,
+    // invalid means Never (no 400). Changing it while waiting on MARA re-
+    // times the deadline from the original submission.
     if (body.publicFallbackDays !== undefined) tx.publicFallbackDays = validPublicFallbackDays(body.publicFallbackDays);
-    // The history events for this edit: an arm/disarm
-    // flip logs on its own; any other field change logs as one
-    // 'edited' event naming what changed. The events are appended
-    // to tx.history here and ride into fresh state through the
-    // mutator's field list below ('history' is in it), so a
-    // rejected edit (a 400 above) leaves no event behind.
-    // Single history: a member's 'edited' is
-    // forwarded to its set's trail inside the save below, on
-    // fresh state — the arm/disarm flip is NOT forwarded, the
-    // set logs its own arm.
+    // History for this edit: an arm flip logs on its own, anything else as
+    // one 'edited' event; a rejected edit logs nothing. A member's
+    // 'edited' is forwarded to its set (its arm flip is not).
     const forwardedEditEvents = [];
     if (typeof body.enabled === 'boolean' && orig.enabled !== tx.enabled) {
       pushHistory(tx, tx.enabled ? 'armed' : 'disarmed', '');
@@ -480,14 +394,9 @@ module.exports = async function txsRoutes(ctx) {
       forwardedEditEvents.push({ type: 'edited', detail: editChanges.join('; ') });
     }
     let checkinReset = false;
-    // The edit's field changes were
-    // computed on the request's snapshot while the fee and trigger
-    // checks awaited the network — only the fields this edit
-    // actually changed ride into FRESH state, so a concurrent save
-    // is not clobbered. The locks are re-checked on the fresh tx:
-    // a tx broadcast in the meantime must not have its hex or
-    // trigger rewritten. The freeze and the danger-zone reset are
-    // re-evaluated on fresh state too.
+    // Only the fields this edit changed are saved into fresh state (the
+    // request waited on the network). Locks, the freeze and the danger-
+    // zone reset are re-checked there.
     let editError = null;
     let dupTx = null;
     const fresh = saveMutation((f) => {

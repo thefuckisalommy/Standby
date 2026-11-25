@@ -1,45 +1,14 @@
 'use strict';
-// Standby — single-container Node app. ZERO runtime dependencies.
-// Serves the static UI and a JSON API backed by plain files in DATA_DIR.
-// Run:  PORT=3100 DATA_DIR=./data node server.js
-//
-// What this app is: it holds the owner's pre-signed Bitcoin
-// transactions and broadcasts them when their trigger fires — a
-// missed check-in, a price, a spent UTXO, a block height, a date, a
-// fee level — or immediately, on the owner's say-so (Broadcast Now on
-// a transaction's own card, or Broadcast Armed for the armed ones).
-// Each transaction is signed in the owner's own wallet and pasted as
-// raw hex; the app never sees keys. Each has its own enable toggle and its own release
-// record. New transactions are armed by default. The broadcast is REAL,
-// via the mempool API — a primary node and a secondary node (both
-// user-chosen mempool endpoints, default mempool.space and
-// blockstream.info/api), primary first, secondary if the primary does
-// not answer. The "test" buttons are dry-runs that check the inputs are
-// still unspent and never broadcast. A dry-run that finds spent inputs
-// records the transaction stale on the spot: staleness is a durable
-// fact about the inputs, not a cycle record and not page memory, so it
-// survives refreshes and check-ins — only replacing the hex re-arms
-// it. Settings has a data backup card:
-// download a JSON backup of the whole setup, or restore one.
-// The shared-input warning is derived from the stored transactions
-// on every state read, so it persists across refreshes and clears the
-// moment a transaction is edited away from the shared input.
-// The check-in status turns 'broadcasted' once a release has gone
-// out (a manual broadcast does not count) and a check-in resets it
-// to 'on-track'. Broadcast Armed only attempts the armed transactions
-// that are not archived (broadcasted or stale).
-// Check-in API keys: a key lets a service or app check in
-// for the owner, and it can only record a check-in — it cannot read
-// transactions or broadcast. Each service gets its own labelled key
-// (shown once, stored as a hash, revocable on its own), and the
-// check-in log records which key checked in. The key is presented to
-// the check-in receiver (a separate service, checkin-receiver/,
-// LAN port 3101), which holds no transaction data and writes only a
-// timestamp the app merges — so a holder of a key has no route to the
-// transactions at all. The receiver reads the key hashes the app
-// publishes to the shared CHECKIN_DIR (keys.json); the app merges a
-// newer timestamp from CHECKIN_DIR/last.json on every status read and
-// on the hourly tick.
+// Standby: holds pre-signed Bitcoin transactions and broadcasts them when
+// their trigger fires (a missed check-in, a price, a spent UTXO, a block
+// height, a date, a fee level) or on the owner's say-so. No runtime
+// dependencies; a static UI and a JSON API over plain files in DATA_DIR.
+// Run: PORT=3100 DATA_DIR=./data node server.js
+// The app never sees keys, only signed hex. Broadcasts are real, via two
+// configured mempool API endpoints (primary first). Dry runs never
+// broadcast. Check-in keys go to the separate check-in receiver (checkin-
+// receiver/), which holds no transaction data and only writes a timestamp
+// the app merges.
 
 const http = require('http');
 const { PORT, BIND, VERSION, DATA_DIR, CHECKIN_DIR, STARTUP_TICK_MS, DEPLOYMENT, PASSWORD, MEMPOOL_OVERRIDE, IGNORED_TEST_OVERRIDES } = require('./lib/config');
@@ -65,34 +34,18 @@ requireWritable([
   if (tightened) console.log('Standby: made ' + tightened + ' data path(s) owner-only (0700 directory, 0600 files)');
 }
 
-// An uncaught exception is a crash, not a
-// condition to serve through: Node warns that continuing after one
-// risks undefined state, and for an app that broadcasts
-// transactions a silently-corrupted process is worse than a short
-// outage. So this is uncaughtExceptionMonitor — it only LOGS; the
-// process still terminates with Node's default behaviour, and
-// Docker restarts it (restart: on-failure on both services, and
-// the Umbrel containers run the same policy).
-// The request handler below is guarded, so a bad request still
-// gets a 400 instead of killing the process; only a throw OUTSIDE
-// a guarded handler reaches here. State is re-read from disk on
-// every load, so a restarted process does not carry a torn
-// in-memory snapshot from the failed handler — and a failed
-// check-in is visible (the POST fails), never silent.
+// An uncaught exception is a crash, not something to serve through: for an
+// app that broadcasts, a corrupted process is worse than a short outage.
+// This only logs; Node still exits and Docker restarts it. Request
+// handlers are guarded (a bad request gets a 400), and state is re-read
+// from disk on every load.
 process.on('uncaughtExceptionMonitor', (e) => {
   console.error('uncaught exception:', e);
 });
 
-// Flush the heartbeat on shutdown: the "I was
-// online" stamp lives in heartbeat.json, throttled to one write
-// per 5 minutes — a shutdown inside the throttle window would
-// otherwise leave a stamp up to 5 minutes stale (harmless for
-// grace, which needs hours, but a clean flush costs nothing and
-// keeps the stamp exact). process.exit(0) is EXPLICIT: a handler
-// that returns without exiting makes Node ignore the signal, and
-// Umbrel SIGKILLs after its grace period — stalling the update
-// and losing the flush. SIGINT gets the same treatment for a
-// local Ctrl-C stop.
+// Flush the heartbeat on shutdown. process.exit(0) is explicit: a handler
+// that returns without exiting makes Node ignore the signal, and Umbrel
+// then SIGKILLs it, stalling updates.
 function flushHeartbeatAndExit() {
   try { store.writeHeartbeat(DATA_DIR, new Date().toISOString()); } catch (e) { console.error('heartbeat flush failed:', e); }
   process.exit(0);
@@ -162,15 +115,10 @@ server.listen(PORT, BIND, () => {
   verifyCheckinKeyStore();
 });
 
-// Release-evaluation timers: the full tick runs once
-// shortly after startup and then every checkCadenceSeconds; the
-// hourly tick runs once shortly after startup and then hourly.
-// The startup fee recompute runs once shortly after startup too
-// — see recomputeStoredFees. The hourly tick records one
-// economy-fee observation (the fee history the peak is computed
-// from) — see recordFeeHistoryObservation. The three 5 s startup delays are
-// STARTUP_TICK_MS (5000 in production; the test harness shortens
-// it to 500 ms via STANDBY_TEST_STARTUP_TICK_MS — see above).
+// Timers: the full tick runs shortly after startup and every check
+// cadence; the hourly tick shortly after startup and hourly; the stored-
+// fee recompute once at startup. The startup delays are STARTUP_TICK_MS (5
+// s; 500 ms in tests).
 setTimeout(runFullTick, STARTUP_TICK_MS);
 setTimeout(runHourlyTick, STARTUP_TICK_MS);
 setTimeout(recomputeStoredFees, STARTUP_TICK_MS);

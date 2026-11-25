@@ -11,16 +11,10 @@ module.exports = async function settingsRoutes(ctx) {
   const { req, res, pathname, now } = ctx;
   let state = ctx.state;
 
-  // POST /api/settings/price-sources/test {provider}:
-  // tests one price provider with a FRESH fetch (bypasses the
-  // price cache) and returns {provider, price, error}. Accepts
-  // any of the five providers, not only the two configured
-  // ones. Never changes the configured sources or the cache —
-  // the Settings Test button uses this to check a provider
-  // before (or without) saving it. A provider that fails
-  // answers 200 with price null and the error, so the UI can
-  // show the failure inline; only an unknown provider id is a
-  // 400.
+  // POST /api/settings/price-sources/test { provider }: fetch one provider
+  // fresh (bypassing the cache) and return { provider, price, error }.
+  // Changes nothing. A failing provider is a 200 with the error; only an
+  // unknown id is a 400.
   if (req.method === 'POST' && pathname === '/api/settings/price-sources/test') {
     const body = await readBody(req);
     const prov = bitcoin.priceProviderById(body && body.provider);
@@ -33,18 +27,10 @@ module.exports = async function settingsRoutes(ctx) {
     }
   }
 
-  // POST /api/settings/price-sources/test-all {providers: [...]}:
-  // tests several sources at once with FRESH fetches
-  // (bypasses the price cache) and returns
-  // {results: [{provider, label, price, error}, ...]} in the order
-  // requested. Each entry is a provider id string or a custom
-  // { id: 'custom', url, path } object. A source that
-  // fails answers with price null and the error (the test itself
-  // worked — the source is down); only a missing/empty providers
-  // array is a 400, and an unknown id inside the list is reported
-  // per-result, not as a whole-call failure. Never changes the
-  // configured sources or the cache — the Settings "Test
-  // connection" button uses this to check both sources in one call.
+  // POST /api/settings/price-sources/test-all { providers: [...] }: the
+  // same for several sources (ids or custom objects), results in request
+  // order. Changes nothing; a missing or empty list is a 400, a bad entry
+  // is reported in its result.
   if (req.method === 'POST' && pathname === '/api/settings/price-sources/test-all') {
     const body = await readBody(req);
     const ids = (body && Array.isArray(body.providers)) ? body.providers : [];
@@ -113,16 +99,9 @@ module.exports = async function settingsRoutes(ctx) {
       if (bitcoin.priceSourceKey(s1) === bitcoin.priceSourceKey(s2)) return sendError(res, 400, 'price sources must be different');
       s.priceSources = { source1: s1, source2: s2 };
     }
-    // Grace period: the on/off toggle plus
-    // the offline gap that triggers a grace and how long it lasts
-    // (null = indefinite, until the owner resumes; a stored 0
-    // still means off, kept for back-compat — the UI never sends
-    // 0). Only the values the Settings card offers are
-    // accepted — anything else is a 400. Saving new values does
-    // NOT change an already-active grace (it keeps the duration
-    // it was created with) — but turning the toggle off makes the
-    // grace read as none everywhere at once (see graceStatus),
-    // so held triggers fire immediately.
+    // Grace settings: only the values the card offers (a stored 0 still
+    // means off). New values do not change an active grace; turning the
+    // toggle off makes it read as none everywhere at once.
     if (body.graceEnabled !== undefined) {
       if (typeof body.graceEnabled !== 'boolean') {
         return sendError(res, 400, 'graceEnabled must be a boolean');

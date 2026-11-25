@@ -1,47 +1,15 @@
 'use strict';
-// ============================================================================
-// BITCOIN — transaction parsing, REAL broadcast, dry-run validation.
-// ============================================================================
-// Zero dependencies: Node built-ins only (crypto, http, https).
-//
-// What this module does:
-//   - parseTx(): validate a raw signed transaction (legacy or segwit) and
-//     compute its txid. No network, no keys.
-//   - dryRun(): check every input of the stored transaction against the
-//     chain (via the primary node, falling back to the secondary) and
-//     report whether a broadcast would be attempted. NEVER broadcasts.
-//   - broadcastTx(): broadcast the stored hex FOR REAL via the primary
-//     mempool API endpoint, falling back to the secondary endpoint if
-//     the primary does not answer. Every attempt is written to the
-//     broadcast log.
-//   - testConnection(): verify both endpoints work (fee endpoint)
-//     without moving funds. The app is OK if either one answers.
-//
-// BROADCAST PATH (settings.primaryApiUrl / secondaryApiUrl):
-//   Two mempool API endpoints, tried in order. The primary is
-//   mempool.space by default; the secondary is blockstream.info/api by
-//   default (a different operator, so it is a genuine second path).
-//   Either can be any mempool.space-compatible instance — another public
-//   one, or the owner's own mempool on the LAN
-//   (e.g. http://<lan-ip>:8999). A blank secondary means the
-//   primary runs alone. A completed freshness check is definitive
-//   (a spent input is a chain fact, not a reason to ask the other
-//   endpoint); only a failed check falls through to the next endpoint.
-//   "Already in mempool" counts as broadcast.
-//
-// There is no Bitcoin Core RPC path: the
-// mempool API is the only broadcast path, and a self-hosted mempool
-// instance is how an own-node user keeps it on their own hardware.
-//
-// HARD RULES:
-//   - Never accept, store, or log private keys, seeds, or passwords.
-//   - The raw signed hex IS stored by the server (see PUT /api/bitcoin) —
-//     it contains no key material, but it reveals the destination
-//     addresses and amounts to anyone who can read the app data.
-//   - The full hex is never written to the log — only a short preview.
-//   - A broadcast is irrevocable. Callers must gate it behind the
-//     release evaluation (server.js) — never broadcast on a hunch.
-// ============================================================================
+// Bitcoin: transaction parsing, dry runs, broadcasts, node reads. Node
+// built-ins only.
+// Nodes are two mempool API endpoints (settings.primaryApiUrl /
+// secondaryApiUrl), tried in order; a blank secondary means primary only.
+// A completed check is definitive (a spent input is a chain fact); only a
+// failed check falls through to the next endpoint. There is no Bitcoin
+// Core RPC path.
+// Hard rules: never accept, store or log keys, seeds or passwords; the
+// stored signed hex reveals destinations and amounts, so only a short
+// preview is ever logged; a broadcast is irrevocable and only the release
+// evaluation may trigger one.
 
 const crypto = require('crypto');
 const http = require('http');
@@ -53,14 +21,9 @@ const MAX_TX_BYTES = 1000000; // 1 MB, same ceiling as the API body limit
 const MAX_RESPONSE_BYTES = 1024 * 1024; // 1 MB — a mempool reply is a 64-char txid or small JSON; anything bigger is a faulty endpoint, not data
 const NET_TIMEOUT_MS = 15000;
 
-// Node endpoints — the user chooses them (settings.primaryApiUrl /
-// secondaryApiUrl). Each is a mempool API endpoint: any
-// mempool.space-compatible instance — another public one, or the owner's
-// own mempool on the LAN (e.g. http://<lan-ip>:8999). MEMPOOL_HOST
-// / MEMPOOL_PORT / MEMPOOL_PROTOCOL env vars let a self-hoster (or a
-// test) point the app at an instance instead; when set they win over
-// the configured PRIMARY URL (parsed in lib/config.js, and logged at
-// startup). There is no env override for the secondary.
+// Node endpoints come from settings. MEMPOOL_HOST / MEMPOOL_PORT /
+// MEMPOOL_PROTOCOL override the primary (lib/config.js); there is no
+// override for the secondary.
 const DEFAULT_PUBLIC_API_URL = 'https://mempool.space';
 const DEFAULT_SECONDARY_API_URL = 'https://blockstream.info/api';
 
@@ -91,26 +54,12 @@ function mempoolSecondaryBase(settings) {
   return normalizePublicApiUrl(v);
 }
 
-// Absolute-locktime check. A transaction is timelocked by
-// an absolute locktime that has not yet passed when ALL of these
-// hold:
-//   * locktime != 0, and
-//   * at least one input has a sequence below 0xffffffff (if every
-//     sequence is maxed, the locktime is ignored and the transaction
-//     is final regardless — the nLockTime rule), and
-//   * the locktime has not passed: below 500,000,000 it is a block
-//     height (timelocked while tipHeight < locktime); at or above it
-//     is a Unix timestamp (timelocked while wall-clock time <
-//     locktime — the node actually compares against the median time
-//     past, not the wall clock, so a timestamp locktime is an
-//     approximation, and the broadcast-retry loop covers the gap).
-// Returns { timelocked, until } where `until` is a number (block
-// height) or a Date (unlock time) when timelocked, else null.
-// Scope: absolute locktime ONLY. Relative timelocks (BIP 68, carried
-// in the sequences) and script timelocks (CLTV/CSV, in the output
-// scripts) are not evaluated here — they are invisible to this
-// check, so such a transaction still looks 'ready' and fails at
-// broadcast, where the retry fix retakes it.
+// Absolute locktime only: timelocked while locktime != 0, some input
+// sequence is below 0xffffffff, and the locktime (a height below
+// 500,000,000, else a Unix time) has not passed. Timestamps are compared
+// to wall-clock time, not median time past; the broadcast retry covers the
+// gap. Relative and script timelocks are not evaluated. Returns {
+// timelocked, until }.
 function timelockedUntil(tx, tipHeight, now) {
   const locktime = tx.locktime || 0;
   if (!locktime) return { timelocked: false, until: null };
@@ -265,44 +214,15 @@ function parseTx(hex) {
   };
 }
 
-// ---------------------------------------------------------------------------
-// PSBT (BIP 174) — import a fully-signed transaction from a .psbt file.
-// ---------------------------------------------------------------------------
-// A PSBT is: magic 'psbt' + 0xff, then a global map, one input map per
-// input of the unsigned transaction, and one output map per output.
-// Each map is a run of <keylen><key><vallen><value> pairs ending in a
-// single 0x00 byte. A key is <keytype 1 byte><keydata>.
-// Zero dependencies — the parser and the finalizer below are plain
-// Node Buffer work. The app never sees keys: a PSBT carries only
-// signatures and scripts, and the extracted raw hex is validated by
-// parseTx exactly like a pasted hex before it is stored.
-//
-// extractTxFromPsbt(data) — data is a Buffer (raw PSBT bytes) or a
-// string (a base64 PSBT, or raw PSBT bytes as a latin1 string — the
-// JSON API can only carry text, so a raw binary file arrives as
-// latin1). Returns { hex, txid } for a FULLY signed PSBT. Throws a
-// clear error when the PSBT is malformed, its unsigned transaction
-// does not parse, or it is not fully signed (naming which inputs are
-// missing signatures and how many each has vs. needs). A partially
-// signed PSBT is never added — finish signing it in the wallet first.
-//
-// Script types finalized from partial signatures (input key 0x02)
-// plus the script info (redeem_script 0x04, witness_script 0x05):
-// P2PKH, P2WPKH, P2SH-P2WPKH, P2SH multisig, P2WSH single-key and
-// P2WSH M-of-N multisig. An input that already carries
-// final_script_sig (0x07) and/or final_script_witness (0x08) uses
-// those directly — but only after they are validated against the
-// spent-output script type. A P2WPKH input needs a
-// non-empty final_scriptWitness of exactly 2 items (signature +
-// pubkey) and no scriptSig; a P2PKH input needs a non-empty
-// final_scriptSig and no witness; a P2WSH input needs a non-empty
-// witness and no scriptSig. An input whose final fields are present
-// but empty — an empty final_scriptSig with no final_scriptWitness —
-// is NOT finalized: it would build a transaction the nodes reject.
-// Unknown script types (taproot) and inputs with no spent-output
-// info are accepted when at least one final field is non-empty.
-// Anything else (an exotic witness script, a script type with no
-// usable signature) is reported as not fully signed, not guessed at.
+// PSBT (BIP 174) import. extractTxFromPsbt(data) takes raw bytes, base64,
+// or raw bytes as latin1 (the JSON API carries text) and returns { hex,
+// txid } for a fully signed PSBT; anything else throws, naming the inputs
+// missing signatures. A partially signed PSBT is never added.
+// Finalized from partial signatures: P2PKH, P2WPKH, P2SH-P2WPKH, P2SH and
+// P2WSH multisig, P2WSH single-key. Existing final fields are used only
+// after they are checked against the spent script type, so an empty final
+// field is never accepted. Unknown script types (taproot) need a non-empty
+// final field.
 const PSBT_MAGIC = Buffer.from([0x70, 0x73, 0x62, 0x74, 0xff]); // 'psbt\xff'
 const MAX_PSBT_BYTES = 1024 * 1024; // 1 MB — the API body is capped at 1 MB too
 
@@ -425,14 +345,8 @@ function finalizePsbtInput(inputMap, scriptPubKey, index) {
   const finalSig = inputMap.find((e) => e.type === 0x07);
   const finalWit = inputMap.find((e) => e.type === 0x08);
   if (finalSig || finalWit) {
-    // Validate the final fields against the spent-output script
-    // type. Merely carrying a final field is not proof
-    // the input is finalized: a P2WPKH input with an empty
-    // final_scriptSig and no final_scriptWitness would otherwise
-    // be accepted, and the transaction it builds rejected by the
-    // nodes. An "empty" field is one that is absent, or whose
-    // value parses to nothing (an empty scriptSig, or a witness
-    // stack of 0 items).
+    // A final field is only trusted if it matches the spent script type:
+    // an empty one would build a transaction the nodes reject.
     let witItems = null;
     if (finalWit) {
       try { witItems = parseWitnessStack(finalWit.value); }
@@ -656,15 +570,9 @@ function extractTxFromPsbt(data) {
   return { hex, txid: parsed.txid };
 }
 
-// ---------------------------------------------------------------------------
-// Minimal HTTP(S) client (zero deps). Resolves { status, body } as text.
-// ---------------------------------------------------------------------------
-// A hard wall-clock deadline guards every call: the socket `timeout`
-// option does NOT fire during a stalled TLS handshake (a request can
-// hang for many minutes without it), so a setTimeout that
-// destroys the request and rejects is the real guard. Without it a
-// stalled broadcast path would hang the release evaluation, the hourly
-// tick, and any dry-run/test request indefinitely.
+// Minimal HTTP(S) client. A wall-clock deadline guards every call: the
+// socket timeout does not fire during a stalled TLS handshake, and a hung
+// request would stall the release evaluation and the tick.
 function requestText({ protocol, hostname, port, path: p, method, headers, body, timeoutMs }) {
   const timeout = timeoutMs || NET_TIMEOUT_MS;
   return new Promise((resolve, reject) => {
@@ -746,22 +654,10 @@ function mempoolReq(path, method, body, base, timeoutMs, contentType) {
 const nodeCheckedAtByBase = {};
 function nodeCheckedAt() { return { ...nodeCheckedAtByBase }; }
 
-// ---------------------------------------------------------------------------
-// Fee verdict: is a stored
-// transaction's FIXED fee good enough for a long-term hold? The fee
-// was set when the tx was signed; if the fee market spikes before
-// the release fires, the tx can sit unconfirmed or be evicted. The
-// verdict compares the tx's own fee rate against the "90-day peak"
-// — the 90th percentile of the hourly economy-fee observations
-// Standby records from its own nodes (see lib/store.js
-// FEE_HISTORY_* and lib/release.js recordFeeHistoryObservation),
-// up to 90 days back. There is NO public fee endpoint: the peak
-// and the current fees both come from the configured primary node,
-// falling back to the secondary — never from a hardcoded public
-// base. The ladder (Low 2x /
-// Medium 1x / High below, Critical below the current economy fee);
-// see feeVerdict below.
-// ---------------------------------------------------------------------------
+// Fee verdict: is a transaction's fixed fee good enough for a long hold?
+// It is compared with the 90-day peak (90th percentile of Standby's own
+// hourly economy-fee readings, lib/release.js) and the current economy
+// fee, both from the configured nodes. See feeVerdict.
 
 // The 90th percentile of a sorted ascending array of numbers
 // (linear interpolation, the standard definition). Returns null
@@ -774,25 +670,11 @@ function percentile90(sorted) {
   return sorted[f] * (c - k) + sorted[c] * (k - f);
 }
 
-// The peak from a recorded fee history: the 90th
-// percentile of the observations' fees — the same percentile math
-// as before, now over Standby's own hourly readings instead of a
-// fetched block-median series. A percentile, NOT the literal
-// maximum — one fee spike would poison a max and make every fee
-// read High Risk. Observations older than the 90-day window are
-// ignored (defense in depth; the recorder and the load sanitizer
-// already prune them). Returns { peak, windowDays, observations,
-// fetchedAt }: peak is null until FEE_HISTORY_MIN_OBSERVATIONS
-// (24) have accumulated AND they span a full day — the raw span
-// (lastTs - firstTs), not the ceil'd windowDays, which rounds
-// minutes up to a day — so 24 readings collected in minutes serve
-// no peak. Before that the historical check is skipped and the UI
-// notes the history is still building.
-// windowDays is the span the history actually covers, in whole
-// days (0..90; 0 when the history has fewer than two distinct
-// timestamps); fetchedAt is the latest
-// observation's timestamp, so the value is clearly labelled,
-// never silently stale.
+// The 90-day peak: the 90th percentile of the readings (a max would let
+// one spike mark every fee High Risk). It stays null until
+// FEE_HISTORY_MIN_OBSERVATIONS readings span a full day, so restarts
+// cannot fake a peak. windowDays is the span covered; fetchedAt the latest
+// reading.
 function feePeakFromObservations(observations, nowMs) {
   const now = (typeof nowMs === 'number' && Number.isFinite(nowMs)) ? nowMs : Date.now();
   const cutoff = now - FEE_HISTORY_WINDOW_DAYS * 86400000;
@@ -824,19 +706,9 @@ function feePeakFromObservations(observations, nowMs) {
   return { peak: percentile90(fees), windowDays, observations: count, fetchedAt };
 }
 
-// Append one hourly observation to a history: pure —
-// returns the new array, the input untouched. The observation is
-// { t, fee } at nowMs; entries older than the window are pruned
-// and the series is capped at the max entries (oldest dropped
-// first), so the history can never grow past ~2,160 entries. A
-// fee that is not a finite non-negative number appends nothing
-// (the recorder checks validity first; this is the backstop).
-// One observation per hour: the dedupe lives HERE, the single
-// choke point every recording goes through — if the latest entry
-// (newest after sanitizing, which sorts ascending) is under an
-// hour old, this call adds nothing, so restarts and repeat ticks
-// cannot manufacture observations. The caller saves the result
-// either way (pruning may still have changed it).
+// Append one { t, fee } reading. Pure. Prunes past the window and caps the
+// size; at most one reading per hour (this is the single place every
+// recording goes through, so restarts cannot add extra readings).
 function appendFeeHistoryObservation(observations, fee, nowMs) {
   const now = (typeof nowMs === 'number' && Number.isFinite(nowMs)) ? nowMs : Date.now();
   const next = sanitizeFeeHistory(Array.isArray(observations) ? observations : [], now);
@@ -850,41 +722,19 @@ function appendFeeHistoryObservation(observations, fee, nowMs) {
   return next.slice(-FEE_HISTORY_MAX_ENTRIES);
 }
 
-// Fee estimates, one measurement for every node type:
-// the "economy" fee is the day-scale estimate everywhere —
-// mempool's /fees/recommended.economyFee IS a ~1-day estimate, so
-// Esplora's equivalent is /fee-estimates at the 144-block target
-// and RPC's would be estimatesmartfee at 144 (there is no RPC mode;
-// any RPC path must match the mapping below). The tier
-// mapping turns an Esplora /fee-estimates map into the same
-// { fastestFee, halfHourFee, hourFee, economyFee, minimumFee }
-// shape mempool serves, so the current-fees cache, the Critical
-// check, and the fee-market trigger all read one shape no matter
-// which node answered. Targets are confirmation targets in
-// blocks: fastest 1, half-hour 3, hour 6, economy 144 (~1 day),
-// minimum 1008 (~1 week).
+// Every node type reports the same 'economy' fee: mempool's economyFee is
+// a ~1-day estimate, so Esplora's /fee-estimates is read at the 144-block
+// target and mapped to the mempool tier shape. Targets: fastest 1, half-
+// hour 3, hour 6, economy 144, minimum 1008.
 const ESPLORA_FEE_TARGETS = { fastest: 1, halfHour: 3, hour: 6, economy: 144, minimum: 1008 };
 
-// The lowest usable fee rate: 1 sat/vB — the minimum relay
-// fee. Below it a transaction will not propagate, so a sub-1
-// estimate is not a price anyone could pay. Esplora/electrs
-// fee-estimates are historical statistics and can drift below 1
-// (a live check showed 0.12 sat/vB at 144 blocks while mempool's
-// economy fee read 1); mempool's tiers are already integers >= 1,
-// so only the Esplora mapping needs the floor.
+// 1 sat/vB, the minimum relay fee. Esplora estimates can drift below it
+// (they are historical); mempool tiers never do.
 const MIN_FEE_RATE_SATVB = 1;
 
-// The rate at one confirmation target from a /fee-estimates map:
-// the EXACT target when present, else null — the same rule as
-// mempool's /fees/recommended, which serves the named tier or no
-// data, never a substitute tier. A nearest-target fallback would
-// mix different confirmation horizons into one historical dataset
-// (a 6-block rate recorded as the day-scale economy fee), so a
-// sparse map yields no reading for its missing tiers instead.
-// A rate that IS present is floored at MIN_FEE_RATE_SATVB —
-// below the relay minimum a transaction will not propagate, so
-// a sub-1 estimate is not a usable fee. A missing target still
-// returns null; the floor never invents a reading.
+// The rate at exactly this target, or null: never a neighbouring target,
+// which would mix horizons into the fee history. A present rate is floored
+// at MIN_FEE_RATE_SATVB.
 function feeEstimateAtTarget(estimates, target) {
   if (!estimates || typeof estimates !== 'object') return null;
   const v = estimates[String(target)];
@@ -892,13 +742,8 @@ function feeEstimateAtTarget(estimates, target) {
   return Math.max(v, MIN_FEE_RATE_SATVB);
 }
 
-// Map an Esplora /fee-estimates response to the mempool
-// recommended-fees shape. Returns null when the economy tier has
-// no usable rate — without an economy rate the object is useless
-// for the Critical check and the observation, so the caller
-// treats it as no data (the other tiers are null when their
-// target is missing, so a sparse map yields no usable object
-// unless its economy tier is present).
+// Esplora /fee-estimates to the mempool tier shape; null without a usable
+// economy rate.
 function feeEstimatesToRecommended(estimates) {
   if (!estimates || typeof estimates !== 'object') return null;
   const out = {};
@@ -909,16 +754,9 @@ function feeEstimatesToRecommended(estimates) {
   return out;
 }
 
-// Fetch the current recommended fees from ONE node base:
-// the mempool endpoint first — /api/v1/fees/recommended returns
-// the named tiers — and Esplora's /fee-estimates when the mempool
-// endpoint 404s (a plain Esplora has no /api/v1/*), mapped to the
-// same shape. The base is the CONFIGURED node, never a public
-// default: the caller tries the primary first and the secondary
-// on failure. Throws on a non-200 answer, an unparseable body, or
-// a shape without a usable economy fee — the caller treats that
-// as "no current-fee data" and skips the Critical check, never
-// as a verdict.
+// Current fees from one node: /api/v1/fees/recommended, or Esplora's /fee-
+// estimates when that 404s. Throws on anything unusable; the caller then
+// skips the Critical check.
 async function fetchCurrentFeesFromNode(base) {
   let res;
   try {
@@ -969,20 +807,11 @@ async function fetchCurrentFeesFromEndpoints(endpoints) {
   throw lastErr || new Error('no fee endpoint answered');
 }
 
-// ---------------------------------------------------------------------------
-// BTC price: the price trigger's feeds.
-// A provider registry — id, label, default base URL, path, and a
-// response parser. All are no-auth GETs. The price is read from
-// TWO providers (Settings: priceSources {source1, source2},
-// defaults CoinGecko + Coinbase) and only trusted when they agree
-// within the configured agreement — see combinePriceReadings
-// below. Binance US quotes USDT, not USD, so the label says so (api.binance.com geo-blocks
-// the US with a 451, so the registry uses api.binance.us);
-// Kraken's c[0] is the last trade price; Bitstamp's `last` is the
-// last trade price.
-// PRICE_API_URL lets a test point every provider at a stub (the
-// same pattern as SLIPSTREAM_API_URL) — when it is set, all providers fetch from that base on their own paths.
-// ---------------------------------------------------------------------------
+// BTC price providers: id, label, base URL, path and parser, all no-auth
+// GETs. The price comes from two configured sources and is trusted only
+// when they agree (combinePriceReadings). Binance US quotes USDT
+// (api.binance.com blocks the US). PRICE_API_URL points every built-in
+// provider at a test stub.
 const PRICE_PROVIDERS = [
   { id: 'coingecko', label: 'CoinGecko', baseUrl: 'https://api.coingecko.com',
     path: '/api/v3/simple/price?ids=bitcoin&vs_currencies=usd',
@@ -1011,19 +840,10 @@ function priceProviderLabel(id) {
   return p ? p.label : String(id);
 }
 
-// A custom price source: the owner points Standby at
-// their own endpoint and tells it where the price lives in the
-// JSON answer. The stored form is { id: 'custom', url, path } —
-// `url` is the FULL endpoint URL (base + path, e.g.
-// https://example.com/api/price?ids=bitcoin), `path` is the
-// dot-path to the price inside the JSON body (e.g.
-// `data.amount`, `result.XXBTZUSD.c[0]`). A path step is a key
-// (letters, digits, _, $), optionally followed by [n]; a bare
-// [n] addresses an array element. parseJsonPath returns the
-// steps or null when the path is not well-formed; priceFromPath
-// walks them and returns the raw leaf (or undefined when any
-// step misses). Both are pure, so the UI, the validator and the
-// fetch all agree on what a path means.
+// A custom price source is { id: 'custom', url, path }: the full URL and a
+// dot-path to the price in the JSON answer (e.g. data.amount,
+// result.XXBTZUSD.c[0]). parseJsonPath and priceFromPath are pure, so the
+// UI, the validator and the fetch read a path the same way.
 function parseJsonPath(path) {
   if (typeof path !== 'string') return null;
   const trimmed = path.trim();
@@ -1073,14 +893,9 @@ function customPriceProvider(url, jsonPath) {
   };
 }
 
-// Normalize one stored price-source value: a known
-// provider id string passes through; a custom object
-// { id: 'custom', url, path } passes through trimmed when the
-// URL is http(s) and the JSON path is well-formed; anything else
-// is null (unknown id, bad URL, bad path). The settings
-// validator, the restore path and the defensive reader all use
-// this one rule, so a stored source is either usable or rejected
-// in exactly the same way everywhere.
+// Normalize a stored price-source value: a known provider id, or a custom
+// { id, url, path } with an http(s) URL and a valid path; anything else is
+// null. Settings, restore and readers all use this rule.
 function normalizePriceSourceValue(v) {
   if (typeof v === 'string') return priceProviderById(v) ? v : null;
   if (v && typeof v === 'object' && v.id === 'custom') {
@@ -1135,13 +950,8 @@ function priceApiBase() {
   return u.protocol + '//' + u.host;
 }
 
-// The base URL one provider fetches from: PRICE_API_URL (when set —
-// honored in test mode only, see lib/config.js)
-// overrides every BUILT-IN provider to the same base — the test
-// hook, so a stub server can answer all five providers on their
-// own paths. A custom source's URL is explicit (the owner typed
-// it), so the override never redirects it. Otherwise the
-// provider's own default base.
+// PRICE_API_URL (test mode only) redirects every built-in provider; a
+// custom source keeps its own URL.
 function priceProviderBase(provider) {
   if (PRICE_API_URL_OVERRIDE && provider.id !== 'custom') return priceApiBase();
   return provider.baseUrl;
@@ -1175,16 +985,9 @@ async function fetchPriceFromProvider(provider) {
   return price;
 }
 
-// Fetch both configured sources in parallel — one failing must not
-// block the other (all-settled). `source1`/`source2` are the
-// STORED values (a provider id string, or a custom
-// { id: 'custom', url, path } object). Returns the readings
-// keyed by SLOT — { source1: {...}, source2: {...} } — because
-// two custom sources share the id 'custom' and cannot be keyed
-// by id. Each entry is { provider, label, price|null,
-// error|null }; `provider` is the id ('kraken' or 'custom') and
-// `label` the display name. An unusable source value is a failed
-// source, not a throw.
+// Fetch both sources in parallel (one failing does not block the other).
+// Readings are keyed by slot, since two custom sources share the id
+// 'custom'. An unusable source is a failed reading, not a throw.
 async function fetchPriceReadings(source1, source2) {
   const jobs = [source1, source2].map(async (src) => {
     const prov = resolvePriceSource(src);
@@ -1203,24 +1006,14 @@ async function fetchPriceReadings(source1, source2) {
   return { source1: r1, source2: r2 };
 }
 
-// The agreement rule: two price readings are only
-// trusted together when the higher is at most `agreementPct`%
-// above the lower:
-//   |p1 - p2| / min(p1, p2) <= agreementPct / 100
-// (Settings: Price agreement; default 5.) Combine two fetched
-// readings into one effective price — the PRIMARY exchange's
-// price (`primaryId`, Settings: source1). The secondary is only
-// a fallback when the primary does not answer:
-//   both valid + agree  → the primary's price — mode 'dual'
-//   one valid           → that price alone, no agreement check —
-//                          mode 'single' (the other is unreachable)
-//   both valid + disagree → invalid, mode 'disagree', reason names it
-//   neither valid        → invalid, mode 'none'
-// Returns { valid, price, mode, note, reason, readings }. `note`
-// names the readings behind the price (dual) or the fallback
-// (single); `reason` is the human-readable unknown reason when
-// !valid. Pure — no I/O, so the evaluator, the UI status, and the
-// already-true check all agree on one rule.
+// Two readings agree when |p1 - p2| / min(p1, p2) <= agreementPct / 100.
+// The result is the primary source's price:
+// - both valid and agree: mode 'dual'
+// - one valid: mode 'single', no agreement check
+// - both valid but disagree: invalid, mode 'disagree'
+// - neither: invalid, mode 'none'
+// Pure, so the evaluator, the UI and the already-true check share one
+// rule.
 function combinePriceReadings(readings, agreementPct) {
   const agree = (typeof agreementPct === 'number' && Number.isFinite(agreementPct) && agreementPct > 0) ? agreementPct / 100 : 0.05;
   const valid = [];
@@ -1288,19 +1081,11 @@ function priceConsensus(readings, agreementPct) {
   return primary.price;
 }
 
-// The verdict itself (the owner's ladder): first the CURRENT check — a fee
-// below the current
-// economy fee would not confirm within a day right now, so it is
-// Critical Risk whatever the history says. Otherwise the
-// historical ladder against the 90-day peak: Low Risk at
-// `lowMult`x the peak, Medium Risk at `medMult`x–`lowMult`x, High
-// Risk below the peak (Settings: Fee verdict; defaults 2 and 1).
-// The economy fee is optional: when it is not supplied (or not a
-// usable number) the Critical check is skipped and only the
-// historical ladder runs. Pure — the frontend mirrors this exact
-// rule (it cannot import this module). Returns null when there is
-// no peak or no fee rate, so the caller shows no verdict instead
-// of a wrong one.
+// Fee verdict: below the current economy fee is Critical (it would not
+// confirm within a day now). Otherwise against the 90-day peak: Low at
+// lowMult x, Medium between medMult x and lowMult x, High below (defaults
+// 2 and 1). Null without a peak or fee rate. The frontend mirrors this
+// rule.
 function feeVerdict(rate, peak, economyFee, lowMult, medMult) {
   if (typeof rate !== 'number' || !Number.isFinite(rate) || rate < 0) return null;
   if (typeof peak !== 'number' || !Number.isFinite(peak) || peak <= 0) return null;
@@ -1335,13 +1120,9 @@ async function broadcastViaApi(hex, txid, apiBase) {
   }
   if (res.status === 200) {
     const returned = res.body.trim();
-    // The mempool API answers a broadcast with the
-    // txid as plain text. A 200 carrying anything else — an error
-    // page, a proxy body, garbage from a faulty custom endpoint —
-    // must NOT be recorded as a broadcast. Require exactly the 64-hex
-    // txid we sent; anything else is a failed attempt and the caller
-    // retries (or falls back to the secondary). The local txid is
-    // returned: it is the value we computed and verified.
+    // The node answers a broadcast with the txid as text. Only exactly our
+    // 64-hex txid counts as success; any other 200 body is a failed
+    // attempt.
     if (!/^[0-9a-f]{64}$/i.test(returned) || returned.toLowerCase() !== txid.toLowerCase()) {
       throw new Error('mempool answered 200 but returned an unexpected txid: ' + returned.slice(0, 200));
     }
@@ -1351,39 +1132,15 @@ async function broadcastViaApi(hex, txid, apiBase) {
   throw new Error('mempool rejected the transaction (HTTP ' + res.status + '): ' + res.body.slice(0, 200));
 }
 
-// ---------------------------------------------------------------------------
-// MARA Slipstream — a direct-to-miner broadcast route. A
-// transaction submitted here goes straight to MARA Pool's private
-// mempool, bypassing the public mempool entirely: it stays private
-// until MARA mines it into a block. That is the point (a sensitive
-// move nobody else can see before it confirms) and the limit (MARA
-// is ~5% of hashrate, so a Slipstream-only transaction can wait, and
-// admission is best-effort — it does not guarantee a block). The
-// public nodes stay for every read/verify job (input freshness,
-// confirmations, tip height): Slipstream has no outspend lookup and
-// no general tx search, so it cannot replace them.
-//   Submit: POST /api/transactions, JSON {"tx_hex": "<hex>"}.
-//     Success = HTTP 200 AND a parsed body with status === "success".
-//     Failure = HTTP 400 with {"status": "error", "message": reason}
-//     — the reason is surfaced. Anything else (a non-JSON body, a
-//     403, a Cloudflare challenge, an unexpected shape) fails closed:
-//     it is a failed submission, never a success. No auth, no API key.
-//     The API is beta (0.1.0-beta) — unexpected shapes fail closed.
-//   Status: GET /api/transactions/status?tx_id=<txid> returns a
-//     TransactionInfo (message, market_rate, functional_rate,
-//     last_24h_odds, last_7d_odds, is_next_block, and a transaction
-//     object with status {confirmed, block_height, block_time},
-//     firstSeen, position, plus submission_type and package_txids).
-//     The base URL is SLIPSTREAM_API_URL when set (tests point it at
-//     the stub so they never touch the real slipstream.mara.com).
-//   Fee floor: the minimum submission rate is the higher of 2x the
-//     current mempool priority fee rate or 2 sat/vB (GET
-//     /api/block-info returns submit_fee_rate). There is deliberately
-//     NO local fee-rate pre-check here — the fee is computed for
-//     display, not as a gate; the submission is attempted
-//     and Slipstream's rejection reason is surfaced if the fee is
-//     too low.
-// ---------------------------------------------------------------------------
+// MARA Slipstream: submits straight to MARA's private mempool, so the
+// transaction stays private until MARA mines it (MARA is ~5% of hashrate;
+// admission is best-effort). The public nodes still do every read, since
+// Slipstream has no outspend lookup.
+// Submit: POST /api/transactions {tx_hex}; success is HTTP 200 with status
+// "success", anything else fails closed. Status: GET
+// /api/transactions/status?tx_id=. No local fee pre-check: Slipstream's
+// rejection reason is shown instead. SLIPSTREAM_API_URL points it at a
+// test stub.
 const DEFAULT_SLIPSTREAM_API_URL = 'https://slipstream.mara.com';
 
 function slipstreamBase() {
@@ -1409,13 +1166,9 @@ function slipstreamReq(path, method, body) {
   });
 }
 
-// Submit one signed transaction to MARA Slipstream. Returns
-// { txid, method: 'slipstream' } on success. Throws on any failure —
-// the caller records it as a failed broadcast and retries (the
-// selected route, Slipstream, is retried; there is no fallback to
-// the public nodes). A transaction Slipstream already knows (a
-// re-submit after a lost reply) answers success again, so a
-// duplicate submit is harmless.
+// Submit to Slipstream; returns { txid, method: 'slipstream' } or throws.
+// No fallback to the public nodes. A duplicate submit answers success
+// again, so it is harmless.
 async function broadcastViaSlipstream(hex, txid) {
   let res;
   try {
@@ -1439,19 +1192,9 @@ async function broadcastViaSlipstream(hex, txid) {
   throw new Error('Slipstream rejected the transaction (HTTP ' + res.status + '): ' + res.body.slice(0, 200));
 }
 
-// Where is a Slipstream-submitted transaction? Returns a normalized
-// { state, position, isNextBlock, last24hOdds, last7dOdds, confirmed,
-// blockHeight, message } where state is:
-//   'queued'    — Slipstream knows it and it is waiting (not confirmed).
-//   'confirmed' — Slipstream reports it confirmed (mined into a block).
-//   'failed'    — Slipstream does not know it any more (404, or a
-//                 200 with no transaction object): it was dropped
-//                 from MARA's queue. The caller treats this as a
-//                 failed broadcast and retries via Slipstream.
-//   'unknown'   — the status check itself failed (endpoint down,
-//                 non-JSON, unexpected shape): do NOT assume the
-//                 transaction is gone — leave it waiting and check
-//                 again next tick.
+// Slipstream status, normalized: 'queued', 'confirmed', 'failed'
+// (Slipstream no longer knows it: dropped, so it is retried) or 'unknown'
+// (the status check failed: leave it waiting).
 async function getSlipstreamTxStatus(txid) {
   let res;
   try {
@@ -1508,45 +1251,18 @@ async function getSlipstreamTxStatus(txid) {
 // Input freshness — is each input still unspent?
 // ---------------------------------------------------------------------------
 
-// Shared outpoint cache — one cache for
-// every outspend lookup, keyed by endpoint + outpoint, so repeated
-// checks of the same outpoint cost one request per TTL window, not
-// one per rule. It sits at the mempoolOutspend layer — the lowest
-// layer — so it covers BOTH the trigger path (checkOutspend) and
-// the dry-run / input-freshness path (checkInputsUnspentVia),
-// which ask the same question about the same outpoints through
-// different call sites. The TTL is the check cadence, passed in by
-// the caller (same pattern as the nodeTipCache / priceCache in
-// server.js); when no TTL is given the default cadence (60 s)
-// applies. HARD RULES, never break these: a 404 (the parent tx is
-// unknown to the node) is NEVER cached — unknown is not an answer,
-// and caching it would let a spend that appears later go
-// undetected until the TTL expired; a failed request is never
-// cached either; a cached answer is never served past its TTL.
-// The fail-safe survives the cache — unknown means unknown, never
-// unspent, never permission to fire.
+// One outspend cache for every lookup, keyed by endpoint and outpoint,
+// with the check cadence as TTL (default 60 s), so the trigger and
+// freshness paths share requests. Never cached: a 404 (unknown parent: a
+// later spend must not be missed) or a failed request. Unknown never means
+// unspent.
 const outspendCache = new Map(); // key -> { fetchedAtMs, result }
 const OUTSPEND_CACHE_DEFAULT_TTL_MS = 60 * 1000;
-// Learned outspend
-// shape, per node base: the bases whose batch route has been
-// proven missing — a batch 404 followed by a singular success.
-// Mempool-compatible APIs differ in which outspend endpoints they
-// serve: mempool.space and Esplora serve both the batch
-// /api/tx/:txid/outspends and the singular
-// /api/tx/:txid/outspend/:vout, while a self-hosted mempool
-// backend v3 serves only the batch (its /api/v1/* has no singular
-// route). The client must not hard-code any implementation's
-// inventory: it tries the batch first, falls back to the singular
-// on a route-missing signal, and remembers the bases that needed
-// the fallback, so the fallback costs one extra request once, not
-// every tick. The record is per base (primary and secondary may
-// differ) and in-memory only — a restart re-learns it, in case a
-// node is upgraded. A base leaves the set the moment its batch
-// answers again. It is capability state, not a cached answer, so
-// the test-only clear-caches hook does NOT reset it — only a
-// restart does. (A suite that flips a stub's shape resets the
-// record with restart(), and proves the learning with a second
-// lookup on the same base.)
+// Bases whose batch outspend route is missing (a batch 404 then a singular
+// success). Implementations differ in which routes they serve, so the
+// client tries the batch, falls back to the singular, and remembers the
+// base. In memory only: a restart re-learns it, and the test cache-clear
+// hook does not reset it.
 const singularOnlyBases = new Set();
 // Test-only (speedup): drop every outspend cache entry and every
 // in-flight dedup promise, so the next lookup fetches fresh —
@@ -1558,15 +1274,9 @@ function clearOutspendCache() {
   outspendInflight.clear();
   outspendsInflight.clear();
 }
-// In-flight dedup: a request
-// already on the wire for an outpoint — or for a funding tx's
-// batch — is shared, not re-issued, so two evaluations that
-// overlap (tick + manual check / dry-run) ask once. The entry is
-// removed the moment the fetch settles, so a failure can never
-// poison later lookups: a failed request is never cached, and the
-// next lookup fetches fresh. (A 404 resolves, not rejects —
-// sharing that answer within the same instant is fine, and it is
-// still never written to the result cache.)
+// In-flight dedup: overlapping lookups of the same outpoint or batch share
+// one request. The entry is dropped when it settles, so a failure never
+// poisons later lookups.
 const outspendInflight = new Map(); // key -> Promise<parsed|null>
 const outspendsInflight = new Map(); // key -> Promise<array|null>
 
@@ -1592,49 +1302,19 @@ function outspendCachePut(apiBase, prevTxid, prevVout, result) {
   outspendCache.set(outspendCacheKey(apiBase, prevTxid, prevVout), { fetchedAtMs: Date.now(), result });
 }
 
-// mempool API: GET /api/tx/:txid/outspend/:vout
-//   200 {spent} / {spent, txid, vin, status}  |  404 = tx unknown to mempool
-// One outpoint's spend
-// status, from whichever outspend shape this node serves. The
-// batch is tried first: it answers every output of the funding tx
-// in one request (and caches the requested outpoint's entry), and
-// it is the shape the most implementations serve — a self-hosted
-// mempool backend v3 keeps the batch and drops the singular. When
-// the batch cannot answer (404: the parent is unknown to this node,
-// or the batch route does not exist here — the two are
-// indistinguishable from the status alone), the singular is tried
-// for that outpoint. If the singular then succeeds, this base is
-// recorded singular-only, so later lookups go straight to the
-// singular and the fallback costs one extra request once, not
-// every tick. A 404 from BOTH shapes is unknown — cannot prove
-// spent or unspent; NEVER cached. Any other failure (429/500/503,
-// ...) still throws exactly as before: a transient or server error
-// is never disguised as "route missing". `skipBatch` is for the
-// rule evaluation's batch path (checkOutspend below): the batch
-// was already attempted for this funding tx by the batch object,
-// so only the singular remains untried for this endpoint.
-// The shape record is trusted once learned — a singular 404 on a
-// recorded base means the parent is unknown, not that the route
-// vanished — and a restart re-learns it from scratch.
-// Bare spent answers. A mempool backed directly by bitcoind
-// (BACKEND=none) answers outspends from bitcoind's gettxout, which
-// cannot name the spender: a spent output comes back as just
-// {spent: true} — no txid, no status — whether the spend is
-// confirmed or only in the mempool. Read as-is, every such spend
-// would look unconfirmed, so a transaction whose input is gone for
-// good would never go stale.
-// The same node answers the missing half through POST /api/prevouts,
-// which looks the output up in the CONFIRMED UTXO set only
-// (gettxout without the mempool): null means the output is gone
-// from the chain — spent by a confirmed transaction; a value means
-// it is still unspent on chain — the spend is mempool-only.
-// Any spent answer without a spender txid is verified this way, even
-// one that claims a status: a mempool singular route has been seen
-// to hardcode confirmed: true. An answer that cannot be verified
-// (route missing, node error) is treated as unconfirmed — exactly
-// what an unverified bare answer meant before — never as confirmed,
-// which would make the transaction stale for good.
-// Resolved entries are marked `bare: true` (the spender is unknown).
+// One outpoint's spend status (GET /api/tx/:txid/outspend/:vout, or the
+// batch). The batch goes first; if it cannot answer (404: unknown parent
+// or missing route) the singular is tried, and a base that needed it is
+// recorded singular-only. A 404 from both is unknown and never cached;
+// other errors throw. skipBatch: the batch was already tried for this
+// funding tx.
+// Bare answers: a mempool on bitcoind (BACKEND=none) answers {spent: true}
+// with no spender or status. Any spend without a spender txid is checked
+// with the same node's POST /api/prevouts (confirmed UTXO set only): null
+// means spent by a confirmed transaction, a value means the spend is
+// mempool-only. If that cannot be checked it reads as unconfirmed, never
+// confirmed (which would make the transaction stale for good). Such
+// entries are marked bare.
 const PREVOUTS_MAX = 100; // the route's per-request limit
 function isBareSpent(entry) {
   return !!entry && typeof entry === 'object' && entry.spent === true && !entry.txid;
@@ -1713,25 +1393,11 @@ async function mempoolOutspend(prevTxid, prevVout, apiBase, ttlMs, skipBatch) {
   finally { if (outspendInflight.get(key) === p) outspendInflight.delete(key); }
 }
 
-// mempool API: GET /api/tx/:txid/outspends
-//   200 [{spent} / {spent, txid, vin, status}, ...] — one entry per
-//   output of the funding tx, in vout order | 404 = tx unknown.
-//   A batch answer populates the per-output cache above, so a later
-//   singular lookup of one of those outpoints hits the cache.
-//   A 404 is never cached (same rule as the singular call).
-//   A 405 or 501 is the
-//   same as a 404 here — the route does not exist on this node —
-//   so it also returns null (unknown, never cached) instead of
-//   throwing: the caller (mempoolOutspend) then tries the singular
-//   shape. Any other failure still throws.
-//   `cacheVout` scopes the cache population: when the batch is
-//   fetched for ONE outpoint (mempoolOutspend's batch-first path),
-//   only that outpoint's entry is cached — a batch fetched for
-//   FINNEY:1 must not plant an answer for FINNEY:0, which nobody
-//   asked about and which a later gate could then read as if it
-//   were a fresh observation. When it is undefined (the rule
-//   evaluation's batch path, where every fetched output is watched)
-//   all entries are cached, as before.
+// GET /api/tx/:txid/outspends: one entry per output, in vout order. 404,
+// 405 or 501 return null (unknown or route missing: never cached) so the
+// caller can try the singular. With cacheVout only that output is cached,
+// so a batch fetched for one outpoint never plants answers for its
+// siblings.
 async function mempoolOutspends(prevTxid, apiBase, ttlMs, cacheVout) {
   const key = apiBase + '|' + prevTxid;
   const inflight = outspendsInflight.get(key);
@@ -1782,17 +1448,9 @@ async function checkOutspends(prevTxid, endpoints, ttlMs) {
   return { txid: prevTxid, results: null, unknown: true, checkedVia: null, checkedBase: null, error: errors.join('; ') };
 }
 
-// One evaluation's batch plan: which
-// funding txs have ≥2 watched outputs in this evaluation, and the
-// memoized batch fetch for each. The plan is built from every
-// UTXO rule in the evaluation — the fetch is LAZY (only when a
-// rule for that funding tx is actually evaluated), so a plan entry
-// whose rule is never evaluated (terminal tx, grace hold) costs
-// nothing, and a funding tx with exactly one watched output keeps
-// the singular endpoint. Created once per evaluation by the
-// caller (evaluateReleaseInner) and passed down through the rule
-// ctx; a caller with no batch (the single-trigger check endpoint)
-// simply gets the singular path.
+// One evaluation's batch plan: funding txs with two or more watched
+// outputs, each fetched lazily (only if a rule for it is evaluated). Built
+// per evaluation; callers without a plan use the singular path.
 function createOutspendBatch(plan, endpoints, ttlMs) {
   const fetched = new Map(); // txid -> Promise<checkOutspends result>
   return {
@@ -1808,16 +1466,9 @@ function createOutspendBatch(plan, endpoints, ttlMs) {
   };
 }
 
-// A batch fetch consults the
-// per-outpoint cache first: when EVERY watched output of this
-// funding tx is fresh in the cache, the batch is assembled from
-// the cache with no HTTP request. Only the PRIMARY endpoint's
-// entries count — the primary decides when it answers, so a
-// secondary answer must never stand in for it. If any watched
-// output is missing or stale, the batch is fetched as before
-// (which repopulates the cache). A missing entry is unknown,
-// never unspent — only watched vouts are ever read from the
-// assembled array.
+// Assemble the batch from cache when every watched output is fresh there,
+// primary entries only (a secondary answer never stands in for the
+// primary). Otherwise fetch it.
 async function checkOutspendsCached(prevTxid, endpoints, ttlMs, watched) {
   const primary = endpoints && endpoints[0];
   if (primary && watched && watched.size > 0) {
@@ -1850,21 +1501,12 @@ function outspendEntryToResult(outpoint, entry, checkedVia, checkedBase) {
   return { outpoint, spent, confirmed, txid: spent ? (entry.txid || null) : null, blockHeight, bare: !!entry.bare, unverified: !!entry.bare && entry.verified === false, unknown: false, checkedVia, checkedBase };
 }
 
-// One input-freshness check against a single endpoint. A spent input
-// is THREE different things — the
-// outspend answer carries the spending txid AND whether that spend is
-// confirmed, and the two must be read together:
-//   own      — the spending txid is this transaction's OWN txid: our
-//              exact transaction is already out there (mempool or a
-//              block). Never stale, never a warning — it is broadcast.
-//   spent    — some OTHER tx spends the input AND that spend is
-//              confirmed: the input is gone for good; stale.
-//   conflict — some OTHER tx spends the input but the spend is NOT
-//              confirmed yet (status.confirmed === false, or no status
-//              at all — ambiguous data is never permanent): the spend
-//              may still be evicted or replaced, so the transaction
-//              stays active with a warning, and a broadcast is still
-//              attempted — the network is the arbiter.
+// Input freshness against one endpoint. A spent input is one of:
+// - own: spent by this transaction's own txid: it is already out there
+//   (broadcast)
+// - spent: spent by another, confirmed transaction: stale
+// - conflict: spent by another, unconfirmed (or unknown-status)
+//   transaction: a warning; the broadcast is still attempted
 async function checkInputsUnspentVia(parsed, apiBase, ttlMs) {
   const unspent = [];
   const spent = [];
@@ -1910,22 +1552,11 @@ async function checkInputsUnspentVia(parsed, apiBase, ttlMs) {
   return { checked: parsed.inputs.length, unspent, spent, conflict, own, unknown };
 }
 
-// Returns { checked, unspent: [input], spent: [input], conflict:
-// [input], own: [input], unknown: [input], checkedVia:
-// 'primary'|'secondary', checkedBase }. `spent` is only the
-// confirmed spends by another transaction; `conflict` the unconfirmed
-// ones; `own` the spends by this transaction's own txid. The
-// endpoints are tried in order; the first one that completes a check
-// wins. A completed check is definitive — an endpoint that says an input
-// is spent is a chain fact, not a reason to ask the other endpoint as
-// well. Only a failed check (endpoint down) falls through to the next one.
-// A 404 for one input is NOT a completed
-// check for that input — the endpoint is saying it does not know the
-// parent transaction, which proves nothing about spent or unspent.
-// So an input the first endpoint 404s is re-asked on the next
-// endpoint, and only an input no endpoint can say about stays
-// `unknown`. Without this, a primary that had never seen the parent
-// would hide a spend the secondary knows about.
+// Returns { checked, unspent, spent, conflict, own, unknown, checkedVia,
+// checkedBase }. Endpoints are tried in order; a completed check is
+// definitive and only a failed one falls through. A 404 for an input is
+// not a check (the node does not know the parent), so that input is asked
+// on the next endpoint and stays unknown only if none can say.
 async function checkInputsUnspent(parsed, endpoints, ttlMs) {
   const errors = [];
   let acc = null;
@@ -1958,47 +1589,21 @@ async function checkInputsUnspent(parsed, endpoints, ttlMs) {
   return acc;
 }
 
-// ---------------------------------------------------------------------------
-// UTXO trigger: is one outpoint spent yet? A single-outpoint
-// version of the input-freshness check above — it answers the same
-// question the release asks about a transaction's input, but about a
-// WATCHED outpoint that is not necessarily one of our inputs.
-// Returns { outpoint, spent, confirmed, txid, blockHeight, unknown,
-// checkedVia, checkedBase, error? }. `unknown` is true when no
-// endpoint could say — the parent tx is unknown to every node that
-// answered (404), or no endpoint answered at all — and the trigger
-// must not fire on it. A 404 from one
-// endpoint is inconclusive, not a completed check: the endpoint does
-// not know the parent, so the next endpoint is asked — the same rule
-// as the input check. Only when every endpoint 404s (or fails) does
-// the answer come back unknown.
-// `blockHeight` is the spending tx's block height (from
-// out.status.block_height) when the spend is confirmed, so the
-// caller can count confirmations; null otherwise. A spent outpoint
-// is only a fire when the spend is confirmed (an unconfirmed spend
-// may still be evicted or replaced, so it only watches) — unless
-// the trigger asked for the unconfirmed mode (confirmations 0),
-// which the caller decides from this answer.
+// UTXO trigger: is a watched outpoint spent? Returns { outpoint, spent,
+// confirmed, txid, blockHeight, unknown, checkedVia, checkedBase }.
+// unknown when no endpoint can say (all 404 or failed); the trigger never
+// fires on it. blockHeight lets the caller count confirmations. Only a
+// confirmed spend fires, unless the rule asks for 0 confirmations.
 async function checkOutspend(outpoint, endpoints, opts) {
   const parts = String(outpoint || '').split(':');
   const prevTxid = parts[0] || '';
   const prevVout = parseInt(parts[1], 10);
   const ttlMs = opts && opts.ttlMs;
   const batch = opts && opts.batch;
-  // Batch path: this evaluation watches
-  // ≥2 outputs of the same funding tx, so one /outspends fetch
-  // answers them all. A batch answer that cannot say about this
-  // output (unknown parent, or no entry for this vout) is unknown,
-  // never unspent — the same fail-safe as the singular path.
-  // A batch unknown is
-  // ambiguous: the parent may be unknown to these nodes, or the
-  // batch route may not exist on them. When every endpoint failed
-  // outright (b.error), that is a hard failure, not a route
-  // question — return unknown as before. Otherwise fall through
-  // to the singular loop below: the singular is the other shape,
-  // and it may answer where the batch could not. The batch was
-  // already attempted for this funding tx, so the loop skips a
-  // redundant batch attempt per endpoint (skipBatch).
+  // Batch path: one fetch answers every watched output of this funding tx.
+  // An answer that cannot say about this output is unknown, never unspent.
+  // Unless every endpoint failed outright, fall through to the singular,
+  // which may answer where the batch could not.
   let batchTried = false;
   if (batch && batch.hasBatch(prevTxid) && Number.isFinite(prevVout) && prevVout >= 0) {
     const b = await batch.fetch(prevTxid);
@@ -2042,47 +1647,19 @@ async function dryRun(dataDir, { tx, endpoints, ttlMs }) {
   const fellBack = check.checkedVia !== 'primary';
   const viaNote = 'Checked via the ' + check.checkedVia + ' node (' + mempoolHostLabel(check.checkedBase) + ')'
     + (fellBack ? ' — the primary node could not be reached.' : '.');
-  // Six states, and the release stays fail-open:
-  //   ready     — every input proven unspent; a broadcast would be attempted.
-  //   unknown   — no input proven spent, but some could not be verified
-  //               (the parent is unknown to the node: very recent, or a
-  //               lagging custom node). The release WOULD still attempt the
-  //               broadcast — the network is the arbiter — so wouldBroadcast
-  //               is true here too. The old code said false while its own
-  //               note said the broadcast would be attempted, and logged
-  //               the run as 'blocked': all three disagreed.
-  //   conflict  — at least one input is spent by another transaction
-  //               that is NOT confirmed yet. The spend may still be
-  //               evicted, so the transaction stays active with a
-  //               warning — and the release WOULD still attempt the
-  //               broadcast, so wouldBroadcast is true here too.
-  //   timelocked — the transaction carries an absolute locktime that
-  //               has not passed yet, so the node would reject it as
-  //               non-final. The transaction stays active with a
-  //               warning; wouldBroadcast is true — the release WILL
-  //               attempt the broadcast (and the node will reject
-  //               it), so it is retried on the next hourly check
-  //               like any other unknown-reason failure. The dry-run
-  //               counts it as attempted, not as ready: it will not
-  //               land until the locktime passes.
-  //   broadcast — the node reports this transaction's OWN txid as the
-  //               spending transaction: it is already out there. Nothing
-  //               to send, so wouldBroadcast is false.
-  //   blocked   — at least one input proven spent by another, confirmed
-  //               transaction; stale, never broadcast.
-  // wouldBroadcast now means what it says: what the release would do.
-  // Precedence: a confirmed competing spend beats everything (our
-  // transaction can never land); our own txid out there beats a mere
-  // conflict (the transaction already exists — the other inputs are
-  // moot); a timelock beats a conflict (the transaction cannot land
-  // yet, whatever the inputs say); a conflict beats unknown.
-  // The tip height is fetched only when the transaction actually
-  // carries a height locktime with a live sequence — a timestamp
-  // locktime needs only the wall clock, and a locktime of 0 (or one
-  // with every sequence maxed) needs no network at all. If the tip
-  // fetch fails, the dry-run fails open: the transaction is reported
-  // as it would be without the timelock check, and the broadcast
-  // (with its retry) is the arbiter.
+  // Verdicts, fail-open:
+  // - ready: every input proven unspent
+  // - unknown: nothing proven spent, some inputs unverifiable; the
+  //   broadcast is still attempted
+  // - conflict: an input spent by an unconfirmed transaction; a warning,
+  //   still attempted
+  // - timelocked: locktime not yet passed; attempted, rejected and retried
+  //   until it passes
+  // - broadcast: the node already has our txid; nothing to send
+  // - blocked: an input spent by a confirmed transaction; stale
+  // Precedence: blocked, broadcast, timelocked, conflict, unknown. The tip
+  // is fetched only for a height locktime with a live sequence; if that
+  // fetch fails the timelock check is skipped and the broadcast decides.
   let timelock = { timelocked: false, until: null };
   if (parsed.locktime && parsed.locktime < 500000000
     && (parsed.inputs || []).some((i) => (i.sequence >>> 0) !== 0xffffffff)) {
@@ -2217,24 +1794,12 @@ async function mempoolTxStatus(txid, apiBase, timeoutMs) {
   return JSON.parse(res.body);
 }
 
-// ---------------------------------------------------------------------------
-// Transaction fee — sum(input prevout values) − total outputs.
-// The input values are NOT in the transaction hex: they live in the
-// parent transactions, fetched from the node (GET /api/tx/:txid).
-// Best-effort only: any lookup failure, unknown parent, or
-// inconsistent value returns null — the caller stores null and the
-// add / dry-run still succeeds. The fee is stored on the record at
-// add time (and refreshed by a dry-run, and recomputed at startup)
-// so the card can show it.
-// ---------------------------------------------------------------------------
+// Transaction fee: input values minus outputs. Input values live in the
+// parent transactions (GET /api/tx/:txid). Best-effort: any failure gives
+// null and the add or dry run still succeeds.
 
-// A mempool /api/tx vout value, as exact satoshis. The API returns
-// the value in SATOSHIS (an integer — the genesis coinbase pays
-// 5000000000, i.e. 50 BTC), NOT in BTC: treating it as BTC and
-// multiplying by 1e8 inflated every parent value a hundred-million
-// fold (a 14,913-sat parent read as 1,491,300,000,000 sats, so a
-// ~224-sat fee displayed as ~1.49 trillion). Returns a BigInt, or
-// null when the value is not a finite non-negative integer.
+// A vout value in satoshis as a BigInt, or null. The API returns satoshis,
+// not BTC.
 function satsValue(value) {
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || !Number.isInteger(value)) return null;
   return BigInt(value);
@@ -2263,13 +1828,9 @@ async function parentOutputValue(prevTxid, prevVout, endpoints, timeoutMs) {
   return null;
 }
 
-// The fee of a parsed transaction: sum(input prevout values) −
-// total outputs, and the fee rate (fee / vsize). Returns
-// { feeSats, feeRateSatVb } or null when any input value cannot be
-// fetched (unknown parent, unreachable node, inconsistent value).
-// The parents are fetched in parallel; each lookup is capped at
-// FEE_LOOKUP_TIMEOUT_MS so a hung node cannot stall an add — the
-// add still succeeds, with no fee stored. Never throws.
+// { feeSats, feeRateSatVb } or null. Parents are fetched in parallel, each
+// capped at FEE_LOOKUP_TIMEOUT_MS so a hung node cannot stall an add.
+// Never throws.
 const FEE_LOOKUP_TIMEOUT_MS = 5000;
 async function computeFee(parsed, endpoints) {
   try {
@@ -2290,18 +1851,9 @@ async function computeFee(parsed, endpoints) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Transaction detail — the inputs and outputs of a parsed transaction,
-// for the card's nested Inputs/Outputs drop-down:
-// every output with its value and its destination address (or its
-// script type when no address can be derived), every input with its
-// outpoint. Derived at read time in GET /api/state from the stored
-// hex — never stored, so no migration and no restore change (the
-// same pattern as findSharedInputs). An input's value is null here:
-// it needs a parent lookup, and a state read must not touch the
-// network — the UI shows the outpoint alone then. The shape carries
-// the slot (valueSats) for a later stored value.
-// ---------------------------------------------------------------------------
+// Inputs and outputs for the card's details, derived from the stored hex
+// at read time (never stored, no network). Input values are null: they
+// would need a parent lookup.
 
 // Base58 (Bitcoin alphabet) and Base58Check: the legacy address
 // encoding. A leading zero byte in the payload is a leading '1'.
@@ -2440,15 +1992,8 @@ async function mempoolTipHeight(apiBase) {
   return h;
 }
 
-// Tip height, PRIMARY-first: the
-// primary is asked first and the secondary is asked ONLY if the
-// primary fails (throws, non-200, unparseable) or returns no
-// valid height. When the primary answers with a valid height the
-// secondary entry is { skipped: true } — the same convention as
-// the primary-first fee fetch. One endpoint down never stops
-// the other. Mirrors fetchNodeFeeReadings. Returns
-// { primary: {...}, secondary: {...} } keyed by endpoint label,
-// each { endpoint, height, error } (or { skipped: true }).
+// Tip height, primary first; the secondary only when the primary has no
+// valid height (its entry is then { skipped: true }).
 async function fetchTipHeights(endpoints) {
   const out = {};
   if (!endpoints || !endpoints.length) return out;
@@ -2483,14 +2028,8 @@ async function fetchTipHeights(endpoints) {
   return out;
 }
 
-// Combine two tip-height readings for the block-height trigger:
-// the PRIMARY node's tip is the one that counts; the secondary
-// is only a fallback when the primary does not answer. No
-// agreement check — a node a block or two ahead is normal
-// propagation lag, and either reading is a real chain height.
-// One valid reading is enough (mode 'single'); none is
-// 'unknown' (mode 'none').
-// Returns { valid, tip, mode, note, reason, readings }.
+// The primary's tip counts; the secondary is a fallback. No agreement
+// check: a block or two of lag between nodes is normal.
 function combineTipHeights(readings) {
   const valid = [];
   for (const label of Object.keys(readings || {})) {
@@ -2536,13 +2075,10 @@ async function getTipHeight(endpoints) {
   throw new Error('could not fetch tip height (' + errors.join('; ') + ')');
 }
 
-// Confirmations for a broadcast transaction, via the endpoints in order.
-// Returns { found, confirmed, blockHeight, confirmations, checkedVia,
-// checkedBase }. A transaction the network has never seen (or that
-// dropped out of the mempool) reports found: false — the caller keeps
-// the last known value and says so. A lookup that fails outright
-// (endpoint down) falls through to the next endpoint; if none answers,
-// the call throws and the caller keeps the last known value.
+// Confirmations for a broadcast transaction: { found, confirmed,
+// blockHeight, confirmations, checkedVia, checkedBase }. found: false when
+// the network does not know it; throws when no endpoint answers (the
+// caller keeps the last value).
 async function getConfirmations(txid, endpoints) {
   const errors = [];
   for (const ep of endpoints) {
@@ -2584,16 +2120,9 @@ function isArchivedTx(tx) {
   return !!(tx && (tx.broadcasted || (tx.release && ARCHIVED_RELEASE_STATUSES.has(tx.release.status))));
 }
 
-// ---------------------------------------------------------------------------
-// Shared inputs — the same outpoint spent by two stored transactions.
-// Only one of them can ever confirm; the other goes stale the moment the
-// first lands. Parses each stored hex (no network) and groups inputs by
-// prevTxid:prevVout. Returns [{ input, txIds }] for inputs used by 2+
-// transactions. Unparseable hex is skipped (a stored tx is always
-// well-formed, so this is defensive only). Archived transactions are
-// excluded: their fate is decided, so a live transaction sharing an
-// input with an archived one is not warned about it.
-// ---------------------------------------------------------------------------
+// Inputs spent by two or more stored transactions: only one can ever
+// confirm. No network; archived transactions are left out (their fate is
+// decided).
 function findSharedInputs(txs) {
   const byInput = new Map();
   for (const tx of txs || []) {
@@ -2620,17 +2149,10 @@ function findSharedInputs(txs) {
 // is the tip height, which both mempool.space and Esplora answer.
 // ---------------------------------------------------------------------------
 async function testConnection(endpoints, opts) {
-  // opts.probeOutputLookup (default true): the output-lookup
-  // capability is probed on demand — the Test connection
-  // button. The hourly tick passes false and the last probed
-  // check for each endpoint (opts.prevResults), so the tick
-  // costs no outspend request, never warms the negotiation's
-  // shape record (a tick that warmed it would change which
-  // route later lookups take), and keeps showing the last
-  // probed shape. Only a genuinely probed check carries
-  // forward: the 'not checked — height failed' placeholder
-  // (value '—') is not a probe result, so it never blocks OK
-  // on a later tick. A check that was never probed stays absent.
+  // probeOutputLookup: only Test connection probes it. The hourly tick
+  // reuses each endpoint's last probe (prevResults), so it makes no
+  // outspend request and never changes the learned route. The 'not
+  // checked' placeholder is not carried forward.
   const probeOutputLookup = !opts || opts.probeOutputLookup !== false;
   const prevResults = (opts && Array.isArray(opts.prevResults)) ? opts.prevResults : [];
   const results = [];
@@ -2647,32 +2169,11 @@ async function testConnection(endpoints, opts) {
   return { ok, detail, results };
 }
 
-// One endpoint, four capabilities: block height, fee
-// estimates, broadcast, and output lookup. Each check returns {ok, detail}.
-// The overall status:
-//   OK — all probed capabilities good (output lookup counts only
-//     once it has been probed — a check that was never probed
-//     neither blocks OK nor shows a value).
-//   CAUTION — the height probe works (the endpoint IS a node) but
-//     broadcast, fees, and/or output lookup are not ready.
-//   FAIL — the height probe fails (network error, timeout, or a
-//     non-200 answer): the endpoint is unreachable or is not a
-//     mempool/Esplora API at all. Height is the gate because it is
-//     the one capability every node provides.
-// `ok` stays true for OK and CAUTION (the old meaning: the height
-// probe passed, so the node is usable) and false for FAIL, so the
-// stored connection.ok keeps its old semantics.
-// `probeOutputLookup` — whether to probe the output-lookup
-// capability now (the Test connection button does; the hourly
-// tick does not, and instead passes the last probed check for
-// this endpoint as `prevOutputLookup`, so the tick costs no
-// outspend request and never warms the negotiation's shape
-// record). The detail is the pill tooltip: when output lookup
-// is the ONLY failing check it names it plainly ("Height OK, but
-// output lookup is unavailable — UTXO rules cannot be evaluated
-// against this node."); otherwise it lists every probed check the
-// way the earlier format did, extended with the output-lookup
-// detail when one was probed.
+// One endpoint, four checks: height, fees, broadcast, output lookup.
+// Status is OK when all probed checks pass, CAUTION when height works but
+// another check does not, FAIL when height fails (height is the one thing
+// every node serves). ok stays true for OK and CAUTION. The detail is the
+// pill tooltip.
 async function testOnePath(apiBase, probeOutputLookup, prevOutputLookup) {
   const height = await testNodeHeight(apiBase);
   if (!height.ok) {
@@ -2728,25 +2229,10 @@ async function testNodeHeight(apiBase) {
   }
 }
 
-// Fee estimates: the mempool endpoint first, then Esplora's.
-// /api/v1/fees/recommended (mempool) returns the named tiers —
-// a 200 with a usable economyFee is ready, and the value is that
-// economy fee ("1 sat/vB"). A plain Esplora answers that with
-// 404, so the fallback is /api/fee-estimates, which returns a map
-// of confirmation target to fee rate — a 200 with a usable rate
-// at the 144-block target (the economy analogue, one consistent
-// measurement — see feeEstimatesToRecommended) is ready. Either
-// shape proves the node can provide fee estimates. On failure
-// the value IS the reason.
-// The economy fee from ONE node: the mempool endpoint
-// first, then Esplora's. Returns { fee, source } — source is
-// 'mempool' (the /api/v1/fees/recommended economyFee) or
-// 'esplora' (the 144-block rate from /api/fee-estimates, exact
-// target or no reading). Throws with an informative
-// message when the node has no usable fee endpoint, so callers
-// can tell "no fee data" from "bad data". The fee-market
-// trigger, the hourly observation, and the node capability test
-// share this — one rule for what a node's fee reading is.
+// The economy fee from one node: { fee, source } from
+// /api/v1/fees/recommended, or Esplora's 144-block rate. Throws when the
+// node has no usable fee data. The fee-market trigger, the hourly reading
+// and the node test share this.
 async function fetchNodeFee(apiBase) {
   let res;
   try {
@@ -2783,13 +2269,8 @@ async function fetchNodeFee(apiBase) {
   return { fee, source: 'esplora' };
 }
 
-// Fee estimates: the mempool endpoint first, then Esplora's.
-// /api/v1/fees/recommended (mempool) returns the named tiers —
-// a 200 with a usable economyFee is ready. A plain Esplora
-// answers that with 404, so the fallback is /api/fee-estimates,
-// which returns a map of confirmation target to fee rate — a 200
-// with a usable rate at the 144-block target is ready. Either
-// shape proves the node can provide fee estimates.
+// Fee check: mempool's /api/v1/fees/recommended, or Esplora's /api/fee-
+// estimates at the 144-block target.
 async function testNodeFees(apiBase) {
   try {
     const r = await fetchNodeFee(apiBase);
@@ -2802,23 +2283,10 @@ async function testNodeFees(apiBase) {
   }
 }
 
-// Fetch the economy fee from the configured nodes, PRIMARY FIRST:
-// the primary node's reading is tried first and the
-// secondary is only asked when the primary cannot answer —
-// matching getTipHeight/checkOutspend/getConfirmations, which
-// are all primary-first with fallback only. The old parallel
-// fetch asked both nodes on every tick, which spent the
-// secondary's rate-limit budget (Blockstream caps unauthenticated
-// use at 700 requests/hour per IP) for a reading the primary
-// already provided. Returns one reading per endpoint, keyed by
-// endpoint label ('primary'/'secondary'). Each reading is
-// { fee, source } on success, { fee: null, error } on failure,
-// or { fee: null, skipped: true } when the endpoint was never
-// asked because the primary already answered. An implausible
-// primary fee (> FEE_IMPLAUSIBLE_SATVB) counts as the primary
-// not answering — the secondary is asked so a valid reading is
-// not lost to bad data. Mirrors fetchPriceReadings' shape, not
-// its parallel behavior.
+// Economy fee readings, primary first; the secondary only when the primary
+// cannot answer or reads above FEE_IMPLAUSIBLE_SATVB (asking both every
+// tick wasted the secondary's rate limit). Each reading is { fee, source
+// }, { fee: null, error } or { fee: null, skipped: true }.
 async function fetchNodeFeeReadings(endpoints) {
   const out = {};
   if (!endpoints || !endpoints.length) return out;
@@ -2859,20 +2327,9 @@ async function fetchNodeFeeReadings(endpoints) {
 // trusted — bad data, not a market move.
 const FEE_IMPLAUSIBLE_SATVB = 10000;
 
-// Combine two fetched fee readings into one effective fee —
-// the PRIMARY node's fee is the one that counts; the secondary
-// is only a fallback when the primary does not answer. No
-// agreement check: the two nodes read the same mempool, and a
-// small difference between them is normal (one may lag a block
-// behind the other) — mode 'dual'. One valid reading is used
-// alone — mode 'single' (the other is unreachable). Neither
-// valid → invalid, mode 'none'. An implausible reading
-// (> FEE_IMPLAUSIBLE_SATVB) is never valid — it is bad data,
-// not a market move, so it is ignored rather than trusted. Fee
-// spikes are real and are exactly what an 'above' rule is for.
-// Returns { valid, fee, mode, note, reason,
-// readings }. Pure — no I/O, so the evaluator, the UI status,
-// and the already-true check all agree on one rule.
+// The primary's fee counts; the secondary is a fallback (mode 'single');
+// neither is 'none'. No agreement check: nodes lag each other a little. A
+// reading above FEE_IMPLAUSIBLE_SATVB is bad data and ignored. Pure.
 function combineFeeReadings(readings) {
   const valid = [];
   const implausible = [];
@@ -2910,14 +2367,9 @@ function combineFeeReadings(readings) {
     reason: '', readings };
 }
 
-// Broadcast: POST /api/tx with an invalid hex. Nothing is
-// broadcast — "00" is not a valid transaction, so the node
-// rejects it at parse time before touching the mempool. A live
-// broadcast endpoint answers 400/422 (invalid tx) — and the
-// test stub answers 200 for the same garbage, so 200 counts too.
-// A 404 means the endpoint does not exist; anything else (or a
-// network error) means the broadcast path is not ready. The
-// value on success is "Reachable"; on failure it IS the reason.
+// Broadcast check: POST /api/tx with "00", which every node rejects at
+// parse time, so nothing is broadcast. 400/422 (and the test stub's 200)
+// mean reachable; 404 or anything else means not ready.
 async function testNodeBroadcast(apiBase) {
   try {
     const res = await mempoolReq('/api/tx', 'POST', '00', apiBase);
@@ -2930,27 +2382,15 @@ async function testNodeBroadcast(apiBase) {
   }
 }
 
-// Output lookup: what kind of spend answer this node gives, which
-// decides how Standby reads UTXO spends from it. The probe asks for
-// the outputs of Hal Finney's first transaction (block 170, the
-// first payment between two people). Both are long spent, so any
-// synced node must answer "spent" — and how it says so is the
-// node's type:
-//   - full: the answer names the spending transaction and its
-//     status (mempool.space, Blockstream, Esplora, a mempool with
-//     BACKEND=esplora). Exact.
-//   - bare, verified: the answer is only {spent: true} (a mempool
-//     running directly on Bitcoin Core), and the node's
-//     /api/prevouts tells a confirmed spend from a mempool one.
-//   - bare, unverified: {spent: true} and no /api/prevouts (an older
-//     Core-backed mempool). Limited: a confirmed spend cannot be told
-//     from a mempool one, so it is reported as a warning (ok false,
-//     warn true — the node is CAUTION, the value amber).
-// The lookup goes through the generic outspend negotiation (batch
-// first, singular as fallback) and the shape that answered is named
-// in the detail (the hover text). A null answer (neither shape) is unavailable; a
-// server error is reported as the reason. Read-only: a lookup,
-// never a broadcast, and no funds move.
+// Output lookup: how this node answers spends, which decides how Standby
+// reads them. It asks about the outputs of Hal Finney's first transaction
+// (block 170), both long spent:
+// - full: names the spender and its status (mempool.space, Blockstream,
+//   Esplora)
+// - bare, verified: only {spent: true}, but /api/prevouts tells confirmed
+//   from mempool spends (a mempool on Bitcoin Core)
+// - bare, unverified: no /api/prevouts; limited, shown as a warning
+// The request shape that answered goes in the detail. Read-only.
 const PROBE_TXID = 'f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16';
 // The probe asks the node fresh and leaves nothing in the outspend
 // cache: a connection test must not change what a UTXO rule watching

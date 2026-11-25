@@ -22,18 +22,12 @@ module.exports = async function backupRoutes(ctx) {
   const { req, res, pathname, now } = ctx;
   let state = ctx.state;
 
-  // POST /api/backup — the whole setup as one JSON document: settings,
-  // every signed transaction (hex included), the check-in clock, and
-  // the recent check-in + broadcast history. Restoring it (POST
-  // /api/restore) puts the app back exactly where the backup was taken.
-  // The file contains the signed hexes, which reveal the destination
-  // addresses and amounts — treat it like the transactions themselves.
-  // It also carries the check-in key hashes (not the keys — those were
-  // never stored), so a restored setup keeps its keys working.
-  // POST /api/backup {password?} — the plain backup document, or,
-  // with a password, encrypted with it (lib/backupcrypto.js). POST
-  // only, so a password never appears in a URL; there is no GET
-  // route, so the plain backup is never one link away.
+  // POST /api/backup { password? }: the whole setup as one document
+  // (settings, every signed hex, the clock, recent logs, check-in key
+  // hashes so keys keep working), encrypted when a password is given
+  // (lib/backupcrypto.js). The hexes reveal destinations and amounts:
+  // treat it like the transactions. POST only, so a password never lands
+  // in a URL and the plain backup is never one link away.
   const buildBackup = () => {
     // The backup carries the SERVED form of each tx (a
     // one-rule set as its single rule) — restore accepts both
@@ -62,13 +56,10 @@ module.exports = async function backupRoutes(ctx) {
     return sendJson(res, 200, await backupcrypto.encryptBackup(buildBackup(), password));
   }
 
-  // POST /api/restore — restore a backup document (the parsed JSON from
-  // a downloaded backup). Validates before touching anything: the
-  // format and version, the settings, and every transaction's hex
-  // (each hex is re-parsed and all derived fields are recomputed from
-  // it, so a corrupt or hand-edited backup cannot store a bad tx).
-  // Replaces the state wholesale; the logs are replaced too when the
-  // backup carries them. Returns the restored transaction count.
+  // POST /api/restore: validate everything before touching anything
+  // (format, settings, every hex re-parsed with derived fields
+  // recomputed), then replace the state wholesale (and the logs, if
+  // carried).
   if (req.method === 'POST' && pathname === '/api/restore') {
     let body = await readBody(req);
     // An encrypted backup is decrypted first — the UI sends
@@ -136,16 +127,10 @@ module.exports = async function backupRoutes(ctx) {
     } else {
       settings.priceSources = { source1: 'coingecko', source2: 'coinbase' };
     }
-    // The grace settings ride along the same way: a backup
-    // from before 0.8.0 carries none, which restores as the defaults
-    // (7 days offline to trigger, 7-day grace); a present but invalid
-    // value rejects the whole restore, like a bad node URL. The active
-    // grace itself does NOT ride along — a restore counts as a check-in
-    // (the owner is present), so the grace is cleared. The
-    // toggle rides along too:
-    // a backup from before the toggle carries no flag, which restores
-    // as on — except a stored duration of 0, which meant off, so it
-    // restores as off.
+    // Grace settings ride along (older backups get the defaults; an
+    // invalid value rejects the restore). The active grace does not: a
+    // restore counts as a check-in. No toggle restores as on, unless the
+    // stored duration is 0 (off).
     if (bsSettings.graceEnabled !== undefined) {
       if (typeof bsSettings.graceEnabled !== 'boolean') {
         return sendError(res, 400, 'backup graceEnabled must be a boolean');
@@ -170,14 +155,8 @@ module.exports = async function backupRoutes(ctx) {
     } else {
       settings.graceDurationDays = 7;
     }
-    // The price-agreement, check-cadence, and fee-verdict
-    // settings ride along the same way: a backup from before
-    // 0.8.0 carries none, which restores as the defaults; a
-    // present but invalid value rejects the whole restore, like a
-    // bad node URL. The fee pair is validated together (using
-    // the backup's value where present, the default otherwise)
-    // so a partial pair cannot break the Low-above-Medium
-    // invariant.
+    // Price agreement, cadence and fee multipliers ride along the same
+    // way; the fee pair is validated together so Low stays above Medium.
     if (bsSettings.priceAgreementPct !== undefined && bsSettings.priceAgreementPct !== null) {
       if (typeof bsSettings.priceAgreementPct !== 'number' || !Number.isFinite(bsSettings.priceAgreementPct) || bsSettings.priceAgreementPct < PRICE_AGREEMENT_PCT_MIN || bsSettings.priceAgreementPct > PRICE_AGREEMENT_PCT_MAX) {
         return sendError(res, 400, 'backup priceAgreementPct must be a number from ' + PRICE_AGREEMENT_PCT_MIN + ' to ' + PRICE_AGREEMENT_PCT_MAX + ' (%)');
@@ -221,22 +200,11 @@ module.exports = async function backupRoutes(ctx) {
       let parsed;
       try { parsed = bitcoin.parseTx(t.hex.trim()); }
       catch (e) { return sendError(res, 400, 'backup transaction hex is invalid: ' + e.message); }
-      // A release record is only accepted when its status is one the
-      // app itself writes, its txid is a string equal to the txid of
-      // the hex in this same backup entry, and its kind (when
-      // present) is one the app writes. The txid is REQUIRED: without
-      // it, {"release":{"status":"stale"}} would permanently disable a
-      // transaction that was never broadcast. Anything else rejects
-      // the WHOLE restore — a corrupt or hand-edited backup must not
-      // silently mark a transaction stale, or resurrect a broadcast
-      // that never happened. Even a txid-matching broadcast/stale
-      // claim is not believed: it is dropped when the restored tx is
-      // built below, and the network re-derives it; the check here
-      // only rejects a malformed or mismatched record outright. A
-      // record the app wrote always passes: every writer carries
-      // txid = the tx's txid (broadcastOneInner paths, dry-run
-      // verdict writes) and kind in RELEASE_KINDS, and the state
-      // migration guarantees txid on older records.
+      // A release record is accepted only with a status and kind the app
+      // writes and a txid equal to this entry's hex txid; anything else
+      // rejects the whole restore (a forged stale record would disable a
+      // tx for good). Even a valid broadcast or stale claim is dropped
+      // below and re-derived from the network.
       if (t.release !== undefined && t.release !== null) {
         if (typeof t.release !== 'object' || !RELEASE_STATUSES.has(t.release.status)
             || typeof t.release.txid !== 'string' || t.release.txid !== parsed.txid
@@ -300,41 +268,21 @@ module.exports = async function backupRoutes(ctx) {
         publicFallbackDays: validPublicFallbackDays(t.publicFallbackDays),
         slipstreamFirstAttemptAt: (typeof t.slipstreamFirstAttemptAt === 'string'
           && !Number.isNaN(new Date(t.slipstreamFirstAttemptAt).getTime())) ? t.slipstreamFirstAttemptAt : null,
-        // The trigger: carried through
-        // when valid — a single trigger or a rule set; a backup
-        // from before 0.8.0 carries none, which restores as the
-        // check-in trigger at the 35-day fallback — the same as
-        // an older record loaded from disk. An invalid trigger in a
-        // hand-edited backup falls back the same way (like the
-        // route and fallback above: lenient, never a 400 — a bad
-        // trigger must not reject a whole restore). The
-        // triggerState rides along too, normalized to the rule
-        // count (a malformed one restores as null — the evaluator
-        // overwrites it on the next evaluation anyway).
+        // A valid trigger (single or set) rides along; missing or invalid
+        // falls back to a 35-day check-in rule rather than rejecting the
+        // restore. triggerState is normalized to the rule count.
         trigger: restoredTrigger,
         triggerState: store.normalizeTriggerState(t.triggerState, restoredTrigger.rules.length),
-        // A broadcasted fact — or a release record claiming the tx
-        // already went out ('broadcast') or is spent ('stale') — is
-        // NOT believed from a backup on txid match alone: a
-        // hand-edited backup could falsely mark a transaction
-        // broadcast, or permanently disable one as stale. Both are
-        // re-derived from the network on the next evaluation (the
-        // freshness gate recognises a tx already out there, and
-        // marks spent inputs stale), so the restore drops them and
-        // the tx comes back active. 'failed', 'conflict', and
-        // 'submitted-slipstream' records are transient and
-        // self-correcting, so they ride along.
+        // Broadcast and stale claims are not believed from a backup (a
+        // forged one could mark a tx sent or disable it for good): they
+        // are dropped and the post-restore node check re-derives them.
+        // Failed, conflict and Slipstream-pending records are transient
+        // and ride along.
         release: (t.release && (t.release.status === 'broadcast' || t.release.status === 'stale')) ? null : (t.release ? t.release : null),
         broadcasted: null,
-        // The event trail rides along when it is well
-        // formed — display-only, so a hand-edited backup cannot
-        // hurt anything by forging it. The same distrust as the
-        // records above applies to its broadcast claims: a
-        // 'broadcast', 'confirmed', or 'stale' event from the
-        // backup is dropped with the record it describes, and the
-        // network re-derives it. A backup from before 0.8.2
-        // carries no history (null) — the load-time backfill seeds
-        // it from the restored facts on the next load.
+        // History rides along when well formed (display only), minus
+        // broadcast, confirmed and stale events, which the network re-
+        // derives. A missing history is seeded on the next load.
         history: Array.isArray(t.history)
           ? t.history.filter((e) => e && typeof e === 'object' && store.HISTORY_TYPES.has(e.type)
               && typeof e.ts === 'string' && !Number.isNaN(new Date(e.ts).getTime())
@@ -343,13 +291,10 @@ module.exports = async function backupRoutes(ctx) {
           : null,
       });
     }
-    // Trigger sets ride along: each set's members must be
-    // among the restored txs, its trigger normalized, its history
-    // sanitized like a tx's (broadcast/confirmed/stale events are
-    // dropped with the records they describe — the network
-    // re-derives them). A set naming no restored tx is dropped
-    // whole (its members stay standalone); a duplicate id, or a
-    // tx in two sets, keeps only the first.
+    // Trigger sets ride along: members must be restored txs, triggers
+    // normalized, history sanitized like a tx's. A set with no restored
+    // member is dropped; a duplicate id or a tx in two sets keeps the
+    // first.
     const restoredSets = [];
     const restoredTxIds = new Set(txs.map((t) => t.id));
     const seenSetIds = new Set();
@@ -384,15 +329,10 @@ module.exports = async function backupRoutes(ctx) {
       }
     }
     const bsCheckin = (bs.checkin && typeof bs.checkin === 'object') ? bs.checkin : {};
-    // The check-in time must be a
-    // real date and not in the future (beyond the same 5-minute skew
-    // the receiver merge allows). An invalid date makes checkinStatus
-    // throw on every status read (new Date(NaN).toISOString()), and a
-    // far-future date would silently postpone the release forever.
-    // Anything else rejects the WHOLE restore before anything is
-    // applied. A real backup always carries a valid ISO timestamp
-    // (or null, for a setup that has never checked in), so this
-    // cannot reject a backup the app itself wrote.
+    // The backup's check-in time must be a real date, not more than 5
+    // minutes in the future (an invalid date breaks every status read; a
+    // future one would postpone the release forever). Otherwise the whole
+    // restore is rejected.
     if (bsCheckin.lastCheckinAt !== undefined && bsCheckin.lastCheckinAt !== null) {
       if (typeof bsCheckin.lastCheckinAt !== 'string') {
         return sendError(res, 400, 'backup check-in time is invalid');
@@ -405,17 +345,9 @@ module.exports = async function backupRoutes(ctx) {
         return sendError(res, 400, 'backup check-in time is in the future');
       }
     }
-    // The "I was online" stamp rides along the same way:
-    // a real date (or null), never in the future beyond the same
-    // 5-minute skew — a future stamp would hide a real offline gap
-    // and defeat the grace. A backup's check-in hold
-    // (heldUntil) is accepted and dropped, never a 400 — and NOT
-    // translated into a grace the way loadState does: a restore
-    // counts as a check-in (the clock
-    // resets to now below) and the grace is cleared by design,
-    // so there is no due check-in for a translated hold to
-    // protect and no offline gap for it to describe. Dropping
-    // it here cannot cause a broadcast.
+    // lastOnlineAt is checked the same way (a future stamp would hide an
+    // outage). A heldUntil is accepted and dropped: the restore is a
+    // check-in, so there is nothing for it to protect.
     if (bsCheckin.lastOnlineAt !== undefined && bsCheckin.lastOnlineAt !== null) {
       if (typeof bsCheckin.lastOnlineAt !== 'string') {
         return sendError(res, 400, 'backup last-online time is invalid');
@@ -460,13 +392,9 @@ module.exports = async function backupRoutes(ctx) {
           ? bs.bitcoin.connection : { ok: null, checkedAt: null, detail: '' },
       },
       checkin: {
-        // A restore is proof the owner is present, so it
-        // counts as a check-in: the clock starts clean at the
-        // restore moment. The backup's clock is still VALIDATED
-        // above (a corrupt or future-dated clock rejects the whole
-        // restore) — it is just not carried forward: lastCheckinAt
-        // and lastOnlineAt are now, and the count keeps the
-        // backup's total plus this restore.
+        // A restore counts as a check-in: the clock starts now (the
+        // backup's clock was validated above, not carried), and the count
+        // keeps the backup's total plus one.
         lastCheckinAt: now.toISOString(),
         totalCheckins: clampInt(bsCheckin.totalCheckins, 0, 0, 1000000) + 1,
         lastOnlineAt: now.toISOString(),
@@ -480,13 +408,9 @@ module.exports = async function backupRoutes(ctx) {
       // smuggle a bad entry into the peak.
       feeHistory: store.sanitizeFeeHistory(bs.feeHistory),
     };
-    // The restore counts as a check-in (see the clock
-    // comment above): the offsets are measured against the OLD
-    // clock, so they are reset to the new one — a carried offset
-    // would otherwise push the effective last check-in into the
-    // future and the bar would read a negative count. A tx that
-    // is still inactive (disarmed, or the restored vacation is
-    // on) is re-marked inactive from now, so it stays frozen at 0.
+    // Freeze offsets were measured against the old clock, so they reset; a
+    // tx still inactive (disarmed, or on the restored vacation) is re-
+    // marked inactive from now.
     for (const t of txs) {
       if (!store.hasTriggerType(t, 'checkin')) continue;
       t.checkinOffsetMs = 0;

@@ -1,35 +1,20 @@
 'use strict';
-// Standby check-in receiver — the check-in-only front door.
-// A separate, minimal service: it holds NO transaction data (it mounts
-// only the shared CHECKIN_DIR, never the app's /data) and it exposes
-// exactly two routes:
-//   GET  /health  — liveness, no data.
-//   POST /checkin — with a check-in API key (Authorization: Bearer <key>
-//   or X-Api-Key) — records "checked in at this time" by writing
-//   last.json into the shared directory, which the main app merges
-//   into its check-in clock on its next status read or hourly tick.
-//   Each check-in also records the caller’s address, so a check-in
-//   from an unexpected address is visible in the check-in log.
-// The key is a bearer token: whoever holds it can check in — and only
-// check in. The receiver validates the presented key against the
-// SHA-256 hashes in keys.json (written by the main app whenever keys
-// change, read fresh on every request, so a revocation takes effect
-// immediately). The key itself is never logged. Plain HTTP on the LAN:
-// the key is the only authentication, so treat it like a password and
-// rotate it if it ever leaks. The main app's Settings tab is where keys
-// are created and revoked.
-// Run:  PORT=3101 CHECKIN_DIR=/checkin node server.js
+// Standby check-in receiver: a separate, minimal service with no
+// transaction data (it mounts only CHECKIN_DIR). Two routes:
+// - GET /health: liveness
+// - POST /checkin with a key (Authorization: Bearer <key> or X-Api-Key):
+//   writes last.json, which the app merges into its clock, with the
+//   caller's address
+// Keys are checked against the SHA-256 hashes in keys.json, read fresh per
+// request (revocation is immediate), and never logged. Plain HTTP: the key
+// is the only authentication, so treat it like a password.
+// Run: PORT=3101 CHECKIN_DIR=/checkin node server.js
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-// The Host allowlist lives in lib/http.js —
-// one implementation for both servers. (fsync) The durable write
-// lives in lib/store.js — one implementation for every state file.
-// Both are pure requires with no load-time side effects, and the
-// receiver runs from the same image as the app, so the modules
-// are present; the receiver still mounts only /checkin and holds
-// no transaction data.
+// The Host allowlist (lib/http.js) and durable writes (lib/store.js) are
+// shared with the app; both load without side effects.
 const { hostAllowed, describeAllowedHosts } = require('../lib/http');
 const { writeFileDurable } = require('../lib/store');
 const { BIND, DEPLOYMENT, TEST_MODE, PORT: CONFIG_PORT, CHECKIN_DIR } = require('../lib/config');
@@ -99,17 +84,9 @@ function writeLastCheckin(keyId, label, sourceIp) {
   return now;
 }
 
-// An uncaught exception is a crash, not a
-// condition to serve through: Node warns that continuing after one
-// risks undefined state. So this is uncaughtExceptionMonitor — it
-// only LOGS; the process still terminates with Node's default
-// behaviour, and Docker restarts it (restart: on-failure, and the
-// Umbrel receiver container runs the same policy — verified
-// live). The request handler below is guarded, so a bad request
-// still gets a 400 instead of killing the process; only a throw
-// OUTSIDE a guarded handler reaches here. A failed check-in is
-// visible (the POST fails), and the check-in state is re-read
-// from disk, so a restarted receiver loses nothing durable.
+// An uncaught exception is a crash: log it and let Node exit (Docker
+// restarts it). Request handlers are guarded, and check-in state is re-
+// read from disk.
 process.on('uncaughtExceptionMonitor', (e) => {
   console.error('uncaught exception:', e);
 });

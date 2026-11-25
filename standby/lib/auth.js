@@ -1,38 +1,19 @@
 'use strict';
-// Standby — app login.
-//
-// Why: the Host allowlist stops DNS rebinding, but not a client
-// that connects by IP. On Umbrel every app shares one Docker
-// network, and Umbrel's login only guards traffic that comes
-// through its app proxy — any other container (or a request-forgery
-// bug in any other app) could reach this container's port directly
-// and read or broadcast the signed transactions. A password the
-// app checks itself closes that path. On Umbrel the compose file
-// sets STANDBY_PASSWORD from the per-install APP_PASSWORD, which
-// Umbrel shows on the app's page (deterministicPassword: true).
-// On the generic Docker / bare installs it is optional.
-//
-// Off when STANDBY_PASSWORD is empty: every request is allowed.
-//
-// How a request proves itself:
-//   - The UI logs in once (POST /api/login) and gets a session
-//     token, which it keeps in localStorage and sends in the
-//     X-Standby-Token header. NOT a cookie: cookies are scoped by
-//     host, not port, so a cookie set on umbrel.local would be sent
-//     to every other app on umbrel.local:<port>. localStorage is
-//     scoped to the exact origin (scheme + host + port), so no
-//     other app can read the token. And a custom header cannot be
-//     attached to a cross-site request without a CORS preflight
-//     this server never answers.
-//   - Scripts can send the password itself as
-//     `Authorization: Bearer <password>`.
-//
-// The token is stateless: "v1.<issued ms>.<HMAC>", where the HMAC
-// key is a random secret in DATA_DIR/session.key (0600) and the
-// signed message includes a hash of the password. So a token
-// survives a restart, expires after TOKEN_TTL_MS, and stops working
-// when the password changes. Logging out rotates the secret, which
-// signs out every device at once — the owner is the only user.
+// App login. The Host allowlist does not stop clients that connect by IP,
+// and on Umbrel every app shares one Docker network while Umbrel's login
+// only guards its proxy. A password checked here closes that path. Umbrel
+// sets STANDBY_PASSWORD from APP_PASSWORD; elsewhere it is optional (empty
+// means off).
+// The UI logs in once (POST /api/login) and sends the session token as
+// X-Standby-Token from localStorage. Not a cookie: cookies are scoped by
+// host, not port, so every app on umbrel.local would receive it;
+// localStorage is per origin, and a custom header cannot cross sites
+// without a preflight this server never answers. Scripts may send
+// Authorization: Bearer <password>.
+// Tokens are stateless, "v1.<issued ms>.<HMAC>", keyed by a random
+// DATA_DIR/session.key and bound to a hash of the password: they survive
+// restarts, expire after TOKEN_TTL_MS, and die when the password changes.
+// Logout rotates the key, signing out every device.
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');

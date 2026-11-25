@@ -15,18 +15,11 @@ module.exports = async function broadcastRoutes(ctx) {
   const { req, res, pathname, now } = ctx;
   let state = ctx.state;
 
-  // POST /api/bitcoin/txs/arm-all — Global Arm/Disarm:
-  // set `enabled` on EVERY staged transaction at once. Body
-  // { enabled: true|false }. Applies to all triggers — check-in,
-  // price, UTXO, manual. "Arm all" arms EVERYTHING, including
-  // transactions individually disarmed before — the owner
-  // re-disarms those after if needed. Each check-in tx's freeze
-  // is re-synced, so disarming freezes its countdown at the day
-  // count it was left at and re-arming resumes from there.
-  // Arming a check-in tx in its danger zone resets the check-in
-  // (the same guard as arming one tx), once, and the
-  // response names it. Manual broadcasts still work while a tx
-  // is disarmed — they never went through the armed toggle.
+  // POST /api/bitcoin/txs/arm-all { enabled }: Global Arm/Disarm for every
+  // staged tx (arming includes ones disarmed individually). Check-in
+  // freezes are re-synced; arming a check-in tx inside its danger zone
+  // resets the check-in once, and the response says so. Manual broadcasts
+  // still work while disarmed.
   if (req.method === 'POST' && pathname === '/api/bitcoin/txs/arm-all') {
     const body = await readBody(req).catch(() => ({}));
     if (typeof body.enabled !== 'boolean') return sendError(res, 400, 'enabled must be true or false');
@@ -101,22 +94,11 @@ module.exports = async function broadcastRoutes(ctx) {
     return sendJson(res, 200, { ok: true, ...r, tx: serveTx(fresh) });
   }
 
-  // POST /api/bitcoin/txs/:id/broadcast-public — the MANUAL escape
-  // hatch for a slow MARA tx. A transaction
-  // submitted to Slipstream and waiting on MARA is private until
-  // MARA mines it; if the owner does not want to wait, this
-  // broadcasts it via the PUBLIC route instead (mempool.space, then
-  // blockstream.info), right now, on the owner's explicit say-so.
-  // It applies ONLY to a Slipstream-pending tx (release status
-  // 'submitted-slipstream') — a public-pending tx is already public,
-  // and an active tx uses the route toggle. On success the
-  // broadcasted fact is set, the stored route becomes 'public', and
-  // the tx is public-pending (confirmed -> Archived, as usual). On
-  // failure the error is surfaced and the tx STAYS Slipstream-pending
-  // (no 'failed' record is written — MARA is still holding it).
-  // MANUAL ONLY: it is not reachable from the release evaluation or
-  // Broadcast Armed — only this endpoint calls broadcastOne with
-  // forcePublic, and only for the one tx named here.
+  // POST /api/bitcoin/txs/:id/broadcast-public: the manual escape hatch
+  // for a Slipstream-pending tx, broadcasting it publicly now. On success
+  // the route becomes public and it is public-pending; on failure it stays
+  // Slipstream-pending with no 'failed' record (MARA still holds it). Only
+  // this endpoint uses forcePublic.
   const txBroadcastPublicMatch = pathname.match(/^\/api\/bitcoin\/txs\/([^/]+)\/broadcast-public$/);
   if (req.method === 'POST' && txBroadcastPublicMatch) {
     const tx = (state.bitcoin.txs || []).find((t) => t.id === txBroadcastPublicMatch[1]);
@@ -130,20 +112,10 @@ module.exports = async function broadcastRoutes(ctx) {
     return sendJson(res, 200, { ok: true, ...r, tx: serveTx(fresh) });
   }
 
-  // POST /api/broadcast/all — MANUAL broadcast of the transactions
-  // that are NOT in the Archived Transactions card (broadcasted, or
-  // already declared stale) — those are never attempted or counted.
-  // The UI sends their ids (it knows the archived set). Without ids
-  // (an older client or a direct API call) the same rule applies from
-  // what the server can see: the broadcasted ones, and the ones
-  // already declared stale — by a release, a manual broadcast, or a
-  // dry-run, whose stale verdict is now recorded on the transaction.
-  // Each is broadcast through the same path (freshness gate, then primary
-  // with secondary fallback); a stale or failed tx does not stop the
-  // others. The UI asks first (a confirmation dialog).
-  // Body { armedOnly: true } sends only the armed
-  // (enabled) transactions — a disarmed id in the list is skipped,
-  // not sent. The broadcast guards are the same either way.
+  // POST /api/broadcast/all: manual broadcast of every tx not archived
+  // (the UI sends the ids; without them the server applies the same rule).
+  // Each goes through the normal path; one failing does not stop the rest.
+  // { armedOnly: true } skips disarmed ids.
   if (req.method === 'POST' && pathname === '/api/broadcast/all') {
     const body = await readBody(req).catch(() => ({}));
     const armedOnly = !!(body && body.armedOnly);

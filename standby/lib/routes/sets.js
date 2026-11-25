@@ -13,16 +13,16 @@ module.exports = async function setsRoutes(ctx) {
   const { req, res, pathname, now } = ctx;
   let state = ctx.state;
 
-  // Trigger sets. A set is one label, one arm/disarm,
-  // and one rule set driving several transactions:
-  //   POST   /api/bitcoin/sets      — create { label, txIds, trigger, enabled?, triggerConfirmed? }
-  //   PUT    /api/bitcoin/sets/:id  — update { label?, txIds?, trigger?, enabled?, triggerConfirmed? }
-  //   DELETE /api/bitcoin/sets/:id  — remove (its txs return to standalone; they are never deleted with it)
-  //   POST   /api/bitcoin/sets/:id/broadcast — MANUAL broadcast of every member, now
-  // A member keeps its own trigger stored (it resumes when the tx
-  // leaves the set); while attached, only the set's trigger is
-  // evaluated. The already-satisfied gate, the danger-zone
-  // check-in reset, and the freeze sync all mirror the tx paths.
+  // Trigger sets: one label, one arm, one rule set for several
+  // transactions.
+  // POST /api/bitcoin/sets { label, txIds, trigger, enabled?,
+  // triggerConfirmed? }
+  // PUT /api/bitcoin/sets/:id (same fields, optional)
+  // DELETE /api/bitcoin/sets/:id (members return to standalone)
+  // POST /api/bitcoin/sets/:id/broadcast (manual, now)
+  // Members keep their own trigger for when they leave; while attached
+  // only the set's is evaluated. The gate, danger-zone reset and freeze
+  // mirror the tx paths.
   function setAttachErrors(freshState, txIds, exceptSetId) {
     const errs = [];
     const seen = new Set();
@@ -190,13 +190,9 @@ module.exports = async function setsRoutes(ctx) {
     return sendJson(res, 200, out);
   }
 
-  // POST /api/bitcoin/sets/:id/broadcast — MANUAL broadcast of
-  // every member, now. Same path as the release (freshness gate,
-  // then the route), on the owner's explicit say-so: it ignores
-  // the set's arm state, like a manual tx broadcast ignores its
-  // own toggle. A stale member yields a 'stale' result and the
-  // loop carries on to the next member — it does not archive
-  // the set.
+  // POST /api/bitcoin/sets/:id/broadcast: manual broadcast of every member
+  // through the normal path, ignoring the set's arm. A stale member is
+  // reported and the rest carry on.
   const setBroadcastMatch = pathname.match(/^\/api\/bitcoin\/sets\/([^/]+)\/broadcast$/);
   if (req.method === 'POST' && setBroadcastMatch) {
     const set = (state.bitcoin.sets || []).find((s) => s.id === setBroadcastMatch[1]);

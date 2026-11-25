@@ -4,19 +4,11 @@ const { checkTriggerNow } = require('../rules');
 // A route module returns NEXT when no route of its own matched.
 const NEXT = Symbol('next');
 
-// The already-satisfied gate for a rule set: evaluates
-// the WHOLE set with the combined semantics — an OR set is blocked
-// when any rule is satisfied now, an AND set when all are.
-// Unknown rules never block (satisfaction cannot be proven).
-// Check-in-only sets never reach this gate: a due check-in rule
-// resets the clock instead (the danger-zone reset below), exactly
-// as a single check-in rule does today — so the gate only runs
-// when the set holds a price, UTXO, block-height, set-date, or
-// fee-market rule. `verb` is 'add' | 'import' | 'save' (the
-// handler's word for the action being confirmed). Returns
-// { chk, blocked, message } — chk is the checkTriggerNow answer
-// (its warning rides on the 201 when the set is not already
-// satisfied, so the UI can say what it found).
+// The already-satisfied gate for a whole rule set: OR is blocked when any
+// rule is satisfied now, AND when all are; unknown never blocks. Only sets
+// with a price, UTXO, height, date or fee rule get here (a due check-in
+// rule resets the clock instead). verb is 'add', 'import' or 'save'.
+// Returns { chk, blocked, message }.
 async function setGateCheck(trgSet, state, now, verb) {
   const hasGatedRule = trgSet.rules.some((r) => r.type === 'price' || r.type === 'utxo' || r.type === 'blockheight' || r.type === 'setdate' || r.type === 'feemarket');
   if (!hasGatedRule) return { chk: null, blocked: false, message: null };
