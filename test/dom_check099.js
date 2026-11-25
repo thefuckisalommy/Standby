@@ -1634,6 +1634,15 @@ function check(name, cond, detail) {
   check('rpc toggle: the node row names the RPC node',
     els['btc-primary'] && els['btc-primary'].textContent === '127.0.0.1:18299 \u00b7 RPC',
     els['btc-primary'] && els['btc-primary'].textContent);
+  // With an RPC password saved, the unencrypted-backup notice says the file holds it.
+  els['btn-backup-download'].click();
+  els['backup-encrypt'].checked = false;
+  fireChange(els['backup-encrypt']);
+  check('rpc toggle: the unencrypted backup warns that it holds the RPC password',
+    els['backup-rpc-warning'] && els['backup-rpc-warning'].style.display !== 'none', '');
+  els['backup-encrypt'].checked = true;
+  fireChange(els['backup-encrypt']);
+  els['btn-backup-modal-cancel'].click();
   els['btc-primary-rpc'].checked = false;
   fireChange(els['btc-primary-rpc']);
   els['btn-btc-save-nodes'].click();
@@ -1644,6 +1653,15 @@ function check(name, cond, detail) {
     stRpcOff.settings.primaryRpc.enabled === false && stRpcOff.settings.primaryRpc.user === ''
     && stRpcOff.settings.primaryRpc.hasPassword === false
     && els['btc-primary'].textContent === '127.0.0.1:18275', JSON.stringify(stRpcOff.settings.primaryRpc) + ' ' + els['btc-primary'].textContent);
+
+  els['btn-backup-download'].click();
+  els['backup-encrypt'].checked = false;
+  fireChange(els['backup-encrypt']);
+  check('rpc toggle: with no RPC password saved, the unencrypted backup has no RPC notice',
+    els['backup-rpc-warning'] && els['backup-rpc-warning'].style.display === 'none', '');
+  els['backup-encrypt'].checked = true;
+  fireChange(els['backup-encrypt']);
+  els['btn-backup-modal-cancel'].click();
 
   // --- 11. Staged Transactions card ---
   // A <details>, open by default.

@@ -359,7 +359,7 @@ a { color: #f59e0b; }
 .switch.small input:checked + .slider::after { transform: translateX(16px); }
 .rpc-fields label { margin-top: 6px; }
 .rpc-hint { font-size: 0.85em; margin: 6px 0 0; }
-.node-check-note { color: var(--warn); font-size: 0.85em; margin: 6px 0 0; white-space: normal; }
+.node-check-note { color: var(--warn); font-size: 0.85em; margin: 6px 0 0; white-space: pre-line; }
 .node-subhead { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 12px 0 4px; }
 .node-subhead label[for="btc-secondary-url"] { margin: 0; }
 .node-subhead .switch { flex-shrink: 0; }

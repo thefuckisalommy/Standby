@@ -1407,10 +1407,18 @@
     setNodeCheckValue(prefix + label + '-fees-value', checks.fees);
     setNodeCheckValue(prefix + label + '-height-value', checks.height);
     setNodeCheckValue(prefix + label + '-outputLookup-value', checks.outputLookup);
-    // A limit with a fix (txindex off) says how to fix it.
+    // RPC nodes only: whether the login is restricted.
+    var userLine = $(prefix + label + '-rpcUser-line');
+    if (userLine) {
+      userLine.style.display = checks.rpcUser ? '' : 'none';
+      setNodeCheckValue(prefix + label + '-rpcUser-value', checks.rpcUser);
+    }
+    // A limit or risk with a fix (txindex off, unrestricted login) says
+    // how to fix it.
     var note = $(prefix + label + '-checks-note');
     if (note) {
-      var text = (checks.outputLookup && checks.outputLookup.note) || '';
+      var text = [checks.outputLookup, checks.rpcUser]
+        .map(function (c) { return (c && c.note) || ''; }).filter(Boolean).join('\n\n');
       note.textContent = text;
       note.style.display = text ? '' : 'none';
     }
@@ -1427,14 +1435,16 @@
     val.classList.toggle('warn', !check.ok && !!check.warn);
     val.classList.toggle('failed', !check.ok && !check.warn);
   }
-  // After a test, open any node that is not OK; never close one the owner
-  // opened. Runs once per test, not on re-render.
+  // After a test, open any node that is not OK or carries advice; never
+  // close one the owner opened. Runs once per test, not on re-render.
   function openFailedNodeDetails() {
     var conn = (S.bitcoin && S.bitcoin.connection) || null;
     var results = (conn && conn.results) || [];
     for (var i = 0; i < results.length; i++) {
       var r = results[i];
-      if (r.status === 'ok') continue;
+      // An OK node with advice (an unrestricted RPC login) opens too.
+      var advice = r.checks && r.checks.rpcUser && r.checks.rpcUser.note;
+      if (r.status === 'ok' && !advice) continue;
       var det = $('btc-' + r.endpoint + '-details');
       if (det) det.open = true;
     }
@@ -5076,6 +5086,9 @@
     var enc = backupMode() === 'encrypted';
     $('backup-encrypted-fields').style.display = enc ? '' : 'none';
     $('backup-plain-fields').style.display = enc ? 'none' : '';
+    // Only when an RPC password is saved: the file carries it.
+    var rpcSaved = ['primaryRpc', 'secondaryRpc'].some(function (k) { return S.settings && S.settings[k] && S.settings[k].hasPassword; });
+    $('backup-rpc-warning').style.display = rpcSaved ? '' : 'none';
     // The write-it-down warning belongs to a generated passphrase, so
     // it goes away while encryption is off and comes back with it.
     setMsg($('backup-modal-msg'), enc && generatedPassphrase ? 'Write this passphrase down now \u2014 it is not stored anywhere.' : '', 'warn');
