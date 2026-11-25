@@ -32,6 +32,7 @@ module.exports = async function stateRoutes(ctx) {
     // The raw fee history is never served (the peak and its window
     // describe it).
     delete served.feeHistory;
+    served.bitcoin.nodeBases = bitcoin.nodeBases(state.settings);
     // Persistence and startup warnings (empty on a healthy run).
     served.warnings = startupWarnings.concat(store.getStateWarnings());
     served.grace = graceStatus(state, now); // the grace: null when none is active, else { active, indefinite, graceUntil, triggeredAt, offlineGapDays }
@@ -106,6 +107,7 @@ module.exports = async function stateRoutes(ctx) {
       bitcoinTxStored: txs.length > 0,
       primaryApiUrl: state.settings.primaryApiUrl,
       secondaryApiUrl: state.settings.secondaryApiUrl,
+      nodeBases: bitcoin.nodeBases(state.settings),
       // Release records per tx (a check-in clears cycle records; stale
       // ones stay).
       releases: txs.filter((t) => t.release).map((t) => ({

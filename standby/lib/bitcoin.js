@@ -1,25 +1,23 @@
 'use strict';
 // Bitcoin: transaction parsing, dry runs, broadcasts, node reads. Node
 // built-ins only.
-// Nodes are two mempool API endpoints (settings.primaryApiUrl /
-// secondaryApiUrl), tried in order; a blank secondary means primary only.
+// Nodes are two endpoints, each a mempool API or Bitcoin Core RPC
+// (lib/rpc.js), tried in order; a blank secondary means primary only.
 // A completed check is definitive (a spent input is a chain fact); only a
-// failed check falls through to the next endpoint. There is no Bitcoin
-// Core RPC path.
-// Hard rules: never accept, store or log keys, seeds or passwords; the
+// failed check falls through to the next endpoint.
+// Hard rules: never accept, store or log wallet keys or seeds (an RPC
+// login is stored for the node, never served or logged); the
 // stored signed hex reveals destinations and amounts, so only a short
 // preview is ever logged; a broadcast is irrevocable and only the release
 // evaluation may trigger one.
 
 const crypto = require('crypto');
-const http = require('http');
-const https = require('https');
 const { MEMPOOL_OVERRIDE, PRICE_API_URL_OVERRIDE, SLIPSTREAM_API_URL_OVERRIDE } = require('./config');
+const { requestText, NET_TIMEOUT_MS } = require('./net');
+const rpc = require('./rpc');
 const { appendBroadcastLog, sanitizeFeeHistory, FEE_HISTORY_WINDOW_DAYS, FEE_HISTORY_MIN_OBSERVATIONS, FEE_HISTORY_MAX_ENTRIES } = require('./store');
 
 const MAX_TX_BYTES = 1000000; // 1 MB, same ceiling as the API body limit
-const MAX_RESPONSE_BYTES = 1024 * 1024; // 1 MB — a mempool reply is a 64-char txid or small JSON; anything bigger is a faulty endpoint, not data
-const NET_TIMEOUT_MS = 15000;
 
 // Node endpoints come from settings. MEMPOOL_HOST / MEMPOOL_PORT /
 // MEMPOOL_PROTOCOL override the primary (lib/config.js); there is no
@@ -76,14 +74,32 @@ function timelockedUntil(tx, tipHeight, now) {
 // The endpoints in the order they are tried. A secondary identical to
 // the primary is dropped — trying the same server twice buys nothing.
 function endpointsFor(settings) {
-  const eps = [{ label: 'primary', base: mempoolBase(settings) }];
+  const s = settings || {};
+  const primaryRpc = rpc.settingBase(s.primaryRpc);
+  if (primaryRpc) rpc.register(primaryRpc, s.primaryRpc.user, s.primaryRpc.password);
+  const eps = [{ label: 'primary', base: primaryRpc || mempoolBase(s) }];
   // Secondary disabled: return the primary alone. Every endpoint consumer
   // reads from here, so this is the whole enforcement. A missing flag
   // means enabled.
-  if (settings && settings.secondaryEnabled === false) return eps;
-  const sec = mempoolSecondaryBase(settings);
-  if (sec && sec !== eps[0].base) eps.push({ label: 'secondary', base: sec });
+  if (s.secondaryEnabled === false) return eps;
+  const secondaryRpc = rpc.settingBase(s.secondaryRpc);
+  const sec = secondaryRpc || mempoolSecondaryBase(s);
+  // The same node twice is tried once, with the primary's login.
+  if (sec && sec !== eps[0].base) {
+    if (secondaryRpc) rpc.register(secondaryRpc, s.secondaryRpc.user, s.secondaryRpc.password);
+    eps.push({ label: 'secondary', base: sec });
+  }
   return eps;
+}
+
+// Each node slot's base as configured (the secondary even while it is
+// switched off), for the UI to match test results to its rows.
+function nodeBases(settings) {
+  const s = settings || {};
+  return {
+    primary: rpc.settingBase(s.primaryRpc) || mempoolBase(s),
+    secondary: rpc.settingBase(s.secondaryRpc) || mempoolSecondaryBase(s),
+  };
 }
 
 // "host[:port]" for messages and log notes (never the full URL twice).
@@ -556,61 +572,21 @@ function extractTxFromPsbt(data) {
   return { hex, txid: parsed.txid };
 }
 
-// Minimal HTTP(S) client. A wall-clock deadline guards every call: the
-// socket timeout does not fire during a stalled TLS handshake, and a hung
-// request would stall the release evaluation and the tick.
-function requestText({ protocol, hostname, port, path: p, method, headers, body, timeoutMs }) {
-  const timeout = timeoutMs || NET_TIMEOUT_MS;
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const fail = (err) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      try { req.destroy(err); } catch { /* already gone */ }
-      reject(err);
-    };
-    const timer = setTimeout(
-      () => fail(new Error('request timed out after ' + timeout + 'ms')),
-      timeout,
-    );
-    if (timer.unref) timer.unref(); // don't keep the process alive for this alone
-    const lib = protocol === 'https:' ? https : http;
-    const req = lib.request(
-      { hostname, port, path: p, method, headers },
-      (res) => {
-        const chunks = [];
-        let received = 0;
-        res.on('data', (c) => {
-          received += c.length;
-          // Cap the body size: a faulty or hostile endpoint could
-          // otherwise grow the process without bound (the timeout limits
-          // time, not size).
-          if (received > MAX_RESPONSE_BYTES) {
-            return fail(new Error('response exceeded ' + MAX_RESPONSE_BYTES + ' bytes'));
-          }
-          chunks.push(c);
-        });
-        res.on('end', () => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString('utf8') });
-        });
-      },
-    );
-    req.on('timeout', () => fail(new Error('request timed out after ' + timeout + 'ms')));
-    req.on('error', fail);
-    req.setTimeout(timeout); // secondary signal; the wall-clock timer is the real guard
-    if (body !== undefined) req.write(body);
-    req.end();
-  });
+function mempoolReq(path, method, body, base, timeoutMs, contentType) {
+  const key = base || DEFAULT_PUBLIC_API_URL;
+  const p = rpc.isRpcBase(key)
+    ? rpc.answer(path, method || 'GET', body, key, timeoutMs, Object.values(ESPLORA_FEE_TARGETS))
+    : restReq(path, method, body, key, timeoutMs, contentType);
+  // Stamp the endpoint on any answer (any status); a timeout, refusal
+  // or DNS error stamps nothing. The derived promise's catch only prevents
+  // an unhandled rejection.
+  p.then(() => { nodeCheckedAtByBase[key] = new Date().toISOString(); }, () => {});
+  return p;
 }
 
-function mempoolReq(path, method, body, base, timeoutMs, contentType) {
-  const u = new URL(base || DEFAULT_PUBLIC_API_URL);
-  const key = base || DEFAULT_PUBLIC_API_URL;
-  const p = requestText({
+function restReq(path, method, body, base, timeoutMs, contentType) {
+  const u = new URL(base);
+  return requestText({
     protocol: u.protocol,
     hostname: u.hostname,
     port: u.port ? parseInt(u.port, 10) : (u.protocol === 'https:' ? 443 : 80),
@@ -620,11 +596,6 @@ function mempoolReq(path, method, body, base, timeoutMs, contentType) {
     body,
     timeoutMs,
   });
-  // Stamp the endpoint on any HTTP answer (any status); a timeout, refusal
-  // or DNS error stamps nothing. The derived promise's catch only prevents
-  // an unhandled rejection.
-  p.then(() => { nodeCheckedAtByBase[key] = new Date().toISOString(); }, () => {});
-  return p;
 }
 
 // Per-endpoint last-answered stamps (the secondary is only asked on
@@ -1736,13 +1707,29 @@ async function parentOutputValue(prevTxid, prevVout, endpoints, timeoutMs) {
     } catch {
       continue; // endpoint down — try the next
     }
-    if (st === null) continue; // unknown here — maybe the other endpoint knows it
+    if (st === null) {
+      // Without txindex an RPC node knows only mempool transactions; an
+      // unspent output's value is still in its UTXO set.
+      if (rpc.isRpcBase(ep.base)) {
+        const v = await rpcPrevoutValue(prevTxid, prevVout, ep.base, timeoutMs);
+        if (v !== null) return v;
+      }
+      continue; // unknown here — maybe the other endpoint knows it
+    }
     const vouts = st.vout || [];
     const out = vouts[prevVout];
     if (!out) return null;
     return satsValue(out.value);
   }
   return null;
+}
+
+async function rpcPrevoutValue(txid, vout, base, timeoutMs) {
+  try {
+    const res = await mempoolReq('/api/prevouts', 'POST', JSON.stringify([{ txid, vout }]), base, timeoutMs, 'application/json');
+    const [out] = JSON.parse(res.body);
+    return out && out.prevout ? satsValue(out.prevout.value) : null;
+  } catch { return null; }
 }
 
 // { feeSats, feeRateSatVb } or null. Parents are fetched in parallel, each
@@ -2082,9 +2069,16 @@ async function testOnePath(apiBase, probeOutputLookup, prevOutputLookup) {
   const outputLookup = probeOutputLookup ? await testNodeOutputLookup(apiBase) : (prevOutputLookup || null);
   const checks = { height, fees, broadcast };
   if (outputLookup) checks.outputLookup = outputLookup;
+  // Advice only: an unrestricted RPC login does not change the status.
+  if (rpc.isRpcBase(apiBase)) {
+    const rpcUser = await testRpcUser(apiBase);
+    if (rpcUser) checks.rpcUser = rpcUser;
+  }
   const allOk = fees.ok && broadcast.ok && (outputLookup ? outputLookup.ok : true);
   let detail;
-  if (outputLookup && outputLookup.warn && fees.ok && broadcast.ok) {
+  if (outputLookup && outputLookup.warn && outputLookup.kind === 'rpc' && fees.ok && broadcast.ok) {
+    detail = 'Height OK, but ' + outputLookup.detail.charAt(0).toLowerCase() + outputLookup.detail.slice(1);
+  } else if (outputLookup && outputLookup.warn && fees.ok && broadcast.ok) {
     detail = 'Height OK, but this node says only that an output is spent, not whether the spend is confirmed — a spent input warns instead of going stale.';
   } else if (outputLookup && !outputLookup.ok && fees.ok && broadcast.ok) {
     detail = 'Height OK, but output lookup is unavailable — UTXO rules cannot be evaluated against this node.';
@@ -2148,7 +2142,7 @@ async function fetchNodeFee(apiBase) {
   // the 144-block rate; without it there is no economy fee.
   const fee = feeEstimateAtTarget(data, ESPLORA_FEE_TARGETS.economy);
   if (typeof fee !== 'number') throw new Error('fee-estimates has no usable rates');
-  return { fee, source: 'esplora' };
+  return { fee, source: rpc.isRpcBase(apiBase) ? 'core' : 'esplora' };
 }
 
 // Fee check: mempool's /api/v1/fees/recommended, or Esplora's /api/fee-
@@ -2157,7 +2151,7 @@ async function testNodeFees(apiBase) {
   try {
     const r = await fetchNodeFee(apiBase);
     if (r.source === 'mempool') return { ok: true, detail: 'ready (economy ' + r.fee + ' sat/vB)', value: r.fee + ' sat/vB' };
-    return { ok: true, detail: 'ready (Esplora estimates)', value: r.fee + ' sat/vB' };
+    return { ok: true, detail: r.source === 'core' ? 'ready (Bitcoin Core estimates)' : 'ready (Esplora estimates)', value: r.fee + ' sat/vB' };
   } catch (e) {
     const msg = e.message || String(e);
     const value = /no fee endpoint/.test(msg) ? 'no fee endpoint' : /no usable economyFee/.test(msg) ? 'no economy fee' : /no usable rates/.test(msg) ? 'no usable rates' : /not JSON/.test(msg) ? 'not JSON' : msg;
@@ -2273,12 +2267,43 @@ const PROBE_TXID = 'f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e
 function forgetProbeOutspends(apiBase) {
   for (const vout of [0, 1]) outspendCache.delete(outspendCacheKey(apiBase, PROBE_TXID, vout));
 }
+async function testRpcUser(apiBase) {
+  const open = await rpc.loginUnrestricted(apiBase);
+  if (open === null) return null;
+  if (!open) return { ok: true, detail: 'restricted by rpcwhitelist', value: 'Restricted' };
+  return { ok: false, warn: true, kind: 'rpc-user', detail: 'this RPC login can make any call, including wallet and node control', value: 'Unrestricted',
+    note: 'This RPC login can do anything on the node, including spending from a loaded wallet. Give Standby a restricted user (see SECURITY.md).' };
+}
+
+// RPC: ask Bitcoin Core whether txindex is on (getindexinfo, Core 0.21+)
+// so the owner is told to enable it. null when the node cannot say.
+const TXINDEX_OFF = { ok: false, warn: true, kind: 'rpc', detail: 'txindex is off — add txindex=1 to bitcoin.conf and restart Bitcoin Core. Until then an input spent by a confirmed transaction reads unknown (never stale), and a UTXO rule on a spent output never fires.', value: 'txindex off',
+  note: 'Add txindex=1 to bitcoin.conf and restart Bitcoin Core. Until then, Standby can\u2019t tell when an input was spent in a block, so it can\u2019t mark that transaction stale or fire a UTXO rule.' };
+async function rpcTxindexCheck(apiBase) {
+  let info;
+  try { info = await rpc.call(apiBase, 'getindexinfo', ['txindex']); } catch { return null; }
+  const ti = info && info.txindex;
+  if (!ti) return TXINDEX_OFF;
+  if (ti.synced === false) {
+    return { ok: false, warn: true, kind: 'rpc', detail: 'txindex is still building — spent outputs in blocks it has not indexed yet read unknown until it finishes.', value: 'txindex still building',
+      note: 'Bitcoin Core is still building its transaction index. Test again once it finishes.' };
+  }
+  return null;
+}
+
 async function testNodeOutputLookup(apiBase) {
+  if (rpc.isRpcBase(apiBase)) {
+    const txindex = await rpcTxindexCheck(apiBase);
+    if (txindex) return txindex;
+  }
   forgetProbeOutspends(apiBase);
   try {
     let entry = null;
     for (const vout of [0, 1]) {
       const out = await mempoolOutspend(PROBE_TXID, vout, apiBase);
+      if (out === null && rpc.isRpcBase(apiBase)) {
+        return TXINDEX_OFF;
+      }
       if (out === null) {
         return { ok: false, detail: 'unavailable — UTXO rules cannot be evaluated against this node', value: 'Unavailable — UTXO rules can\u2019t be evaluated' };
       }
@@ -2292,6 +2317,9 @@ async function testNodeOutputLookup(apiBase) {
     }
     if (!entry.bare) {
       return { ok: true, kind: 'full', detail: 'ready — names the spending transaction and its confirmations (' + shape + ')', value: 'Full answers' };
+    }
+    if (entry.verified && rpc.isRpcBase(apiBase)) {
+      return { ok: true, kind: 'rpc-txindex', detail: 'ready — RPC with txindex; a confirmed spend is told from a mempool one', value: 'RPC with txindex' };
     }
     if (entry.verified) {
       return { ok: true, kind: 'bare-verified', detail: 'ready — says only \u201cspent\u201d; /api/prevouts tells a confirmed spend from a mempool one (' + shape + ')', value: 'Bare + confirmation check' };
@@ -2318,7 +2346,7 @@ module.exports = {
   normalizePriceSourceValue, priceSourceKey, resolvePriceSource,
   fetchNodeFee, fetchNodeFeeReadings, combineFeeReadings, FEE_IMPLAUSIBLE_SATVB,
   fetchTipHeights, combineTipHeights,
-  normalizePublicApiUrl, mempoolBase, endpointsFor, nodeCheckedAt,
+  normalizePublicApiUrl, mempoolBase, endpointsFor, nodeBases, nodeCheckedAt,
   clearOutspendCache,
   DEFAULT_PUBLIC_API_URL, DEFAULT_SECONDARY_API_URL,
   DEFAULT_SLIPSTREAM_API_URL,

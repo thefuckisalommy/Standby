@@ -1020,8 +1020,8 @@
     // test; a result for an endpoint that has since changed reads Not
     // tested.
     var conn = S.bitcoin.connection || {};
-    renderNodeStatus('readiness-', 'primary', status.primaryApiUrl, conn);
-    renderNodeStatus('readiness-', 'secondary', status.secondaryApiUrl, conn);
+    renderNodeStatus('readiness-', 'primary', nodeBase('primary', status.nodeBases), conn);
+    renderNodeStatus('readiness-', 'secondary', nodeBase('secondary', status.nodeBases), conn);
     renderExchangeRows(status);
   }
 
@@ -1331,7 +1331,10 @@
   var txCardEls = {}; // tx id -> { row, sentLine, pill, rules, feeVerdictEl, maraEl, fallbackValueEl }: the rendered card, so the confirmations poll and the live tick can update it in place
   var setCardEls = {}; // set id -> { row, pill, rules }: the rendered set card, for the live tick
 
-  function hostOf(u) { try { return new URL(u).host; } catch (e) { return u || ''; } }
+  function hostOf(u) {
+    if (/^rpcs?:\/\//.test(u || '')) return u.replace(/^rpcs?:\/\//, '') + ' \u00b7 RPC';
+    try { return new URL(u).host; } catch (e) { return u || ''; }
+  }
   // One node's row: host plus overall pill (OK, CAUTION, FAIL, Not tested,
   // Not set); the tooltip has the detail. Settings ('btc-') also shows the
   // capability rows; the Dashboard ('readiness-') only the pill. A legacy
@@ -1404,6 +1407,21 @@
     setNodeCheckValue(prefix + label + '-fees-value', checks.fees);
     setNodeCheckValue(prefix + label + '-height-value', checks.height);
     setNodeCheckValue(prefix + label + '-outputLookup-value', checks.outputLookup);
+    // RPC nodes only: whether the login is restricted.
+    var userLine = $(prefix + label + '-rpcUser-line');
+    if (userLine) {
+      userLine.style.display = checks.rpcUser ? '' : 'none';
+      setNodeCheckValue(prefix + label + '-rpcUser-value', checks.rpcUser);
+    }
+    // A limit or risk with a fix (txindex off, unrestricted login) says
+    // how to fix it.
+    var note = $(prefix + label + '-checks-note');
+    if (note) {
+      var text = [checks.outputLookup, checks.rpcUser]
+        .map(function (c) { return (c && c.note) || ''; }).filter(Boolean).join('\n\n');
+      note.textContent = text;
+      note.style.display = text ? '' : 'none';
+    }
   }
   function setNodeCheckValue(id, check) {
     var val = $(id);
@@ -1417,14 +1435,16 @@
     val.classList.toggle('warn', !check.ok && !!check.warn);
     val.classList.toggle('failed', !check.ok && !check.warn);
   }
-  // After a test, open any node that is not OK; never close one the owner
-  // opened. Runs once per test, not on re-render.
+  // After a test, open any node that is not OK or carries advice; never
+  // close one the owner opened. Runs once per test, not on re-render.
   function openFailedNodeDetails() {
     var conn = (S.bitcoin && S.bitcoin.connection) || null;
     var results = (conn && conn.results) || [];
     for (var i = 0; i < results.length; i++) {
       var r = results[i];
-      if (r.status === 'ok') continue;
+      // An OK node with advice (an unrestricted RPC login) opens too.
+      var advice = r.checks && r.checks.rpcUser && r.checks.rpcUser.note;
+      if (r.status === 'ok' && !advice) continue;
       var det = $('btc-' + r.endpoint + '-details');
       if (det) det.open = true;
     }
@@ -2173,16 +2193,48 @@
     $('btc-secondary-fields').style.display = on ? '' : 'none';
     $('btc-secondary-enabled-wrap').title = on ? 'Secondary node on — used if the primary fails' : 'Secondary node off — primary only';
   }
+  // RPC toggle per node: on shows the RPC fields instead of the mempool
+  // URL. The password is never served; blank keeps the saved one.
+  function syncRpc(slot) {
+    var on = $('btc-' + slot + '-rpc').checked;
+    $('btc-' + slot + '-url').style.display = on ? 'none' : '';
+    $('btc-' + slot + '-rpc-fields').style.display = on ? '' : 'none';
+  }
+  function renderRpcFields(slot) {
+    var r = S.settings[slot + 'Rpc'] || {};
+    $('btc-' + slot + '-rpc').checked = r.enabled === true;
+    $('btc-' + slot + '-rpc-url').value = r.url || '';
+    $('btc-' + slot + '-rpc-user').value = r.user || '';
+    $('btc-' + slot + '-rpc-password').value = '';
+    $('btc-' + slot + '-rpc-password').placeholder = r.hasPassword ? 'Saved \u2014 leave blank to keep' : '';
+    syncRpc(slot);
+  }
+  function rpcFieldsBody(slot) {
+    return {
+      enabled: $('btc-' + slot + '-rpc').checked,
+      url: $('btc-' + slot + '-rpc-url').value,
+      user: $('btc-' + slot + '-rpc-user').value,
+      password: $('btc-' + slot + '-rpc-password').value,
+    };
+  }
+  // The base each node slot uses (mempool URL or rpc://host:port), as the
+  // test results name it.
+  function nodeBase(slot, bases) {
+    if (bases && bases[slot] !== undefined) return bases[slot];
+    return slot === 'primary' ? S.settings.primaryApiUrl : S.settings.secondaryApiUrl;
+  }
   function renderBitcoin() {
     $('btc-primary-url').value = S.settings.primaryApiUrl || 'https://mempool.space';
     $('btc-secondary-url').value = S.settings.secondaryApiUrl || '';
+    renderRpcFields('primary');
+    renderRpcFields('secondary');
     // Secondary on/off (missing means on): the toggle hides the other
     // settings without clearing them.
     $('btc-secondary-enabled').checked = S.settings.secondaryEnabled !== false;
     syncSecondaryEnabled();
     var conn = S.bitcoin.connection || {};
-    renderNodeStatus('btc-', 'primary', S.settings.primaryApiUrl, conn);
-    renderNodeStatus('btc-', 'secondary', S.settings.secondaryApiUrl, conn);
+    renderNodeStatus('btc-', 'primary', nodeBase('primary', S.bitcoin.nodeBases), conn);
+    renderNodeStatus('btc-', 'secondary', nodeBase('secondary', S.bitcoin.nodeBases), conn);
 
     var txs = S.bitcoin.txs || [];
     var overlapsByTx = computeOverlaps();
@@ -3529,6 +3581,8 @@
     var s = await api('PUT', '/api/settings', {
       primaryApiUrl: $('btc-primary-url').value,
       secondaryApiUrl: $('btc-secondary-url').value,
+      primaryRpc: rpcFieldsBody('primary'),
+      secondaryRpc: rpcFieldsBody('secondary'),
       // The secondary toggle saves with the node settings; its URL is kept
       // while off.
       secondaryEnabled: $('btc-secondary-enabled').checked,
@@ -3558,6 +3612,8 @@
   // The secondary settings hide or show at once; the value saves with Save
   // nodes.
   $('btc-secondary-enabled').addEventListener('change', syncSecondaryEnabled);
+  $('btc-primary-rpc').addEventListener('change', function () { syncRpc('primary'); });
+  $('btc-secondary-rpc').addEventListener('change', function () { syncRpc('secondary'); });
 
   // The Add form's fallback row shows only while the route is Slipstream,
   // with a note on what the duration means.
@@ -4305,8 +4361,8 @@
     patchCheckinBars(status);
     patchReadinessRows();
     var conn = (S.bitcoin && S.bitcoin.connection) || {};
-    renderNodeStatus('readiness-', 'primary', status.primaryApiUrl, conn);
-    renderNodeStatus('readiness-', 'secondary', status.secondaryApiUrl, conn);
+    renderNodeStatus('readiness-', 'primary', nodeBase('primary', status.nodeBases), conn);
+    renderNodeStatus('readiness-', 'secondary', nodeBase('secondary', status.nodeBases), conn);
     renderExchangeRows(status);
     // The Logs tab has no inputs in it — rebuilding its rows is
     // safe any time, even with a pop-out open over it.
@@ -4315,8 +4371,8 @@
     (S.bitcoin.txs || []).forEach(function (tx) { patchTxCard(tx, overlapsByTx); });
     (S.bitcoin.sets || []).forEach(function (s) { patchSetCard(s); });
     // Settings live updates touch text only, never input values.
-    renderNodeStatus('btc-', 'primary', S.settings.primaryApiUrl, conn);
-    renderNodeStatus('btc-', 'secondary', S.settings.secondaryApiUrl, conn);
+    renderNodeStatus('btc-', 'primary', nodeBase('primary', S.bitcoin.nodeBases), conn);
+    renderNodeStatus('btc-', 'secondary', nodeBase('secondary', S.bitcoin.nodeBases), conn);
     refreshPriceSourceRow(1);
     refreshPriceSourceRow(2);
     var agreeSpan = $('price-sources-agreement');
@@ -4794,7 +4850,7 @@
     },
     nodes: {
       title: 'Bitcoin nodes',
-      body: 'The Bitcoin nodes Standby talks to. The primary is tried first; if it fails, the secondary is used.\n\nToggle the secondary off to use the primary alone with no fallback if it is down or unreachable.\n\nThe address is a mempool instance \u2014 mempool.space by default, another public instance, or your own mempool on the LAN.\n\nUTXO, block-height, and fee-market triggers read the node, and broadcasts go through it.\n\nA mempool running directly on Bitcoin Core reports that an input is spent but not by whom. Standby asks it whether that spend is confirmed instead, and counts a UTXO trigger\u2019s confirmations from when it first sees the confirmed spend.',
+      body: 'The Bitcoin nodes Standby talks to. The primary is tried first; if it fails, the secondary is used.\n\nToggle the secondary off to use the primary alone with no fallback if it is down or unreachable.\n\nEach node is a mempool instance \u2014 mempool.space by default, another public instance, or your own mempool on the LAN \u2014 or, with its RPC toggle on, Bitcoin Core over RPC. An RPC node needs txindex=1 to see spends in blocks; Test connection says if it is off.\n\nUTXO, block-height, and fee-market triggers read the node, and broadcasts go through it.\n\nA mempool running directly on Bitcoin Core reports that an input is spent but not by whom. Standby asks it whether that spend is confirmed instead, and counts a UTXO trigger\u2019s confirmations from when it first sees the confirmed spend.',
       triggers: ['general'],
     },
     'price-sources': {
@@ -5030,6 +5086,9 @@
     var enc = backupMode() === 'encrypted';
     $('backup-encrypted-fields').style.display = enc ? '' : 'none';
     $('backup-plain-fields').style.display = enc ? 'none' : '';
+    // Only when an RPC password is saved: the file carries it.
+    var rpcSaved = ['primaryRpc', 'secondaryRpc'].some(function (k) { return S.settings && S.settings[k] && S.settings[k].hasPassword; });
+    $('backup-rpc-warning').style.display = rpcSaved ? '' : 'none';
     // The write-it-down warning belongs to a generated passphrase, so
     // it goes away while encryption is off and comes back with it.
     setMsg($('backup-modal-msg'), enc && generatedPassphrase ? 'Write this passphrase down now \u2014 it is not stored anywhere.' : '', 'warn');

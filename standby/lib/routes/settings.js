@@ -1,5 +1,6 @@
 'use strict';
 const bitcoin = require('../bitcoin');
+const rpc = require('../rpc');
 const { sanitizeState, syncCheckinFreeze } = require('../checkin');
 const { saveMutation } = require('../http');
 const { priceSourceError } = require('../prices');
@@ -77,6 +78,11 @@ module.exports = async function settingsRoutes(ctx) {
       const v = typeof body.secondaryApiUrl === 'string' ? body.secondaryApiUrl.trim() : '';
       try { s.secondaryApiUrl = v ? bitcoin.normalizePublicApiUrl(v) : ''; }
       catch (e) { return sendError(res, 400, e.message); }
+    }
+    for (const key of ['primaryRpc', 'secondaryRpc']) {
+      if (body[key] === undefined) continue;
+      try { s[key] = rpc.normalizeSetting(body[key], s[key]); }
+      catch (e) { return sendError(res, 400, (key === 'primaryRpc' ? 'primary' : 'secondary') + ' node: ' + e.message); }
     }
     // Secondary on/off (boolean); off means primary only. Missing means
     // on.

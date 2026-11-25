@@ -350,7 +350,7 @@ def main():
 
         # --- 1. health + version ----------------------------------------
         s, h = req('GET', '/api/health')
-        check('1 health reports version 0.8.13.1', h.get('version') == '0.8.13.1', h)
+        check('1 health reports version 0.8.14', h.get('version') == '0.8.14', h)
 
         # --- 2. block-height trigger --------------------------------------
         # Validation at add: bad heights rejected, good ones accepted.
@@ -4641,7 +4641,7 @@ def main():
               s == 400 and body == b'Bad request URL', (s, body))
         s, r = req('GET', '/api/health')
         check('32 crash: app still answers after the malformed request',
-              s == 200 and r.get('version') == '0.8.13.1', (s, r))
+              s == 200 and r.get('version') == '0.8.14', (s, r))
         s, body = raw_get('//[', RBASE)
         check('32 crash: malformed request line to the receiver gets 400',
               s == 400 and body == b'Bad request URL', (s, body))
@@ -5307,7 +5307,7 @@ def main():
         _bind_checkin = '/tmp/standby-test099-bind-checkin'
         _expected_bind = APP_ENV.get('STANDBY_BIND', '127.0.0.1')
         check('39 bind: main instance listen line names the profile bind',
-              ('Standby 0.8.13.1 listening on %s:%d (data: ' % (_expected_bind, PORT)) in read_log(),
+              ('Standby 0.8.14 listening on %s:%d (data: ' % (_expected_bind, PORT)) in read_log(),
               read_log()[-500:])
 
         def _bind_log_text():
@@ -5418,7 +5418,7 @@ def main():
         _auth_app = _bind_instance({'STANDBY_PASSWORD': _pw})
         check('40 auth: instance comes up', wait_up(_ab))
         s, r = req('GET', '/api/health', base=_ab)
-        check('40 auth: health is public', s == 200 and r.get('version') == '0.8.13.1', (s, r))
+        check('40 auth: health is public', s == 200 and r.get('version') == '0.8.14', (s, r))
         s, r = req('GET', '/api/auth/status', base=_ab)
         check('40 auth: status says required, not authenticated',
               s == 200 and r == {'required': True, 'authenticated': False}, (s, r))
@@ -5817,12 +5817,175 @@ def main():
         stop(_app43)
         stop(_stub43)
 
+        # --- 45. Bitcoin Core RPC node ---
+        # The primary node is the RPC stub (a tiny chain: FINNEY vout 0
+        # spent in a block, vout 1 unspent). Own app instance.
+        _rpc_port = 18198
+        _rpc_base = 'http://127.0.0.1:%d' % _rpc_port
+        _stub45 = start(['node', os.path.join(os.path.dirname(v.STUB), 'rpc_stub.js'), str(_rpc_port)], log=_bind_log)
+        check('45 rpc: stub comes up', wait_up(_rpc_base, path='/__test__/calls'))
+        shutil.rmtree(_bind_data, ignore_errors=True)
+        shutil.rmtree(_bind_checkin, ignore_errors=True)
+        _app45 = start(['node', 'server.js'], env=_e43, cwd=APP, log=_bind_log)
+        check('45 rpc: instance comes up', wait_up(_ab43))
+        _rpc_on = {'enabled': True, 'url': '127.0.0.1:%d' % _rpc_port, 'user': 'standby', 'password': 'stubpass'}
+
+        s, r = req('PUT', '/api/settings', {'primaryRpc': dict(_rpc_on, password=''), 'secondaryEnabled': False}, base=_ab43)
+        check('45 settings: RPC on without a password is refused (400)', s == 400 and 'password' in r.get('error', ''), (s, r))
+        s, r = req('PUT', '/api/settings', {'primaryRpc': dict(_rpc_on, url='ftp://x'), 'secondaryEnabled': False}, base=_ab43)
+        check('45 settings: a non-http RPC address is refused (400)', s == 400, (s, r))
+        s, r = req('PUT', '/api/settings', {'primaryRpc': _rpc_on, 'secondaryEnabled': False}, base=_ab43)
+        check('45 settings: RPC primary saved (200)', s == 200, (s, r))
+        check('45 settings: the reply holds no password, only that one is saved',
+              r.get('primaryRpc') == {'enabled': True, 'url': _rpc_base, 'user': 'standby', 'hasPassword': True}, r.get('primaryRpc'))
+        s, st = req('GET', '/api/state', base=_ab43)
+        check('45 settings: GET /api/state never serves the password',
+              'stubpass' not in json.dumps(st) and st['settings']['primaryRpc'].get('hasPassword') is True, st['settings'].get('primaryRpc'))
+        check('45 settings: the node base is the RPC address',
+              (st.get('bitcoin') or {}).get('nodeBases', {}).get('primary') == 'rpc://127.0.0.1:%d' % _rpc_port, (st.get('bitcoin') or {}).get('nodeBases'))
+        with open(os.path.join(_bind_data, 'state.json')) as f:
+            check('45 settings: the password is stored on the device', json.load(f)['settings']['primaryRpc']['password'] == 'stubpass')
+        s, r = req('PUT', '/api/settings', {'primaryRpc': dict(_rpc_on, password='')}, base=_ab43)
+        with open(os.path.join(_bind_data, 'state.json')) as f:
+            check('45 settings: saving with a blank password keeps the stored one',
+                  s == 200 and json.load(f)['settings']['primaryRpc']['password'] == 'stubpass', (s, r))
+
+        def _test45():
+            s, r = req('POST', '/api/bitcoin/connection/test', {}, base=_ab43)
+            return {x.get('endpoint'): x for x in r.get('results', [])}.get('primary', {})
+
+        def _clear45():
+            return req('POST', '/api/__test__/clear-caches', {'only': ['outspend', 'nodeTip']}, base=_ab43)[0] == 200
+
+        pr = _test45()
+        ck = pr.get('checks') or {}
+        check('45 test: RPC node with txindex is OK on every row',
+              pr.get('status') == 'ok' and (ck.get('height') or {}).get('value') == 'Height 900,000'
+              and (ck.get('fees') or {}).get('value') == '1 sat/vB' and (ck.get('broadcast') or {}).get('value') == 'Reachable'
+              and (ck.get('outputLookup') or {}).get('value') == 'RPC with txindex', pr)
+        s, calls = req('GET', '/__test__/calls', base=_rpc_base)
+        check('45 test: the broadcast probe sent nothing', calls.get('sendrawtransaction', 0) >= 1, calls)
+        s, sent = req('GET', '/__test__/sent', base=_rpc_base)
+        check('45 test: ... and nothing was accepted', sent == [], sent)
+        check('45 rpc user: a whitelisted login reads Restricted',
+              (ck.get('rpcUser') or {}).get('value') == 'Restricted', ck.get('rpcUser'))
+        req('POST', '/__test__/restricted', {'enabled': False}, base=_rpc_base)
+        pr = _test45()
+        ru = (pr.get('checks') or {}).get('rpcUser') or {}
+        check('45 rpc user: an unrestricted login reads Unrestricted with advice, and the node stays OK',
+              pr.get('status') == 'ok' and ru.get('value') == 'Unrestricted' and ru.get('warn') is True
+              and 'restricted user' in (ru.get('note') or ''), pr)
+        req('POST', '/__test__/restricted', {'enabled': True}, base=_rpc_base)
+        req('POST', '/__test__/txindex', {'enabled': False}, base=_rpc_base)
+        _clear45()
+        pr = _test45()
+        ol = (pr.get('checks') or {}).get('outputLookup') or {}
+        check('45 txindex: off reads CAUTION with "txindex off" and how to enable it',
+              pr.get('status') == 'caution' and ol.get('value') == 'txindex off' and ol.get('warn') is True
+              and 'txindex=1' in (ol.get('note') or ''), pr)
+        req('POST', '/__test__/txindex', {'enabled': True, 'synced': False}, base=_rpc_base)
+        pr = _test45()
+        check('45 txindex: still building reads CAUTION and says so',
+              pr.get('status') == 'caution' and ((pr.get('checks') or {}).get('outputLookup') or {}).get('value') == 'txindex still building', pr)
+        req('POST', '/__test__/txindex', {'enabled': True}, base=_rpc_base)
+        s, r = req('PUT', '/api/settings', {'primaryRpc': dict(_rpc_on, password='wrong')}, base=_ab43)
+        pr = _test45()
+        check('45 test: a wrong password fails and says so',
+              pr.get('status') == 'fail' and 'login failed' in (pr.get('detail') or ''), pr)
+        req('PUT', '/api/settings', {'primaryRpc': _rpc_on}, base=_ab43)
+
+        def _dry45(tx_id):
+            s, r = req('POST', '/api/broadcast/test', {'id': tx_id}, base=_ab43)
+            return s, (r.get('results') or [{}])[0]
+
+        s, r = req('POST', '/api/bitcoin/txs', {'txHex': v.craft(1, 120000), 'label': 'RPC ready', 'trigger': {'type': 'manual', 'params': {}}}, base=_ab43)
+        check('45 tx: added over RPC (201)', s == 201, (s, r))
+        _ready45 = r['tx']['id'] if s == 201 else None
+        check('45 tx: fee from the parent output (150,000 - 120,000)', r.get('tx', {}).get('feeSats') == 30000, r.get('tx', {}).get('feeSats'))
+        s, one = _dry45(_ready45)
+        check('45 dry run: unspent input reads ready', s == 200 and one.get('verdict') == 'ready', one)
+        s, r = req('POST', '/api/bitcoin/txs', {'txHex': v.craft(0, 120001), 'label': 'RPC stale', 'trigger': {'type': 'manual', 'params': {}}}, base=_ab43)
+        _stale45 = r['tx']['id'] if s == 201 else None
+        s, one = _dry45(_stale45)
+        check('45 dry run: an input spent in a block reads stale', s == 200 and one.get('verdict') == 'blocked' and len(one.get('spent', [])) == 1, one)
+        s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'utxo', 'params': {'outpoint': v.FINNEY + ':0', 'confirmations': 0}}}, base=_ab43)
+        check('45 utxo: a spent outpoint fires', s == 200 and r.get('fire') is True, r)
+        # With -txospenderindex Core names a confirmed spender and its
+        # block: still stale, now with the spender and height. While the
+        # index is behind it errors, and the spend reads as without it.
+        req('POST', '/__test__/spender-index', {'mode': 'synced'}, base=_rpc_base)
+        _clear45()
+        s, one = _dry45(_stale45)
+        sp = (one.get('spent') or [{}])[0]
+        check('45 spender index: a confirmed spend is stale, naming the spender and block',
+              s == 200 and one.get('verdict') == 'blocked' and sp.get('spentBy') == 'bb' * 32 and sp.get('blockHeight') == 899990, one)
+        s, r = req('POST', '/api/triggers/check', {'trigger': {'type': 'utxo', 'params': {'outpoint': v.FINNEY + ':0', 'confirmations': 6}}}, base=_ab43)
+        check('45 spender index: a UTXO rule counts confirmations from the spend block (11 >= 6, fires)', s == 200 and r.get('fire') is True, r)
+        req('POST', '/__test__/spender-index', {'mode': 'behind'}, base=_rpc_base)
+        _clear45()
+        s, one = _dry45(_stale45)
+        check('45 spender index: while the index is behind, the spend still reads stale (via txindex)',
+              s == 200 and one.get('verdict') == 'blocked' and len(one.get('spent', [])) == 1, one)
+        req('POST', '/__test__/spender-index', {'mode': 'off'}, base=_rpc_base)
+        # The same RPC node in both slots is asked once, with the primary's
+        # login (the secondary's must not replace it).
+        s, r = req('PUT', '/api/settings', {'secondaryEnabled': True, 'secondaryRpc': dict(_rpc_on, user='other', password='otherpass')}, base=_ab43)
+        pr = _test45()
+        check('45 same node twice: the primary keeps its own login (OK)', s == 200 and pr.get('status') == 'ok', (s, pr.get('detail')))
+        req('PUT', '/api/settings', {'secondaryEnabled': False, 'secondaryRpc': dict(_rpc_on, enabled=False)}, base=_ab43)
+        # A mempool spend by someone else: a conflict naming the spender.
+        req('POST', '/__test__/mempool-spend', {'txid': v.SECOND, 'vout': 0, 'spender': 'cd' * 32}, base=_rpc_base)
+        s, r = req('POST', '/api/bitcoin/txs', {'txHex': v.craft_prev(v.SECOND, 0, 120002), 'label': 'RPC conflict', 'trigger': {'type': 'manual', 'params': {}}}, base=_ab43)
+        _conf45 = r['tx']['id'] if s == 201 else None
+        _clear45()
+        s, one = _dry45(_conf45)
+        check('45 dry run: a mempool spend is a conflict naming the spender',
+              s == 200 and one.get('verdict') == 'conflict' and (one.get('conflict') or [{}])[0].get('spentBy') == 'cd' * 32, one)
+        # Without txindex: the fee still comes from the UTXO set, and a
+        # spend in a block reads unknown, never stale.
+        req('POST', '/__test__/txindex', {'enabled': False}, base=_rpc_base)
+        s, r = req('POST', '/api/bitcoin/txs', {'txHex': v.craft(1, 120003), 'label': 'RPC no index', 'trigger': {'type': 'manual', 'params': {}}}, base=_ab43)
+        check('45 no txindex: the fee still reads (from the UTXO set)', s == 201 and r['tx'].get('feeSats') == 29997, r.get('tx', {}).get('feeSats'))
+        _clear45()
+        s, one = _dry45(_stale45)
+        check('45 no txindex: a spend in a block is unknown, not stale',
+              s == 200 and one.get('verdict') != 'blocked' and len(one.get('spent', [])) == 0, one)
+        req('POST', '/__test__/txindex', {'enabled': True}, base=_rpc_base)
+        # Broadcast by hand: sent once, confirmed, then recognised as ours.
+        s, r = req('POST', '/api/bitcoin/txs/' + _ready45 + '/broadcast', {}, base=_ab43)
+        check('45 broadcast: sent over RPC', s == 200 and (r.get('tx') or {}).get('broadcasted'), (s, r))
+        s, sent = req('GET', '/__test__/sent', base=_rpc_base)
+        check('45 broadcast: the node received exactly that hex', sent == [v.craft(1, 120000)], len(sent))
+        s, r = req('GET', '/api/bitcoin/confirmations', base=_ab43)
+        c = next((x for x in r.get('confirmations', []) if x.get('id') == _ready45), {})
+        check('45 broadcast: confirmations read from the node (block 899,995)', c.get('blockHeight') == 899995 and c.get('confirmations') == 6, c)
+        # Backup and restore carry the RPC login.
+        s, bak = req('POST', '/api/backup', {}, base=_ab43)
+        check('45 backup: the backup carries the RPC login', bak['state']['settings']['primaryRpc']['password'] == 'stubpass', bak['state']['settings'].get('primaryRpc', {}).keys())
+        bak['state']['settings']['primaryRpc']['password'] = 'stubpass'
+        s, r = req('POST', '/api/restore', bak, base=_ab43, timeout=60)
+        check('45 restore: restores with the RPC node (200)', s == 200 and r.get('ok') is True, (s, r))
+        check('45 restore: ... and serves no password', 'stubpass' not in json.dumps(r), (r.get('state') or {}).get('settings', {}).get('primaryRpc'))
+        with open(os.path.join(_bind_data, 'state.json')) as f:
+            check('45 restore: ... with the RPC login stored', json.load(f)['settings']['primaryRpc'] == dict(_rpc_on, url=_rpc_base))
+        # Back to a mempool node.
+        s, r = req('PUT', '/api/settings', {'primaryRpc': dict(_rpc_on, enabled=False)}, base=_ab43)
+        s, st = req('GET', '/api/state', base=_ab43)
+        check('45 settings: RPC off uses the mempool URL again',
+              s == 200 and not (st['settings']['primaryRpc'] or {}).get('enabled') and not st['bitcoin']['nodeBases']['primary'].startswith('rpc'), st['bitcoin'].get('nodeBases'))
+        with open(os.path.join(_bind_data, 'state.json')) as f:
+            _off45 = json.load(f)['settings']['primaryRpc']
+            check('45 settings: RPC off forgets the login, keeping the address',
+                  _off45 == {'enabled': False, 'url': _rpc_base, 'user': '', 'password': ''}, _off45)
+        stop(_app45)
+        stop(_stub45)
+
     finally:
         for p in list(v.procs):
             stop(p)
 
     # --- 11. no server left running -------------------------------------
-    for port in (PORT, RECEIVER_PORT, STUB_P, STUB_S, 18190, 18191, 18197, 3440, 3441):
+    for port in (PORT, RECEIVER_PORT, STUB_P, STUB_S, 18190, 18191, 18197, 18198, 3440, 3441):
         check('11 no server left running on port %d' % port, port_closed(port))
 
     print()

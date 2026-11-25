@@ -205,9 +205,21 @@
         <h2>Bitcoin nodes</h2>
         <button class="help-btn" id="help-nodes" data-help="nodes" aria-label="About this setting" title="About this setting">?</button>
       </div>
-      <p class="muted">A mempool API endpoint — not an Electrum server or Bitcoin Core RPC.</p>
+      <p class="muted">A mempool API endpoint, or Bitcoin Core over RPC.</p>
       <label for="btc-primary-url">Primary node</label>
+      <div class="rpc-row"><span class="rpc-label">Bitcoin Core RPC</span>
+        <label class="switch small" title="Use Bitcoin Core RPC for this node"><input type="checkbox" id="btc-primary-rpc"><span class="slider"></span></label>
+      </div>
       <input id="btc-primary-url" type="text" placeholder="https://mempool.space">
+      <div id="btc-primary-rpc-fields" class="rpc-fields" style="display:none">
+        <label for="btc-primary-rpc-url">RPC address</label>
+        <input id="btc-primary-rpc-url" type="text" placeholder="http://umbrel.local:8332" autocomplete="off">
+        <label for="btc-primary-rpc-user">RPC username</label>
+        <input id="btc-primary-rpc-user" type="text" autocomplete="off">
+        <label for="btc-primary-rpc-password">RPC password</label>
+        <input id="btc-primary-rpc-password" type="password" autocomplete="new-password">
+        <p class="muted rpc-hint">Needs <code>txindex=1</code> on the node for full spend and confirmation lookups.</p>
+      </div>
       <div class="node-subhead">
         <label for="btc-secondary-url">Secondary node</label>
         <label class="switch green" id="btc-secondary-enabled-wrap" title="Secondary node on — used if the primary fails">
@@ -216,7 +228,19 @@
         </label>
       </div>
       <div id="btc-secondary-fields">
+      <div class="rpc-row"><span class="rpc-label">Bitcoin Core RPC</span>
+        <label class="switch small" title="Use Bitcoin Core RPC for this node"><input type="checkbox" id="btc-secondary-rpc"><span class="slider"></span></label>
+      </div>
       <input id="btc-secondary-url" type="text" placeholder="https://blockstream.info/api">
+      <div id="btc-secondary-rpc-fields" class="rpc-fields" style="display:none">
+        <label for="btc-secondary-rpc-url">RPC address</label>
+        <input id="btc-secondary-rpc-url" type="text" placeholder="http://umbrel.local:8332" autocomplete="off">
+        <label for="btc-secondary-rpc-user">RPC username</label>
+        <input id="btc-secondary-rpc-user" type="text" autocomplete="off">
+        <label for="btc-secondary-rpc-password">RPC password</label>
+        <input id="btc-secondary-rpc-password" type="password" autocomplete="new-password">
+        <p class="muted rpc-hint">Needs <code>txindex=1</code> on the node for full spend and confirmation lookups.</p>
+      </div>
       </div>
       <p>
         <button id="btn-btc-save-nodes" class="primary">Save nodes</button>
@@ -231,6 +255,8 @@
             <div class="node-check-line"><span class="node-check-label">Fee estimates</span> <span id="btc-primary-fees-value" class="node-check-detail"></span></div>
             <div class="node-check-line"><span class="node-check-label">Block height</span> <span id="btc-primary-height-value" class="node-check-detail"></span></div>
             <div class="node-check-line"><span class="node-check-label">Output lookup</span> <span id="btc-primary-outputLookup-value" class="node-check-detail"></span></div>
+            <div id="btc-primary-rpcUser-line" class="node-check-line" style="display:none"><span class="node-check-label">RPC user</span> <span id="btc-primary-rpcUser-value" class="node-check-detail"></span></div>
+            <p id="btc-primary-checks-note" class="node-check-note" style="display:none"></p>
           </div>
         </details>
       </div>
@@ -243,6 +269,8 @@
             <div class="node-check-line"><span class="node-check-label">Fee estimates</span> <span id="btc-secondary-fees-value" class="node-check-detail"></span></div>
             <div class="node-check-line"><span class="node-check-label">Block height</span> <span id="btc-secondary-height-value" class="node-check-detail"></span></div>
             <div class="node-check-line"><span class="node-check-label">Output lookup</span> <span id="btc-secondary-outputLookup-value" class="node-check-detail"></span></div>
+            <div id="btc-secondary-rpcUser-line" class="node-check-line" style="display:none"><span class="node-check-label">RPC user</span> <span id="btc-secondary-rpcUser-value" class="node-check-detail"></span></div>
+            <p id="btc-secondary-checks-note" class="node-check-note" style="display:none"></p>
           </div>
         </details>
       </div>
@@ -687,6 +715,7 @@
     </div>
     <div id="backup-plain-fields" style="display:none">
       <p class="notice bad">Unencrypted: anyone who gets this file can broadcast your transactions and see where they send funds. Keep it somewhere only you can reach.</p>
+      <p id="backup-rpc-warning" class="notice bad" style="display:none">It also holds your Bitcoin Core RPC password in plain text.</p>
     </div>
     <p class="inline-btns">
       <button type="button" class="primary" id="btn-backup-modal-download">Download backup</button>

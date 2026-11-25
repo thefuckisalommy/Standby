@@ -1602,6 +1602,67 @@ function check(name, cond, detail) {
     els['readiness-secondary'] && els['readiness-secondary'].textContent === '127.0.0.1:18276',
     els['readiness-secondary'] && els['readiness-secondary'].textContent);
 
+  // --- 10e. RPC toggle per node ---
+  // On shows the RPC fields instead of the mempool URL; Save sends them;
+  // the password never comes back. No RPC node here, so no test is run.
+  check('rpc toggle static: each node has an RPC switch and fields',
+    ['primary', 'secondary'].every((n) => idx.indexOf('id="btc-' + n + '-rpc"') !== -1 && idx.indexOf('id="btc-' + n + '-rpc-fields"') !== -1), '');
+  check('rpc toggle static: the secondary RPC row hides with the secondary fields',
+    idx.indexOf('id="btc-secondary-fields"') < idx.indexOf('id="btc-secondary-rpc"'), '');
+  check('rpc toggle: off by default, the URL box shows and the RPC fields are hidden',
+    els['btc-primary-rpc'].checked === false && els['btc-primary-url'].style.display !== 'none'
+    && els['btc-primary-rpc-fields'].style.display === 'none', '');
+  els['btc-primary-rpc'].checked = true;
+  fireChange(els['btc-primary-rpc']);
+  check('rpc toggle: on hides the URL box and shows the RPC fields',
+    els['btc-primary-url'].style.display === 'none' && els['btc-primary-rpc-fields'].style.display !== 'none', '');
+  els['btc-primary-rpc-url'].value = '127.0.0.1:18299';
+  els['btc-primary-rpc-user'].value = 'standby';
+  els['btc-primary-rpc-password'].value = 'dom-secret';
+  els['btn-btc-save-nodes'].click();
+  await new Promise((r) => setTimeout(r, 1500));
+  await waitForRender();
+  const stRpc = await (await fetch('/api/state')).json();
+  check('rpc toggle: Save stores the RPC node, and the state never carries the password',
+    stRpc.settings.primaryRpc && stRpc.settings.primaryRpc.enabled === true && stRpc.settings.primaryRpc.hasPassword === true
+    && JSON.stringify(stRpc).indexOf('dom-secret') === -1, JSON.stringify(stRpc.settings.primaryRpc));
+  check('rpc toggle: after the save the password box is empty and says a password is saved',
+    els['btc-primary-rpc-password'].value === '' && /Saved/.test(els['btc-primary-rpc-password'].placeholder || ''),
+    els['btc-primary-rpc-password'].placeholder);
+  check('rpc toggle: the address reads back normalised',
+    els['btc-primary-rpc-url'].value === 'http://127.0.0.1:18299', els['btc-primary-rpc-url'].value);
+  check('rpc toggle: the node row names the RPC node',
+    els['btc-primary'] && els['btc-primary'].textContent === '127.0.0.1:18299 \u00b7 RPC',
+    els['btc-primary'] && els['btc-primary'].textContent);
+  // With an RPC password saved, the unencrypted-backup notice says the file holds it.
+  els['btn-backup-download'].click();
+  els['backup-encrypt'].checked = false;
+  fireChange(els['backup-encrypt']);
+  check('rpc toggle: the unencrypted backup warns that it holds the RPC password',
+    els['backup-rpc-warning'] && els['backup-rpc-warning'].style.display !== 'none', '');
+  els['backup-encrypt'].checked = true;
+  fireChange(els['backup-encrypt']);
+  els['btn-backup-modal-cancel'].click();
+  els['btc-primary-rpc'].checked = false;
+  fireChange(els['btc-primary-rpc']);
+  els['btn-btc-save-nodes'].click();
+  await new Promise((r) => setTimeout(r, 1500));
+  await waitForRender();
+  const stRpcOff = await (await fetch('/api/state')).json();
+  check('rpc toggle: off saves back to the mempool node and forgets the login',
+    stRpcOff.settings.primaryRpc.enabled === false && stRpcOff.settings.primaryRpc.user === ''
+    && stRpcOff.settings.primaryRpc.hasPassword === false
+    && els['btc-primary'].textContent === '127.0.0.1:18275', JSON.stringify(stRpcOff.settings.primaryRpc) + ' ' + els['btc-primary'].textContent);
+
+  els['btn-backup-download'].click();
+  els['backup-encrypt'].checked = false;
+  fireChange(els['backup-encrypt']);
+  check('rpc toggle: with no RPC password saved, the unencrypted backup has no RPC notice',
+    els['backup-rpc-warning'] && els['backup-rpc-warning'].style.display === 'none', '');
+  els['backup-encrypt'].checked = true;
+  fireChange(els['backup-encrypt']);
+  els['btn-backup-modal-cancel'].click();
+
   // --- 11. Staged Transactions card ---
   // A <details>, open by default.
   check('staged card: the card is titled "Staged Transactions" (static HTML)',
@@ -2874,7 +2935,7 @@ function check(name, cond, detail) {
       idx.indexOf(phrase) === -1, phrase);
   }
   check('trim static: the kept short hints are still in the page',
-    idx.indexOf('A mempool API endpoint — not an Electrum server or Bitcoin Core RPC') !== -1
+    idx.indexOf('A mempool API endpoint, or Bitcoin Core over RPC.') !== -1
     && idx.indexOf('Download an encrypted backup (recommended) or an unencrypted one.') !== -1
     && idx.indexOf('POST /checkin to check in, GET /health to test') !== -1
     && idx.indexOf('A reading is only trusted when the two agree within <span id="price-sources-agreement">5%</span>.') !== -1, '');
@@ -2972,8 +3033,8 @@ function check(name, cond, detail) {
     && idx.indexOf('Installed version:') !== -1 && idx.indexOf('id="app-version"') !== -1, '');
   check('app version static: the card has no "?" button and no details (just the version line)',
     idx.indexOf('id="help-version"') === -1, '');
-  check('app version: the installed version reads 0.8.13.1 (from /api/health)',
-    els['app-version'] && els['app-version'].textContent === '0.8.13.1',
+  check('app version: the installed version reads 0.8.14 (from /api/health)',
+    els['app-version'] && els['app-version'].textContent === '0.8.14',
     els['app-version'] && els['app-version'].textContent);
   setFilter('general');
   check('app version: the card is visible under General',

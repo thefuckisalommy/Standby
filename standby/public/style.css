@@ -351,6 +351,15 @@ a { color: #f59e0b; }
 .switch.green input:checked + .slider { background: var(--ok); }
 /* The secondary-node toggle sits right-aligned in its heading row, so it
    stays reachable while the node is off. */
+/* Per-node RPC toggle and the fields it reveals. */
+.rpc-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 8px 0 4px; }
+.rpc-row .rpc-label { font-size: 0.9em; color: var(--muted); }
+.switch.small .slider { width: 36px; height: 20px; }
+.switch.small .slider::after { width: 14px; height: 14px; }
+.switch.small input:checked + .slider::after { transform: translateX(16px); }
+.rpc-fields label { margin-top: 6px; }
+.rpc-hint { font-size: 0.85em; margin: 6px 0 0; }
+.node-check-note { color: var(--warn); font-size: 0.85em; margin: 6px 0 0; white-space: pre-line; }
 .node-subhead { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 12px 0 4px; }
 .node-subhead label[for="btc-secondary-url"] { margin: 0; }
 .node-subhead .switch { flex-shrink: 0; }
