@@ -1057,7 +1057,7 @@ function writeJsonl(dataDir, file, entries) {
 }
 
 module.exports = {
-  loadState, saveState, writeFileDurable, secureDataDir, LOG_KEEP_ENTRIES, LOG_COMPACT_BYTES, DATA_DIR_MODE, DATA_FILE_MODE, writeHeartbeat, touchHeartbeat, defaultState, newTxId, newSetId,
+  loadState, saveState, writeFileDurable, renameReplacing, secureDataDir, LOG_KEEP_ENTRIES, LOG_COMPACT_BYTES, DATA_DIR_MODE, DATA_FILE_MODE, writeHeartbeat, touchHeartbeat, defaultState, newTxId, newSetId,
   appendCheckin, readCheckins, writeCheckins,
   appendBroadcastLog, readBroadcastLog, writeBroadcastLog,
   normalizeTrigger, normalizeRule, triggerOf, triggerRulesOf, triggerTypesOf, hasTriggerType,

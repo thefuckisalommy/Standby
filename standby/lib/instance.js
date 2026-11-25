@@ -13,6 +13,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { LOCK_REFRESH_MS } = require('./config');
+const { renameReplacing } = require('./store');
 
 const LOCK_FILE = 'standby.lock';
 const REFRESH_MS = LOCK_REFRESH_MS;
@@ -26,17 +27,34 @@ function alive(pid) {
   try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
 }
 
+function sleep(ms) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }
+
+// The lock's contents; null only when there is no lock file. Writes are
+// atomic (a whole file swapped in), so a read error is transient (Windows
+// while another process swaps the file): retry, then treat as unreadable.
 function readLock(file) {
-  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
+  for (let attempt = 0; ; attempt++) {
+    try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) {
+      if (e.code === 'ENOENT') return null;
+      if (attempt >= 10) return { unreadable: true };
+      sleep(50);
+    }
+  }
 }
 
-function sleep(ms) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }
+// Write the lock as a whole: a temp file swapped in, never truncated in
+// place, so no reader sees a partial lock.
+function writeLock(file, mode) {
+  const tmp = file + '.' + ID + '.tmp';
+  fs.writeFileSync(tmp, body(), mode === undefined ? undefined : { mode });
+  renameReplacing(tmp, file);
+}
 
 // Another live copy's lock, or null when the lock is absent, ours, left by
 // a dead process, or old and not refreshed within one more interval.
 function holder(file) {
   const cur = readLock(file);
-  if (!cur || !Number.isInteger(cur.pid) || cur.pid === process.pid || !alive(cur.pid)) return null;
+  if (!cur || cur.unreadable || !Number.isInteger(cur.pid) || cur.pid === process.pid || !alive(cur.pid)) return null;
   const age = Date.now() - Date.parse(cur.refreshedAt || '');
   if (age < STALE_MS) return cur;
   const deadline = Date.now() + REFRESH_MS + REFRESH_MS / 2;
@@ -73,9 +91,7 @@ function acquire(dataDir, fileMode) {
   }
   const other = holder(file);
   if (other) return { ok: false, pid: other.pid };
-  const tmp = file + '.' + ID;
-  fs.writeFileSync(tmp, body(), { mode: fileMode });
-  fs.renameSync(tmp, file);
+  writeLock(file, fileMode);
   sleep(Math.min(250, REFRESH_MS / 4));
   const cur = readLock(file);
   if (!cur || cur.id !== ID) return { ok: false, pid: cur && cur.pid };
@@ -86,7 +102,11 @@ function acquire(dataDir, fileMode) {
 function stillOwner() {
   if (!lockPath) return true; // no lock taken (library use, scripts)
   const cur = readLock(lockPath);
-  return !!cur && cur.id === ID;
+  if (cur === null) { // gone, so nobody else holds it: put ours back
+    try { writeLock(lockPath); } catch { /* the next refresh retries */ }
+    return true;
+  }
+  return cur.id === ID;
 }
 
 // Called before every evaluation and broadcast.
@@ -101,7 +121,7 @@ function assertOwner() {
 function refresh() {
   if (!lockPath) return;
   assertOwner();
-  try { fs.writeFileSync(lockPath, body()); } catch (e) { console.warn('Standby: could not refresh ' + lockPath + ': ' + e.message); }
+  try { writeLock(lockPath); } catch (e) { console.warn('Standby: could not refresh ' + lockPath + ': ' + e.message); }
 }
 
 function release() {

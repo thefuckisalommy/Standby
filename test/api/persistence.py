@@ -991,6 +991,41 @@ def run():
         check('47b paused: on resuming, the old copy sees the lock is gone and exits', pd_code == 1, pd_code)
         check('47b paused: the new copy keeps running', pe.poll() is None and serving(3441))
         stop(pe)
+    # The lock is always whole: with a copy refreshing every 100 ms, every
+    # read parses (a refresh swaps a whole file in, never truncates).
+    shutil.rmtree(one_data, ignore_errors=True)
+    pf = start(['node', 'server.js'], env=dict(fast_env, PORT='3440', STANDBY_TEST_LOCK_REFRESH_MS='100'), cwd=APP, log=one_log)
+    check('47b atomic: a fast-refreshing copy comes up', wait_up('http://127.0.0.1:3440'))
+    bad_reads = 0
+    reads = 0
+    end_at = time.time() + 3
+    while time.time() < end_at:
+        try:
+            with open(os.path.join(one_data, 'standby.lock')) as f:
+                json.loads(f.read())
+        except (ValueError, OSError):
+            bad_reads += 1
+        reads += 1
+    check('47b atomic: every read of a refreshing lock is whole', bad_reads == 0, '%d of %d reads failed' % (bad_reads, reads))
+    check('47b atomic: no temp lock files left behind', not [n for n in os.listdir(one_data) if n.startswith('standby.lock.')],
+          os.listdir(one_data))
+    stop(pf)
     for port in (3440, 3441):
         check('47b: port %d closed again' % port, port_closed(port))
+    # The clock module: a corrected system clock drops the old offsets
+    # (unverified, so a node is asked again), and an "off" clock is
+    # re-checked, not left held until the old readings age out.
+    clock_js = (
+        "const c=require('./lib/clock');let shift=0;const real=Date.now;Date.now=()=>real()+shift;"
+        "c.observe(new Date(real()-2*3600e3).toUTCString());const a=c.status();const askOff=c.shouldAsk();"
+        "shift=-2*3600e3;const b=c.status();"
+        "console.log(JSON.stringify({a,askOff,b}));")
+    out = subprocess.run(['node', '-e', clock_js], cwd=APP, capture_output=True, text=True, timeout=20)
+    try:
+        cj = json.loads(out.stdout.strip().splitlines()[-1])
+    except Exception:
+        cj = {}
+    check('48b clock: a clock 2 hours ahead reads off', cj.get('a') == 'off', (cj, out.stderr[-300:]))
+    check('48b clock: an off clock is re-checked with a node', cj.get('askOff') is True, cj)
+    check('48b clock: correcting the system clock drops the old readings (unverified, asked again)', cj.get('b') == 'unverified', cj)
 

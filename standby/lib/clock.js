@@ -11,10 +11,21 @@ const WINDOW_MS = 60 * 60 * 1000;
 const MAX_SAMPLES = 15;
 
 const samples = []; // { offsetMs, atMs }
+// Wall clock minus a monotonic one: it moves only when the system clock is
+// changed (or, on Linux, across a sleep). Then the old offsets describe a
+// clock that no longer exists, so they are dropped.
+let wallMinusMono = null;
+function clockChanged() {
+  const now = Date.now() - performance.now();
+  const changed = wallMinusMono !== null && Math.abs(now - wallMinusMono) > 60 * 1000;
+  wallMinusMono = now;
+  if (changed) samples.length = 0;
+}
 
 function observe(dateHeader) {
   const serverMs = Date.parse(dateHeader || '');
   if (!Number.isFinite(serverMs)) return;
+  clockChanged();
   const now = Date.now();
   samples.push({ offsetMs: now - serverMs, atMs: now });
   if (samples.length > MAX_SAMPLES) samples.shift();
@@ -23,6 +34,7 @@ function observe(dateHeader) {
 // The device clock minus server time in ms (positive: the device is
 // ahead), or null without a recent answer.
 function offsetMs() {
+  clockChanged();
   const now = Date.now();
   const recent = samples.filter((s) => Math.abs(now - s.atMs) <= WINDOW_MS).map((s) => s.offsetMs).sort((a, b) => a - b);
   if (!recent.length) return null;
@@ -48,16 +60,16 @@ function problem() {
     + ' — date and check-in triggers are held until it is corrected';
 }
 
-// Whether to ask a node for its time now: unverified, and not asked in the
-// last minute.
+// Whether to ask a node for its time now: not verified (unverified or
+// off, so a corrected clock is noticed), and not asked in the last minute.
 let lastAskMs = 0;
 function shouldAsk() {
-  if (status() !== 'unverified' || Date.now() - lastAskMs < 60000) return false;
+  if (status() === 'verified' || Date.now() - lastAskMs < 60000) return false;
   lastAskMs = Date.now();
   return true;
 }
 
 // Test only.
-function reset() { samples.length = 0; lastAskMs = 0; }
+function reset() { samples.length = 0; lastAskMs = 0; wallMinusMono = null; }
 
 module.exports = { observe, offsetMs, status, problem, shouldAsk, reset, MAX_SKEW_MS };
