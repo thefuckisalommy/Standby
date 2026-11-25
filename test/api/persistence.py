@@ -996,20 +996,35 @@ def run():
     shutil.rmtree(one_data, ignore_errors=True)
     pf = start(['node', 'server.js'], env=dict(fast_env, PORT='3440', STANDBY_TEST_LOCK_REFRESH_MS='100'), cwd=APP, log=one_log)
     check('47b atomic: a fast-refreshing copy comes up', wait_up('http://127.0.0.1:3440'))
-    bad_reads = 0
+    partial = 0
+    busy = 0
     reads = 0
     end_at = time.time() + 3
     while time.time() < end_at:
         try:
             with open(os.path.join(one_data, 'standby.lock')) as f:
                 json.loads(f.read())
-        except (ValueError, OSError):
-            bad_reads += 1
+        except ValueError:
+            partial += 1
+        except OSError:
+            busy += 1
         reads += 1
-    check('47b atomic: every read of a refreshing lock is whole', bad_reads == 0, '%d of %d reads failed' % (bad_reads, reads))
-    check('47b atomic: no temp lock files left behind', not [n for n in os.listdir(one_data) if n.startswith('standby.lock.')],
-          os.listdir(one_data))
+    # Never a partial lock. Windows briefly refuses to open a file while it
+    # is swapped into place; the app's reads retry through that, so a
+    # refused open counts only on POSIX.
+    check('47b atomic: no read of a refreshing lock ever sees a partial file', partial == 0, '%d of %d reads partial' % (partial, reads))
+    if os.name != 'nt':
+        check('47b atomic: every read of a refreshing lock opens it (POSIX)', busy == 0, '%d of %d reads failed to open' % (busy, reads))
     stop(pf)
+    # A copy killed mid-refresh can leave its temp lock file; the next copy
+    # clears it.
+    with open(os.path.join(one_data, 'standby.lock.deadbeefdeadbeef.tmp'), 'w') as f:
+        f.write('{}')
+    pg = start(['node', 'server.js'], env=dict(fast_env, PORT='3440', STANDBY_TEST_LOCK_REFRESH_MS='30000'), cwd=APP, log=one_log)
+    check('47b atomic: the next copy comes up', wait_up('http://127.0.0.1:3440'))
+    check('47b atomic: it clears temp lock files left by a killed copy',
+          not [n for n in os.listdir(one_data) if n.startswith('standby.lock.')], os.listdir(one_data))
+    stop(pg)
     for port in (3440, 3441):
         check('47b: port %d closed again' % port, port_closed(port))
     # The clock module: a corrected system clock drops the old offsets

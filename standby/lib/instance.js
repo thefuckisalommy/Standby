@@ -72,9 +72,21 @@ function body() {
 
 function own(file) {
   lockPath = file;
+  clearLeftovers(path.dirname(file));
   timer = setInterval(refresh, REFRESH_MS);
   if (timer.unref) timer.unref();
   process.on('exit', release);
+}
+
+// Temp lock files left by a copy killed mid-write (they hold no claim).
+function clearLeftovers(dataDir) {
+  let names = [];
+  try { names = fs.readdirSync(dataDir); } catch { return; }
+  for (const n of names) {
+    if (n.startsWith(LOCK_FILE + '.') && n.endsWith('.tmp') && !n.includes(ID)) {
+      try { fs.unlinkSync(path.join(dataDir, n)); } catch { /* another copy's, mid-write */ }
+    }
+  }
 }
 
 // { ok: true } once the lock is ours, or { ok: false, pid } when another
