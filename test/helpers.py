@@ -5,11 +5,20 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
 
+# Windows: run in UTF-8 mode, as on Linux. The app's files and logs are
+# UTF-8; the Windows code page can neither read nor print them.
+if os.name == 'nt' and not sys.flags.utf8_mode:
+    sys.exit(subprocess.call([sys.executable, '-X', 'utf8'] + sys.argv))
+
 _TESTDIR = os.path.dirname(os.path.abspath(__file__))
+# The system temp folder (/tmp on Linux, %TEMP% on Windows).
+TMP = tempfile.gettempdir()
 # The repository root; the app lives in its standby/ folder.
 GOAL = os.path.dirname(_TESTDIR)
 STUB = os.path.join(_TESTDIR, 'stubs.js')
@@ -85,8 +94,9 @@ SENTINEL_TXID = txid_of(SENTINEL_HEX)
 procs = []
 
 
-def start(cmd, env=None, cwd=None, log='/tmp/standby-test-proc.log'):
+def start(cmd, env=None, cwd=None, log=None, signal_group=False):
     """Start a process the suite stops at the end (see procs)."""
+    log = log or os.path.join(TMP, 'standby-test-proc.log')
     e = dict(os.environ)
     if env:
         e.update(env)
@@ -95,7 +105,10 @@ def start(cmd, env=None, cwd=None, log='/tmp/standby-test-proc.log'):
     e.setdefault('STANDBY_TEST_MODE', '1')
     # A 500 ms startup tick instead of 5 s (honored in test mode only).
     e.setdefault('STANDBY_TEST_STARTUP_TICK_MS', '500')
-    p = subprocess.Popen(cmd, env=e, cwd=cwd, stdout=open(log, 'ab'), stderr=subprocess.STDOUT)
+    # signal_group: on Windows, its own process group, so it can be sent
+    # Ctrl+Break (the Windows stand-in for SIGTERM).
+    flags = subprocess.CREATE_NEW_PROCESS_GROUP if (signal_group and os.name == 'nt') else 0
+    p = subprocess.Popen(cmd, env=e, cwd=cwd, stdout=open(log, 'ab'), stderr=subprocess.STDOUT, creationflags=flags)
     procs.append(p)
     return p
 

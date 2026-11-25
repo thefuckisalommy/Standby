@@ -16,6 +16,7 @@ Runs on Umbrel (community app store) or any Linux machine with Docker (arm64 and
   - **Manual only**: never fires on its own.
 - **Releases**: every tick (about once a minute), each armed set whose trigger fires is broadcast. Inputs are re-checked first; a transaction whose input was spent elsewhere is marked stale and never sent.
 - **Grace after being offline**: after more than 7 days offline, every trigger pauses for 7 days (or until you resume), so nothing fires on conditions that changed while you were away. Can be turned off.
+- **Clock check**: a due set-date or check-in trigger fires only once a node confirms this device's clock is within 10 minutes of its own time; otherwise it is held, with the reason on the card.
 - **Vacation and disarm**: vacation freezes check-in countdowns; a disarmed set never fires on its own but can still be broadcast by hand.
 - **Fee risk**: each transaction's fee rate compared with the 90-day peak of observed fees (Low, Medium, High, Critical). Informational only.
 - **Dry run**: checks inputs and timelocks without broadcasting.
@@ -53,7 +54,7 @@ Both run read-only, without Linux capabilities, with `no-new-privileges`.
 
 **Updating:** change the image tag (or download the new compose file), then `docker compose pull && docker compose up -d`. Data lives in `./data` and `./checkin`.
 
-**Without Docker:** Node 26+, `cd standby && node server.js` (localhost:3100, data in `./data`).
+**Without Docker** (Linux, macOS or Windows): Node 26+, `cd standby && node server.js` (localhost:3100, data in `./data`). The check-in receiver is `node checkin-receiver/server.js` (port 3101). On Windows, Ctrl+C or Ctrl+Break stops it cleanly. Only one copy runs per data folder; a second refuses to start.
 
 ### Configuration
 
@@ -65,8 +66,9 @@ All optional; see `standby/lib/config.js`.
 | `STANDBY_BIND` | `127.0.0.1` | Listen address. Docker sets `0.0.0.0` inside the container. |
 | `STANDBY_ALLOWED_HOSTS` | unset | Extra hostnames, comma-separated. |
 | `STANDBY_WEB_PORT`, `STANDBY_CHECKIN_PORT` | `3100`, `3101` | Host ports in `docker-compose.yml`. |
-| `PORT`, `DATA_DIR`, `CHECKIN_DIR` | `3100`, `./data`, `/checkin` | Listen port and data locations. |
+| `PORT`, `DATA_DIR`, `CHECKIN_DIR` | `3100`, `./data`, `./data/checkin` | Listen port and data locations (Docker and Umbrel set `/data` and `/checkin`). |
 | `MEMPOOL_HOST`, `MEMPOOL_PORT`, `MEMPOOL_PROTOCOL` | unset | Override a mempool primary node. |
+| `STANDBY_LOG_FILE` | unset | Also write the log to this file (rotates at 1 MB). Give the receiver its own file. |
 
 ## Check-ins
 

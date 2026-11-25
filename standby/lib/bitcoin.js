@@ -15,6 +15,8 @@ const crypto = require('crypto');
 const { MEMPOOL_OVERRIDE, PRICE_API_URL_OVERRIDE, SLIPSTREAM_API_URL_OVERRIDE } = require('./config');
 const { requestText, NET_TIMEOUT_MS, BROADCAST_TIMEOUT_MS } = require('./net');
 const rpc = require('./rpc');
+const instance = require('./instance');
+const clock = require('./clock');
 const { appendBroadcastLog, sanitizeFeeHistory, FEE_HISTORY_WINDOW_DAYS, FEE_HISTORY_MIN_OBSERVATIONS, FEE_HISTORY_MAX_ENTRIES } = require('./store');
 
 const MAX_TX_BYTES = 1000000; // 1 MB, same ceiling as the API body limit
@@ -576,7 +578,7 @@ function mempoolReq(path, method, body, base, timeoutMs, contentType) {
   const key = base || DEFAULT_PUBLIC_API_URL;
   const p = rpc.isRpcBase(key)
     ? rpc.answer(path, method || 'GET', body, key, timeoutMs, Object.values(ESPLORA_FEE_TARGETS))
-    : restReq(path, method, body, key, timeoutMs, contentType);
+    : restReq(path, method, body, key, timeoutMs, contentType).then((r) => { clock.observe(r.date); return r; });
   // Stamp the endpoint on any answer (any status); a timeout, refusal
   // or DNS error stamps nothing. The derived promise's catch only prevents
   // an unhandled rejection.
@@ -1097,6 +1099,7 @@ function slipstreamReq(path, method, body, timeoutMs) {
 // No fallback to the public nodes. A duplicate submit answers success
 // again, so it is harmless.
 async function broadcastViaSlipstream(hex, txid) {
+  instance.assertOwner();
   let res;
   try {
     res = await slipstreamReq('/api/transactions', 'POST', JSON.stringify({ tx_hex: hex }), BROADCAST_TIMEOUT_MS);
@@ -1640,6 +1643,7 @@ async function dryRun(dataDir, { tx, endpoints, ttlMs }) {
 // method, fallback }; throws (and logs) on total failure. Irrevocable once
 // it lands.
 async function broadcastTx(dataDir, { hex, txid, endpoints, notePrefix }) {
+  instance.assertOwner();
   const errors = [];
   for (const ep of endpoints) {
     try {

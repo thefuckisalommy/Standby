@@ -212,8 +212,8 @@ def run():
           ('check-in key revoked: ' + str(log_id)) in read_log())
     # (b2) No state and no backups: a genuine first boot (a second
     # instance proves it).
-    fresh_data = '/tmp/standby-test099-fresh'
-    fresh_checkin = '/tmp/standby-test099-fresh-checkin'
+    fresh_data = TMP + '/standby-test099-fresh'
+    fresh_checkin = TMP + '/standby-test099-fresh-checkin'
     shutil.rmtree(fresh_data, ignore_errors=True)
     shutil.rmtree(fresh_checkin, ignore_errors=True)
     check('20 fresh: port 3458 free', port_closed(3458))
@@ -465,7 +465,7 @@ def run():
     check('33 hosts: IP literal Host passes', s == 200, (s, body))
     s, body = raw_req('GET', '/api/health', BASE, host='umbrel.local')
     check('33 hosts: umbrel.local passes', s == 200, (s, body))
-    s, body = raw_req('GET', '/api/health', BASE, host=os.uname().nodename.lower())
+    s, body = raw_req('GET', '/api/health', BASE, host=platform.node().lower())
     check('33 hosts: machine hostname is rejected without an allowlist (0.8.11)',
           s == 421 and body == b'Unrecognised Host header', (s, body))
     check('33 hosts: missing Host header is rejected',
@@ -475,8 +475,8 @@ def run():
           read_log()[-500:])
     # STANDBY_ALLOWED_HOSTS: a second instance with two extra names.
     # They pass, others still 421, IP literals still pass.
-    extra_data = '/tmp/standby-test099-extra'
-    extra_checkin = '/tmp/standby-test099-extra-checkin'
+    extra_data = TMP + '/standby-test099-extra'
+    extra_checkin = TMP + '/standby-test099-extra-checkin'
     shutil.rmtree(extra_data, ignore_errors=True)
     shutil.rmtree(extra_checkin, ignore_errors=True)
     check('33 hosts: port 3440 free', port_closed(3440))
@@ -623,39 +623,41 @@ def run():
     delete_all_txs()
     # (d) SIGTERM flush: a fresh instance with its heartbeat deleted
     # must recreate it on SIGTERM and exit 0.
-    sig_data = '/tmp/standby-test099-sigterm'
-    sig_checkin = '/tmp/standby-test099-sigterm-checkin'
+    sig_data = TMP + '/standby-test099-sigterm'
+    sig_checkin = TMP + '/standby-test099-sigterm-checkin'
     shutil.rmtree(sig_data, ignore_errors=True)
     shutil.rmtree(sig_checkin, ignore_errors=True)
     check('34 sigterm: port 3440 free', port_closed(3440))
     sig_env = dict(APP_ENV)
     sig_env.update({'PORT': '3440', 'DATA_DIR': sig_data, 'CHECKIN_DIR': sig_checkin})
     sig_base = 'http://127.0.0.1:3440'
-    sig_app = start(['node', 'server.js'], env=sig_env, cwd=APP, log=LOG)
+    # Windows has no SIGTERM; Ctrl+Break (SIGBREAK) is its stand-in.
+    sig_name = 'SIGBREAK' if os.name == 'nt' else 'SIGTERM'
+    sig_app = start(['node', 'server.js'], env=sig_env, cwd=APP, log=LOG, signal_group=True)
     check('34 sigterm: instance comes up', wait_up(sig_base))
     try:
         os.remove(os.path.join(sig_data, 'heartbeat.json'))
     except OSError:
         pass
-    sig_app.send_signal(signal.SIGTERM)
+    sig_app.send_signal(signal.CTRL_BREAK_EVENT if os.name == 'nt' else signal.SIGTERM)
     try:
         sig_code = sig_app.wait(timeout=5)
     except subprocess.TimeoutExpired:
         sig_code = None
         stop(sig_app)
-    check('34 sigterm: process exits 0 on SIGTERM', sig_code == 0, sig_code)
+    check('34 sigterm: process exits 0 on ' + sig_name, sig_code == 0, sig_code)
     try:
         hb_sig = json.load(open(os.path.join(sig_data, 'heartbeat.json')))
         hb_sig_at = hb_sig.get('lastOnlineAt')
     except Exception:
         hb_sig_at = None
-    check('34 sigterm: SIGTERM flush lands the heartbeat',
+    check('34 sigterm: ' + sig_name + ' flush lands the heartbeat',
           isinstance(hb_sig_at, str)
           and abs((datetime.now(timezone.utc) - datetime.fromisoformat(hb_sig_at.replace('Z', '+00:00'))).total_seconds()) < 30, hb_sig_at)
     # (e) A missing or corrupt heartbeat falls back to the state's
     # lastOnlineAt; tested directly against lib/store.js (a running
     # server rewrites the heartbeat). Also the save dedupe.
-    hb_dir = '/tmp/standby-test099-heartbeat'
+    hb_dir = TMP + '/standby-test099-heartbeat'
     shutil.rmtree(hb_dir, ignore_errors=True)
     os.makedirs(hb_dir)
     hb_seed = load_state_file()
@@ -744,7 +746,7 @@ def run():
     delete_all_txs()
     # (b) The clamp, on lib/store.js directly: a future heartbeat is
     # ignored, a future state stamp capped, both together capped.
-    cl_dir = '/tmp/standby-test099-clamp'
+    cl_dir = TMP + '/standby-test099-clamp'
     shutil.rmtree(cl_dir, ignore_errors=True)
     os.makedirs(cl_dir)
     cl_seed = load_state_file()
@@ -795,7 +797,7 @@ def run():
                      "now-=10*24*3600*1000;"
                      "const c=s.touchHeartbeat(d,iso(now))?'WROTE':'SKIP';"
                      "Date.now=real;console.log(a+' '+b+' '+c);"
-                     % json.dumps('/tmp/standby-test099-throttle'))
+                     % json.dumps(TMP + '/standby-test099-throttle'))
     out, err = node_out(node_throttle)
     check('35 throttle: write, throttled re-touch, backward jump writes again',
           out == 'WROTE SKIP WROTE', out + err)
@@ -834,15 +836,15 @@ def run():
                   "const b=s.readCheckins(d,50);"
                   "const tmp=!fs.existsSync(d+'/checkins.jsonl.tmp');"
                   "console.log(a.length===2&&a[1].method==='t2'&&b.length===1&&b[0].method==='w'&&tmp?'OK':'FAIL');"
-                  % json.dumps('/tmp/standby-test099-jsonl'))
+                  % json.dumps(TMP + '/standby-test099-jsonl'))
     out, err = node_out(node_jsonl)
     check('35 jsonl: append + rewrite round-trip with no .tmp', out == 'OK', out + err)
     # --- 36. uncaught exception ---
     # The app and the receiver must exit nonzero on an uncaught
     # exception (test-only throw hook), log it, and close their ports.
-    uc_data = '/tmp/standby-test099-uncaught'
-    uc_checkin = '/tmp/standby-test099-uncaught-checkin'
-    uc_log = '/tmp/standby-test099-uncaught.log'
+    uc_data = TMP + '/standby-test099-uncaught'
+    uc_checkin = TMP + '/standby-test099-uncaught-checkin'
+    uc_log = TMP + '/standby-test099-uncaught.log'
     shutil.rmtree(uc_data, ignore_errors=True)
     shutil.rmtree(uc_checkin, ignore_errors=True)
     uc_env = dict(APP_ENV)
@@ -859,7 +861,7 @@ def run():
     check('36 uncaught: app log records the exception',
           'uncaught exception:' in _uc_log, _uc_log[-300:] if _uc_log else None)
     check('36 uncaught: scratch app port is closed again', port_closed(3440))
-    rc_log = '/tmp/standby-test099-uncaught-recv.log'
+    rc_log = TMP + '/standby-test099-uncaught-recv.log'
     rc = start(['node', 'server.js'], env={'PORT': '3441', 'CHECKIN_DIR': uc_checkin},
                cwd=os.path.join(APP, 'checkin-receiver'), log=rc_log)
     check('36 uncaught: scratch receiver starts', wait_up('http://127.0.0.1:3441', path='/health'))
@@ -873,3 +875,172 @@ def run():
     check('36 uncaught: receiver log records the exception',
           'uncaught exception:' in _rc_log, _rc_log[-300:] if _rc_log else None)
     check('36 uncaught: scratch receiver port is closed again', port_closed(3441))
+
+    # --- 47. one copy per data folder; port in use; log file ---
+    one_data = TMP + '/standby-test099-onecopy'
+    one_log = TMP + '/standby-test099-onecopy.log'
+    one_file = TMP + '/standby-test099-onecopy-file.log'
+    for pth in (one_data,):
+        shutil.rmtree(pth, ignore_errors=True)
+    for pth in (one_log, one_file, one_file + '.1'):
+        try:
+            os.remove(pth)
+        except OSError:
+            pass
+    one_env = dict(APP_ENV)
+    one_env.update({'PORT': '3440', 'DATA_DIR': one_data, 'CHECKIN_DIR': one_data + '/checkin', 'STANDBY_LOG_FILE': one_file})
+    check('47 one copy: port 3440 free', port_closed(3440))
+    one_app = start(['node', 'server.js'], env=one_env, cwd=APP, log=one_log)
+    check('47 one copy: first copy comes up', wait_up('http://127.0.0.1:3440'))
+    lock = json.load(open(os.path.join(one_data, 'standby.lock')))
+    check('47 one copy: the lock names the running copy', lock.get('pid') == one_app.pid, lock)
+    # A second copy on the same data folder (another port) refuses.
+    two = subprocess.run(['node', 'server.js'], env=dict(os.environ, **dict(one_env, PORT='3441', STANDBY_TEST_MODE='1')),
+                         cwd=APP, capture_output=True, text=True, timeout=20)
+    check('47 one copy: a second copy on the same data folder refuses to start',
+          two.returncode == 1 and 'another copy is already running on this data folder' in two.stdout + two.stderr,
+          (two.returncode, (two.stdout + two.stderr)[-300:]))
+    check('47 one copy: ... and never listened', port_closed(3441))
+    # A copy on a taken port says so.
+    busy = subprocess.run(['node', 'server.js'], env=dict(os.environ, **dict(one_env, DATA_DIR=one_data + '-other', STANDBY_TEST_MODE='1')),
+                          cwd=APP, capture_output=True, text=True, timeout=20)
+    shutil.rmtree(one_data + '-other', ignore_errors=True)
+    check('47 port: a taken port is a clear error, not a crash',
+          busy.returncode == 1 and 'port 3440 is already in use' in busy.stdout + busy.stderr,
+          (busy.returncode, (busy.stdout + busy.stderr)[-300:]))
+    # The log file holds the console lines, timestamped.
+    try:
+        log_text = open(one_file).read()
+    except OSError:
+        log_text = ''
+    check('47 log file: STANDBY_LOG_FILE gets the console lines, timestamped',
+          re.search(r'^\d{4}-\d\d-\d\dT[\d:.]+Z INFO Standby \S+ listening on ', log_text, re.M) is not None, log_text[:300])
+    # A lock left by a dead copy is taken over.
+    stop(one_app)
+    with open(os.path.join(one_data, 'standby.lock'), 'w') as f:
+        json.dump({'pid': 999999, 'refreshedAt': datetime.now(timezone.utc).isoformat()}, f)
+    one_app = start(['node', 'server.js'], env=one_env, cwd=APP, log=one_log)
+    check('47 one copy: a lock left by a dead copy is taken over', wait_up('http://127.0.0.1:3440'))
+    stop(one_app)
+    check('47 one copy: port 3440 closed again', port_closed(3440))
+
+    # --- 47b. the lock under pressure (refresh every second) ---
+    fast_env = dict(one_env, STANDBY_TEST_LOCK_REFRESH_MS='1000')
+    fast_env.pop('STANDBY_LOG_FILE', None)
+    shutil.rmtree(one_data, ignore_errors=True)
+    def lock_now():
+        try:
+            return json.load(open(os.path.join(one_data, 'standby.lock')))
+        except Exception:
+            return {}
+    def serving(port):
+        try:
+            return req('GET', '/api/health', base='http://127.0.0.1:%d' % port, timeout=2)[0] == 200
+        except Exception:
+            return False
+    # Two copies started at the same moment: exactly one runs.
+    pa = start(['node', 'server.js'], env=dict(fast_env, PORT='3440'), cwd=APP, log=one_log)
+    pb = start(['node', 'server.js'], env=dict(fast_env, PORT='3441'), cwd=APP, log=one_log)
+    time.sleep(5)
+    up = [p for p, port in ((pa, 3440), (pb, 3441)) if p.poll() is None and serving(port)]
+    check('47b race: two copies started together — exactly one runs', len(up) == 1,
+          [(p.poll(), serving(port)) for p, port in ((pa, 3440), (pb, 3441))])
+    winner = up[0] if up else pa
+    check('47b race: the lock names the one that runs', lock_now().get('pid') == winner.pid, lock_now())
+    # Killed outright (no clean exit): a new copy takes over at once.
+    for p in (pa, pb):
+        try:
+            p.kill(); p.wait(timeout=5)
+        except Exception:
+            pass
+    check('47b crash: the lock outlives a hard kill', bool(lock_now()), lock_now())
+    pc = start(['node', 'server.js'], env=dict(fast_env, PORT='3440'), cwd=APP, log=one_log)
+    check('47b crash: a new copy takes over the dead copy\'s lock', wait_up('http://127.0.0.1:3440') and lock_now().get('pid') == pc.pid, lock_now())
+    # A live copy whose lock looks old (just woken from sleep) keeps it: the
+    # new copy waits one interval, sees it refresh, and refuses.
+    held = lock_now()
+    held['refreshedAt'] = iso_ago(minutes=10)
+    with open(os.path.join(one_data, 'standby.lock'), 'w') as f:
+        json.dump(held, f)
+    woke = subprocess.run(['node', 'server.js'], env=dict(os.environ, **dict(fast_env, PORT='3441', STANDBY_TEST_MODE='1')),
+                          cwd=APP, capture_output=True, text=True, timeout=30)
+    check('47b sleep: a live copy with an old lock keeps it (the new copy refuses)',
+          woke.returncode == 1 and pc.poll() is None and lock_now().get('pid') == pc.pid, (woke.returncode, lock_now()))
+    stop(pc)
+    # A pid reused by another program (alive, but no Standby refreshing the
+    # lock) is taken over after one interval.
+    with open(os.path.join(one_data, 'standby.lock'), 'w') as f:
+        json.dump({'pid': os.getpid(), 'id': 'not-standby', 'refreshedAt': iso_ago(minutes=10)}, f)
+    pd = start(['node', 'server.js'], env=dict(fast_env, PORT='3440'), cwd=APP, log=one_log)
+    check('47b reuse: a reused pid (alive, never refreshing) is taken over', wait_up('http://127.0.0.1:3440') and lock_now().get('pid') == pd.pid, lock_now())
+    # A paused copy is taken over; when it resumes it exits before it can
+    # evaluate or broadcast. Pausing a process is POSIX-only.
+    if os.name == 'nt':
+        check('47b paused: pausing a process is POSIX-only (covered on Linux)', True)
+        stop(pd)
+    else:
+        os.kill(pd.pid, signal.SIGSTOP)
+        time.sleep(3.5)
+        pe = start(['node', 'server.js'], env=dict(fast_env, PORT='3441'), cwd=APP, log=one_log)
+        check('47b paused: a new copy takes over from a paused one', wait_up('http://127.0.0.1:3441') and lock_now().get('pid') == pe.pid, lock_now())
+        os.kill(pd.pid, signal.SIGCONT)
+        try:
+            pd_code = pd.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pd_code = None
+        check('47b paused: on resuming, the old copy sees the lock is gone and exits', pd_code == 1, pd_code)
+        check('47b paused: the new copy keeps running', pe.poll() is None and serving(3441))
+        stop(pe)
+    # The lock is always whole: with a copy refreshing every 100 ms, every
+    # read parses (a refresh swaps a whole file in, never truncates).
+    shutil.rmtree(one_data, ignore_errors=True)
+    pf = start(['node', 'server.js'], env=dict(fast_env, PORT='3440', STANDBY_TEST_LOCK_REFRESH_MS='100'), cwd=APP, log=one_log)
+    check('47b atomic: a fast-refreshing copy comes up', wait_up('http://127.0.0.1:3440'))
+    partial = 0
+    busy = 0
+    reads = 0
+    end_at = time.time() + 3
+    while time.time() < end_at:
+        try:
+            with open(os.path.join(one_data, 'standby.lock')) as f:
+                json.loads(f.read())
+        except ValueError:
+            partial += 1
+        except OSError:
+            busy += 1
+        reads += 1
+    # Never a partial lock. Windows briefly refuses to open a file while it
+    # is swapped into place; the app's reads retry through that, so a
+    # refused open counts only on POSIX.
+    check('47b atomic: no read of a refreshing lock ever sees a partial file', partial == 0, '%d of %d reads partial' % (partial, reads))
+    if os.name != 'nt':
+        check('47b atomic: every read of a refreshing lock opens it (POSIX)', busy == 0, '%d of %d reads failed to open' % (busy, reads))
+    stop(pf)
+    # A copy killed mid-refresh can leave its temp lock file; the next copy
+    # clears it.
+    with open(os.path.join(one_data, 'standby.lock.deadbeefdeadbeef.tmp'), 'w') as f:
+        f.write('{}')
+    pg = start(['node', 'server.js'], env=dict(fast_env, PORT='3440', STANDBY_TEST_LOCK_REFRESH_MS='30000'), cwd=APP, log=one_log)
+    check('47b atomic: the next copy comes up', wait_up('http://127.0.0.1:3440'))
+    check('47b atomic: it clears temp lock files left by a killed copy',
+          not [n for n in os.listdir(one_data) if n.startswith('standby.lock.')], os.listdir(one_data))
+    stop(pg)
+    for port in (3440, 3441):
+        check('47b: port %d closed again' % port, port_closed(port))
+    # The clock module: a corrected system clock drops the old offsets
+    # (unverified, so a node is asked again), and an "off" clock is
+    # re-checked, not left held until the old readings age out.
+    clock_js = (
+        "const c=require('./lib/clock');let shift=0;const real=Date.now;Date.now=()=>real()+shift;"
+        "c.observe(new Date(real()-2*3600e3).toUTCString());const a=c.status();const askOff=c.shouldAsk();"
+        "shift=-2*3600e3;const b=c.status();"
+        "console.log(JSON.stringify({a,askOff,b}));")
+    out = subprocess.run(['node', '-e', clock_js], cwd=APP, capture_output=True, text=True, timeout=20)
+    try:
+        cj = json.loads(out.stdout.strip().splitlines()[-1])
+    except Exception:
+        cj = {}
+    check('48b clock: a clock 2 hours ahead reads off', cj.get('a') == 'off', (cj, out.stderr[-300:]))
+    check('48b clock: an off clock is re-checked with a node', cj.get('askOff') is True, cj)
+    check('48b clock: correcting the system clock drops the old readings (unverified, asked again)', cj.get('b') == 'unverified', cj)
+

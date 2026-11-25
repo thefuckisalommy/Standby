@@ -13,7 +13,7 @@ def run():
           s == 400 and body == b'Bad request URL', (s, body))
     s, r = req('GET', '/api/health')
     check('32 crash: app still answers after the malformed request',
-          s == 200 and r.get('version') == '0.8.16', (s, r))
+          s == 200 and r.get('version') == '0.8.17', (s, r))
     s, body = raw_get('//[', RBASE)
     check('32 crash: malformed request line to the receiver gets 400',
           s == 400 and body == b'Bad request URL', (s, body))
@@ -50,7 +50,7 @@ def run():
     # logs no warning.
     _expected_bind = APP_ENV.get('STANDBY_BIND', '127.0.0.1')
     check('39 bind: main instance listen line names the profile bind',
-          ('Standby 0.8.16 listening on %s:%d (data: ' % (_expected_bind, PORT)) in read_log(),
+          ('Standby 0.8.17 listening on %s:%d (data: ' % (_expected_bind, PORT)) in read_log(),
           read_log()[-500:])
 
     def _bind_log_text():
@@ -161,7 +161,7 @@ def run():
     _auth_app = _bind_instance({'STANDBY_PASSWORD': _pw})
     check('40 auth: instance comes up', wait_up(_ab))
     s, r = req('GET', '/api/health', base=_ab)
-    check('40 auth: health is public', s == 200 and r.get('version') == '0.8.16', (s, r))
+    check('40 auth: health is public', s == 200 and r.get('version') == '0.8.17', (s, r))
     s, r = req('GET', '/api/auth/status', base=_ab)
     check('40 auth: status says required, not authenticated',
           s == 200 and r == {'required': True, 'authenticated': False}, (s, r))
@@ -195,13 +195,18 @@ def run():
     for _site, _want in (('same-origin', 200), ('none', 200), ('same-site', 403), ('cross-site', 403)):
         s, r = req('GET', '/api/state', base=_ab, headers=dict(_th, **{'Sec-Fetch-Site': _site}))
         check('40 fetch-site: Sec-Fetch-Site %s -> %d' % (_site, _want), s == _want, (s, r))
-    # Files are owner-only.
+    # Files are owner-only. Windows has no POSIX modes (the user profile's
+    # folder permissions apply), so there the files only need to exist.
     _mode = lambda p: os.stat(p).st_mode & 0o777
-    check('40 modes: data directory is 0700', _mode(_bind_data) == 0o700, oct(_mode(_bind_data)))
-    check('40 modes: state.json is 0600', _mode(os.path.join(_bind_data, 'state.json')) == 0o600,
-          oct(_mode(os.path.join(_bind_data, 'state.json'))))
-    check('40 modes: session.key is 0600', _mode(os.path.join(_bind_data, 'session.key')) == 0o600,
-          oct(_mode(os.path.join(_bind_data, 'session.key'))))
+    if os.name == 'nt':
+        check('40 modes: Windows has no POSIX modes; data files exist',
+              all(os.path.exists(os.path.join(_bind_data, f)) for f in ('state.json', 'session.key')))
+    else:
+        check('40 modes: data directory is 0700', _mode(_bind_data) == 0o700, oct(_mode(_bind_data)))
+        check('40 modes: state.json is 0600', _mode(os.path.join(_bind_data, 'state.json')) == 0o600,
+              oct(_mode(os.path.join(_bind_data, 'state.json'))))
+        check('40 modes: session.key is 0600', _mode(os.path.join(_bind_data, 'session.key')) == 0o600,
+              oct(_mode(os.path.join(_bind_data, 'session.key'))))
     # A token survives a restart.
     stop(_auth_app)
     _e = dict(APP_ENV)
@@ -247,7 +252,7 @@ def run():
     stop(_auth_app)
     # A data directory that cannot be created: the app refuses to
     # start (exit 1) and names the problem and the fix.
-    _blocker = '/tmp/standby-test099-bind-blocker'
+    _blocker = TMP + '/standby-test099-bind-blocker'
     shutil.rmtree(_blocker, ignore_errors=True)
     open(_blocker, 'w').close()
     _e = dict(os.environ, **APP_ENV)
@@ -289,7 +294,7 @@ def run():
         check('41 backup: no signed hex appears in the encrypted file',
               _hex0 and _hex0 not in json.dumps(enc), '')
     # The standalone tool decrypts it to the same backup.
-    _encf = '/tmp/standby-test099-backup.encrypted.json'
+    _encf = TMP + '/standby-test099-backup.encrypted.json'
     with open(_encf, 'w') as f:
         json.dump(enc, f)
     _tool = os.path.join(APP, '..', 'tools', 'decrypt-backup.js')

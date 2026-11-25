@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import helpers as v
+TMP = v.TMP
 
 check = v.check
 
@@ -43,8 +44,8 @@ CONFLICT = 'cc' * 32
 
 GOAL = v.GOAL
 APP = v.app_dir(GOAL)
-DATA = '/tmp/standby-test099-regress'
-CHECKIN_DIR = '/tmp/standby-test099-regress-checkin'
+DATA = TMP + '/standby-test099-regress'
+CHECKIN_DIR = TMP + '/standby-test099-regress-checkin'
 PORT = 3448
 BASE = 'http://127.0.0.1:%d' % PORT
 RECEIVER_PORT = 3449
@@ -66,7 +67,7 @@ RECEIVER_ENV = {'PORT': str(RECEIVER_PORT), 'CHECKIN_DIR': CHECKIN_DIR}
 if os.environ.get('STANDBY_TEST_PROFILE') == 'umbrel':
     RECEIVER_ENV['STANDBY_BIND'] = '0.0.0.0'
     RECEIVER_ENV['STANDBY_ALLOWED_HOSTS'] = 'standby.local'
-LOG = '/tmp/standby-test099-regress-proc.log'
+LOG = TMP + '/standby-test099-regress-proc.log'
 
 
 def iso_ago(**kw):
@@ -308,7 +309,7 @@ def main():
 
         # --- 1. health + endpoints -------------------------------------
         s, h = req('GET', '/api/health')
-        check('1 health reports version 0.8.16', h.get('version') == '0.8.16', h)
+        check('1 health reports version 0.8.17', h.get('version') == '0.8.17', h)
         s, st = req('GET', '/api/state')
         check('1 fresh state: no global threshold in settings, no txs',
               'thresholdDays' not in st.get('settings', {}) and st.get('bitcoin', {}).get('txs') == [], st.get('settings'))

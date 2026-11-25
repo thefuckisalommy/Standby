@@ -17,7 +17,8 @@ const crypto = require('crypto');
 // shared with the app; both load without side effects.
 const { hostAllowed, describeAllowedHosts } = require('../lib/http');
 const { writeFileDurable } = require('../lib/store');
-const { BIND, DEPLOYMENT, TEST_MODE, PORT: CONFIG_PORT, CHECKIN_DIR } = require('../lib/config');
+const { BIND, DEPLOYMENT, TEST_MODE, PORT: CONFIG_PORT, CHECKIN_DIR, LOG_FILE } = require('../lib/config');
+require('../lib/logfile').install(LOG_FILE);
 const { requireWritable } = require('../lib/startup');
 
 // The receiver's own default port is 3101 (config's default, 3100,
@@ -156,6 +157,13 @@ const server = http.createServer((req, res) => {
   return sendJson(res, 404, { error: 'not found' });
 });
 
+server.on('error', (e) => {
+  if (e.code === 'EADDRINUSE') {
+    console.error('Standby receiver: port ' + PORT + ' is already in use on ' + BIND + '. Set PORT to a free port.');
+    process.exit(1);
+  }
+  throw e;
+});
 server.listen(PORT, BIND, () => {
   console.log(`Standby check-in receiver listening on ${BIND}:${PORT} (checkin dir: ${CHECKIN_DIR})`);
   console.log('Standby receiver allowed Hosts: ' + describeAllowedHosts());

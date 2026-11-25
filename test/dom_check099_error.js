@@ -17,7 +17,7 @@ global.location = { reload: () => { global.__reloaded = true; } };
 
 const fs = require('fs');
 const BASE = process.env.ERR_BASE || 'http://127.0.0.1:3468';
-const DATA_FILE = (process.env.ERR_DATA || '/tmp/standby-test099-dom-err') + '/state.json';
+const DATA_FILE = (process.env.ERR_DATA || require('os').tmpdir() + '/standby-test099-dom-err') + '/state.json';
 const els = {};
 function elText(el) {
   // The shim stores textContent per element (no aggregation), so read the
@@ -420,8 +420,8 @@ const APP_DIR = process.env.ERR_APP_DIR
         : fs.existsSync(path.join(__dirname, '..', 'branch-0.8.3', 'server.js'))
           ? path.join(__dirname, '..', 'branch-0.8.3')
           : path.join(__dirname, '..', 'app'));
-const DATA = process.env.ERR_DATA || '/tmp/standby-test099-dom-err';
-const CHECKIN_DIR = process.env.ERR_CHECKIN || '/tmp/standby-test099-dom-err-checkin';
+const DATA = process.env.ERR_DATA || require('os').tmpdir() + '/standby-test099-dom-err';
+const CHECKIN_DIR = process.env.ERR_CHECKIN || require('os').tmpdir() + '/standby-test099-dom-err-checkin';
 const STUB_P = process.env.ERR_STUB_P || '18265';
 const STUB_S = process.env.ERR_STUB_S || '18266';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

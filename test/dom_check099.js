@@ -10,7 +10,7 @@
 'use strict';
 const fs = require('fs');
 const BASE = 'http://127.0.0.1:3478';
-const DATA_FILE = '/tmp/standby-test099-dom/state.json';
+const DATA_FILE = require('os').tmpdir() + '/standby-test099-dom/state.json';
 const els = {};
 function elText(el) {
   // The shim stores textContent per element (no aggregation), so read the
@@ -3048,8 +3048,8 @@ function check(name, cond, detail) {
     && idx.indexOf('Installed version:') !== -1 && idx.indexOf('id="app-version"') !== -1, '');
   check('app version static: the card has no "?" button and no details (just the version line)',
     idx.indexOf('id="help-version"') === -1, '');
-  check('app version: the installed version reads 0.8.16 (from /api/health)',
-    els['app-version'] && els['app-version'].textContent === '0.8.16',
+  check('app version: the installed version reads 0.8.17 (from /api/health)',
+    els['app-version'] && els['app-version'].textContent === '0.8.17',
     els['app-version'] && els['app-version'].textContent);
   setFilter('general');
   check('app version: the card is visible under General',

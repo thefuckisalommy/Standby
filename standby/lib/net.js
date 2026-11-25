@@ -49,7 +49,7 @@ function requestText({ protocol, hostname, port, path: p, method, headers, body,
           if (settled) return;
           settled = true;
           clearTimeout(timer);
-          resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString('utf8') });
+          resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString('utf8'), date: res.headers.date });
         });
       },
     );

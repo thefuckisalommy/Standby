@@ -28,13 +28,14 @@ spec.loader.exec_module(v)
 # Resolve paths from this file: the repo root, with the app in standby/.
 _TESTDIR = os.path.dirname(os.path.abspath(__file__))
 GOAL = os.path.dirname(_TESTDIR)
+TMP = v.TMP
 BRANCH = v.app_dir(GOAL)
 TESTDIR = _TESTDIR
-DATA = '/tmp/standby-test099-dom'
-CHECKIN_DIR = '/tmp/standby-test099-dom-checkin'
+DATA = TMP + '/standby-test099-dom'
+CHECKIN_DIR = TMP + '/standby-test099-dom-checkin'
 BASE = 'http://127.0.0.1:3478'
 RBASE = 'http://127.0.0.1:3479'
-LOG = '/tmp/standby-test099-dom-proc.log'
+LOG = TMP + '/standby-test099-dom-proc.log'
 FINNEY_OUTPOINT = 'f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16:1'
 
 # STANDBY_TEST_PROFILE=umbrel runs the app and receiver with
@@ -94,7 +95,7 @@ try:
     assert v.wait_up(BASE), 'app did not come up'
     assert v.wait_up(RBASE, path='/health'), 'receiver did not come up'
     s, h = v.req('GET', '/api/health', base=BASE)
-    assert h.get('version') == '0.8.16', h
+    assert h.get('version') == '0.8.17', h
     s, r = v.req('PUT', '/api/settings', {'primaryApiUrl': 'http://127.0.0.1:18275',
                                           'secondaryApiUrl': 'http://127.0.0.1:18276'}, base=BASE)
     assert s == 200, r
@@ -147,8 +148,8 @@ try:
     # Error-screen phase: its own instance on ports 3468/3469 (stubs
     # 18265/18266). The script respawns the app itself by PID; the
     # launcher stops the receiver and stubs here.
-    err_data = '/tmp/standby-test099-dom-err'
-    err_checkin = '/tmp/standby-test099-dom-err-checkin'
+    err_data = TMP + '/standby-test099-dom-err'
+    err_checkin = TMP + '/standby-test099-dom-err-checkin'
     shutil.rmtree(err_data, ignore_errors=True)
     shutil.rmtree(err_checkin, ignore_errors=True)
     e1 = v.start(['node', v.STUB, '18265'], log=LOG)
