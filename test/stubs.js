@@ -159,9 +159,24 @@ const outspendOverride = {};
 // make only one node unaware of a parent.
 const unknownParents = new Set();
 
+// POST /__test__/date-offset { seconds }: answer with a Date header that
+// far from the real time, so the app sees its own clock as off.
+let dateOffsetMs = 0;
+
 const server = http.createServer((req, res) => {
   const u = new URL(req.url, 'http://localhost');
   const p = u.pathname;
+  if (dateOffsetMs) res.setHeader('Date', new Date(Date.now() + dateOffsetMs).toUTCString());
+  if (req.method === 'POST' && p === '/__test__/date-offset') {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      try { dateOffsetMs = (Number(JSON.parse(body || '{}').seconds) || 0) * 1000; } catch { dateOffsetMs = 0; }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, offsetSeconds: dateOffsetMs / 1000 }));
+    });
+    return;
+  }
   if (req.method === 'GET' && p === '/api/blocks/tip/height') {
     tipRequests++;
     if (tipFail) {

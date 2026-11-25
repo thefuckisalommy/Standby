@@ -581,26 +581,14 @@ def run():
     save_state_file(stj)
     check('6c unify: check-in clock restored (restart)', restart())
 
-    # --- 6e. short-threshold check-in outage protection ---
-    # The grace also activates on the check-in clock: an offline gap
-    # over a quarter of the shortest armed check-in threshold, with
-    # over half of it elapsed since the last check-in. The grant is
-    # still the grace duration. Only effective rules set the threshold
-    # (a set member's parked trigger does not). A stored unexpired
-    # heldUntil becomes an active grace. The 5h case is the no-grace
-    # pin.
-    def state_set_e(set_id):
-        s2, st2 = req('GET', '/api/state')
-        for x in st2.get('bitcoin', {}).get('sets', []):
-            if x.get('id') == set_id:
-                return x
-        return None
+    # --- 6e. one grace rule for every trigger type ---
+    # Only an offline gap over the grace threshold (7 days) starts a grace;
+    # a short check-in period does not start one sooner. A 30h outage with
+    # a 1-day check-in leaves no grace, and the past-due tx fires.
     def delete_all_sets_e():
         s2, st2 = req('GET', '/api/state')
         for x in st2.get('bitcoin', {}).get('sets', []):
             req('DELETE', '/api/bitcoin/sets/' + x['id'], base=BASE)
-    # Leg 1: 30h gap, 1-day threshold. Only the check-in leg can set
-    # the grace; the past-due tx is held and the grant is 7 days.
     s, r = req('POST', '/api/checkin', {'method': 'app'})
     check('6e short: check-in lands so the clock is fresh for the add', s == 200 and r.get('ok') is True, r)
     s, r = add_tx('E checkin 1d', {'type': 'checkin', 'params': {'thresholdDays': 1}}, 111200)
@@ -613,113 +601,13 @@ def run():
         save_state_file(stj)
     check('6e short: app restarted with a 30h gap and a 30h-old clock (1-day threshold)', restart(before_start=seed_e1))
     s, st = req('GET', '/api/state')
-    check('6e short: the grace is active (check-in leg — the 30h gap is under the 7-day flat threshold)',
-          st.get('grace', {}).get('active') is True, st.get('grace'))
-    check('6e short: the offline gap reads 1 day (floor of 30h)',
-          st.get('grace', {}).get('offlineGapDays') == 1, st.get('grace'))
-    gu1 = st.get('grace', {}).get('graceUntil')
-    check('6e short: the grace lasts the configured 7 days, not the old 12h pushout',
-          gu1 is not None and (datetime.fromisoformat(gu1.replace('Z', '+00:00')) - datetime.now(timezone.utc)).total_seconds() > 6 * 86400,
-          gu1)
-    s, r, res = release_results()
-    check('6e short: the past-due 1-day check-in tx is held during the grace (skipped, status grace)',
-          s == 200 and res.get(e1, {}).get('action') == 'skipped' and res.get(e1, {}).get('triggerStatus') == 'grace', res.get(e1))
-    check('6e short: nothing broadcasted during the grace',
-          (state_tx(e1) or {}).get('broadcasted') is None, (state_tx(e1) or {}).get('broadcasted'))
-    delete_all_txs()
-    s, r = req('POST', '/api/grace/resume', {})
-    check('6e short: resumed', s == 200, (s, r))
-    # Leg 2: 18h gap clears both bars (6h and 12h), so the grace holds
-    # the tx due in 6h.
-    s, r = req('POST', '/api/checkin', {'method': 'app'})
-    check('6e 18h: check-in lands so the clock is fresh for the add', s == 200 and r.get('ok') is True, r)
-    s, r = add_tx('E checkin 1d 18h', {'type': 'checkin', 'params': {'thresholdDays': 1}}, 111202)
-    e2 = r['tx']['id'] if s == 201 else None
-    check('6e 18h: the 1-day check-in tx adds', s == 201, (s, r))
-    def seed_e2():
-        stj = load_state_file()
-        stj['checkin']['lastOnlineAt'] = iso_ago(hours=18)
-        stj['checkin']['lastCheckinAt'] = iso_ago(hours=18)
-        save_state_file(stj)
-    check('6e 18h: app restarted with an 18h gap and an 18h-old clock (1-day threshold)', restart(before_start=seed_e2))
-    s, st = req('GET', '/api/state')
-    check('6e 18h: the grace IS active (18h > 6h and > 12h — the old condition holds)',
-          st.get('grace', {}).get('active') is True, st.get('grace'))
-    s, r, res = release_results()
-    check('6e 18h: the not-yet-due 1-day check-in tx is held during the grace (skipped, status grace)',
-          s == 200 and res.get(e2, {}).get('action') == 'skipped' and res.get(e2, {}).get('triggerStatus') == 'grace', res.get(e2))
-    check('6e 18h: nothing broadcasted during the grace',
-          (state_tx(e2) or {}).get('broadcasted') is None, (state_tx(e2) or {}).get('broadcasted'))
-    delete_all_txs()
-    s, r = req('POST', '/api/grace/resume', {})
-    check('6e 18h: resumed', s == 200, (s, r))
-    # Leg 3: 5h gap is under both, so no grace; the tx (due in 19h)
-    # stays staged.
-    s, r = req('POST', '/api/checkin', {'method': 'app'})
-    check('6e 5h: check-in lands so the clock is fresh for the add', s == 200 and r.get('ok') is True, r)
-    s, r = add_tx('E checkin 1d 5h', {'type': 'checkin', 'params': {'thresholdDays': 1}}, 111204)
-    e3 = r['tx']['id'] if s == 201 else None
-    check('6e 5h: the 1-day check-in tx adds', s == 201, (s, r))
-    def seed_e3():
-        stj = load_state_file()
-        stj['checkin']['lastOnlineAt'] = iso_ago(hours=5)
-        stj['checkin']['lastCheckinAt'] = iso_ago(hours=5)
-        save_state_file(stj)
-    check('6e 5h: app restarted with a 5h gap and a 5h-old clock (1-day threshold)', restart(before_start=seed_e3))
-    s, st = req('GET', '/api/state')
-    check('6e 5h: NO grace — 5h is under a quarter of the 1-day threshold (6h)',
+    check('6e short: NO grace — 30h is under the 7-day offline threshold, whatever the check-in period',
           st.get('grace') is None, st.get('grace'))
-    check('6e 5h: the 1-day check-in tx is still staged (not due for 19h, nothing broadcast)',
-          (state_tx(e3) or {}).get('release') is None and (state_tx(e3) or {}).get('broadcasted') is None,
-          (state_tx(e3) or {}))
-    delete_all_txs()
-    # Leg 4: a member's parked 1-day trigger does not set the
-    # threshold; its set's 2-day rule does (7h/13h: no grace; 30h/30h:
-    # grace, set held).
-    s, r = req('POST', '/api/checkin', {'method': 'app'})
-    check('6e set: check-in lands so the clock is fresh for the adds', s == 200 and r.get('ok') is True, r)
-    s, r = add_tx('E set member 1d', {'type': 'checkin', 'params': {'thresholdDays': 1}}, 111206)
-    m4 = r['tx']['id'] if s == 201 else None
-    check('6e set: the member tx adds with its own 1-day check-in trigger', s == 201, (s, r))
-    s, r = req('POST', '/api/bitcoin/sets', {'label': 'E set 2d', 'txIds': [m4],
-          'trigger': {'type': 'checkin', 'params': {'thresholdDays': 2}}})
-    set4 = r.get('set', {}).get('id') if s == 201 else None
-    check('6e set: the set creates with a 2-day check-in trigger', s == 201, (s, r))
-    def seed_e4a():
-        stj = load_state_file()
-        stj['checkin']['lastOnlineAt'] = iso_ago(hours=7)
-        stj['checkin']['lastCheckinAt'] = iso_ago(hours=13)
-        save_state_file(stj)
-    check('6e set: app restarted with a 7h gap and a 13h-old clock (set threshold 2d)', restart(before_start=seed_e4a))
-    s, st = req('GET', '/api/state')
-    check('6e set: NO grace — T is the set\'s 2 days, not the parked 1 day (7h < 12h = T/4)',
-          st.get('grace') is None, st.get('grace'))
-    x4a = state_set_e(set4)
-    check('6e set: the set reads on-track (13h of 48h), not grace',
-          (x4a or {}).get('triggerStatus', {}).get('status') == 'on-track', (x4a or {}).get('triggerStatus'))
-    check('6e set: the member tx is still staged (nothing broadcast)',
-          (state_tx(m4) or {}).get('release') is None and (state_tx(m4) or {}).get('broadcasted') is None,
-          (state_tx(m4) or {}))
-    def seed_e4b():
-        stj = load_state_file()
-        stj['checkin']['lastOnlineAt'] = iso_ago(hours=30)
-        stj['checkin']['lastCheckinAt'] = iso_ago(hours=30)
-        save_state_file(stj)
-    check('6e set: app restarted with a 30h gap and a 30h-old clock (set threshold 2d)', restart(before_start=seed_e4b))
-    s, st = req('GET', '/api/state')
-    check('6e set: the grace IS active (30h > 12h = T/4 and > 24h = T/2)',
-          st.get('grace', {}).get('active') is True, st.get('grace'))
     s, r, res = release_results()
-    check('6e set: the set is held during the grace (skipped, status grace)',
-          s == 200 and res.get(set4, {}).get('action') == 'skipped' and res.get(set4, {}).get('triggerStatus') == 'grace', res.get(set4))
-    check('6e set: the member tx is still staged (nothing broadcast)',
-          (state_tx(m4) or {}).get('release') is None and (state_tx(m4) or {}).get('broadcasted') is None,
-          (state_tx(m4) or {}))
-    s, r = req('DELETE', '/api/bitcoin/sets/' + set4)
-    check('6e set: the set deletes', s == 200, (s, r))
+    check('6e short: the past-due 1-day check-in tx fires (not held)',
+          ((state_tx(e1) or {}).get('release') or {}).get('status') == 'broadcast'
+          or res.get(e1, {}).get('action') == 'broadcast', (res.get(e1), (state_tx(e1) or {}).get('release')))
     delete_all_txs()
-    s, r = req('POST', '/api/grace/resume', {})
-    check('6e set: resumed', s == 200, (s, r))
     # Leg 5: an unexpired stored heldUntil becomes an active grace
     # (the fresh lastOnlineAt rules out a new one); the past-due tx is
     # held.
@@ -967,3 +855,34 @@ def run():
     check('8 smoke: none of the four broadcasts (nothing due)',
           all(res.get(t, {}).get('action') != 'broadcast' for t in res), res)
     delete_all_txs()
+
+    # --- 48. a wrong device clock holds date-based triggers ---
+    # The stubs answer with a Date two hours behind, so this device reads
+    # two hours ahead: a due set-date tx is held (not broadcast) with the
+    # reason on its card; once the clocks agree it fires.
+    delete_all_txs()
+    for b in (STUB_BASE_P, STUB_BASE_S):
+        req('POST', '/__test__/date-offset', {'seconds': -7200}, base=b)
+    req('POST', '/api/__test__/clear-caches', {'only': ['clock', 'nodeTip', 'price']})
+    s, r = req('POST', '/api/bitcoin/connection/test', {})
+    check('48 clock: the nodes answer (their clock reads two hours behind)', s == 200, (s, r))
+    s, r = add_tx('Clock 48', {'type': 'setdate', 'params': {'fireAt': iso_ago(minutes=5)}}, 111300, trigger_confirmed=True)
+    c48 = r['tx']['id'] if s == 201 else None
+    check('48 clock: a set-date tx already due adds', s == 201, (s, r))
+    s, r, res = release_results()
+    check('48 clock: the due set-date tx is held, not broadcast',
+          s == 200 and res.get(c48, {}).get('action') != 'broadcast' and (state_tx(c48) or {}).get('broadcasted') is None,
+          (res.get(c48), (state_tx(c48) or {}).get('broadcasted')))
+    ts48 = (state_tx(c48) or {}).get('triggerStatus') or {}
+    check('48 clock: its card says the device clock is 2 hours ahead',
+          ts48.get('status') == 'held' and "clock is 2 hours ahead" in (ts48.get('reason') or ''), ts48)
+    for b in (STUB_BASE_P, STUB_BASE_S):
+        req('POST', '/__test__/date-offset', {'seconds': 0}, base=b)
+    req('POST', '/api/__test__/clear-caches', {'only': ['clock']})
+    s, r = req('POST', '/api/bitcoin/connection/test', {})
+    s, r, res = release_results()
+    check('48 clock: once the clocks agree, the set-date tx fires',
+          res.get(c48, {}).get('action') == 'broadcast' or ((state_tx(c48) or {}).get('release') or {}).get('status') == 'broadcast',
+          (res.get(c48), (state_tx(c48) or {}).get('release')))
+    delete_all_txs()
+

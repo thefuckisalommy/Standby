@@ -20,6 +20,7 @@ function clearCaches(only) {
   if (want('nodeTip')) { caches.nodeTip = { readings: null, fetchedAt: null, primary: null, secondary: null }; cleared.push('nodeTip'); }
   if (want('currentFees')) { caches.currentFees = { fees: null, fetchedAt: null }; cleared.push('currentFees'); }
   if (want('outspend')) { bitcoin.clearOutspendCache(); cleared.push('outspend'); }
+  if (want('clock')) { require('./clock').reset(); cleared.push('clock'); }
   return cleared;
 }
 

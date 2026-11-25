@@ -2,6 +2,7 @@
 // Minimal HTTP(S) client for node, price and Slipstream requests.
 const http = require('http');
 const https = require('https');
+const clock = require('./clock');
 
 const MAX_RESPONSE_BYTES = 1024 * 1024; // node and price replies are small; anything bigger is a faulty endpoint
 // Reads give up after 8 s, so a hung node fails over to the secondary
@@ -49,6 +50,7 @@ function requestText({ protocol, hostname, port, path: p, method, headers, body,
           if (settled) return;
           settled = true;
           clearTimeout(timer);
+          clock.observe(res.headers.date);
           resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString('utf8') });
         });
       },

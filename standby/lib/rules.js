@@ -5,6 +5,7 @@ const bitcoin = require('./bitcoin');
 const { caches } = require('./caches');
 const { checkinClock, checkinLiveOffsetMs, isGraceActive } = require('./checkin');
 const { DATA_DIR } = require('./config');
+const deviceClock = require('./clock');
 const { forwardMemberHistory, noteSetMemberStale, pushHistory, recordRelease, shortTxid } = require('./history');
 const { checkCadenceSecondsOf, fetchNodeFeesCached, fetchPriceCached, fetchTipHeightsCached, priceAgreementPctOf, priceSourcesOf } = require('./prices');
 const { releaseTriggerFor, singleTriggerConditionText, toTriggerSet, triggerConditionText, triggerLabel } = require('./triggers');
@@ -409,6 +410,14 @@ async function evaluateRule(state, tx, ruleIndex, now, utxoBatch) {
     setRuleTriggerState(tx, ruleIndex, slice);
     return { rule, fire: false, status: 'vacation', reason: 'Vacation mode is on', held: 'vacation', slice };
   }
+  // Date-based rules trust this device's clock: held while it disagrees
+  // with the servers' (lib/clock.js).
+  const clockOff = (rule.type === 'checkin' || rule.type === 'setdate') ? deviceClock.problem() : null;
+  if (clockOff) {
+    const slice = freshTriggerState(now, 'held', clockOff);
+    setRuleTriggerState(tx, ruleIndex, slice);
+    return { rule, fire: false, status: 'held', reason: clockOff, held: 'held', slice };
+  }
   const r = await checkRule(state, rule, now, {
     prevSlice,
     liveOffsetMs: checkinLiveOffsetMs(tx, now),
@@ -497,17 +506,18 @@ function ruleStatusFor(state, tx, rule, slice, now) {
   const st = slice;
   const base = { type: trg.type, label: triggerLabel(trg), condition: singleTriggerConditionText(trg) };
   if (trg.type === 'checkin') {
-    const clock = checkinClock(state, now, trg.params.thresholdDays, checkinLiveOffsetMs(tx, now));
-    if (clock.state === 'not-started') return { ...base, status: 'not-started', reason: 'No check-in recorded yet' };
+    const clock2 = checkinClock(state, now, trg.params.thresholdDays, checkinLiveOffsetMs(tx, now));
+    if (clock2.state === 'not-started') return { ...base, status: 'not-started', reason: 'No check-in recorded yet' };
     // Vacation is check-in-only: it freezes this tx's
     // clock and holds its release, and nothing else's.
     if (state.settings.vacationMode) return { ...base, status: 'vacation', reason: 'Vacation mode is on — the countdown is frozen' };
+    if (deviceClock.problem()) return { ...base, status: 'held', reason: deviceClock.problem(), daysSince: clock2.daysSince, windowDays: clock2.windowDays, nextDue: clock2.nextDue };
     // Past due during a grace reads 'grace', not 'release-due' (held,
     // cannot fire); an on-track clock keeps counting. Mirrors
     // checkinStatus.
-    if (isGraceActive(state, now) && clock.state === 'release-due') return { ...base, status: 'grace', reason: 'Grace period active — will evaluate when it ends', daysSince: clock.daysSince, windowDays: clock.windowDays, nextDue: clock.nextDue };
-    if (clock.state === 'release-due') return { ...base, status: 'release-due', reason: 'Release due', daysSince: clock.daysSince, windowDays: clock.windowDays, nextDue: clock.nextDue };
-    return { ...base, status: 'on-track', reason: clock.daysSince + ' of ' + clock.windowDays + ' days elapsed', daysSince: clock.daysSince, windowDays: clock.windowDays, nextDue: clock.nextDue };
+    if (isGraceActive(state, now) && clock2.state === 'release-due') return { ...base, status: 'grace', reason: 'Grace period active — will evaluate when it ends', daysSince: clock2.daysSince, windowDays: clock2.windowDays, nextDue: clock2.nextDue };
+    if (clock2.state === 'release-due') return { ...base, status: 'release-due', reason: 'Release due', daysSince: clock2.daysSince, windowDays: clock2.windowDays, nextDue: clock2.nextDue };
+    return { ...base, status: 'on-track', reason: clock2.daysSince + ' of ' + clock2.windowDays + ' days elapsed', daysSince: clock2.daysSince, windowDays: clock2.windowDays, nextDue: clock2.nextDue };
   }
   if (trg.type === 'manual') {
     return { ...base, status: 'manual', reason: 'Waiting for manual broadcast' };
@@ -554,6 +564,7 @@ function ruleStatusFor(state, tx, rule, slice, now) {
     return { ...base, status: st.status || 'watching', reason: st.reason || 'waiting for the height', lastTipHeight: (typeof st.lastTipHeight === 'number' ? st.lastTipHeight : null) };
   }
   if (trg.type === 'setdate') {
+    if (deviceClock.problem()) return { ...base, status: 'held', reason: deviceClock.problem() };
     // Set-date is pure clock math, so it reads live even when never
     // evaluated or disarmed. Same reasons as checkSetDateRule.
     const fireMs = Date.parse(trg.params.fireAt);

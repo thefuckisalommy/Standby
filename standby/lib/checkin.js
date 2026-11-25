@@ -242,32 +242,11 @@ function graceStatus(state, now) {
 function isGraceActive(state, now) {
   return graceStatus(state, now) !== null;
 }
-// The smallest threshold among armed check-in rules that can fire
-// (standalone txs and sets; a member's parked trigger never counts). null
-// when none: the check-in leg then has nothing to protect.
-function smallestArmedCheckinThresholdDays(state) {
-  const txs = state.bitcoin.txs || [];
-  const memberIds = new Set();
-  for (const s of (state.bitcoin.sets || [])) for (const id of (s.txIds || [])) memberIds.add(id);
-  const thresholds = [];
-  for (const t of txs) {
-    if (!t.enabled || memberIds.has(t.id) || !store.hasTriggerType(t, 'checkin')) continue;
-    for (const r of store.triggerOf(t).rules) if (r.type === 'checkin') thresholds.push(r.params.thresholdDays);
-  }
-  for (const s of (state.bitcoin.sets || [])) {
-    if (!s.enabled || !store.hasTriggerType(s, 'checkin')) continue;
-    for (const r of store.triggerOf(s).rules) if (r.type === 'checkin') thresholds.push(r.params.thresholdDays);
-  }
-  return thresholds.length ? Math.min.apply(null, thresholds) : null;
-}
-
-// Start a grace on an offline gap when either the gap exceeds
-// graceOfflineDays, or it exceeds a quarter of the shortest armed check-in
-// threshold with over half of it elapsed since the last check-in (so a
-// 1-day rule is protected after a 6-hour outage). The grant is
-// graceDurationDays either way. Runs on evaluation, on state and status
-// reads and on the full tick, so a returning app notices the gap before
-// anything fires. Returns true when it set one.
+// Start a grace when the app was offline longer than graceOfflineDays: one
+// rule for every trigger type, check-in included. The grant is
+// graceDurationDays. Runs on evaluation, on state and status reads and on
+// the full tick, so a returning app notices the gap before anything fires.
+// Returns true when it set one.
 function applyGrace(state, now) {
   if (isGraceActive(state, now)) return false;
   const online = state.checkin && state.checkin.lastOnlineAt ? new Date(state.checkin.lastOnlineAt) : null;
@@ -276,18 +255,7 @@ function applyGrace(state, now) {
   if (!graceIsEnabled(s)) return false; // grace disabled: never set one
   const offlineDays = (typeof s.graceOfflineDays === 'number' && GRACE_OFFLINE_DAYS.includes(s.graceOfflineDays)) ? s.graceOfflineDays : 7;
   const gapMs = now.getTime() - online.getTime();
-  let activates = gapMs > offlineDays * 86400000;
-  if (!activates) {
-    // The check-in leg only applies when a check-in rule is armed.
-    const thresholdDays = smallestArmedCheckinThresholdDays(state);
-    if (thresholdDays !== null) {
-      const thresholdMs = thresholdDays * 86400000;
-      const last = state.checkin.lastCheckinAt ? new Date(state.checkin.lastCheckinAt) : null;
-      if (last && !Number.isNaN(last.getTime())
-        && gapMs > thresholdMs / 4
-        && now.getTime() - last.getTime() > thresholdMs / 2) activates = true;
-    }
-  }
+  const activates = gapMs > offlineDays * 86400000;
   if (!activates) return false;
   const durationDays = (s.graceDurationDays === null) ? null
     : ((typeof s.graceDurationDays === 'number' && GRACE_DURATION_DAYS.includes(s.graceDurationDays)) ? s.graceDurationDays : 7);
