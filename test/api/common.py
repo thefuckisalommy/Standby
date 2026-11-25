@@ -350,6 +350,8 @@ def boot():
     global p_primary, p_secondary, p_receiver
     for d in (DATA, CHECKIN_DIR):
         shutil.rmtree(d, ignore_errors=True)
+    # A fresh process log per group, as on a CI runner (read_log() reads it).
+    open(LOG, 'w').close()
     # --- pre-flight: our ports are free (nothing 09x left running) ---
     for port in (PORT, RECEIVER_PORT, STUB_P, STUB_S):
         check('preflight: port %d free' % port, port_closed(port))

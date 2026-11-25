@@ -4,6 +4,10 @@ What changed in each Standby release, newest first. The same notes appear in the
 
 Code comments describe how the app works now; the history of why it changed lives here and in git.
 
+## 0.8.15
+
+Maintenance release with no change to how the app works. The API test suite is split into eight groups that run in parallel, so each change is checked in about a third of the time.
+
 ## 0.8.14
 
 Bitcoin Core RPC. Each node in Settings → Bitcoin nodes now has a Bitcoin Core RPC toggle: turn it on and enter the node's RPC address, username and password to use Bitcoin Core directly instead of a mempool API. The password is stored on the device and never shown again in the app; turning RPC off deletes the login. Test connection warns when the RPC login is unrestricted (it could spend from a wallet loaded on the node), and the unencrypted-backup dialog warns that the file holds the RPC password. Test connection checks whether the node has txindex turned on and, if not, says how to enable it — without txindex Standby cannot tell when an input was spent in a block. Fees for new transactions are worked out from the node even without txindex, and a node running -txospenderindex is read correctly (a confirmed spend names its spender and block). IPv6 node addresses (like http://[::1]:8332) now work, for mempool nodes too. Also in 0.8.14: the README and security notes are shorter and cover RPC setup, including a restricted RPC user.
