@@ -217,7 +217,7 @@
         <label for="btc-primary-rpc-user">RPC username</label>
         <input id="btc-primary-rpc-user" type="text" autocomplete="off">
         <label for="btc-primary-rpc-password">RPC password</label>
-        <input id="btc-primary-rpc-password" type="password" autocomplete="new-password">
+        <div class="pw-wrap"><input id="btc-primary-rpc-password" type="password" autocomplete="new-password"><button type="button" class="pw-toggle" id="btc-primary-rpc-password-show" aria-label="Show password" title="Show password"><svg class="eye-show" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg><svg class="eye-hide" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 19c-6.5 0-10-7-10-7a18.5 18.5 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c6.5 0 10 7 10 7a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="2" y1="2" x2="22" y2="22"/></svg></button></div>
         <p class="muted rpc-hint">Needs <code>txindex=1</code> on the node for full spend and confirmation lookups.</p>
       </div>
       <div class="node-subhead">
@@ -238,7 +238,7 @@
         <label for="btc-secondary-rpc-user">RPC username</label>
         <input id="btc-secondary-rpc-user" type="text" autocomplete="off">
         <label for="btc-secondary-rpc-password">RPC password</label>
-        <input id="btc-secondary-rpc-password" type="password" autocomplete="new-password">
+        <div class="pw-wrap"><input id="btc-secondary-rpc-password" type="password" autocomplete="new-password"><button type="button" class="pw-toggle" id="btc-secondary-rpc-password-show" aria-label="Show password" title="Show password"><svg class="eye-show" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg><svg class="eye-hide" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 19c-6.5 0-10-7-10-7a18.5 18.5 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c6.5 0 10 7 10 7a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="2" y1="2" x2="22" y2="22"/></svg></button></div>
         <p class="muted rpc-hint">Needs <code>txindex=1</code> on the node for full spend and confirmation lookups.</p>
       </div>
       </div>
@@ -681,7 +681,7 @@
     <p class="muted" id="login-hint">Enter the Standby password. On Umbrel it is shown on the app's page in the Umbrel dashboard.</p>
     <form id="login-form">
       <label for="login-password">Password</label>
-      <input type="password" id="login-password" autocomplete="current-password" required>
+      <div class="pw-wrap"><input type="password" id="login-password" autocomplete="current-password" required><button type="button" class="pw-toggle" id="login-password-show" aria-label="Show password" title="Show password"><svg class="eye-show" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg><svg class="eye-hide" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 19c-6.5 0-10-7-10-7a18.5 18.5 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c6.5 0 10 7 10 7a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="2" y1="2" x2="22" y2="22"/></svg></button></div>
       <p class="inline-btns"><button type="submit" class="primary" id="btn-login">Log in</button></p>
       <p id="login-msg" class="muted"></p>
     </form>
@@ -703,9 +703,9 @@
         <input type="checkbox" id="backup-generate"><span class="slider"></span></label>
       <div id="backup-typed-fields">
         <label for="backup-password">Backup password (at least 12 characters)</label>
-        <input type="password" id="backup-password" autocomplete="new-password">
+        <div class="pw-wrap"><input type="password" id="backup-password" autocomplete="new-password"><button type="button" class="pw-toggle" id="backup-password-show" aria-label="Show password" title="Show password"><svg class="eye-show" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg><svg class="eye-hide" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 19c-6.5 0-10-7-10-7a18.5 18.5 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c6.5 0 10 7 10 7a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="2" y1="2" x2="22" y2="22"/></svg></button></div>
         <label for="backup-password2">Repeat the password</label>
-        <input type="password" id="backup-password2" autocomplete="new-password">
+        <div class="pw-wrap"><input type="password" id="backup-password2" autocomplete="new-password"><button type="button" class="pw-toggle" id="backup-password2-show" aria-label="Show password" title="Show password"><svg class="eye-show" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg><svg class="eye-hide" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 19c-6.5 0-10-7-10-7a18.5 18.5 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c6.5 0 10 7 10 7a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="2" y1="2" x2="22" y2="22"/></svg></button></div>
       </div>
       <div id="backup-generated-fields" style="display:none">
         <label>Your backup passphrase — write it down</label>
@@ -733,7 +733,7 @@
     <h3 id="restore-pw-title">This backup is encrypted</h3>
     <form id="restore-pw-form">
       <label for="restore-password">Backup password</label>
-      <input type="password" id="restore-password" autocomplete="off" required>
+      <div class="pw-wrap"><input type="password" id="restore-password" autocomplete="off" required><button type="button" class="pw-toggle" id="restore-password-show" aria-label="Show password" title="Show password"><svg class="eye-show" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg><svg class="eye-hide" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 19c-6.5 0-10-7-10-7a18.5 18.5 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c6.5 0 10 7 10 7a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="2" y1="2" x2="22" y2="22"/></svg></button></div>
       <p class="inline-btns">
         <button type="submit" class="primary" id="btn-restore-pw">Restore</button>
         <button type="button" id="btn-restore-pw-cancel">Cancel</button>

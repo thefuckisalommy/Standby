@@ -139,7 +139,7 @@ function readinessBlocks() {
       return {
         // A row is label, status pill and optional fee pill; the state
         // line is the condition text.
-        label: (row.children[0] || {}).textContent || '',
+        label: elText(row.children[0] || {}) || '',
         status: (row.children[1] || {}).textContent || '',
         statusCls: (row.children[1] || {}).className || '',
         fee: (row.children[2] || {}).textContent || '',
@@ -157,13 +157,14 @@ function readinessMembers(label) {
   const txs = els['readiness-txs'];
   if (!txs) return null;
   const block = txs.children.find((b) => (b.className || '').split(' ').includes('readiness-tx')
-    && ((b.children[0] || {}).children[0] || {}).textContent === label);
+    && elText((b.children[0] || {}).children[0] || {}) === label);
   if (!block) return null;
   return block.children.slice(2)
     .filter((c) => (c.className || '').split(' ').includes('readiness-tx-member'))
     .map((c) => ({
-      left: (c.children[0] || {}).textContent || '',
+      left: elText(c.children[0] || {}) || '',
       leftCls: (c.children[0] || {}).className || '',
+      link: ((c.children[0] || {}).children || []).find((k) => k.className === 'txid-link') || null,
       amt: (c.children[1] || {}).textContent || '',
       amtCls: (c.children[1] || {}).className || '',
       hasPill: (c.children || []).some((k) => (k.className || '').split(' ').includes('pill')),
@@ -1663,6 +1664,20 @@ function check(name, cond, detail) {
   fireChange(els['backup-encrypt']);
   els['btn-backup-modal-cancel'].click();
 
+  // --- 10f. show/hide on password boxes ---
+  for (const id of ['btc-primary-rpc-password', 'login-password', 'backup-password', 'backup-password2', 'restore-password']) {
+    check('password toggle: ' + id + ' has a show button', idx.indexOf('id="' + id + '-show"') !== -1, '');
+  }
+  els['btc-primary-rpc-password'].type = 'password';
+  els['btc-primary-rpc-password-show'].click();
+  check('password toggle: tapping shows the text',
+    els['btc-primary-rpc-password'].type === 'text' && els['btc-primary-rpc-password-show'].title === 'Hide password',
+    els['btc-primary-rpc-password'].type);
+  els['btc-primary-rpc-password-show'].click();
+  check('password toggle: tapping again hides it',
+    els['btc-primary-rpc-password'].type === 'password' && els['btc-primary-rpc-password-show'].title === 'Show password',
+    els['btc-primary-rpc-password'].type);
+
   // --- 11. Staged Transactions card ---
   // A <details>, open by default.
   check('staged card: the card is titled "Staged Transactions" (static HTML)',
@@ -3033,8 +3048,8 @@ function check(name, cond, detail) {
     && idx.indexOf('Installed version:') !== -1 && idx.indexOf('id="app-version"') !== -1, '');
   check('app version static: the card has no "?" button and no details (just the version line)',
     idx.indexOf('id="help-version"') === -1, '');
-  check('app version: the installed version reads 0.8.15 (from /api/health)',
-    els['app-version'] && els['app-version'].textContent === '0.8.15',
+  check('app version: the installed version reads 0.8.16 (from /api/health)',
+    els['app-version'] && els['app-version'].textContent === '0.8.16',
     els['app-version'] && els['app-version'].textContent);
   setFilter('general');
   check('app version: the card is visible under General',
@@ -4180,6 +4195,16 @@ function check(name, cond, detail) {
     !!rdyLines && rdyLines[1].left === 'Tx 2 \u2014 ' + rdyShort2 + '\u2026', rdyLines ? rdyLines[1].left : 'no lines');
   check('readiness members: member 2 line reads its amount (0.0025 BTC)',
     !!rdyLines && rdyLines[1].amt === '0.0025 BTC', rdyLines ? rdyLines[1].amt : 'no lines');
+  // The short txid opens the full one in the TXID pop-out.
+  check('readiness members: each short txid is a link', !!rdyLines && rdyLines.every((l) => l.link), '');
+  if (rdyLines && rdyLines[0].link) {
+    rdyLines[0].link.click();
+    check('readiness members: tapping it opens the TXID pop-out with the full txid',
+      els['confirm-modal'].classList.contains('open') && els['confirm-title'].textContent === 'Transaction ID'
+      && (els['modal-details'].innerHTML || '').indexOf(rdyShort1) !== -1,
+      els['confirm-title'].textContent);
+    els['confirm-cancel'].click();
+  }
   check('readiness members: member lines are label span + amount span (exactly 2 children each)',
     !!rdyLines && rdyLines.every((l) => l.kids === 2), rdyLines ? rdyLines.map((l) => l.kids).join(',') : 'no lines');
   check('readiness members: member lines carry NO pill at all',

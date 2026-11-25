@@ -1016,3 +1016,36 @@ def run():
     time.sleep(4)  # the tick finishes its node test and saves
     check('42 race: the tick that was on the network does not overwrite it', _lookup_value() == 'Full answers', _lookup_value())
     stop(_race_app)
+
+    # --- 46. back online after a silence: every card re-checked once ---
+    # The nodes last answered two days ago (seeded). The first answer after
+    # the restart dry-runs every card: a disarmed tx whose input was spent
+    # meanwhile reads stale, which no other check would record for it.
+    s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft(0, 115500), 'label': 'Offline 46', 'trigger': {'type': 'manual', 'params': {}}})
+    check('46 offline: tx spending a spent input added (201)', s == 201, (s, r))
+    t46 = r['tx']['id'] if s == 201 else None
+    s, r = req('PUT', '/api/bitcoin/txs/' + t46, {'enabled': False})
+    check('46 offline: disarmed (200)', s == 200, (s, r))
+    check('46 offline: not stale yet', ((state_tx(t46) or {}).get('release') or {}).get('status') != 'stale')
+
+    def seed46():
+        stj = load_state_file()
+        conn = stj['bitcoin'].setdefault('connection', {})
+        conn['nodeCheckedAt'] = {'primary': iso_ago(days=2), 'secondary': iso_ago(days=2)}
+        save_state_file(stj)
+    check('46 offline: app restarted after two days without a node answer', restart(before_start=seed46))
+    check('46 offline: the first node answer re-checks every card (the disarmed tx reads stale)',
+          wait_until(lambda: ((state_tx(t46) or {}).get('release') or {}).get('status') == 'stale', deadline=20),
+          (state_tx(t46) or {}).get('release'))
+    check('46 offline: the log says so', 'back online after a silence' in read_log())
+    # A short gap does not re-check: a restart with fresh stamps leaves a
+    # new disarmed stale-input tx alone.
+    s, r = req('POST', '/api/bitcoin/txs', {'txHex': craft(0, 115501), 'label': 'Online 46', 'trigger': {'type': 'manual', 'params': {}}})
+    t46b = r['tx']['id'] if s == 201 else None
+    req('PUT', '/api/bitcoin/txs/' + t46b, {'enabled': False})
+    check('46 online: app restarted after a short gap', restart())
+    time.sleep(3)
+    check('46 online: no re-check after a short gap (still not stale)',
+          ((state_tx(t46b) or {}).get('release') or {}).get('status') != 'stale', (state_tx(t46b) or {}).get('release'))
+    delete_all_txs()
+
