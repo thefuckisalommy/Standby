@@ -39,8 +39,11 @@ function check(name, cond, detail) {
     check('"Choose other sources" shows the price selects', await vis('#setup-card #set-price-source1'));
     await p.selectOption('#set-price-source2', 'kraken');
     await p.click('#btn-setup-prices-save'); await p.waitForTimeout(400);
-    check('the triggers page explains check-in, open', await vis('#setup-checkin details[open] p')
-      && /check in regularly/.test(await p.textContent('#setup-checkin')));
+    check('the triggers page starts with every entry collapsed', await vis('#setup-checkin')
+      && !(await p.$('#setup-checkin details[open]')) && !(await vis('#setup-checkin details p')));
+    await p.click('#setup-checkin details:first-of-type summary'); await p.waitForTimeout(100);
+    check('opening Check-in explains it', await vis('#setup-checkin details:first-of-type p')
+      && /check in regularly/.test(await p.textContent('#setup-checkin details:first-of-type p')));
     await p.click('#btn-setup-checkin-next'); await p.waitForTimeout(150);
     check('first transaction step', await vis('#setup-tx'));
     await p.click('#btn-setup-tx-add'); await p.waitForTimeout(200);
