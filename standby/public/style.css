@@ -281,6 +281,10 @@ button.btn-checkin-big { width: 100%; padding: 16px 20px; font-size: 19px; }
    own layout). */
 #tab-dashboard .node-lines > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 #tab-dashboard .node-lines > div > span:first-child { min-width: 0; overflow-wrap: anywhere; }
+/* A node's name stays on one line: too long, it is cut with "…" (the full
+   name is its title); the time and the pill never shrink. */
+#readiness-node-item .node-lines > div > span:first-child { flex: 0 1 auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; overflow-wrap: normal; }
+#readiness-node-item .node-lines .node-check-detail { flex-shrink: 0; }
 #tab-dashboard .node-lines .pill { flex-shrink: 0; }
 /* Exchange rows: the price's margin-left: auto pushes price and pill
    right, into the same column as the node pills. Must stay after the

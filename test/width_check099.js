@@ -561,6 +561,21 @@ function check(name, cond, detail) {
   await checkEl('width dashboard: Exchange Status Coinbase row fits', '#readiness-exchange-2');
   await checkEl('width dashboard: Node Status primary row checked time fits', '#readiness-primary-checked');
   await checkEl('width dashboard: Node Status secondary row checked time fits', '#readiness-secondary-checked');
+  // A long node name is cut to one line with "…" (full name in the title).
+  const longName = await page.evaluate(() => {
+    const el = document.getElementById('readiness-primary');
+    const keep = el.textContent;
+    el.textContent = 'a-very-long-bitcoin-node-hostname.example.local:8332 \u00b7 RPC';
+    const cs = getComputedStyle(el);
+    const row = el.parentNode.getBoundingClientRect();
+    const pill = document.getElementById('readiness-primary-status').getBoundingClientRect();
+    const out = { nowrap: cs.whiteSpace === 'nowrap', ellipsis: cs.textOverflow === 'ellipsis', cut: el.scrollWidth > el.clientWidth,
+      oneLine: row.height < pill.height * 1.8, pillInside: pill.right <= row.right + 1, title: !!el.title };
+    el.textContent = keep;
+    return out;
+  });
+  check('width dashboard: a long node name stays on one line, cut with an ellipsis, the pill still in the row',
+    longName.nowrap && longName.ellipsis && longName.cut && longName.oneLine && longName.pillInside && longName.title, JSON.stringify(longName));
   await checkEl('width dashboard: Exchange Status CoinGecko row pill fits', '#readiness-exchange-1-status');
   await checkEl('width dashboard: Exchange Status Coinbase row pill fits', '#readiness-exchange-2-status');
   await checkEl('width dashboard: Exchange Status CoinGecko row price fits', '#readiness-exchange-1-price');

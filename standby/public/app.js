@@ -795,6 +795,7 @@
         var priceEl = $('readiness-exchange-' + (i + 1) + '-price');
         if (!host || !pill) return;
         host.textContent = src.label || src.provider || '';
+        host.title = host.textContent;
         // Checked line: "checked 11:53 PM - $61,392.8" (one refresh time
         // for both sources), or just the time before any price.
         var checked = (S.bitcoin && S.bitcoin.currentPriceAt) ? 'checked ' + fmtCheckedAt(S.bitcoin.currentPriceAt) : '';
@@ -1371,6 +1372,7 @@
     var slotName = (prefix === 'readiness-' && secondaryDisabled) ? 'Secondary Node' : null;
     if (!url) {
       host.textContent = slotName || 'Not set';
+      host.title = host.textContent;
       pill.textContent = 'Not set';
       pill.className = 'pill muted';
       if (checksEl) checksEl.style.display = 'none';
@@ -1381,6 +1383,7 @@
     // never as failing.
     if (secondaryDisabled) {
       host.textContent = slotName || hostOf(url);
+      host.title = host.textContent;
       pill.textContent = 'Disabled';
       pill.className = 'pill muted';
       pill.title = 'Secondary node is off — Standby talks to the primary node only.';
@@ -1389,6 +1392,8 @@
       return;
     }
     host.textContent = slotName || hostOf(url);
+    // A long name is cut to one line with "…"; the full name is its title.
+    host.title = host.textContent;
     var res = (conn.results || []).find(function (r) { return r.endpoint === label && r.base === url; });
     var stamp = conn.nodeCheckedAt && conn.nodeCheckedAt[label];
     if (checkedEl) checkedEl.textContent = (res && stamp) ? 'checked ' + fmtCheckedAt(stamp) : '';
