@@ -19,6 +19,42 @@ function check(name, cond, detail) {
   p.on('pageerror', (e) => errs.push(e.message));
   const vis = (sel) => p.isVisible(sel);
   try {
+    // The download's "Start with this computer" page, before Done: this
+    // run is not a download, so its answers are faked in the browser.
+    const ctx2 = await browser.newContext({ viewport: { width: 390, height: 844 } });
+    const d = await ctx2.newPage();
+    d.on('pageerror', (e) => errs.push(e.message));
+    const fake = { available: true, startAtLogin: true, stop: true, error: null };
+    const sent = [];
+    await d.route('**/api/desktop', (route) => route.fulfill({ json: fake }));
+    await d.route('**/api/settings', async (route) => {
+      const body = route.request().postDataJSON ? route.request().postDataJSON() : null;
+      if (route.request().method() === 'PUT' && body && typeof body.startAtLogin === 'boolean') {
+        sent.push(body.startAtLogin);
+        fake.startAtLogin = body.startAtLogin;
+        return route.fulfill({ json: { startAtLogin: body.startAtLogin } });
+      }
+      return route.continue();
+    });
+    await d.goto(BASE); await d.waitForTimeout(1200);
+    await d.click('#btn-setup-start'); await d.waitForTimeout(150);
+    check('downloads: setup has 7 steps', (await d.textContent('#setup-stepno')) === 'Step 1 of 7', await d.textContent('#setup-stepno'));
+    await d.click('#btn-setup-pw-skip'); await d.click('#btn-setup-skip-confirm'); await d.waitForTimeout(300);
+    await d.click('#btn-setup-nodes-save'); await d.waitForTimeout(400);
+    await d.click('#btn-setup-prices-keep'); await d.waitForTimeout(400);
+    await d.click('#btn-setup-checkin-next'); await d.waitForTimeout(150);
+    await d.click('#btn-setup-tx-skip'); await d.waitForTimeout(200);
+    check('downloads: "Start with this computer" comes before Done, on by default',
+      await d.isVisible('#setup-startup') && (await d.textContent('#setup-stepno')) === 'Step 6 of 7' && await d.isChecked('#setup-autostart')
+        && /You can turn this off here/.test(await d.textContent('#setup-autostart-note')), await d.textContent('#setup-stepno'));
+    await d.click('#setup-startup .slider'); await d.waitForTimeout(400);
+    check('downloads: switching it off there takes effect at once',
+      sent[sent.length - 1] === false && !(await d.isChecked('#setup-autostart')) && /^Off\./.test(await d.textContent('#setup-autostart-note')),
+      JSON.stringify(sent) + ' ' + await d.textContent('#setup-autostart-note'));
+    await d.click('#btn-setup-startup-next'); await d.waitForTimeout(200);
+    check('downloads: then Done', await d.isVisible('#setup-done'));
+    await ctx2.close();
+
     await p.goto(BASE); await p.waitForTimeout(1200);
     check('welcome shows on a fresh install, tabs hidden', await vis('#setup-welcome') && !(await vis('#tabs')));
     await p.click('#btn-setup-start'); await p.waitForTimeout(150);
@@ -63,6 +99,18 @@ function check(name, cond, detail) {
     await p.goto(BASE + '#settings'); await p.waitForTimeout(800);
     check('the price choice was saved', (await p.inputValue('#set-price-source2')) === 'kraken');
     check('App login: the no-password notice', await vis('#login-card-none'));
+    check('This computer is not offered outside the downloads', !(await vis('#card-desktop')));
+    check('Check for new versions: offered on a plain run, off by default', await vis('#update-box') && !(await p.isChecked('#update-check')));
+    await fetch('http://127.0.0.1:18255/__test__/release', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"tag":"v99.0.0"}' });
+    await p.click('#update-box .slider'); await p.waitForTimeout(2200);
+    check('switched on, a newer release shows in App version', await vis('#update-notice') && /99\.0\.0 is available/.test(await p.textContent('#update-notice')),
+      await p.textContent('#update-msg'));
+    await p.goto(BASE); await p.waitForTimeout(1200);
+    check('and on the dashboard', await vis('#update-banner') && (await p.textContent('#update-banner-version')) === '99.0.0');
+    await p.click('#update-banner-later'); await p.waitForTimeout(200);
+    await p.reload(); await p.waitForTimeout(1200);
+    check('"Not now" hides it for that version', !(await vis('#update-banner')));
+    await p.goto(BASE + '#settings'); await p.waitForTimeout(800);
     check('Check-in API keys: the "Accept check-ins from other devices" switch is offered, off',
       await vis('#remote-checkin') && !(await p.isChecked('#remote-checkin-on')) && !(await vis('#api-keys-receiver-line')));
     await p.fill('#login-new1', 'correct horse battery'); await p.fill('#login-new2', 'correct horse battery');

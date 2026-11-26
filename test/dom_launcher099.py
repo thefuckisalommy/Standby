@@ -210,7 +210,8 @@ try:
     sapp = v.start(['node', 'server.js'],
                    env=_with_profile({'PORT': '3458', 'DATA_DIR': setup_data, 'CHECKIN_DIR': setup_checkin,
                         'SLIPSTREAM_API_URL': 'http://127.0.0.1:18255',
-                        'PRICE_API_URL': 'http://127.0.0.1:18255'}),
+                        'PRICE_API_URL': 'http://127.0.0.1:18255',
+                        'STANDBY_TEST_UPDATE_URL': 'http://127.0.0.1:18255/repos/thefuckisalommy/Standby/releases/latest'}),
                    cwd=BRANCH, log=LOG)
     try:
         assert v.wait_up('http://127.0.0.1:3458'), 'setup-phase app did not come up'

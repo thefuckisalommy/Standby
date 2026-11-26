@@ -31,13 +31,27 @@ From the [releases page](https://github.com/thefuckisalommy/Standby/releases), d
 - **Windows:** double-click `standby.exe`. The build is not code-signed yet, so Windows may say "Windows protected your PC": choose **More info**, then **Run anyway**.
 - **Linux:** run `./standby`.
 
-A window shows that Standby is running and the page opens in your browser at `http://localhost:3100`. Keep the window open: closing it stops Standby, and triggers are only checked while it runs. Your data is kept in `%APPDATA%\Standby` (Windows) or `~/.local/share/standby` (Linux). To check a download, compare it with `SHA256SUMS.txt` from the same release, or run `gh attestation verify <file> --repo thefuckisalommy/Standby`.
+The page opens in your browser at `http://localhost:3100`. On Windows Standby runs in the background with its icon next to the clock (**Open Standby**, **Quit Standby**); on Linux keep the terminal open. Triggers are only checked while Standby runs, so by default it also starts by itself when you sign in to the computer (setup shows this, and Settings → This computer turns it off; Settings also has **Stop Standby**). Starting it again while it runs just opens the page. **To remove it,** first switch off Settings → This computer → *Start Standby when I sign in* (that removes its entry from the sign-in list), quit it, then delete the program; your data folder is left for you to keep or delete. Your data, and its log `standby.log`, are kept in `%APPDATA%\Standby` (Windows) or `~/.local/share/standby` (Linux). To check a download, compare it with `SHA256SUMS.txt` from the same release, or run `gh attestation verify <file> --repo thefuckisalommy/Standby`.
+
+On a Linux machine without a desktop there is no sign-in to start from; a systemd user service does it instead (`loginctl enable-linger` keeps it running while you are logged out):
+
+```ini
+# ~/.config/systemd/user/standby.service, then: systemctl --user enable --now standby
+[Service]
+ExecStart=%h/standby/standby --background
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+
+**Updates:** the download checks once a day whether a newer release exists (Settings → App version; GitHub sees your address, nothing else is sent) and says so with a link. It never installs anything: download the new archive and replace the program; your data stays where it is.
 
 ## Install on Umbrel
 
 App Store → Community App Stores → add `https://github.com/thefuckisalommy/Standby`, then install Standby. The login password is shown on Standby's page in the Umbrel dashboard.
 
-On first open, a short setup walks through the app password (skippable, with a warning), the Bitcoin nodes, the price sources and how triggers work, then your first transaction. Every step can keep its default, and everything can be changed later in Settings (which can also run setup again).
+On first open, a short setup walks through the app password (skippable, with a warning), the Bitcoin nodes, the price sources and how triggers work, then your first transaction. Every step can keep its default, and everything can be changed later in Settings. Start fresh (Settings) runs it again.
 
 ## Run with Docker
 

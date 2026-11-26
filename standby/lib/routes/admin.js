@@ -46,6 +46,8 @@ module.exports = async function adminRoutes(ctx) {
     startupWarnings.length = 0;
     if (auth.source() === 'app') auth.clearAppPassword();
     require('../remote-checkin').sync(fresh);
+    require('../autostart').sync(fresh.settings.startAtLogin !== false);
+    require('../updates').sync(fresh.settings);
     clearCaches();
     rearmFullTick();
     console.log('Standby: all data deleted (start fresh)');

@@ -159,6 +159,16 @@ const outspendOverride = {};
 // make only one node unaware of a parent.
 const unknownParents = new Set();
 
+// GitHub's latest release, for "Check for new versions"
+// (STANDBY_TEST_UPDATE_URL): GET /repos/<owner>/<repo>/releases/latest
+// answers { tag_name, html_url }; POST /__test__/release { tag } sets the
+// tag (default v0.0.1), { status } makes it answer that HTTP status, and
+// { url } sends that html_url instead of the release's GitHub page.
+let releaseTag = 'v0.0.1';
+let releaseUrl = null;
+let releaseStatus = 200;
+let releaseRequests = 0;
+
 // POST /__test__/date-offset { seconds }: answer with a Date header that
 // far from the real time, so the app sees its own clock as off.
 let dateOffsetMs = 0;
@@ -174,6 +184,29 @@ const server = http.createServer((req, res) => {
       try { dateOffsetMs = (Number(JSON.parse(body || '{}').seconds) || 0) * 1000; } catch { dateOffsetMs = 0; }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, offsetSeconds: dateOffsetMs / 1000 }));
+    });
+    return;
+  }
+  if (req.method === 'GET' && /^\/repos\/[^/]+\/[^/]+\/releases\/latest$/.test(p)) {
+    releaseRequests++;
+    res.writeHead(releaseStatus, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify(releaseStatus === 200 ? { tag_name: releaseTag, html_url: releaseUrl || 'https://github.com/thefuckisalommy/Standby/releases/tag/' + releaseTag } : { message: 'stub error' }));
+  }
+  if (req.method === 'GET' && p === '/__test__/release-count') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ count: releaseRequests }));
+  }
+  if (req.method === 'POST' && p === '/__test__/release') {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      let j = {};
+      try { j = JSON.parse(body || '{}'); } catch { /* empty */ }
+      if (typeof j.tag === 'string') releaseTag = j.tag;
+      releaseStatus = Number.isInteger(j.status) ? j.status : 200;
+      releaseUrl = typeof j.url === 'string' ? j.url : null;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, tag: releaseTag, status: releaseStatus }));
     });
     return;
   }

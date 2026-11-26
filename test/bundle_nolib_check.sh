@@ -6,7 +6,16 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="${1:-$ROOT/standby-bundled}"
 T="$(mktemp -d)"
-trap 'kill "${APP:-}" "${RECV:-}" 2>/dev/null || true; rm -rf "$T"' EXIT
+# On exit: stop both, wait until they have finished writing (the app saves
+# its heartbeat as it stops), then remove the folder; cleanup never fails
+# the check.
+# shellcheck disable=SC2329 # called by the EXIT trap below
+cleanup() {
+  kill "${APP:-}" "${RECV:-}" 2>/dev/null || true
+  wait "${APP:-}" "${RECV:-}" 2>/dev/null || true
+  rm -rf "$T" 2>/dev/null || true
+}
+trap cleanup EXIT
 cp -r "$SRC" "$T/app"
 rm -rf "$T/app/lib"
 mkdir -p "$T/data"
