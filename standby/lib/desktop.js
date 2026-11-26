@@ -37,10 +37,8 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 function Say($word) { [Console]::Out.WriteLine($word); [Console]::Out.Flush() }
-$source = New-Object System.Drawing.Bitmap $env:STANDBY_TRAY_ICON
-$small = New-Object System.Drawing.Bitmap $source, 32, 32
 $icon = New-Object System.Windows.Forms.NotifyIcon
-$icon.Icon = [System.Drawing.Icon]::FromHandle($small.GetHicon())
+$icon.Icon = New-Object System.Drawing.Icon($env:STANDBY_TRAY_ICON, [System.Windows.Forms.SystemInformation]::SmallIconSize)
 $icon.Text = 'Standby'
 $menu = New-Object System.Windows.Forms.ContextMenuStrip
 $title = $menu.Items.Add('Standby ' + $env:STANDBY_TRAY_VERSION + ' (running)')
@@ -105,13 +103,13 @@ function startTray({ iconFile, version, onOpen }) {
   process.on('exit', () => { if (tray) { try { tray.kill(); } catch { /* gone */ } } });
 }
 
-// The logo as a file for the tray script: from inside the program in a
-// standalone build, else from public/.
+// The app icon (standby.ico, all sizes) as a file for the tray script:
+// from inside the program in a standalone build, else from public/.
 function writeTrayIcon(dataDir, publicDir) {
   let bytes = null;
-  try { bytes = Buffer.from(require('node:sea').getAsset('public/logo.jpg')); } catch { /* not standalone */ }
-  if (!bytes) bytes = fs.readFileSync(path.join(publicDir, 'logo.jpg'));
-  const file = path.join(dataDir, 'tray-icon.jpg');
+  try { bytes = Buffer.from(require('node:sea').getAsset('public/standby.ico')); } catch { /* not standalone */ }
+  if (!bytes) bytes = fs.readFileSync(path.join(publicDir, 'standby.ico'));
+  const file = path.join(dataDir, 'tray-icon.ico');
   fs.writeFileSync(file, bytes);
   return file;
 }

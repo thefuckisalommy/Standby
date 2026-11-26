@@ -121,6 +121,20 @@ if os.name == 'nt':
     pe = int.from_bytes(exe_head[0x3c:0x40], 'little')
     check('the Windows program is windowed (no console window)', int.from_bytes(exe_head[pe + 24 + 68:pe + 24 + 70], 'little') == 2,
           int.from_bytes(exe_head[pe + 24 + 68:pe + 24 + 70], 'little'))
+    # It carries Standby's name (and icon, set in the same step), not Node's.
+    _vi = subprocess.run(['powershell', '-NoProfile', '-Command',
+                          "$v = (Get-Item -LiteralPath $env:SB_EXE).VersionInfo; $v.FileDescription + '|' + $v.ProductName + '|' + $v.FileVersion"],
+                         capture_output=True, text=True, env=dict(os.environ, SB_EXE=app_exe)).stdout.strip()
+    check('the Windows program is named Standby (description, product, version)',
+          _vi.startswith('Standby|Standby|') and _vi.endswith(VERSION.split('-')[0] + ('.0' * (4 - len(VERSION.split('.'))))), _vi)
+    # Standby's icon has orange broadcast arcs (about 50 orange pixels at
+    # 32 px); Node's green icon has none.
+    _ico = subprocess.run(['powershell', '-NoProfile', '-Command',
+                           "Add-Type -AssemblyName System.Drawing; $b = [System.Drawing.Icon]::ExtractAssociatedIcon($env:SB_EXE).ToBitmap(); $n = 0; "
+                           "for ($x = 0; $x -lt $b.Width; $x++) { for ($y = 0; $y -lt $b.Height; $y++) { $c = $b.GetPixel($x, $y); "
+                           "if ($c.A -gt 128 -and $c.R -gt 180 -and $c.G -gt 80 -and $c.G -lt 190 -and $c.B -lt 90) { $n++ } } }; $n"],
+                          capture_output=True, text=True, env=dict(os.environ, SB_EXE=app_exe)).stdout.strip()
+    check('the Windows program shows the Standby icon (its orange arcs)', _ico.isdigit() and int(_ico) >= 20, _ico)
 
 # 1. Default data folder (the user's own), nothing beside the program.
 p = launch(app_exe, base_env)
