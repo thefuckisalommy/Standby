@@ -1,0 +1,422 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Standby</title>
+<style>
+:root {
+  --bg: #0a0c0f;
+  --panel: #101318;
+  --panel-2: #141820;
+  --line: #1f252e;
+  --line-2: #2a313c;
+  --text: #e7eaef;
+  --text-2: #b4bcc8;
+  --muted: #818b99;
+  --faint: #566070;
+  --accent: #f39a2b;
+  --accent-ink: #1a1206;
+  --ok: #3fb97f;
+  --ok-bg: rgba(63, 185, 127, 0.12);
+  --warn: #e0b04a;
+  --warn-bg: rgba(224, 176, 74, 0.12);
+  --bad: #ef5d5d;
+  --bad-bg: rgba(239, 93, 93, 0.12);
+  --radius: 10px;
+  --mono: "JetBrains Mono", ui-monospace, monospace;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.45 Inter, system-ui, sans-serif;
+  font-feature-settings: "tnum" 1, "cv11" 1;
+  -webkit-font-smoothing: antialiased;
+}
+.num { font-variant-numeric: tabular-nums; }
+.mono { font-family: var(--mono); font-size: 12.5px; letter-spacing: -0.01em; }
+.muted { color: var(--muted); }
+.faint { color: var(--faint); }
+
+/* ---------- top bar ---------- */
+.top {
+  height: 56px; border-bottom: 1px solid var(--line);
+  display: flex; align-items: center; gap: 28px; padding: 0 28px;
+  background: rgba(10, 12, 15, 0.9); position: sticky; top: 0;
+}
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 600; letter-spacing: -0.01em; font-size: 15px; }
+.brand img { width: 26px; height: 26px; border-radius: 7px; }
+.nav { display: flex; gap: 4px; }
+.nav a {
+  color: var(--muted); text-decoration: none; padding: 7px 12px; border-radius: 7px; font-weight: 500; font-size: 13.5px;
+}
+.nav a.on { color: var(--text); background: var(--panel-2); }
+.ticker { margin-left: auto; display: flex; gap: 22px; align-items: center; color: var(--muted); font-size: 12.5px; }
+.ticker b { color: var(--text-2); font-weight: 500; }
+.ticker .sep { width: 1px; height: 16px; background: var(--line-2); }
+.iconbtn {
+  width: 32px; height: 32px; display: grid; place-items: center; border-radius: 8px;
+  border: 1px solid var(--line); color: var(--muted); background: transparent;
+}
+
+/* ---------- layout ---------- */
+main { max-width: 1320px; margin: 0 auto; padding: 28px 28px 48px; display: grid; gap: 20px; }
+.row { display: grid; gap: 20px; grid-template-columns: minmax(0, 1fr) 380px; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+.panel-head {
+  display: flex; align-items: center; gap: 12px; padding: 16px 20px; border-bottom: 1px solid var(--line);
+}
+.panel-head h2 { font-size: 13px; font-weight: 600; letter-spacing: 0.02em; text-transform: uppercase; color: var(--text-2); }
+.panel-head .right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+
+.btn {
+  font: 500 13px Inter, sans-serif; border-radius: 8px; padding: 8px 14px; border: 1px solid var(--line-2);
+  background: var(--panel-2); color: var(--text); display: inline-flex; align-items: center; gap: 8px; white-space: nowrap;
+}
+.btn.ghost { background: transparent; color: var(--text-2); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+.btn.big { font-size: 15px; padding: 13px 22px; border-radius: 10px; }
+
+.chip {
+  display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 500;
+  padding: 3px 9px; border-radius: 999px; white-space: nowrap;
+}
+.chip.ok { background: var(--ok-bg); color: var(--ok); }
+.chip.warn { background: var(--warn-bg); color: var(--warn); }
+.chip.bad { background: var(--bad-bg); color: var(--bad); }
+.chip.dim { background: var(--panel-2); color: var(--muted); }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }
+.dot.live { box-shadow: 0 0 0 3px rgba(63, 185, 127, 0.18); }
+
+/* ---------- check-in hero ---------- */
+.hero { padding: 26px 28px 24px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 32px; align-items: end; }
+.eyebrow { font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.countdown { font-size: 56px; font-weight: 600; letter-spacing: -0.035em; line-height: 1.05; margin-top: 10px; }
+.countdown small { font-size: 22px; font-weight: 500; color: var(--muted); letter-spacing: -0.01em; margin: 0 14px 0 3px; }
+.hero-sub { color: var(--text-2); margin-top: 10px; font-size: 14.5px; }
+.hero-sub strong { color: var(--text); font-weight: 600; }
+.hero-actions { display: flex; flex-direction: column; align-items: flex-end; gap: 10px; }
+.hero-actions .meta { font-size: 12.5px; color: var(--muted); text-align: right; }
+
+.clocks { border-top: 1px solid var(--line); padding: 20px 28px 22px; display: grid; gap: 16px; align-content: start; }
+.check { display: flex; flex-direction: column; }
+.check .clocks { flex: 1; display: flex; flex-direction: column; }
+.check .clocks .legend { margin-top: auto; padding-top: 4px; }
+.clock { display: grid; grid-template-columns: 168px minmax(0, 1fr) 150px; gap: 18px; align-items: center; }
+.clock .name { font-weight: 500; font-size: 13.5px; }
+.clock .name span { display: block; color: var(--muted); font-size: 12px; font-weight: 400; }
+.track { position: relative; height: 8px; border-radius: 999px; background: var(--panel-2); overflow: hidden; }
+.track .zone {
+  position: absolute; top: 0; bottom: 0; right: 0; width: 25%;
+  background: repeating-linear-gradient(135deg, rgba(239, 93, 93, 0.16) 0 4px, transparent 4px 8px);
+}
+.track .fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 999px; background: var(--text-2); }
+.clock .left { text-align: right; font-size: 13px; }
+.clock .left b { font-weight: 600; }
+.clock .left span { display: block; font-size: 12px; color: var(--muted); }
+.clocks .legend { display: flex; gap: 18px; font-size: 12px; color: var(--muted); padding-left: 186px; }
+.clocks .legend i {
+  display: inline-block; width: 18px; height: 8px; border-radius: 3px; vertical-align: -1px; margin-right: 6px;
+  background: repeating-linear-gradient(135deg, rgba(239, 93, 93, 0.35) 0 3px, transparent 3px 6px);
+}
+
+/* ---------- system ---------- */
+.sys-status { padding: 16px 20px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--line); }
+.sys-status .big { font-size: 17px; font-weight: 600; letter-spacing: -0.01em; }
+.sys-status .shield {
+  width: 38px; height: 38px; border-radius: 10px; display: grid; place-items: center; background: var(--ok-bg); color: var(--ok);
+}
+.sys { list-style: none; }
+.sys li { display: grid; grid-template-columns: 16px 1fr auto; gap: 12px; align-items: start; padding: 10px 20px; border-bottom: 1px solid var(--line); }
+.sys li:last-child { border-bottom: 0; }
+.sys .k { font-weight: 500; font-size: 13.5px; }
+.sys .v { color: var(--muted); font-size: 12.5px; margin-top: 1px; }
+.sys .s { font-size: 12.5px; color: var(--text-2); text-align: right; white-space: nowrap; }
+.sys .ind { margin-top: 6px; }
+.ok-c { color: var(--ok); } .warn-c { color: var(--warn); } .bad-c { color: var(--bad); }
+
+/* ---------- armed list ---------- */
+.tabs { display: flex; gap: 2px; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 3px; }
+.tabs span { padding: 4px 10px; border-radius: 6px; font-size: 12.5px; color: var(--muted); font-weight: 500; }
+.tabs span.on { background: var(--panel-2); color: var(--text); }
+.tabs em { font-style: normal; color: var(--faint); margin-left: 4px; }
+.grid-row {
+  display: grid; align-items: center; gap: 16px; padding: 14px 20px;
+  grid-template-columns: minmax(180px, 1.35fr) minmax(200px, 1.6fr) minmax(170px, 1.2fr) 112px 132px 118px 96px;
+  border-bottom: 1px solid var(--line);
+}
+.grid-row.head { padding-top: 10px; padding-bottom: 10px; font-size: 11.5px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--faint); }
+.grid-row:last-child { border-bottom: 0; }
+.tx-name { font-weight: 600; font-size: 14px; display: flex; align-items: center; gap: 8px; }
+.tx-name .count { font-size: 11.5px; font-weight: 500; color: var(--muted); background: var(--panel-2); border-radius: 5px; padding: 1px 6px; }
+.tx-sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.trig { display: flex; align-items: center; gap: 9px; font-size: 13.5px; }
+.trig svg { color: var(--muted); flex: none; }
+.trig.op { font-size: 10.5px; font-weight: 700; letter-spacing: 0.08em; color: var(--faint); margin: 3px 0 3px 25px; }
+.prog { display: grid; gap: 6px; }
+.prog .bar { height: 4px; border-radius: 999px; background: var(--panel-2); overflow: hidden; }
+.prog .bar i { display: block; height: 100%; border-radius: 999px; background: var(--text-2); }
+.prog .t { font-size: 12.5px; color: var(--text-2); }
+.prog .t span { color: var(--muted); }
+.amt { text-align: right; font-size: 13.5px; font-weight: 500; }
+.amt span { display: block; color: var(--muted); font-size: 12px; font-weight: 400; }
+.fee .t { font-size: 12.5px; color: var(--muted); margin-top: 3px; }
+.state { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
+.member { background: rgba(255, 255, 255, 0.012); }
+.member .tx-name { font-weight: 500; font-size: 13px; color: var(--text-2); padding-left: 18px; position: relative; }
+.member .tx-name::before { content: ""; position: absolute; left: 4px; top: -4px; width: 8px; height: 12px; border-left: 1px solid var(--line-2); border-bottom: 1px solid var(--line-2); border-bottom-left-radius: 4px; }
+.more { width: 30px; height: 30px; border-radius: 7px; display: grid; place-items: center; color: var(--muted); border: 1px solid var(--line); }
+.sel { color: var(--faint); font-size: 12px; }
+
+/* ---------- activity ---------- */
+.feed { list-style: none; }
+.feed li { display: grid; grid-template-columns: 110px 22px 1fr auto; gap: 12px; align-items: center; padding: 11px 20px; border-bottom: 1px solid var(--line); font-size: 13px; }
+.feed li:last-child { border-bottom: 0; }
+.feed .when { color: var(--muted); font-size: 12.5px; }
+.feed .ic { color: var(--muted); display: grid; place-items: center; }
+.feed .what b { font-weight: 500; }
+.feed .what span { color: var(--muted); }
+
+/* ---------- phone ---------- */
+.tabbar { display: none; }
+.phone-title { display: none; }
+@media (max-width: 720px) {
+  .top { padding: 0 16px; gap: 12px; height: 52px; }
+  .nav, .ticker { display: none; }
+  .top .iconbtn { margin-left: auto; }
+  main { padding: 14px 16px 96px; gap: 14px; }
+  .row { grid-template-columns: 1fr; gap: 14px; }
+  .hero { grid-template-columns: 1fr; padding: 20px 18px 18px; gap: 6px; }
+  .deadline { display: none; }
+  .phone-title { display: block; font-size: 17px; font-weight: 600; letter-spacing: -0.01em; }
+  .hero-actions { align-items: stretch; margin-top: 8px; }
+  .hero-actions .btn { justify-content: center; }
+  .hero-actions .meta { text-align: left; }
+  .clocks { padding: 14px 18px 16px; }
+  .clock { grid-template-columns: 1fr auto; gap: 6px 12px; }
+  .clock .track { grid-column: 1 / -1; grid-row: 2; }
+  .clocks .legend { padding-left: 0; flex-direction: column; gap: 4px; }
+  .sys li.extra { display: none; }
+  .grid-row.head { display: none; }
+  .grid-row { grid-template-columns: 1fr auto; gap: 10px 12px; padding: 14px 16px; }
+  .grid-row > .c-trig, .grid-row > .c-prog { grid-column: 1 / -1; }
+  .grid-row > .c-fee, .grid-row > .c-amt { display: none; }
+  .grid-row > .c-name { grid-row: 1; }
+  .grid-row > .c-state { grid-row: 1; grid-column: 2; }
+  .grid-row .more { display: none; }
+  .member { display: none; }
+  .panel-head .right .btn.ghost, .tabs { display: none; }
+  .feed li { grid-template-columns: 22px 1fr; padding: 11px 16px; }
+  .feed .when { grid-column: 2; grid-row: 2; }
+  .feed .ic { grid-row: 1 / 3; }
+  .feed li > :last-child { display: none; }
+  .tabbar {
+    display: grid; grid-template-columns: repeat(4, 1fr); position: fixed; left: 0; right: 0; bottom: 0;
+    border-top: 1px solid var(--line); background: rgba(12, 14, 18, 0.96); padding: 8px 6px 24px;
+  }
+  .tabbar a { color: var(--muted); text-decoration: none; font-size: 11px; font-weight: 500; display: grid; justify-items: center; gap: 4px; }
+  .tabbar a.on { color: var(--text); }
+}
+
+/* ---------- v2: calmer desktop ---------- */
+main { max-width: 1180px; }
+.top { background: var(--bg); }
+.ticker { display: none; }
+.top .iconbtn { margin-left: auto; }
+.check-head { display: flex; align-items: center; gap: 16px; padding: 22px 24px 18px; }
+.check-head .title { font-size: 17px; font-weight: 600; letter-spacing: -0.01em; }
+.check-head .meta { font-size: 13px; color: var(--muted); margin-top: 2px; }
+.check-head .btn { margin-left: auto; }
+.clocks { padding: 18px 24px 20px; }
+.clock { grid-template-columns: 150px minmax(0, 1fr) 120px; }
+.zone-key { font-size: 12px; color: var(--faint); display: flex; align-items: center; gap: 7px; }
+.zone-key i { display: inline-block; width: 16px; height: 7px; border-radius: 3px; background: repeating-linear-gradient(135deg, rgba(239, 93, 93, 0.35) 0 3px, transparent 3px 6px); }
+.sys2 .sys-status { padding: 18px 20px 14px; border-bottom: 0; }
+.sys2 .sys li { grid-template-columns: 14px 1fr auto; padding: 9px 20px; border-bottom: 0; align-items: center; }
+.sys2 .sys li .k { font-weight: 400; color: var(--text-2); font-size: 13.5px; }
+.sys2 .sys li .s { color: var(--muted); }
+.sys2 .sys li .dot { margin: 0; }
+.sys2 .sys { padding-bottom: 10px; }
+.tx { display: grid; grid-template-columns: minmax(170px, 1fr) minmax(300px, 2fr) 120px 200px 32px; gap: 20px; align-items: center; padding: 16px 20px; border-bottom: 1px solid var(--line); }
+.tx:last-child { border-bottom: 0; }
+.tx.head { padding-top: 10px; padding-bottom: 10px; font-size: 11.5px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--faint); }
+.tx .tp { display: grid; gap: 7px; }
+.tx .tp .line { display: flex; align-items: center; gap: 9px; font-size: 13.5px; }
+.tx .tp .line svg { color: var(--muted); flex: none; }
+.tx .tp .meter { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; padding-left: 25px; }
+.tx .tp .meter .bar { height: 4px; border-radius: 999px; background: var(--panel-2); overflow: hidden; }
+.tx .tp .meter .bar i { display: block; height: 100%; background: var(--text-2); border-radius: 999px; }
+.tx .tp .meter span { font-size: 12.5px; color: var(--muted); white-space: nowrap; }
+.tx .tp .or { font-size: 10.5px; font-weight: 700; letter-spacing: 0.08em; color: var(--faint); padding-left: 25px; }
+.tx .st { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
+.tx .amt2 { text-align: right; font-weight: 500; }
+.tx .nm { font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.tx .nm .count { font-size: 11.5px; font-weight: 500; color: var(--muted); background: var(--panel-2); border-radius: 5px; padding: 1px 6px; display: inline-flex; align-items: center; gap: 4px; }
+.feed2 li { grid-template-columns: 110px 1fr; }
+@media (max-width: 720px) {
+  .top { background: var(--bg); }
+  .tabbar { background: var(--bg); }
+  .check-head { flex-wrap: wrap; padding: 18px 18px 14px; }
+  .check-head .btn { margin-left: 0; width: 100%; justify-content: center; order: 2; }
+  .check-head > div { order: 1; }
+  .clock { grid-template-columns: 1fr auto; }
+  .tx.head { display: none; }
+  .tx { grid-template-columns: 1fr auto; gap: 10px 12px; padding: 14px 16px; }
+  .tx .tp { grid-column: 1 / -1; grid-row: 2; }
+  .tx .amt2, .tx .more { display: none; }
+  .tx .st { grid-row: 1; grid-column: 2; }
+  .feed2 li { grid-template-columns: 1fr; gap: 2px; }
+}
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <symbol id="i-pulse" viewBox="0 0 24 24"><path d="M3 12h4l3-7 4 14 3-7h4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-price" viewBox="0 0 24 24"><path d="M4 17l5-5 4 3 7-8M15 7h5v5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-coin" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 8v8M9.5 10h4a1.5 1.5 0 010 3h-4 4.5a1.5 1.5 0 010 3h-4.5" fill="none" stroke="currentColor" stroke-width="1.5"/></symbol>
+    <symbol id="i-cal" viewBox="0 0 24 24"><rect x="4" y="5.5" width="16" height="14" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M4 10h16M9 3.5v4M15 3.5v4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+    <symbol id="i-cube" viewBox="0 0 24 24"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3zM4 7.5l8 4.5 8-4.5M12 12v9" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></symbol>
+    <symbol id="i-node" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="6.5" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="4" y="13.5" width="16" height="6.5" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="8" cy="7.25" r="1" fill="currentColor"/><circle cx="8" cy="16.75" r="1" fill="currentColor"/></symbol>
+    <symbol id="i-fee" viewBox="0 0 24 24"><path d="M5 19V9M10 19V5M15 19v-7M20 19v-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6l7-3z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M8.5 12l2.5 2.5 4.5-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-dots" viewBox="0 0 24 24"><circle cx="6" cy="12" r="1.6" fill="currentColor"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/><circle cx="18" cy="12" r="1.6" fill="currentColor"/></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="9.5" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8 10.5V8a4 4 0 018 0v2.5" fill="none" stroke="currentColor" stroke-width="1.8"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5v13l10-6.5-10-6.5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
+    <symbol id="i-phone" viewBox="0 0 24 24"><rect x="7" y="3" width="10" height="18" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M11 17.5h2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+    <symbol id="i-plug" viewBox="0 0 24 24"><path d="M9 3v5M15 3v5M7 8h10v3a5 5 0 01-10 0V8zM12 16v5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><path d="M9 6v12M15 6v12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-home" viewBox="0 0 24 24"><path d="M4 11l8-6.5 8 6.5V20H4z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
+    <symbol id="i-list" viewBox="0 0 24 24"><path d="M8 7h12M8 12h12M8 17h12M4 7h.01M4 12h.01M4 17h.01" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 3v2.5M12 18.5V21M3 12h2.5M18.5 12H21M5.6 5.6l1.8 1.8M16.6 16.6l1.8 1.8M5.6 18.4l1.8-1.8M16.6 7.4l1.8-1.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  </defs>
+</svg>
+
+<header class="top">
+  <div class="brand"><img src="icon.png" alt="">Standby</div>
+  <nav class="nav">
+    <a class="on" href="overview.html">Overview</a><a href="transactions.html">Transactions</a><a>Activity</a><a>Settings</a>
+  </nav>
+  <div class="ticker num">
+    <span>Block <b>924,318</b></span><span class="sep"></span>
+    <span>BTC <b>$97,412</b></span><span class="sep"></span>
+    <span>Economy fee <b>4 sat/vB</b></span>
+  </div>
+  <button class="iconbtn" title="Lock"><svg width="16" height="16"><use href="#i-lock"/></svg></button>
+</header>
+
+<main>
+  <div class="row">
+    <!-- check-in -->
+    <section class="panel check">
+      <div class="check-head">
+        <div>
+          <div class="title">Check-in</div>
+          <div class="meta">Last check-in Mon 24 Nov, 14:32 · from iPhone</div>
+        </div>
+        <button class="btn primary big"><svg width="18" height="18"><use href="#i-check"/></svg>Check in now</button>
+      </div>
+      <div class="clocks">
+        <div class="clock">
+          <div class="name">Savings plan<span>35-day check-in</span></div>
+          <div class="track"><div class="zone"></div><div class="fill" style="width:6.2%"></div></div>
+          <div class="left num"><b>32d 20h</b><span>Mon 29 Dec</span></div>
+        </div>
+        <div class="clock">
+          <div class="name">Family set<span>90-day check-in</span></div>
+          <div class="track"><div class="zone"></div><div class="fill" style="width:2.4%"></div></div>
+          <div class="left num"><b>87d 20h</b><span>Sun 22 Feb</span></div>
+        </div>
+        <div class="zone-key" style="margin-top:auto"><i></i>Last 25% of each window</div>
+      </div>
+    </section>
+
+    <!-- system -->
+    <section class="panel sys2">
+      <div class="sys-status">
+        <div class="shield"><svg width="20" height="20"><use href="#i-shield"/></svg></div>
+        <div>
+          <div class="big">Ready to broadcast</div>
+          <div class="muted" style="font-size:12.5px">Last dry run today, 09:14</div>
+        </div>
+      </div>
+      <ul class="sys">
+        <li><span class="dot live ok-c"></span><span class="k">Primary node</span><span class="s mono">mempool.space</span></li>
+        <li><span class="dot ok-c"></span><span class="k">Secondary node</span><span class="s mono">blockstream.info</span></li>
+        <li><span class="dot ok-c"></span><span class="k">BTC price</span><span class="s num">$97,412</span></li>
+        <li><span class="dot ok-c"></span><span class="k">Economy fee</span><span class="s num">4 sat/vB</span></li>
+      </ul>
+    </section>
+  </div>
+
+  <!-- armed -->
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Transactions</h2>
+      <div class="tabs"><span class="on">Armed<em>5</em></span><span>Inactive<em>1</em></span><span>Archived<em>3</em></span></div>
+      <div class="right">
+        <button class="btn ghost"><svg width="15" height="15"><use href="#i-play"/></svg>Dry run all</button>
+        <button class="btn"><svg width="15" height="15"><use href="#i-plus"/></svg>Add transaction</button>
+      </div>
+    </div>
+    <div class="tx head"><div>Name</div><div>Fires when</div><div style="text-align:right">Amount</div><div style="text-align:right">Status</div><span></span></div>
+    <div class="tx">
+      <div class="nm">Savings plan</div>
+      <div class="tp"><div class="line"><svg width="16" height="16"><use href="#i-pulse"/></svg><span>No check-in for 35 days</span></div><div class="meter"><div class="bar"><i style="width:6.2%"></i></div><span class="num">32d 20h left</span></div></div>
+      <div class="amt2 num">0.4200 BTC</div>
+      <div class="st"><span class="chip ok"><span class="dot"></span>Ready</span></div>
+      <span class="more"><svg width="16" height="16"><use href="#i-dots"/></svg></span>
+    </div>
+    <div class="tx">
+      <div class="nm">Family set <span class="count">2 tx<svg width="10" height="10" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg></span></div>
+      <div class="tp"><div class="line"><svg width="16" height="16"><use href="#i-pulse"/></svg><span>No check-in for 90 days</span></div><div class="meter"><div class="bar"><i style="width:2.4%"></i></div><span class="num">87d 20h left</span></div></div>
+      <div class="amt2 num">1.2500 BTC</div>
+      <div class="st"><span class="chip warn">Medium fee risk</span><span class="chip ok"><span class="dot"></span>Ready</span></div>
+      <span class="more"><svg width="16" height="16"><use href="#i-dots"/></svg></span>
+    </div>
+    <div class="tx">
+      <div class="nm">Price exit</div>
+      <div class="tp"><div class="line"><svg width="16" height="16"><use href="#i-price"/></svg><span>BTC at or above $150,000</span></div><div class="meter"><div class="bar"><i style="width:64.9%"></i></div><span class="num">$52,588 to go</span></div></div>
+      <div class="amt2 num">0.1500 BTC</div>
+      <div class="st"><span class="chip bad">High fee risk</span><span class="chip ok"><span class="dot"></span>Ready</span></div>
+      <span class="more"><svg width="16" height="16"><use href="#i-dots"/></svg></span>
+    </div>
+    <div class="tx">
+      <div class="nm">Cold storage sweep</div>
+      <div class="tp"><div class="line"><svg width="16" height="16"><use href="#i-coin"/></svg><span>Output <span class="mono">a1b2…e4f0:1</span> is spent</span></div><div class="or">OR</div><div class="line"><svg width="16" height="16"><use href="#i-cube"/></svg><span>Block 1,000,000</span></div><div class="meter"><div class="bar"><i style="width:92.4%"></i></div><span class="num">75,682 blocks</span></div></div>
+      <div class="amt2 num">2.0000 BTC</div>
+      <div class="st"><span class="chip ok"><span class="dot"></span>Ready</span></div>
+      <span class="more"><svg width="16" height="16"><use href="#i-dots"/></svg></span>
+    </div>
+    <div class="tx">
+      <div class="nm">Year-end gift</div>
+      <div class="tp"><div class="line"><svg width="16" height="16"><use href="#i-cal"/></svg><span>Thu 1 Jan 2027, 09:00</span></div><div class="meter"><div class="bar"><i style="width:84%"></i></div><span class="num">35d 15h left</span></div></div>
+      <div class="amt2 num">0.0500 BTC</div>
+      <div class="st"><span class="chip dim"><span class="dot"></span>Timelocked</span></div>
+      <span class="more"><svg width="16" height="16"><use href="#i-dots"/></svg></span>
+    </div>
+  </section>
+
+  <!-- activity -->
+  <section class="panel">
+    <div class="panel-head"><h2>Activity</h2><div class="right"><a class="sel">View all</a></div></div>
+    <ul class="feed feed2">
+      <li><span class="when num">Today 09:14</span><span class="what"><b>Dry run</b> <span>· all 5 armed transactions ready</span></span></li>
+      <li><span class="when num">Mon 14:32</span><span class="what"><b>Check-in</b> <span>· from iPhone</span></span></li>
+      <li><span class="when num">Sat 18:40</span><span class="what"><b>Added Year-end gift</b> <span>· armed</span></span></li>
+    </ul>
+  </section>
+</main>
+
+<nav class="tabbar">
+  <a class="on" href="overview.html"><svg width="20" height="20"><use href="#i-home"/></svg>Overview</a>
+  <a href="transactions-phone-list.html"><svg width="20" height="20"><use href="#i-list"/></svg>Transactions</a>
+  <a><svg width="20" height="20"><use href="#i-pulse"/></svg>Activity</a>
+  <a><svg width="20" height="20"><use href="#i-gear"/></svg>Settings</a>
+</nav>
+</body>
+</html>
