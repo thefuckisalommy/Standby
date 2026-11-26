@@ -25,7 +25,7 @@ const rules = {
   'no-redeclare': 'error',
 };
 module.exports = [
-  { ignores: ['**/node_modules/**'] },
+  { ignores: ['**/node_modules/**', 'standby-bundled/**'] },
   { files: ['standby/**/*.js', 'tools/**/*.js', 'eslint.config.js'], languageOptions: { ecmaVersion: 2024, sourceType: 'commonjs', globals: node }, rules },
   { files: ['standby/public/**/*.js'], languageOptions: { ecmaVersion: 2020, sourceType: 'script', globals: browser }, rules },
   // Test drivers run code in the page too (browser globals), and share

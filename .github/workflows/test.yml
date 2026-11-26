@@ -16,6 +16,9 @@
 #   - Image job:        bash test/smoke_compose.sh            (~3 min)
 #     (builds the image and runs both install paths for real — see
 #     the script — after shellcheck on the shell scripts)
+#   - Bundle job:       test/make_bundled_app.sh, then the API and
+#     regression suites with STANDBY_TEST_APP_DIR on the bundled copy
+#     (~12 min), then test/bundle_nolib_check.sh
 #   - Lint job:         npx eslint@9.17.0                     (~30 s)
 #     (eslint.config.js at the repo root; nothing is added to the app)
 #
@@ -103,6 +106,30 @@ jobs:
           python-version: '3.11'
       - name: Run API suite (${{ matrix.group }})
         run: python3 test/verify099.py --only ${{ matrix.group }}
+
+  # The single-script bundles (tools/bundle.js) that the standalone builds
+  # embed: the API and regression suites run against a copy of the app
+  # whose entry scripts are the bundles, then the bundles must start and
+  # answer with lib/ deleted (nothing loaded from the app's files).
+  bundle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '26'
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.11'
+      - name: Build the bundled copy
+        run: bash test/make_bundled_app.sh
+      - name: API suite against the bundles
+        run: STANDBY_TEST_APP_DIR="$PWD/standby-bundled" python3 test/verify099.py
+      - name: Regression suite against the bundles
+        run: STANDBY_TEST_APP_DIR="$PWD/standby-bundled" python3 test/verify099-regress.py
+      - name: The bundles run without lib/
+        run: bash test/bundle_nolib_check.sh
 
   # The same API groups and regression suite on Windows (plain Node, no
   # Docker), so a Windows-only break shows up here.

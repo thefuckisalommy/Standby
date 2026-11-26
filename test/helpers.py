@@ -27,8 +27,9 @@ VERSION = json.load(open(os.path.join(GOAL, 'standby', 'package.json')))['versio
 
 
 def app_dir(root):
-    """The app's folder under the repository root."""
-    return os.path.join(root, 'standby')
+    """The app's folder under the repository root, or STANDBY_TEST_APP_DIR
+    (the bundled copy made by test/make_bundled_app.sh)."""
+    return os.environ.get('STANDBY_TEST_APP_DIR') or os.path.join(root, 'standby')
 
 
 # The parent transactions the stub node knows: FINNEY has outputs 0
