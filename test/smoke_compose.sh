@@ -69,14 +69,32 @@ check "generic: the log names the chown fix" \
 docker compose -p sbsmoke-generic down >/dev/null 2>&1
 
 $SUDO chown -R 1000:1000 data checkin
-printf 'STANDBY_PASSWORD=smoke-test-password-123\n' > .env
-docker compose -p sbsmoke-generic up -d >/dev/null 2>&1
 healthy() { [ "$(docker inspect --format '{{.State.Health.Status}}' "$(docker compose -p sbsmoke-generic ps -q "$1")")" = healthy ]; }
-check "generic: web container becomes healthy" wait_for 90 healthy web
-check "generic: check-in receiver becomes healthy" wait_for 90 healthy checkin
-
 B=http://127.0.0.1:3100
 H='Content-Type: application/json'
+
+# The README install: no .env. No password yet; the first-open setup asks
+# for one (and so does Settings), stored in the app.
+docker compose -p sbsmoke-generic up -d >/dev/null 2>&1
+check "generic (no .env): web container becomes healthy" wait_for 90 healthy web
+check "generic (no .env): no password yet, so setup will ask for one" \
+  bash -c "curl -s $B/api/auth/status | grep -q '\"source\":\"none\"'"
+check "generic (no .env): a fresh install starts in setup" \
+  bash -c "curl -s $B/api/state | grep -q '\"setup\":{\"done\":false}'"
+check "generic (no .env): a password can be chosen in the app" \
+  bash -c "curl -s -X POST -H '$H' -d '{\"password\":\"chosen-in-the-app-1\"}' $B/api/auth/password | grep -q '\"required\":true'"
+check "generic (no .env): it is kept in the data folder" bash -c "$SUDO test -f data/login.json"
+docker compose -p sbsmoke-generic down >/dev/null 2>&1
+$SUDO rm -f data/login.json
+
+# A STANDBY_PASSWORD in .env (older installs, or managing it outside the
+# app): it takes over.
+printf 'STANDBY_PASSWORD=smoke-test-password-123\n' > .env
+docker compose -p sbsmoke-generic up -d >/dev/null 2>&1
+check "generic: web container becomes healthy" wait_for 90 healthy web
+check "generic: check-in receiver becomes healthy" wait_for 90 healthy checkin
+check "generic: a .env password reads as set outside the app" \
+  bash -c "curl -s $B/api/auth/status | grep -q '\"source\":\"env\"'"
 check "generic: web runs as UID 1000" \
   bash -c "[ \"\$(docker compose -p sbsmoke-generic exec -T web id -u)\" = 1000 ]"
 check "generic: /api/state without a login is 401" \

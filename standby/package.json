@@ -3,7 +3,7 @@
   "engines": {
     "node": ">=26"
   },
-  "license": "UNLICENSED",
+  "license": "MIT",
   "main": "server.js",
   "name": "standby",
   "private": true,

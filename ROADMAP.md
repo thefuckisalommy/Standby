@@ -2,6 +2,11 @@
 
 Planned work, roughly in order. Nothing here is promised; [CHANGELOG.md](CHANGELOG.md) records what shipped.
 
+## Decided
+
+- **Login on the desktop builds:** like every install without a password from Umbrel or `STANDBY_PASSWORD`, the first-open setup asks for one; it can be skipped, with a warning (0.8.19).
+- **Licence:** MIT.
+
 ## Next
 
 - **Standalone builds (0.9.0).** A Windows x64 `.exe` and single-file Linux x64 and arm64 programs (Node built in, no Docker). Launching one opens a console window and the Standby page in the browser. The data folder lives in the user's own folder. The check-in receiver ships as a second, optional program.
