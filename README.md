@@ -40,8 +40,6 @@ docker compose up -d
 # open http://localhost:3100 — setup asks you to choose a password
 ```
 
-**Installed with an older README?** Its `.env` file holds a `STANDBY_PASSWORD`, which keeps working and takes priority over a password set in the app. To choose your password in the app instead, remove that line and restart: `sed -i '/^STANDBY_PASSWORD=/d' .env && docker compose up -d`, then set one in Settings → App login straight away (until then there is none).
-
 The containers run as UID 1000, so the data directories must belong to it; Standby refuses to start and says so if it cannot write. Upgrading from 0.8.10 or older (which ran as root): run the `chown` once before starting.
 
 Two services from one image:
