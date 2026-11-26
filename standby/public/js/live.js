@@ -535,6 +535,7 @@ function patchTxCard(tx, overlapsByTx) {
   if (pillCls === 'ok' && overlapsByTx[tx.id] && overlapsByTx[tx.id].length) pillCls = 'warn';
   card.pill.textContent = txPillText(tx, st);
   card.pill.className = 'pill ' + pillCls;
+  if (card.row && card.row.dataset) card.row.dataset.armed = armedAttr(tx, st);
   var ruleSet = triggerSetOf(tx);
   var ruleStates = triggerStatesOf(tx);
   (card.rules || []).forEach(function (r, i) {
@@ -574,6 +575,7 @@ function patchSetCard(set) {
   var st = setStatus(set);
   card.pill.textContent = setPillText(set, st);
   card.pill.className = 'pill ' + st.cls;
+  if (card.row && card.row.dataset) card.row.dataset.armed = armedAttr(set, st);
   var ruleSet = triggerSetOf(set);
   var ruleStates = triggerStatesOf(set);
   (card.rules || []).forEach(function (r, i) {

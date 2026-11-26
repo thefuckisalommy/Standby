@@ -15,12 +15,14 @@ function renderHeaderButtons() {
   if (lock) lock.style.display = authInfo.required ? '' : 'none';
 }
 
-// Lock: forget this browser's login and show the login screen. Other
-// devices stay logged in (Settings > App login > Log out everywhere ends
-// every session).
+// Lock: after a confirm (an accidental tap does nothing), forget this
+// browser's login and show the login screen. Other devices stay logged in
+// (Settings > App login > Log out everywhere ends every session).
 $('btn-lock').addEventListener('click', function () {
-  setToken(null);
-  location.reload();
+  showConfirm('Lock Standby?', 'This browser is logged out and shows the login screen; you will need the password to get back in. Other devices stay logged in, and Standby keeps running.', function () {
+    setToken(null);
+    location.reload();
+  }, 'Lock');
 });
 
 $('appbar-brand').addEventListener('click', function () { showTab('dashboard'); });

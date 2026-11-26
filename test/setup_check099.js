@@ -132,7 +132,13 @@ function check(name, cond, detail) {
     await p.reload(); await p.waitForTimeout(1000);
     check('this browser stays logged in', !(await vis('#login-modal .modal')));
     check('header: the lock shows once a password is set', await vis('#btn-lock'));
-    await p.click('#btn-lock'); await p.waitForTimeout(1200);
+    await p.click('#btn-lock'); await p.waitForTimeout(200);
+    check('the lock asks first', await vis('#confirm-modal .modal') && /Lock Standby\?/.test(await p.textContent('#confirm-title')));
+    await p.click('#confirm-cancel'); await p.waitForTimeout(200);
+    check('Cancel keeps this browser logged in', !(await vis('#confirm-modal .modal')) && !(await vis('#login-modal .modal'))
+      && (await p.evaluate(() => localStorage.getItem('standby.sessionToken'))) !== null);
+    await p.click('#btn-lock'); await p.waitForTimeout(200);
+    await p.click('#confirm-proceed'); await p.waitForTimeout(1200);
     check('the lock logs this browser out: the login screen', await vis('#login-modal .modal'));
     check('the lock removed the stored session', (await p.evaluate(() => localStorage.getItem('standby.sessionToken'))) === null);
     await p.click('#login-forgot summary'); await p.waitForTimeout(100);

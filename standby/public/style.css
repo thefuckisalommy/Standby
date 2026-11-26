@@ -809,3 +809,39 @@ button.btn-checkin-big { width: auto; flex: 0 0 auto; padding: 12px 22px; font-s
   .iconbtn.wide span { display: none; }
   .alerts-panel { position: fixed; left: 12px; right: 12px; top: 62px; width: auto; }
 }
+
+/* Transactions: each card has an orange edge while armed and is all
+   grey when disarmed; each trigger box takes its trigger type's colour;
+   a set's member boxes are neutral. */
+#tab-bitcoin .tx-card.tx-sub { background: transparent; border-color: var(--line); padding: 14px 16px; }
+#tab-bitcoin .tx-card.tx-sub[data-armed="on"] { border-color: var(--armed-edge); }
+#tab-bitcoin .tx-card.tx-sub[data-armed="off"] { border-color: var(--line); }
+#tab-bitcoin .tx-card.tx-sub[data-armed="off"],
+#tab-bitcoin .tx-card.tx-sub[data-armed="off"] .tx-amount,
+#tab-bitcoin .tx-card.tx-sub[data-armed="off"] .tx-head b,
+#tab-bitcoin .tx-card.tx-sub[data-armed="off"] .tx-trigger { color: var(--faint); }
+#tab-bitcoin .tx-card.tx-sub[data-armed="off"] .tx-trigger { border-left-color: var(--line-2) !important; }
+.tx-amount { font-size: 18px; font-weight: 600; letter-spacing: -0.01em; }
+.tx-trigger { background: var(--bg); border-left-color: var(--line-2); }
+.tx-trigger[data-type="checkin"] { border-left-color: var(--t-checkin); }
+.tx-trigger[data-type="price"] { border-left-color: var(--t-price); }
+.tx-trigger[data-type="utxo"] { border-left-color: var(--t-utxo); }
+.tx-trigger[data-type="blockheight"] { border-left-color: var(--t-block); }
+.tx-trigger[data-type="setdate"] { border-left-color: var(--t-date); }
+.tx-trigger[data-type="feemarket"] { border-left-color: var(--t-fee); }
+.tx-trigger[data-type="manual"] { border-left-color: var(--t-manual); }
+.tx-trigger[data-type="checkin"] .tx-trigger-k { color: var(--t-checkin); }
+.tx-trigger[data-type="price"] .tx-trigger-k { color: var(--t-price); }
+.tx-trigger[data-type="utxo"] .tx-trigger-k { color: var(--t-utxo); }
+.tx-trigger[data-type="blockheight"] .tx-trigger-k { color: var(--t-block); }
+.tx-trigger[data-type="setdate"] .tx-trigger-k { color: var(--t-date); }
+.tx-trigger[data-type="feemarket"] .tx-trigger-k { color: var(--t-fee); }
+.tx-trigger.tx-item { border-left-color: var(--line-2); background: var(--panel-2); }
+#tab-bitcoin details.staged > summary, #tab-bitcoin details.pending > summary, #tab-bitcoin details.archived > summary { font-size: 16px; font-weight: 600; }
+.tx-actions button { padding: 7px 12px; font-size: 13.5px; }
+/* Disarmed: everything inside is grey (the switch stays usable). */
+#tab-bitcoin .tx-card.tx-sub[data-armed="off"] * { color: var(--faint) !important; }
+#tab-bitcoin .tx-card.tx-sub[data-armed="off"] button,
+#tab-bitcoin .tx-card.tx-sub[data-armed="off"] .tx-trigger,
+#tab-bitcoin .tx-card.tx-sub[data-armed="off"] .pill { border-color: var(--line-2) !important; background-color: transparent; }
+#tab-bitcoin .tx-card.tx-sub[data-armed="off"] .tx-trigger-k { color: var(--faint) !important; }

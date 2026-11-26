@@ -1689,8 +1689,8 @@ function check(name, cond, detail) {
 
   // --- 11. Staged Transactions card ---
   // A <details>, open by default.
-  check('staged card: the card is titled "Staged Transactions" (static HTML)',
-    idx.indexOf('Staged Transactions') !== -1 && idx.indexOf('id="btc-card"') !== -1, '');
+  check('staged card: the card is titled "Active" (static HTML)',
+    idx.indexOf('<span class="sum-text">Active</span>') !== -1 && idx.indexOf('id="btc-card"') !== -1, '');
   check('staged card: the old "Pre-signed Bitcoin transactions" title is gone (static HTML)',
     idx.indexOf('Pre-signed Bitcoin transactions') === -1, '');
   const btcTag = (idx.match(/<details[^>]*id="btc-card"[^>]*>/) || [''])[0];
