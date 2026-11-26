@@ -5275,7 +5275,13 @@
   // here can show or reset the password.
   function renderForgot() {
     var body = $('login-forgot-body');
-    if (authInfo.source === 'app') {
+    if (authInfo.source === 'app' && authInfo.dataFolder) {
+      // A standalone build: no command line needed.
+      body.innerHTML = '<p>It cannot be shown or reset from this page. On the computer running Standby:</p>'
+        + '<ol><li>Close Standby (close its window).</li><li>Open the folder <code></code> and delete the file <code>login.json</code> in it.</li><li>Start Standby again and set a new password.</li></ol>'
+        + '<p>Your transactions, triggers and settings are kept.</p>';
+      body.querySelector('code').textContent = authInfo.dataFolder;
+    } else if (authInfo.source === 'app') {
       body.innerHTML = '<p>It cannot be shown or reset from this page. On the computer running Standby:</p>'
         + '<ol><li>Close Standby.</li><li>Start it again with <code>--reset-password</code>, or delete <code>login.json</code> from the Standby data folder'
         + (authInfo.deployment === 'docker' ? ' (<code>data</code>, next to <code>docker-compose.yml</code>)' : '') + '.</li><li>Open Standby and set a new password.</li></ol>'
@@ -5669,7 +5675,7 @@
   });
 
   api('GET', '/api/auth/status').then(function (st) {
-    authInfo = { required: !!st.required, source: st.source || (st.required ? 'env' : 'none'), deployment: st.deployment || '' };
+    authInfo = { required: !!st.required, source: st.source || (st.required ? 'env' : 'none'), deployment: st.deployment || '', dataFolder: st.dataFolder || '' };
     renderLoginCard();
     renderForgot();
     if (st.required && !st.authenticated) showLogin();

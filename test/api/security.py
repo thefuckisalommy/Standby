@@ -281,6 +281,7 @@ def run():
         check('40b app-pw: login.json is 0600', _mode(_lf) == 0o600, oct(_mode(_lf)))
     s, r = req('GET', '/api/auth/status', base=_ab)
     check('40b app-pw: status says required, source app', r.get('required') is True and r.get('source') == 'app', r)
+    check('40b app-pw: a non-standalone run names no data folder in the status', 'dataFolder' not in r, r)
     s, r = req('GET', '/api/state', base=_ab)
     check('40b app-pw: the API is gated now', s == 401 and r.get('login') is True, (s, r))
     _ah = {'X-Standby-Token': _atok or ''}
