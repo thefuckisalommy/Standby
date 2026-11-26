@@ -29,10 +29,11 @@ module.exports = async function settingsRoutes(ctx) {
   }
 
   // GET /api/desktop: this computer's options (standalone builds):
-  // { available, startAtLogin, stop (Stop Standby offered), error }.
+  // { available, startAtLogin, stop (Stop Standby offered), platform
+  // ('win32' has the tray icon; Linux runs with no window), error }.
   if (req.method === 'GET' && pathname === '/api/desktop') {
     const a = autostart.status();
-    return sendJson(res, 200, { available: a.available, startAtLogin: state.settings.startAtLogin !== false, stop: STANDALONE, error: a.error });
+    return sendJson(res, 200, { available: a.available, startAtLogin: state.settings.startAtLogin !== false, stop: STANDALONE, platform: a.platform, error: a.error });
   }
 
   // POST /api/app/stop: Stop Standby (standalone builds only). Answers,

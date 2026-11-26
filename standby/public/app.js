@@ -5412,11 +5412,18 @@
     return api('GET', '/api/desktop').then(function (d) { desktopInfo = d; renderDesktop(); })
       .catch(function () { /* older server: nothing to show */ });
   }
+  // Windows runs in the tray; Linux has no tray icon, so it says where
+  // to open Standby instead.
+  function hasTray() { return !!(desktopInfo && desktopInfo.platform === 'win32'); }
+  function pageAddress() { return 'http://' + (window.location.host || 'localhost:3100'); }
   function renderDesktop() {
     var d = desktopInfo;
     $('card-desktop').style.display = (d && d.available) ? '' : 'none';
     if (!d || !d.available) return;
     $('desktop-autostart').checked = !!d.startAtLogin;
+    $('desktop-autostart-note').textContent = hasTray()
+      ? 'Standby starts in the background when you sign in to this computer, with its icon next to the clock. Triggers are only checked while Standby runs.'
+      : 'Standby starts in the background when you sign in to this computer, with no window: open it at ' + pageAddress() + '. Triggers are only checked while Standby runs.';
     if (d.error) setMsg($('desktop-msg'), 'Could not change the sign-in list: ' + d.error, false);
   }
   async function setStartAtLogin(want, msgEl) {
@@ -5782,6 +5789,9 @@
   // switching it off here takes effect at once.
   function renderSetupStartup() {
     var on = !!(desktopInfo && desktopInfo.startAtLogin);
+    $('setup-startup-lead').textContent = 'Standby only checks your triggers while it is running. So that it keeps running after a restart, it starts by itself when you sign in to this computer, '
+      + (hasTray() ? 'quietly in the background with its icon next to the clock.'
+        : 'quietly in the background with no window. Open it any time at ' + pageAddress() + ' (worth bookmarking), and stop it from Settings → This computer.');
     $('setup-autostart').checked = on;
     $('setup-autostart-note').textContent = on
       ? 'On. You can turn this off here, or later in Settings → This computer.'
