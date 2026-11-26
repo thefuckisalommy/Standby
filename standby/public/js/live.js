@@ -476,6 +476,8 @@ function patchCheckinBars(status) {
     }
     var cap = block.children[2];
     if (cap) cap.textContent = daysSince + ' of ' + windowDays + ' days elapsed' + (frozen ? ' — disarmed, frozen' : b.state === 'grace' ? ' — held by grace' : '');
+    block.dataset.nextDue = b.nextDue || '';
+    fillCkLeft(block.children[3], daysSince, windowDays, b.nextDue, frozen, b.state === 'grace');
   });
 }
 // Patch the readiness rows in place (status and fee pills; set rows by
@@ -654,6 +656,7 @@ function tickCheckinCountdownLocal() {
       }
       var cap = block.children[2];
       if (cap) cap.textContent = d + ' of ' + windowDays + ' days elapsed' + (frozen ? ' — disarmed, frozen' : '');
+      fillCkLeft(block.children[3], d, windowDays, block.dataset && block.dataset.nextDue, frozen, false);
     });
   }
   (S.bitcoin.txs || []).forEach(function (tx) {

@@ -1,84 +1,98 @@
-/* Standby — dark theme. System fonts, soft borders, one accent. */
+/* Standby — dark theme: near-black, thin lines, one orange accent for
+   the main action and for what is armed; colour otherwise carries meaning
+   (green OK, amber watch, red risk). */
 :root {
-  --bg: #0f1115;
-  --card: #1a1d24;
-  --ink: #f3f4f6;
-  --muted: #9ca3af;
-  --line: #2f3540;
-  --accent: #d97706; /* warm amber, restrained */
-  --accent-bg: #3f2a08;
-  --ok: #4ade80;
-  --ok-bg: #14532d;
-  --warn: #fbbf24;
-  --warn-bg: #451a03;
-  --bad: #f87171;
-  --bad-bg: #450a0a;
-  --bad-soft: #fca5a5; /* lighter red: High Risk */
-  --bad-soft-bg: #7f1d1d;
+  --bg: #0a0c0f;
+  --card: #101318;
+  --panel-2: #151920;
+  --ink: #e7eaef;
+  --ink-2: #b4bcc8;
+  --muted: #8a94a3;
+  --faint: #5f6977;
+  --line: #1f252e;
+  --line-2: #2a313c;
+  --accent: #f39a2b;
+  --accent-ink: #1a1206;
+  --accent-bg: rgba(243, 154, 43, 0.14);
+  --armed-edge: rgba(243, 154, 43, 0.3);
+  --ok: #3fb97f;
+  --ok-bg: rgba(63, 185, 127, 0.14);
+  --warn: #e0b04a;
+  --warn-bg: rgba(224, 176, 74, 0.14);
+  --bad: #ef5d5d;
+  --bad-bg: rgba(239, 93, 93, 0.14);
+  --bad-soft: #f59a9a; /* lighter red: High Risk */
+  --bad-soft-bg: rgba(245, 154, 154, 0.12);
+  /* Trigger types, one colour each. */
+  --t-checkin: #6ea8ff;
+  --t-price: #b69cff;
+  --t-utxo: #4cc9e6;
+  --t-block: #a3adbd;
+  --t-date: #f19ac0;
+  --t-fee: #e8b86a;
+  --t-manual: #8a94a3;
   --radius: 10px;
+  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 * { box-sizing: border-box; }
 body {
   margin: 0;
   background: var(--bg);
   color: var(--ink);
-  font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font: 15.5px/1.5 Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-feature-settings: "tnum" 1;
+  -webkit-font-smoothing: antialiased;
 }
 /* No horizontal page scroll on a phone. clip (not hidden) avoids a scroll
    container that would break sticky headers; hidden is the fallback. */
 html, body { overflow-x: hidden; overflow-x: clip; }
+/* Top bar: logo, the tabs (desktop) and the menu. On a phone the tabs
+   become a bar along the bottom of the screen (see the end of this file). */
 header.appbar {
   position: sticky; top: 0; z-index: 50;
-  background: var(--card);
+  background: var(--bg);
   border-bottom: 1px solid var(--line);
-  /* Short bar: the logo text and burger button keep their
-     size — only the blank space above and below them is cut. */
-  padding: 4px 20px;
+  padding: 0 24px; height: 58px;
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 24px;
 }
-.appbar-title { font-size: 22px; font-weight: 700; letter-spacing: 0.2px; }
-.appbar-logo { height: 28px; width: 28px; flex-shrink: 0; border-radius: 6px; display: block; }
+.appbar-title { font-size: 17px; font-weight: 600; letter-spacing: -0.01em; }
+.appbar-logo { height: 28px; width: 28px; flex-shrink: 0; border-radius: 7px; display: block; }
+.appbar-brand { display: flex; align-items: center; gap: 10px; }
 header .spacer { flex: 1; }
 /* Burger menu (three-line ☰). */
 .burger { position: relative; }
 .burger summary {
   list-style: none; cursor: pointer;
-  padding: 8px; border-radius: 6px;
+  width: 36px; height: 36px; border-radius: 8px; border: 1px solid var(--line);
   display: flex; align-items: center; justify-content: center;
-  font-size: 22px; color: var(--ink);
+  font-size: 18px; color: var(--muted);
 }
 .burger summary::-webkit-details-marker { display: none; }
-.burger summary:hover { background: #2f3540; }
+.burger summary:hover { background: var(--panel-2); color: var(--ink); }
 .burger nav {
   position: absolute; right: 0; top: calc(100% + 8px); min-width: 12rem;
-  background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  background: var(--card); border: 1px solid var(--line-2); border-radius: var(--radius);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
   overflow: hidden;
 }
 .burger nav a {
-  display: block; padding: 12px 16px; color: var(--ink);
-  text-decoration: none; font-size: 15px;
+  display: block; padding: 11px 16px; color: var(--ink);
+  text-decoration: none; font-size: 14.5px;
 }
-.burger nav a:hover { background: #2f3540; }
-main { max-width: 880px; margin: 0 auto; padding: 0 20px 20px; }
-nav.tabs {
-  /* No gap: the buttons' own padding spaces them, and the four still fit
-     one row at 390px with a wider font. */
-  display: flex; gap: 0; flex-wrap: wrap; justify-content: center;
-  margin-bottom: 20px;
-  border-bottom: 1px solid var(--line);
-  /* Sticky tab bar, just below the sticky appbar (~59px tall). The
-     background is needed (the buttons have none); z-index 40 keeps it
-     under the appbar (50). */
-  position: sticky; top: 60px; z-index: 40; background: var(--bg);
-}
+.burger nav a:hover { background: var(--panel-2); }
+main { max-width: 1120px; margin: 0 auto; padding: 24px 24px 32px; }
+/* The tabs, in the top bar. */
+nav.tabs { display: flex; gap: 4px; align-items: center; }
 nav.tabs button {
-  background: none; border: none; border-bottom: 2px solid transparent;
-  padding: 10px 10px; font-size: 15px; color: var(--muted); cursor: pointer;
+  display: inline-flex; align-items: center; gap: 8px;
+  background: none; border: none; border-radius: 8px;
+  padding: 8px 12px; font-size: 14px; font-weight: 500; color: var(--muted); cursor: pointer;
 }
-nav.tabs button.active { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
+nav.tabs button svg { display: none; }
+nav.tabs button:hover { background: var(--panel-2); color: var(--ink); }
+nav.tabs button.active { color: var(--ink); background: var(--panel-2); }
 section.tab { display: none; }
 section.tab.active { display: block; }
 .card {
@@ -100,7 +114,7 @@ label { display: block; font-size: 14px; font-weight: 600; margin: 12px 0 4px; }
 input[type="text"], input[type="email"], input[type="number"], input[type="date"],
 input[type="url"], input[type="datetime-local"], input[type="password"], textarea, select {
   width: 100%; padding: 9px 10px; font: inherit; font-size: 15px;
-  border: 1px solid var(--line); border-radius: 6px; background: #0f1115; color: var(--ink);
+  border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--ink);
   color-scheme: dark;
 }
 /* A select must never be wider than its container: on a phone the native
@@ -123,11 +137,11 @@ input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent); bo
 button {
   font: inherit; font-size: 15px; cursor: pointer;
   padding: 9px 16px; border-radius: 6px;
-  border: 1px solid var(--line); background: #262b35; color: var(--ink);
+  border: 1px solid var(--line); background: var(--panel-2); color: var(--ink);
 }
-button:hover { background: #2f3540; }
-button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-button.primary:hover { background: #b45309; }
+button:hover { background: var(--line-2); }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+button.primary:hover { background: #e58c1e; }
 button.big { font-size: 18px; padding: 14px 28px; }
 button.danger { border-color: var(--bad); color: var(--bad); }
 button:disabled { opacity: 0.5; cursor: default; }
@@ -158,13 +172,13 @@ button:disabled { opacity: 0.5; cursor: default; }
 .pill.bad { background: var(--bad-bg); color: var(--bad); }
 /* High Risk is a lighter red than Critical, so the two read apart. */
 .pill.bad-soft { background: var(--bad-soft-bg); color: var(--bad-soft); }
-.pill.muted { background: #2f3540; color: var(--muted); }
+.pill.muted { background: var(--line-2); color: var(--muted); }
 .notice {
   border: 1px solid var(--line); border-left: 4px solid var(--accent);
-  background: #1c1a17; border-radius: 6px; padding: 10px 14px; margin: 12px 0;
+  background: #17130d; border-radius: 6px; padding: 10px 14px; margin: 12px 0;
   font-size: 14px;
 }
-.notice.bad { border-left-color: var(--bad); background: #2a1215; }
+.notice.bad { border-left-color: var(--bad); background: #1d1012; }
 /* Grace card: amber left border (a warning, like the Grace pill), a
    countdown bar, and Resume with its note beside it. */
 .grace-card { border-left: 4px solid var(--warn); }
@@ -182,12 +196,12 @@ table { width: 100%; border-collapse: collapse; font-size: 14.5px; }
 th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
 th { color: var(--muted); font-weight: 600; }
 pre {
-  background: #0f1115; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
   padding: 12px; white-space: pre-wrap; word-break: break-word;
   font-size: 13px; max-height: 300px; overflow: auto;
 }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
-.progress { height: 8px; background: #2f3540; border-radius: 999px; overflow: hidden; margin: 8px 0; }
+.progress { height: 8px; background: var(--line-2); border-radius: 999px; overflow: hidden; margin: 8px 0; }
 .progress > div { height: 100%; background: var(--accent); }
 /* Per-tx check-in bars: label, bar (.progress, colour set inline by time
    left) and caption. */
@@ -232,7 +246,7 @@ button.btn-checkin-big { width: 100%; padding: 16px 20px; font-size: 19px; }
    first line (never wrapping: the label truncates), the trigger and value
    below. The 6px gap and 8px padding keep the longest two-pill label on
    one line at 390px. */
-.readiness-tx { background: #22252d; border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; margin: 10px 0; }
+.readiness-tx { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; margin: 10px 0; }
 .readiness-tx-row { display: flex; align-items: baseline; gap: 6px; flex-wrap: nowrap; }
 .readiness-tx-row b { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; font-weight: 400; }
 .readiness-tx-row .pill { flex-shrink: 0; }
@@ -244,14 +258,14 @@ button.btn-checkin-big { width: 100%; padding: 16px 20px; font-size: 19px; }
 .readiness-tx-member-amt { flex-shrink: 0; font-size: 14px; }
 /* The Node + Exchange Status block: one blue-slate sub-card, each row with
    its own checked time. */
-.readiness-status { background: #1f2a38; border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; margin: 10px 0; }
+.readiness-status { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; margin: 10px 0; }
 .readiness-status .readiness-item { margin: 0; }
 .readiness-status .readiness-item + .readiness-item { margin-top: 10px; }
 /* The guard note under a trigger picker: the rule's own
    safety guard, named where the rule is set — not on the card. */
 .guard-note {
   border: 1px solid var(--line); border-left: 4px solid var(--accent);
-  background: #1c1a17; border-radius: 6px; padding: 10px 14px; margin: 12px 0 4px;
+  background: #17130d; border-radius: 6px; padding: 10px 14px; margin: 12px 0 4px;
   font-size: 14px; overflow-wrap: break-word;
 }
 /* The Fee line's verdict suffix, coloured like the pills. */
@@ -281,7 +295,7 @@ button.btn-checkin-big { width: 100%; padding: 16px 20px; font-size: 19px; }
    placed after the space-between rule. */
 #readiness-node-item .node-lines > div { justify-content: flex-start; }
 #readiness-node-item .node-lines .node-check-detail { margin-left: auto; }
-a { color: #f59e0b; }
+a { color: var(--accent); }
 
 /* Card header row: heading left, toggle right. */
 .section-head { display: flex; align-items: center; justify-content: space-between;
@@ -331,7 +345,7 @@ a { color: #f59e0b; }
 .switch { display: inline-flex; align-items: center; gap: 10px; cursor: pointer;
   font-weight: 600; font-size: 15px; margin: 0; }
 .switch input { position: absolute; opacity: 0; width: 0; height: 0; }
-.switch .slider { width: 44px; height: 24px; border-radius: 999px; background: #374151;
+.switch .slider { width: 44px; height: 24px; border-radius: 999px; background: var(--line-2);
   transition: background 0.15s; flex-shrink: 0; position: relative; }
 .switch .slider::after { content: ""; position: absolute; top: 3px; left: 3px; width: 18px;
   height: 18px; border-radius: 50%; background: #f3f4f6; transition: transform 0.15s; }
@@ -380,7 +394,7 @@ details.archived > summary { cursor: pointer; font-size: 18px; font-weight: 700;
    headers. */
 
 /* A tx card nested in its list card: a lighter panel. */
-.tx-card.tx-sub { margin-top: 12px; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius); background: #14171d; }
+.tx-card.tx-sub { margin-top: 12px; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius); background: #0d1014; }
 .tx-card .tx-head { display: flex; align-items: flex-start; gap: 12px; flex-wrap: nowrap; }
 .tx-card .tx-head b { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; font-size: 15px; }
 .tx-card .tx-head .pill { flex-shrink: 0; margin-left: auto; }
@@ -395,7 +409,7 @@ details.archived > summary { cursor: pointer; font-size: 18px; font-weight: 700;
    state. */
 .tx-trigger {
   margin-top: 10px; padding: 9px 12px;
-  background: #0f1115;
+  background: var(--bg);
   border: 1px solid var(--line); border-left: 3px solid var(--accent);
   border-radius: 8px; font-size: 14.5px; line-height: 1.45;
   overflow-wrap: anywhere;
@@ -404,7 +418,7 @@ details.archived > summary { cursor: pointer; font-size: 18px; font-weight: 700;
 .tx-trigger.tx-item { border-left-color: #60a5fa; }
 /* A repeatable entry in the Add modal:
    one boxed panel per transaction, like a rule panel. */
-.btc-tx-entry { background: #14171d; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-top: 10px; }
+.btc-tx-entry { background: #0d1014; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-top: 10px; }
 .btc-tx-entry:first-child { margin-top: 0; }
 /* Space between the Add modal's set label and the first entry. */
 #btc-tx-list { margin-top: 12px; }
@@ -431,16 +445,16 @@ details.archived > summary { cursor: pointer; font-size: 18px; font-weight: 700;
    not uppercased, unlike the single-rule header. */
 .rules-label-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 12px 0 4px; }
 .rules-label-row label { margin: 0; }
-.op-section { border: 1px solid var(--line); border-radius: 8px; background: #14171d; padding: 12px; margin: 12px 0 4px; }
+.op-section { border: 1px solid var(--line); border-radius: 8px; background: #0d1014; padding: 12px; margin: 12px 0 4px; }
 .op-section > label { margin: 0 0 4px; font-size: 14px; }
-.op-card { display: flex; align-items: flex-start; gap: 10px; width: 100%; text-align: left; background: #0f1115; border: 1px solid var(--line); border-left: 3px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-top: 8px; }
-.op-card.selected { border-left-color: var(--accent); background: #1c1a17; }
+.op-card { display: flex; align-items: flex-start; gap: 10px; width: 100%; text-align: left; background: var(--bg); border: 1px solid var(--line); border-left: 3px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-top: 8px; }
+.op-card.selected { border-left-color: var(--accent); background: #17130d; }
 .op-radio { flex-shrink: 0; width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--muted); margin-top: 2px; }
-.op-card.selected .op-radio { border-color: var(--accent); background: var(--accent); box-shadow: inset 0 0 0 3px #1c1a17; }
+.op-card.selected .op-radio { border-color: var(--accent); background: var(--accent); box-shadow: inset 0 0 0 3px #17130d; }
 .op-card-text b { display: block; font-size: 15px; }
 .op-card-text span { display: block; color: var(--muted); font-size: 13.5px; margin-top: 1px; }
 .op-note { color: var(--muted); font-size: 13px; margin: 10px 0 0; }
-.rule { background: #14171d; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-top: 10px; }
+.rule { background: #0d1014; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-top: 10px; }
 .rule-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .rule-head b { font-size: 14px; }
 .rule-remove { background: transparent; border: 1px solid var(--line); color: var(--muted); font-size: 13px; padding: 4px 10px; }
@@ -513,7 +527,7 @@ p.inline-btns { display: flex; gap: 8px; flex-wrap: nowrap; align-items: center;
 /* Notes are a small boxed section inside the Details, only when the
    transaction has notes. */
 .tx-card .tx-mara { color: var(--muted); font-size: 14px; margin: 4px 0; overflow-wrap: anywhere; }
-.tx-card .tx-notes { color: var(--muted); font-size: 14px; margin: 8px 0 4px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: #0f1115; }
+.tx-card .tx-notes { color: var(--muted); font-size: 14px; margin: 8px 0 4px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
 .tx-card .tx-actions { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
 .tx-card .tx-actions button { padding: 6px 12px; font-size: 14px; }
 /* Sent line (green when confirmed, amber unconfirmed, red not found or
@@ -525,7 +539,7 @@ p.inline-btns { display: flex; gap: 8px; flex-wrap: nowrap; align-items: center;
 /* A broadcast log row is clickable — it pops out the details of that
    entry. */
 .log-row { cursor: pointer; }
-.log-row:hover { background: #232833; }
+.log-row:hover { background: var(--panel-2); }
 /* Confirmation dialog for the manual broadcasts. */
 .modal-overlay {
   position: fixed; inset: 0; z-index: 100;
@@ -538,7 +552,7 @@ p.inline-btns { display: flex; gap: 8px; flex-wrap: nowrap; align-items: center;
    a confirm opened while editing is visible. */
 #confirm-modal { z-index: 110; }
 /* The login screen covers everything, the other modals included. */
-#login-modal { z-index: 120; background: var(--bg, #0f1115); }
+#login-modal { z-index: 120; background: var(--bg, var(--bg)); }
 /* Modals never scroll or widen horizontally (a native select popout could
    otherwise widen the page); vertical scroll stays. */
 .modal {
@@ -630,7 +644,7 @@ body.setup-open #tabs, body.setup-open main section.tab, body.setup-open .burger
 .setup-logo { width: 56px; height: 56px; border-radius: 12px; margin: 4px 0 10px; }
 .setup-card .choice { display: block; border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px 12px 42px; margin: 10px 0; position: relative; cursor: pointer; font-weight: 400; }
 .setup-card .choice input { position: absolute; left: 14px; top: 14px; margin: 0; accent-color: var(--accent); width: 16px; height: 16px; }
-.setup-card .choice.sel { border-color: var(--accent); background: #1c1a17; }
+.setup-card .choice.sel { border-color: var(--accent); background: #17130d; }
 .setup-card .choice strong { display: block; }
 .setup-card .choice span { color: var(--muted); font-size: 14px; }
 .setup-defs { background: #161a20; border-radius: 8px; padding: 4px 12px; margin: 10px 0 14px; }
@@ -674,3 +688,100 @@ body.setup-open #tabs, body.setup-open main section.tab, body.setup-open .burger
 
 /* The dashboard's "new version" notice: its Not now link is quiet. */
 .muted-link { color: var(--muted); }
+
+/* ===================== 0.8.24 look =====================
+   Panels, controls and the Overview layout. Later rules here refine the
+   older ones above. */
+.card { border-radius: var(--radius); padding: 20px 22px; margin-bottom: 20px; }
+.card h2 { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; }
+button { font-size: 14px; font-weight: 500; border-radius: 8px; border-color: var(--line-2); padding: 8px 14px; }
+button.big { font-size: 15px; padding: 12px 22px; border-radius: 10px; }
+button.danger { background: transparent; border-color: rgba(239, 93, 93, 0.4); }
+.pill { font-size: 12px; font-weight: 500; padding: 3px 9px; }
+input[type="text"], input[type="email"], input[type="number"], input[type="date"],
+input[type="url"], input[type="datetime-local"], input[type="password"], textarea, select { border-radius: 8px; }
+.muted { font-size: 13.5px; }
+code, pre, textarea { font-family: var(--mono); }
+
+/* Overview: check-in and connections side by side, armed transactions
+   below. */
+.dash-top { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 20px; align-items: stretch; margin-bottom: 20px; }
+.dash-top > .card { margin-bottom: 0; }
+.dash-top:has(> #checkin-card[style*="none"]) { grid-template-columns: minmax(0, 1fr); }
+
+/* Check-in: title, status and last check-in on the left, the button on
+   the right; then one bar per check-in transaction. */
+.ck-head { display: flex; align-items: center; gap: 16px; padding-bottom: 16px; border-bottom: 1px solid var(--line); }
+.ck-title { flex: 1 1 auto; min-width: 0; }
+.ck-title .section-head { justify-content: flex-start; }
+.ck-meta { margin: 4px 0 0; color: var(--muted); font-size: 13.5px; }
+.ck-meta #last-checkin { color: var(--ink-2); }
+button.btn-checkin-big { width: auto; flex: 0 0 auto; padding: 12px 22px; font-size: 15px; }
+#checkin-tx-bars { display: grid; gap: 14px; padding-top: 16px; }
+.ck-tx { margin: 0; display: grid; grid-template-columns: 170px minmax(0, 1fr) 128px; grid-template-areas: "label bar left" "cap bar left"; column-gap: 18px; align-items: center; }
+.ck-tx-label { grid-area: label; font-weight: 500; font-size: 14px; }
+.ck-tx .progress { grid-area: bar; margin: 0; height: 6px; background-color: var(--panel-2);
+  /* The last quarter of the window, hatched: there, arming or editing
+     counts as a check-in. */
+  background-image: repeating-linear-gradient(135deg, rgba(239, 93, 93, 0.22) 0 4px, transparent 4px 8px);
+  background-size: 25% 100%; background-position: right; background-repeat: no-repeat; }
+.ck-tx .progress-label { grid-area: cap; margin: 0; font-size: 12.5px; }
+.ck-tx-left { grid-area: left; text-align: right; font-size: 13px; }
+.ck-tx-left b { display: block; font-weight: 600; }
+.ck-tx-left span { display: block; color: var(--muted); font-size: 12.5px; }
+.ck-tx.frozen .ck-tx-left b { color: var(--muted); font-weight: 500; }
+#status-line { margin: 14px 0 0; }
+#status-line:empty { display: none; }
+
+/* Connections: nodes and price sources, one quiet row each. */
+#connections-card h2 { margin-bottom: 10px; }
+#connections-card .readiness-status { background: none; border: 0; padding: 0; margin: 0; }
+#connections-card .readiness-label { font-size: 11.5px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--faint); margin: 6px 0 4px; }
+#connections-card .node-lines > div { padding: 7px 0; border-top: 1px solid var(--line); font-size: 14px; }
+#connections-card .node-lines > div + div { margin-top: 0; }
+
+/* Armed transactions: one panel each; an orange edge while armed, all
+   grey when disarmed. The condition line takes its trigger's colour. */
+.readiness-tx { background: transparent; border: 1px solid var(--armed-edge); border-radius: 8px; padding: 10px 12px; margin: 10px 0 0; }
+.readiness-tx-row b { font-weight: 600; font-size: 14.5px; }
+.readiness-tx-state { font-size: 13px; margin-top: 4px; display: flex; align-items: baseline; gap: 7px; }
+.readiness-tx-state::before { content: ""; width: 7px; height: 7px; border-radius: 2px; background: currentColor; flex: none; transform: translateY(-1px); }
+.readiness-tx-state.t-checkin { color: var(--t-checkin); }
+.readiness-tx-state.t-price { color: var(--t-price); }
+.readiness-tx-state.t-utxo { color: var(--t-utxo); }
+.readiness-tx-state.t-blockheight { color: var(--t-block); }
+.readiness-tx-state.t-setdate { color: var(--t-date); }
+.readiness-tx-state.t-feemarket { color: var(--t-fee); }
+.readiness-tx-state.t-manual, .readiness-tx-state.t-multi { color: var(--ink-2); }
+/* A low fee risk is the normal case: said quietly. */
+.readiness-tx-row .pill.fee-pill.ok { background: transparent; color: var(--muted); box-shadow: inset 0 0 0 1px var(--line-2); }
+.readiness-tx.off { border-color: var(--line); }
+.readiness-tx.off, .readiness-tx.off .readiness-tx-state, .readiness-tx.off .pill { color: var(--faint); }
+.readiness-tx.off .pill { background: rgba(255, 255, 255, 0.04); box-shadow: none; }
+.readiness-tx-member { margin-left: 15px; color: var(--ink-2); }
+
+/* Phones and narrow windows. */
+@media (max-width: 860px) {
+  .dash-top { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 720px) {
+  header.appbar { padding: 0 16px; height: 54px; gap: 12px; }
+  main { padding: 16px 16px 96px; }
+  /* The tabs become a bar along the bottom, with icons. */
+  nav.tabs {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 45;
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 0;
+    background: var(--bg); border-top: 1px solid var(--line);
+    padding: 6px 4px calc(10px + env(safe-area-inset-bottom));
+  }
+  nav.tabs button { flex-direction: column; gap: 3px; padding: 6px 2px; font-size: 11.5px; border-radius: 8px; }
+  nav.tabs button svg { display: block; }
+  nav.tabs button:hover { background: none; }
+  nav.tabs button.active { background: none; color: var(--ink); }
+  .card { padding: 16px; }
+  .ck-head { flex-wrap: wrap; }
+  .ck-head button.btn-checkin-big { width: 100%; }
+  .ck-tx { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "label left" "bar bar" "cap cap"; row-gap: 6px; }
+  .ck-tx-left { display: flex; gap: 8px; align-items: baseline; }
+  .ck-tx-left span { font-size: 12px; }
+}

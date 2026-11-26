@@ -8,8 +8,13 @@
 </head>
 <body>
 <header class="appbar">
-  <img class="appbar-logo" src="/logo.jpg" alt="Standby logo">
-  <span class="appbar-title">Standby</span>
+  <span class="appbar-brand"><img class="appbar-logo" src="/logo.jpg" alt="Standby logo"><span class="appbar-title">Standby</span></span>
+  <nav class="tabs" id="tabs">
+    <button data-tab="dashboard" class="active"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M4 11l8-6.5 8 6.5V20H4z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>Dashboard</button>
+    <button data-tab="bitcoin"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M8 7h12M8 12h12M8 17h12M4 7h.01M4 12h.01M4 17h.01" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>Transactions</button>
+    <button data-tab="settings"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 3v2.5M12 18.5V21M3 12h2.5M18.5 12H21M5.6 5.6l1.8 1.8M16.6 16.6l1.8 1.8M5.6 18.4l1.8-1.8M16.6 7.4l1.8-1.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>Settings</button>
+    <button data-tab="logs"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M3 12h4l3-7 4 14 3-7h4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>Logs</button>
+  </nav>
   <span class="spacer"></span>
   <details class="burger" id="burger-menu">
     <summary title="Menu" aria-label="Menu">&#9776;</summary>
@@ -150,13 +155,6 @@
     <button class="setup-back" id="btn-setup-back">‹ Back</button>
   </div>
 
-  <nav class="tabs" id="tabs">
-    <button data-tab="dashboard" class="active">Dashboard</button>
-    <button data-tab="bitcoin">Transactions</button>
-    <button data-tab="settings">Settings</button>
-    <button data-tab="logs">Logs</button>
-  </nav>
-
   <!-- ============ DASHBOARD ============ -->
   <section class="tab active" id="tab-dashboard">
     <!-- A newer version is out (GET /api/update); "Not now" hides it for
@@ -188,28 +186,25 @@
       <p id="grace-msg" class="muted"></p>
     </div>
 
+    <div class="dash-top">
     <div class="card" id="checkin-card">
-      <div class="section-head">
-        <h2>Check-in</h2>
-        <span id="status-pill" class="pill muted">—</span>
+      <div class="ck-head">
+        <div class="ck-title">
+          <div class="section-head">
+            <h2>Check-in</h2>
+            <span id="status-pill" class="pill muted">—</span>
+          </div>
+          <p class="ck-meta">Last check-in <span id="last-checkin">—</span></p>
+        </div>
+        <button id="btn-checkin" class="primary big btn-checkin-big">✓ Check in now</button>
       </div>
       <div id="checkin-tx-bars"></div>
       <p id="status-line" class="muted">Loading…</p>
-      <dl class="kv" style="margin-top:12px">
-        <dt>Last check-in</dt><dd id="last-checkin">—</dd>
-      </dl>
-      <p style="margin-top:16px">
-        <button id="btn-checkin" class="primary big btn-checkin-big">✓ Check in — I'm here</button>
-      </p>
       <p id="checkin-msg" class="muted"></p>
     </div>
 
-    <div class="card">
-      <h2>Release readiness</h2>
-      <div class="readiness-item">
-        <div class="readiness-label">Transaction</div>
-        <div id="readiness-txs" class="tx-list"></div>
-      </div>
+    <div class="card" id="connections-card">
+      <h2>Connections</h2>
       <div class="readiness-status">
         <div class="readiness-item" id="readiness-node-item">
           <div class="readiness-label">Node Status</div>
@@ -226,6 +221,12 @@
           </div>
         </div>
       </div>
+    </div>
+    </div>
+
+    <div class="card" id="armed-card">
+      <h2>Active transactions</h2>
+      <div id="readiness-txs" class="tx-list"></div>
     </div>
   </section>
 

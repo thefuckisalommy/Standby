@@ -1,7 +1,7 @@
 // Width check: Chromium (Playwright) at 390px against the app the DOM
 // launcher runs on :3478. Forms, notes, Settings cards, help buttons and
 // filter must fit; readiness rows stay one line; exchange and node pills
-// share a right edge; the tab bar sticks under the appbar.
+// share a right edge; on a phone the tabs are a bar along the bottom.
 // Exits 0 when every check passes; prints PASS/FAIL per check, then
 // FAILURES: N.
 'use strict';
@@ -357,8 +357,10 @@ function check(name, cond, detail) {
   await checkPage('width settings: document has no horizontal overflow (vacation + arm/disarm)');
 
   // --- Tab bar ---
-  // The tabs sit right under the appbar and stick at 60px when scrolled.
-  // Scroll to the top first.
+  // At phone width the tabs are a bar fixed along the bottom of the
+  // screen (icons over labels), above the content, with an opaque
+  // background; the page leaves room at the bottom so its last lines are
+  // not hidden behind it. The appbar stays sticky at the top.
   await page.evaluate(() => window.scrollTo(0, 0));
   await page.waitForTimeout(300);
   const tabBar = await page.evaluate(() => {
@@ -370,73 +372,55 @@ function check(name, cond, detail) {
     const csTabs = getComputedStyle(tabs);
     const csBar = getComputedStyle(appbar);
     const tr = tabs.getBoundingClientRect();
-    const br = appbar.getBoundingClientRect();
     return {
-      mainPadTop: csMain.paddingTop, mainPadSide: csMain.paddingLeft, mainPadBottom: csMain.paddingBottom,
-      tabsPosition: csTabs.position, tabsTop: csTabs.top, tabsZ: csTabs.zIndex, tabsBg: csTabs.backgroundColor,
-      tabsTopEdge: Math.round(tr.top * 10) / 10, appbarBottom: Math.round(br.bottom * 10) / 10,
-      appbarPosition: csBar.position, appbarTop: csBar.top, appbarZ: csBar.zIndex,
+      mainPadBottom: parseFloat(csMain.paddingBottom),
+      tabsPosition: csTabs.position, tabsZ: Number(csTabs.zIndex), tabsBg: csTabs.backgroundColor,
+      tabsBottom: Math.round(tr.bottom * 10) / 10, tabsHeight: Math.round(tr.height), tabsLeft: Math.round(tr.left), tabsWidth: Math.round(tr.width),
+      viewH: window.innerHeight, viewW: window.innerWidth,
+      appbarPosition: csBar.position, appbarTop: csBar.top, appbarZ: Number(csBar.zIndex),
+      iconsShown: [...tabs.querySelectorAll('button svg')].filter((x) => getComputedStyle(x).display !== 'none').length,
     };
   });
-  check('width tabs: main top padding is 0 (no gap above the tabs — the default matches the scrolled height)',
-    !!tabBar && tabBar.mainPadTop === '0px', tabBar ? 'paddingTop=' + tabBar.mainPadTop : 'no main/tabs/appbar');
-  check('width tabs: main side/bottom padding unchanged (20px)',
-    !!tabBar && tabBar.mainPadSide === '20px' && tabBar.mainPadBottom === '20px',
-    tabBar ? 'side=' + tabBar.mainPadSide + ' bottom=' + tabBar.mainPadBottom : 'no main');
-  check('width tabs: nav.tabs is sticky with top 60px and z-index 40',
-    !!tabBar && tabBar.tabsPosition === 'sticky' && tabBar.tabsTop === '60px' && tabBar.tabsZ === '40',
-    tabBar ? 'position=' + tabBar.tabsPosition + ' top=' + tabBar.tabsTop + ' z=' + tabBar.tabsZ : 'no tabs');
-  check('width tabs: nav.tabs has an opaque background (scrolling content is occluded behind it)',
-    !!tabBar && tabBar.tabsBg === 'rgb(15, 17, 21)',
-    tabBar ? 'background=' + tabBar.tabsBg : 'no tabs');
-  check('width tabs: the appbar is still sticky at top 0 with z-index 50 (unchanged)',
-    !!tabBar && tabBar.appbarPosition === 'sticky' && tabBar.appbarTop === '0px' && tabBar.appbarZ === '50',
+  check('width tabs: at 390px nav.tabs is fixed along the bottom of the screen, full width',
+    !!tabBar && tabBar.tabsPosition === 'fixed' && Math.abs(tabBar.tabsBottom - tabBar.viewH) <= 1 && tabBar.tabsLeft === 0 && tabBar.tabsWidth === tabBar.viewW,
+    tabBar ? 'position=' + tabBar.tabsPosition + ' bottom=' + tabBar.tabsBottom + '/' + tabBar.viewH + ' left=' + tabBar.tabsLeft + ' width=' + tabBar.tabsWidth : 'no main/tabs/appbar');
+  check('width tabs: the bottom bar has an opaque background and sits above the content (z-index > 0)',
+    !!tabBar && /^rgb\(/.test(tabBar.tabsBg) && tabBar.tabsZ > 0,
+    tabBar ? 'background=' + tabBar.tabsBg + ' z=' + tabBar.tabsZ : 'no tabs');
+  check('width tabs: the page leaves room at the bottom for the bar (main bottom padding >= bar height)',
+    !!tabBar && tabBar.mainPadBottom >= tabBar.tabsHeight,
+    tabBar ? 'padding=' + tabBar.mainPadBottom + ' bar=' + tabBar.tabsHeight : 'no main');
+  check('width tabs: every tab shows its icon on a phone',
+    !!tabBar && tabBar.iconsShown === 4, tabBar ? 'icons=' + tabBar.iconsShown : 'no tabs');
+  check('width tabs: the appbar is still sticky at top 0, above the tab bar',
+    !!tabBar && tabBar.appbarPosition === 'sticky' && tabBar.appbarTop === '0px' && tabBar.appbarZ > tabBar.tabsZ,
     tabBar ? 'position=' + tabBar.appbarPosition + ' top=' + tabBar.appbarTop + ' z=' + tabBar.appbarZ : 'no appbar');
-  check('width tabs: at the top of the page the tabs sit directly below the appbar (~1px gap, matching the scrolled state)',
-    !!tabBar && (tabBar.tabsTopEdge - tabBar.appbarBottom) >= 0 && (tabBar.tabsTopEdge - tabBar.appbarBottom) <= 2,
-    tabBar ? 'tabsTop=' + tabBar.tabsTopEdge + ' appbarBottom=' + tabBar.appbarBottom + ' gap=' + Math.round((tabBar.tabsTopEdge - tabBar.appbarBottom) * 10) / 10 : 'no tabs/appbar');
-  // All four tabs fit on one centered row (~46px tall, not ~96px).
+  // All four tabs on one row, equal widths.
   const tabRows = await page.evaluate(() => {
     const btns = [...document.querySelectorAll('nav.tabs button')];
     if (btns.length !== 4) return null;
     const tops = btns.map((b) => Math.round(b.getBoundingClientRect().top));
-    const bar = document.querySelector('nav.tabs').getBoundingClientRect();
-    const first = btns[0].getBoundingClientRect();
-    const last = btns[btns.length - 1].getBoundingClientRect();
-    return {
-      tops, rows: new Set(tops).size, barHeight: Math.round(bar.height),
-      leftGap: Math.round(first.left - bar.left),
-      rightGap: Math.round(bar.right - last.right),
-    };
+    const widths = btns.map((b) => Math.round(b.getBoundingClientRect().width));
+    return { tops, rows: new Set(tops).size, widths, spread: Math.max(...widths) - Math.min(...widths) };
   });
-  check('width tabs: all four tabs fit on one row at 390px (no wrap to a second row)',
-    !!tabRows && tabRows.rows === 1 && tabRows.barHeight <= 50,
-    tabRows ? 'tops=' + JSON.stringify(tabRows.tops) + ' barHeight=' + tabRows.barHeight : 'no tabs');
-  check('width tabs: the button group is centered (equal gaps on both sides of the bar)',
-    !!tabRows && Math.abs(tabRows.leftGap - tabRows.rightGap) <= 2,
-    tabRows ? 'leftGap=' + tabRows.leftGap + ' rightGap=' + tabRows.rightGap : 'no tabs');
-  // Scrolled down, the tabs stick at 60px under the appbar.
+  check('width tabs: all four tabs fit on one row at 390px, equal widths',
+    !!tabRows && tabRows.rows === 1 && tabRows.spread <= 1,
+    tabRows ? 'tops=' + JSON.stringify(tabRows.tops) + ' widths=' + JSON.stringify(tabRows.widths) : 'no tabs');
+  // Scrolled down, the bar stays put at the bottom.
   await page.evaluate(() => window.scrollTo(0, 800));
   await page.waitForTimeout(400);
   const tabBarScrolled = await page.evaluate(() => {
     const tabs = document.querySelector('nav.tabs');
-    const appbar = document.querySelector('header.appbar');
-    if (!tabs || !appbar) return null;
+    if (!tabs) return null;
     const tr = tabs.getBoundingClientRect();
-    const br = appbar.getBoundingClientRect();
-    return {
-      scrollY: Math.round(window.scrollY),
-      tabsTopEdge: Math.round(tr.top * 10) / 10, appbarBottom: Math.round(br.bottom * 10) / 10,
-    };
+    return { scrollY: Math.round(window.scrollY), tabsBottom: Math.round(tr.bottom * 10) / 10, viewH: window.innerHeight };
   });
   check('width tabs: scrolled 800px, the page actually scrolled',
-    !!tabBarScrolled && tabBarScrolled.scrollY >= 700, tabBarScrolled ? 'scrollY=' + tabBarScrolled.scrollY : 'no tabs/appbar');
-  check('width tabs: scrolled, the tabs stick at 60px directly below the appbar (no gap, no overlap)',
-    !!tabBarScrolled && tabBarScrolled.tabsTopEdge >= 59 && tabBarScrolled.tabsTopEdge <= 61
-    && tabBarScrolled.tabsTopEdge >= tabBarScrolled.appbarBottom
-    && tabBarScrolled.tabsTopEdge <= tabBarScrolled.appbarBottom + 2,
-    tabBarScrolled ? 'tabsTop=' + tabBarScrolled.tabsTopEdge + ' appbarBottom=' + tabBarScrolled.appbarBottom : 'no tabs/appbar');
-  await checkPage('width tabs: document has no horizontal overflow with the sticky tabs');
+    !!tabBarScrolled && tabBarScrolled.scrollY >= 700, tabBarScrolled ? 'scrollY=' + tabBarScrolled.scrollY : 'no tabs');
+  check('width tabs: scrolled, the tab bar stays along the bottom of the screen',
+    !!tabBarScrolled && Math.abs(tabBarScrolled.tabsBottom - tabBarScrolled.viewH) <= 1,
+    tabBarScrolled ? 'bottom=' + tabBarScrolled.tabsBottom + '/' + tabBarScrolled.viewH : 'no tabs');
+  await checkPage('width tabs: document has no horizontal overflow with the bottom tab bar');
   await page.evaluate(() => window.scrollTo(0, 0));
   await page.waitForTimeout(200);
 

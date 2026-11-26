@@ -409,6 +409,33 @@ function renderStatusHead(status) {
 // Check-in bars as data, one per active check-in rule: from
 // status.checkinTxs, or derived for an older server. Shared by the
 // render and the live patch.
+// The right-hand side of a check-in bar: time left in bold, the due day
+// under it ("32 days left" / "Mon 29 Dec"); disarmed, due or held by a
+// grace say so instead. Shared by the render, the refresh and the tick.
+function fillCkLeft(el, daysSince, windowDays, nextDue, frozen, grace) {
+  if (!el) return;
+  var left = Math.max(0, windowDays - daysSince);
+  var main = frozen ? 'Disarmed' : grace ? 'Held by grace' : left <= 0 ? 'Due now' : left + (left === 1 ? ' day left' : ' days left');
+  var sub = frozen ? 'clock paused' : fmtDueDay(nextDue);
+  el.textContent = '';
+  var b = document.createElement('b');
+  b.textContent = main;
+  el.appendChild(b);
+  if (sub) {
+    var s = document.createElement('span');
+    s.textContent = sub;
+    el.appendChild(s);
+  }
+}
+// The trigger-type class for a readiness condition line: the one type of
+// all its rules, or 'multi' when they differ.
+function triggerTypeClass(holder) {
+  var types = {};
+  triggerSetOf(holder).rules.forEach(function (r) { types[r.type] = true; });
+  var keys = Object.keys(types);
+  return 't-' + (keys.length === 1 ? keys[0] : 'multi');
+}
+
 function checkinBarsData(status) {
   var bars = status.checkinTxs || [];
   if (!bars.length) {
@@ -642,6 +669,11 @@ function renderDashboard(status) {
     cap.className = 'progress-label';
     cap.textContent = daysSince + ' of ' + windowDays + ' days elapsed' + (frozen ? ' — disarmed, frozen' : b.state === 'grace' ? ' — held by grace' : '');
     block.appendChild(cap);
+    block.dataset.nextDue = b.nextDue || '';
+    var leftEl = document.createElement('div');
+    leftEl.className = 'ck-tx-left';
+    fillCkLeft(leftEl, daysSince, windowDays, b.nextDue, frozen, b.state === 'grace');
+    block.appendChild(leftEl);
     barsEl.appendChild(block);
   });
   // Active transactions only (pending and archived never broadcast at
@@ -657,7 +689,8 @@ function renderDashboard(status) {
       // One block per armed rule: label and pills, then the condition
       // ("Fires when ...").
       var item = document.createElement('div');
-      item.className = 'readiness-tx';
+      var holder = e.kind === 'set' ? e.set : e.tx;
+      item.className = 'readiness-tx' + (holder.enabled === false ? ' off' : ' armed');
       var row = document.createElement('div');
       row.className = 'readiness-tx-row';
       var label = document.createElement('b');
@@ -692,7 +725,7 @@ function renderDashboard(status) {
       if (fpill) row.appendChild(fpill);
       item.appendChild(row);
       var stateLine = document.createElement('div');
-      stateLine.className = 'readiness-tx-state';
+      stateLine.className = 'readiness-tx-state ' + triggerTypeClass(holder);
       // The state line is the card's condition text (one row per rule);
       // current values live on the card and in the status sections.
       stateLine.textContent = triggerSetCondition(e.kind === 'set' ? e.set : e.tx);

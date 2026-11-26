@@ -76,6 +76,14 @@ function fmtDate(iso) {
   return new Date(iso).toLocaleString();
 }
 
+// A due day, short: "Mon 29 Dec".
+function fmtDueDay(iso) {
+  if (!iso) return '';
+  var d = new Date(iso);
+  if (!isFinite(d.getTime())) return '';
+  return d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
+}
+
 // Check-in dates without seconds ("11/11/2026, 9:00 AM").
 function fmtDateShort(iso) {
   if (!iso) return '—';
