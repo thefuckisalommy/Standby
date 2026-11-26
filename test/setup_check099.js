@@ -81,6 +81,9 @@ function check(name, cond, detail) {
     check('a wrong current password is refused', /current password is wrong/.test(await p.textContent('#logout-msg')));
     await p.fill('#login-cur', 'correct horse battery'); await p.click('#btn-login-change'); await p.waitForTimeout(500);
     check('the password changed', /changed/.test(await p.textContent('#logout-msg')));
+    check('the Start fresh card says the Standby password goes too',
+      (await p.textContent('#fresh-login-note')) === 'Your Standby password is removed too, so setup asks for a new one.',
+      await p.textContent('#fresh-login-note'));
     await p.click('#btn-fresh-delete'); await p.waitForTimeout(150);
     check('start fresh asks for the password', await vis('#fresh-password') && await vis('#fresh-backup-row'));
     await p.fill('#fresh-password', 'another long password'); await p.click('#btn-fresh-go'); await p.waitForTimeout(200);

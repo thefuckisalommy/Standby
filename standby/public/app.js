@@ -5266,6 +5266,9 @@
     env.style.display = src === 'env' ? '' : 'none';
     env.textContent = 'A password is set. ' + envPasswordWhere() + ' It is changed there, not here.';
     $('logout-row').style.display = authInfo.required ? '' : 'none';
+    // Start fresh: what happens to the password, only where it matters.
+    $('fresh-login-note').textContent = src === 'app' ? 'Your Standby password is removed too, so setup asks for a new one.'
+      : (src === 'env' && authInfo.deployment === 'umbrel') ? 'Your Umbrel app password stays.' : '';
   }
 
   // "Forgot password?" on the login screen: instructions only — nothing
