@@ -24,8 +24,8 @@ function defaultState() {
     settings: {
       primaryApiUrl: 'https://mempool.space', // the primary node: a mempool API endpoint (any mempool.space-compatible instance — another public one, or your own mempool on the LAN)
       secondaryApiUrl: 'https://blockstream.info/api', // the secondary node, tried only if the primary does not answer; blank = primary runs alone
-      secondaryEnabled: true, // the secondary node is on by default — off means primary only, no fallback anywhere (see endpointsFor in lib/bitcoin.js); a missing flag in old state means enabled
-      priceSources: { source1: 'coingecko', source2: 'coinbase' }, // the two BTC price feeds for price rules — each a provider id (see PRICE_PROVIDERS in lib/bitcoin.js) or a custom { id: 'custom', url, path } object; a reading is only trusted when the two agree within the configured agreement (Settings: Price agreement), and when they agree the primary source's price is the one that decides
+      secondaryEnabled: true, // the secondary node is on by default — off means primary only, no fallback anywhere (see endpointsFor in lib/bitcoin/nodes.js); a missing flag in old state means enabled
+      priceSources: { source1: 'coingecko', source2: 'coinbase' }, // the two BTC price feeds for price rules — each a provider id (see PRICE_PROVIDERS in lib/bitcoin/prices.js) or a custom { id: 'custom', url, path } object; a reading is only trusted when the two agree within the configured agreement (Settings: Price agreement), and when they agree the primary source's price is the one that decides
       // Price agreement: the two price sources must agree within this %
       // (1–20, default 5). Tighter is safer but waits more during fast
       // moves.
@@ -156,7 +156,7 @@ function sanitizeFeeHistory(raw, nowMs) {
   return out.slice(-FEE_HISTORY_MAX_ENTRIES);
 }
 // How a tx is named in a set's history tags (mirrors txDisplayName in
-// public/app.js): a member as '"<set label>" - Tx N', a standalone by its
+// public/js/dashboard.js; test/mirror_check.js checks they agree): a member as '"<set label>" - Tx N', a standalone by its
 // label, else its short txid.
 function shortTxid16(txid) {
   const s = String(txid || '');
@@ -320,7 +320,7 @@ function normalizeTrigger(input) {
 
 // The tx's normalized rule set; missing or unusable means a 35-day check-
 // in rule, so no transaction is lost to an unreadable trigger. Mirrored in
-// public/app.js.
+// public/js/dashboard.js (test/mirror_check.js checks they agree).
 function triggerOf(tx) {
   if (!tx || typeof tx !== 'object') return defaultTriggerSet();
   const r = normalizeTrigger(tx.trigger);

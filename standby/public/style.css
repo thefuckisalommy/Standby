@@ -159,11 +159,6 @@ button:disabled { opacity: 0.5; cursor: default; }
 /* High Risk is a lighter red than Critical, so the two read apart. */
 .pill.bad-soft { background: var(--bad-soft-bg); color: var(--bad-soft); }
 .pill.muted { background: #2f3540; color: var(--muted); }
-.stub {
-  display: inline-block; padding: 2px 8px; border-radius: 4px;
-  background: var(--warn-bg); color: var(--warn); border: 1px dashed var(--accent);
-  font-size: 12px; font-weight: 700; letter-spacing: 0.4px;
-}
 .notice {
   border: 1px solid var(--line); border-left: 4px solid var(--accent);
   background: #1c1a17; border-radius: 6px; padding: 10px 14px; margin: 12px 0;
@@ -192,9 +187,6 @@ pre {
   font-size: 13px; max-height: 300px; overflow: auto;
 }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
-.checklist label { display: flex; gap: 10px; align-items: flex-start; font-weight: 400; margin: 10px 0; cursor: pointer; }
-.checklist input[type="checkbox"] { width: 18px; height: 18px; margin-top: 2px; flex-shrink: 0; }
-.checklist .done { color: var(--muted); text-decoration: line-through; }
 .progress { height: 8px; background: #2f3540; border-radius: 999px; overflow: hidden; margin: 8px 0; }
 .progress > div { height: 100%; background: var(--accent); }
 /* Per-tx check-in bars: label, bar (.progress, colour set inline by time
@@ -235,13 +227,7 @@ button.btn-checkin-big { width: 100%; padding: 16px 20px; font-size: 19px; }
 /* The measured value beside a capability, muted. */
 .node-check-detail { color: var(--muted); font-size: 13px; white-space: nowrap; }
 .node-lines > div + div { margin-top: 4px; }
-/* Readiness list: label left (wraps), pill right (never shrinks), thin
-   dividers. */
 .tx-list { margin-top: 2px; }
-.tx-row { display: flex; align-items: center; gap: 12px; padding: 7px 0; }
-.tx-row + .tx-row { border-top: 1px solid var(--line); }
-.tx-row b { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; font-size: 15px; font-weight: 400; }
-.tx-row .pill { flex-shrink: 0; }
 /* Readiness blocks: one sub-card per armed rule, label and pills on the
    first line (never wrapping: the label truncates), the trigger and value
    below. The 6px gap and 8px padding keep the longest two-pill label on

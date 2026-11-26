@@ -185,7 +185,7 @@ async function checkUtxoRule(state, rule, now, ctx) {
         : 'This UTXO is already spent (unconfirmed) — it would fire once the spend reaches ' + needConfs + noun + '.',
     };
   }
-  // A confirmed spend: count from the tip. A bare answer (lib/bitcoin.js
+  // A confirmed spend: count from the tip. A bare answer (lib/bitcoin/outspends.js
   // resolveBareSpends) proves confirmation but not the block, so the count
   // runs from the tip when this rule first saw it confirmed
   // (lastOutspend.firstSeenConfirmedHeight): never early, exact while

@@ -24,10 +24,25 @@ const rules = {
   'no-dupe-keys': 'error',
   'no-redeclare': 'error',
 };
+// The page's files (standby/public/js/) share one scope: each may use what
+// the others declare at the top level. Unused or doubly declared top-level
+// names are caught by test/page_names_check.js.
+const fs = require('fs');
+const path = require('path');
+const PAGE_DIR = path.join(__dirname, 'standby', 'public', 'js');
+const pageFiles = fs.existsSync(PAGE_DIR) ? fs.readdirSync(PAGE_DIR).filter((f) => f.endsWith('.js')) : [];
+const topNames = (f) => [...fs.readFileSync(path.join(PAGE_DIR, f), 'utf8').matchAll(/^(?:async )?(?:function|var) ([A-Za-z_$][\w$]*)/gm)].map((m) => m[1]);
+const pageGlobals = (own) => Object.fromEntries(pageFiles.filter((f) => f !== own).flatMap(topNames).map((n) => [n, 'writable']));
+const pageRules = { ...rules, 'no-unused-vars': ['error', { args: 'none', caughtErrors: 'none', vars: 'local' }] };
+
 module.exports = [
   { ignores: ['**/node_modules/**', 'standby-bundled/**'] },
   { files: ['standby/**/*.js', 'tools/**/*.js', 'eslint.config.js'], languageOptions: { ecmaVersion: 2024, sourceType: 'commonjs', globals: node }, rules },
-  { files: ['standby/public/**/*.js'], languageOptions: { ecmaVersion: 2020, sourceType: 'script', globals: browser }, rules },
+  ...pageFiles.map((f) => ({
+    files: ['standby/public/js/' + f],
+    languageOptions: { ecmaVersion: 2020, sourceType: 'script', globals: { ...browser, ...pageGlobals(f) } },
+    rules: pageRules,
+  })),
   // Test drivers run code in the page too (browser globals), and share
   // helper blocks that not every driver uses.
   { files: ['test/**/*.js'], languageOptions: { ecmaVersion: 2024, sourceType: 'commonjs', globals: { ...browser, ...node } }, rules: { ...rules, 'no-unused-vars': 'off' } },
