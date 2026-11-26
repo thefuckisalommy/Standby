@@ -19,7 +19,8 @@
 const fs = require('fs');
 const path = require('path');
 
-const ROOT = path.join(__dirname, '..', 'standby');
+// BUNDLE_ROOT: another app folder (test/bundle_check.js uses one).
+const ROOT = process.env.BUNDLE_ROOT ? path.resolve(process.env.BUNDLE_ROOT) : path.join(__dirname, '..', 'standby');
 const [entryArg, outArg] = process.argv.slice(2);
 function fail(msg) { console.error('bundle: ' + msg); process.exit(1); }
 if (!entryArg || !outArg) fail('usage: node tools/bundle.js <entry relative to standby/> <out file>');
@@ -39,9 +40,58 @@ function resolveId(fromId, spec) {
   }
   return fail(fromId + ': require(\'' + spec + '\') not found');
 }
-// Comments may mention require(...); only code counts.
+// The code without its comments, so a comment mentioning require(...)
+// does not count. A small scanner, not a pattern: strings, template
+// strings and regex literals are kept whole, so "//" or "/*" inside them
+// is not mistaken for a comment. A "/" starts a regex literal where an
+// expression can start (after an operator, a bracket or a keyword such as
+// return), otherwise it is division.
+const REGEX_AFTER = /[(,=:[!&|?{};+\-*%<>~^]/;
+const REGEX_AFTER_WORDS = /\b(return|typeof|instanceof|in|of|new|delete|void|throw|case|do|else|yield|await)$/;
 function stripComments(src) {
-  return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"\\])\/\/.*$/gm, '$1');
+  let out = '';
+  let i = 0;
+  let prev = ''; // the last character of code that was not white space
+  const n = src.length;
+  while (i < n) {
+    const c = src[i];
+    const d = src[i + 1];
+    if (c === '/' && d === '/') { while (i < n && src[i] !== '\n') i++; continue; }
+    if (c === '/' && d === '*') {
+      const end = src.indexOf('*/', i + 2);
+      i = end === -1 ? n : end + 2;
+      out += ' ';
+      continue;
+    }
+    if (c === '\'' || c === '"' || c === '`') {
+      const start = i++;
+      while (i < n && src[i] !== c) i += src[i] === '\\' ? 2 : 1;
+      i++;
+      out += src.slice(start, i);
+      prev = c;
+      continue;
+    }
+    if (c === '/' && (prev === '' || REGEX_AFTER.test(prev) || REGEX_AFTER_WORDS.test(out.trimEnd()))) {
+      const start = i++;
+      let inClass = false;
+      while (i < n && src[i] !== '\n') {
+        if (src[i] === '\\') { i += 2; continue; }
+        if (src[i] === '[') inClass = true;
+        else if (src[i] === ']') inClass = false;
+        else if (src[i] === '/' && !inClass) break;
+        i++;
+      }
+      i++;
+      while (i < n && /[a-z]/i.test(src[i])) i++; // flags
+      out += src.slice(start, i);
+      prev = '/';
+      continue;
+    }
+    out += c;
+    if (!/\s/.test(c)) prev = c;
+    i++;
+  }
+  return out;
 }
 
 const modules = new Map(); // id -> { source, map }
@@ -100,7 +150,7 @@ function __bLoad(id) {
   module.loaded = true;
   return module.exports;
 }
-__bLoad(${JSON.stringify(entry)});`);
+module.exports = __bLoad(${JSON.stringify(entry)});`);
 
 fs.mkdirSync(path.dirname(path.resolve(outArg)), { recursive: true });
 fs.writeFileSync(outArg, out.join('\n') + '\n');

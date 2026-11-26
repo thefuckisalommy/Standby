@@ -521,6 +521,7 @@
       </div>
       <p id="api-keys-receiver-line">Your connection IP is:<br><code id="api-keys-receiver-url"></code></p>
       <p class="muted" id="api-keys-routes">POST /checkin to check in, GET /health to test — the key goes as an Authorization: Bearer token.</p>
+      <p class="notice" id="api-keys-warning">Treat each key like a password. Someone with a key can't see or send your transactions, but they can check in for you, which keeps your check-in triggers from firing. Give each device its own key, and revoke any key you think has leaked.</p>
       <div id="api-keys-list"></div>
       <label for="api-key-label">Label for the new key</label>
       <input id="api-key-label" type="text" placeholder="e.g. Check-in bot">

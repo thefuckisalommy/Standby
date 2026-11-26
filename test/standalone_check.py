@@ -4,8 +4,10 @@ On the system they were built for: the app starts with no files beside
 it, reports deployment "desktop" and the version, serves its page and
 script from inside the program, keeps its data in the user's own folder
 when DATA_DIR is unset (with the folder named, without the user's name,
-for "Forgot password?"), honours --reset-password, and opens its own
-check-in port when "Accept check-ins from other devices" is on. The
+for "Forgot password?"), honours --reset-password, opens its own
+check-in port when "Accept check-ins from other devices" is on, and
+keeps everything across a restart (an armed transaction and its
+trigger, a check-in key, settings, the check-in clock). The
 browser is not opened (STANDBY_OPEN_BROWSER=0). Ports 3477/3476. Prints PASS/FAIL per check, then FAILURES: N.
 """
 import json
@@ -19,6 +21,8 @@ import urllib.error
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import helpers as v  # noqa: E402 (a signed test transaction)
 DIST = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, '..', 'dist'))
 EXE = '.exe' if os.name == 'nt' else ''
 VERSION = json.load(open(os.path.join(HERE, '..', 'standby', 'package.json')))['version']
@@ -41,6 +45,16 @@ def get(url, body=None):
         return e.code, e.read()
     except Exception as e:  # not up yet
         return None, str(e).encode()
+
+
+def call(method, url, body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    r = urllib.request.Request(url, data=data, method=method, headers={'Content-Type': 'application/json'})
+    try:
+        with urllib.request.urlopen(r, timeout=10) as resp:
+            return resp.status, json.loads(resp.read() or b'null')
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read() or b'null')
 
 
 def wait(url, seconds=30):
@@ -118,6 +132,14 @@ except urllib.error.HTTPError as e:
 check('switched on, the program checks in from its own check-in port', up and cs == 200, (up, cs))
 s, body = get('http://127.0.0.1:3476/api/state')
 check('the check-in port serves nothing of the app', s == 404, s)
+# State that must survive a restart (checked in run 2).
+s, r = call('POST', B + '/api/bitcoin/txs', {'txHex': v.craft(1, 100021), 'label': 'Standalone restart', 'notes': '',
+                                              'trigger': {'type': 'checkin', 'params': {'thresholdDays': 30}}})
+tx_id = (r or {}).get('tx', {}).get('id') if s == 201 else None
+s2, _ = call('PUT', B + '/api/bitcoin/txs/' + str(tx_id), {'enabled': True}) if tx_id else (None, None)
+s3, _ = call('PUT', B + '/api/settings', {'checkCadenceSeconds': 120, 'graceOfflineDays': 3})
+check('a transaction is added and armed, and settings changed', s == 201 and s2 == 200 and s3 == 200, (s, r, s2, s3))
+_, before = call('GET', B + '/api/state')
 s, body = get(B + '/api/auth/password', {'password': 'standalone check pw'})
 check('a password can be set', s == 200, body)
 out = stop(p)
@@ -129,6 +151,20 @@ wait(B + '/api/health')
 s, body = get(B + '/api/auth/status')
 check('--reset-password removes the password', s == 200 and json.loads(body).get('required') is False, body)
 check('the check-in port reopens after a restart', wait('http://127.0.0.1:3476/health', 10))
+_, after = call('GET', B + '/api/state')
+tx = next((t for t in (after or {}).get('bitcoin', {}).get('txs', []) if t.get('id') == tx_id), None)
+check('after a restart the transaction is still there, armed, with its trigger',
+      tx is not None and tx.get('enabled') is True and tx.get('hex') == v.craft(1, 100021)
+      and (tx.get('trigger') or {}).get('type') == 'checkin' and ((tx.get('trigger') or {}).get('params') or {}).get('thresholdDays') == 30,
+      tx and {k: tx.get(k) for k in ('enabled', 'trigger')})
+check('after a restart the settings, check-in clock and key are kept',
+      (after or {}).get('settings', {}).get('checkCadenceSeconds') == 120
+      and (after or {}).get('settings', {}).get('graceOfflineDays') == 3
+      and (after or {}).get('settings', {}).get('acceptRemoteCheckins') is True
+      and (after or {}).get('checkin', {}).get('lastCheckinAt') == (before or {}).get('checkin', {}).get('lastCheckinAt')
+      and any(k.get('label') == 'standalone check' for k in (after or {}).get('checkinKeys', [])),
+      {'settings': {k: (after or {}).get('settings', {}).get(k) for k in ('checkCadenceSeconds', 'graceOfflineDays', 'acceptRemoteCheckins')},
+       'checkin': (after or {}).get('checkin')})
 out = stop(p)
 
 shutil.rmtree(home, ignore_errors=True)

@@ -37,7 +37,9 @@ Dry runs never broadcast; a release does. Before each release the inputs are re-
 
 A key can only record a check-in: it cannot read transactions, broadcast or change settings. A stolen key can still keep check-in triggers from ever firing, so revoke it at once if you suspect a leak, and give each service its own key. Keys are stored only as hashes.
 
-The receiver (port 3101) is plain HTTP and has two routes (`GET /health`, `POST /checkin`), access only to the check-in directory, and a generic 401 for every bad key. On Docker and Umbrel it is a separate container that cannot see the transactions. The download and a plain run serve the same two routes from the app itself, on their own port, only while **Accept check-ins from other devices** is on (off by default); the app's own port stays on `localhost`. Keep it on your LAN or Tailscale; never expose it to the internet. Each check-in records the caller's address in the log.
+The receiver (port 3101) is plain HTTP and has two routes (`GET /health`, `POST /checkin`), access only to the check-in directory, and a generic 401 for every bad key. On Docker and Umbrel it is a separate container that cannot see the transactions. The download and a plain run serve the same two routes from the app itself, on their own port, only while **Accept check-ins from other devices** is on (off by default); the app's own port stays on `localhost`.
+
+A check-in key cannot read or send anything, but whoever holds it can check in for you, which keeps check-in triggers from firing. Treat each key like a password: give each device its own key, and revoke any key you think has leaked (each check-in's caller address is in the log, to spot one you do not recognise). Keep it on your LAN or Tailscale; never expose it to the internet. Each check-in records the caller's address in the log.
 
 ## Bitcoin Core RPC
 
