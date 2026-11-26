@@ -845,3 +845,17 @@ button.btn-checkin-big { width: auto; flex: 0 0 auto; padding: 12px 22px; font-s
 #tab-bitcoin .tx-card.tx-sub[data-armed="off"] .tx-trigger,
 #tab-bitcoin .tx-card.tx-sub[data-armed="off"] .pill { border-color: var(--line-2) !important; background-color: transparent; }
 #tab-bitcoin .tx-card.tx-sub[data-armed="off"] .tx-trigger-k { color: var(--faint) !important; }
+
+/* Settings and Logs: a comfortable reading width; in Settings, Save is a
+   quiet button (orange is kept for the main action), checkboxes take the
+   accent, the filter is compact. Logs: quiet headers, monospace txids. */
+#tab-settings, #tab-logs { max-width: 820px; margin: 0 auto; }
+input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
+#tab-settings button.primary { background: var(--panel-2); color: var(--ink); border-color: var(--line-2); font-weight: 500; }
+#tab-settings button.primary:hover { border-color: var(--accent); background: var(--panel-2); }
+.settings-filter { border-bottom: 0; padding-bottom: 0; }
+.settings-filter select { width: auto; min-width: 220px; }
+th { font-size: 11.5px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--faint); }
+th, td { border-bottom-color: var(--line); }
+#broadcast-log td:nth-child(3) { font-family: var(--mono); font-size: 13px; }
+.log-row { cursor: pointer; }
