@@ -256,26 +256,43 @@
 
   <!-- ============ BITCOIN ============ -->
   <section class="tab" id="tab-bitcoin">
-    <details class="card staged" id="btc-card" open>
-      <summary><span class="sum-text">Active</span><button id="btn-btc-add-pill" class="add-tx-pill" type="button">+ Add Tx</button></summary>
-      <p class="btc-actions">
-        <button id="btn-btc-test-all">Dry-run all</button>
-        <button id="btn-btc-broadcast-armed" class="danger">Broadcast armed</button>
-      </p>
-      <p id="btc-all-msg" class="muted"></p>
-      <div id="btc-active-list"></div>
-    </details>
-    <details class="card pending" id="pending-card" open>
-      <summary>Pending</summary>
-      <div id="btc-pending-list"></div>
-    </details>
-    <details class="card archived" id="archived-card">
-      <summary>Archived</summary>
-      <p class="muted">Transactions that have already been broadcast, or whose inputs were declared spent.</p>
-      <div id="btc-archived-list"></div>
-    </details>
-    <div class="card">
-      <button id="btn-btc-add-open" class="primary add-open-full">+ Add a pre-signed transaction</button>
+    <!-- A list (left) and the selected transaction in full (right); on a
+         phone the list, then the transaction's own screen. js/txview.js. -->
+    <div class="txv" id="txv">
+      <div class="card txv-list" id="txv-list">
+        <div class="txv-tools">
+          <input id="txv-search" type="search" placeholder="Search name, txid, address" aria-label="Search transactions" autocomplete="off">
+          <button id="btn-btc-add-open" class="primary add-open-full">+ Add</button>
+        </div>
+        <div class="txv-seg" role="tablist" aria-label="Section">
+          <button type="button" id="txv-seg-active" class="on" role="tab">Active <span class="n" id="txv-n-active"></span></button>
+          <button type="button" id="txv-seg-pending" role="tab">Pending <span class="n" id="txv-n-pending"></span></button>
+          <button type="button" id="txv-seg-archived" role="tab">Archived <span class="n" id="txv-n-archived"></span></button>
+        </div>
+        <div id="txv-rows"></div>
+        <p class="btc-actions">
+          <button id="btn-btc-test-all">Dry-run all</button>
+          <button id="btn-btc-broadcast-armed" class="danger">Broadcast armed</button>
+        </p>
+        <p id="btc-all-msg" class="muted"></p>
+      </div>
+      <div class="txv-detail" id="txv-detail">
+        <button type="button" class="txv-back" id="txv-back">‹ Transactions</button>
+        <div class="card txv-empty" id="txv-empty"><p class="muted">Select a transaction to see it in full.</p></div>
+        <details class="card staged" id="btc-card" open>
+          <summary><span class="sum-text">Active</span><button id="btn-btc-add-pill" class="add-tx-pill" type="button">+ Add Tx</button></summary>
+          <div id="btc-active-list"></div>
+        </details>
+        <details class="card pending" id="pending-card" open>
+          <summary>Pending</summary>
+          <div id="btc-pending-list"></div>
+        </details>
+        <details class="card archived" id="archived-card">
+          <summary>Archived</summary>
+          <p class="muted">Transactions that have already been broadcast, or whose inputs were declared spent.</p>
+          <div id="btc-archived-list"></div>
+        </details>
+      </div>
     </div>
   </section>
 
@@ -966,6 +983,7 @@
 <script src="/js/dashboard.js"></script>
 <script src="/js/transactions.js"></script>
 <script src="/js/sets.js"></script>
+<script src="/js/txview.js"></script>
 <script src="/js/live.js"></script>
 <script src="/js/settings.js"></script>
 <script src="/js/setup.js"></script>

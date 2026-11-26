@@ -1749,6 +1749,50 @@ function check(name, cond, detail) {
     els['add-modal'] && !els['add-modal'].classList.contains('open'),
     els['add-modal'] ? 'open=' + els['add-modal'].classList.contains('open') : 'no add-modal');
 
+  // --- 11c. Transactions list and detail (js/txview.js) ---
+  // One row per active card, the Active count matches, exactly one card
+  // is selected (the first row's), and each card carries a 4-cell
+  // summary strip.
+  const txvRows = () => els['txv-rows'].children.filter((r) => r.className === 'txv-row');
+  const activeCards = els['btc-active-list'].children.filter((c) => (c.className || '').indexOf('tx-card') !== -1);
+  const selCards = () => ['btc-active-list', 'btc-pending-list', 'btc-archived-list']
+    .flatMap((id) => els[id].children).filter((c) => c.classList && c.classList.contains('txv-sel'));
+  check('tx list: one row per active card',
+    txvRows().length === activeCards.length && activeCards.length >= 2,
+    'rows=' + txvRows().length + ' cards=' + activeCards.length);
+  check('tx list: the Active count matches the rows',
+    els['txv-n-active'].textContent === String(txvRows().length), 'count=' + els['txv-n-active'].textContent);
+  check('tx list: exactly one card is shown, the first row’s',
+    selCards().length === 1 && cardTitle(selCards()[0]) === elText(txvRows()[0].children[0].children[0]),
+    'selected=' + selCards().length);
+  check('tx list: every card has a summary strip of 4 cells (Armed, Sends, Fee, Route / Transactions)',
+    activeCards.every((c) => { const st = c.children.find((x) => x.className === 'tx-stats'); return st && st.children.length === 4; }), '');
+  // A row opens its card (on a phone, its own screen); back returns.
+  const row2 = txvRows()[1];
+  const row2Name = elText(row2.children[0].children[0]);
+  row2.click();
+  check('tx list: tapping a row shows that card',
+    selCards().length === 1 && cardTitle(selCards()[0]) === row2Name, 'want ' + row2Name);
+  check('tx list: tapping a row opens its screen (phone)', els['txv'].classList.contains('detail-open'), '');
+  els['txv-back'].click();
+  check('tx list: back returns to the list', !els['txv'].classList.contains('detail-open'), '');
+  check('tx list: the selection stays after going back',
+    selCards().length === 1 && cardTitle(selCards()[0]) === row2Name, '');
+  // Search narrows the rows; clearing it brings them back.
+  els['txv-search'].value = 'zz-no-such-transaction';
+  els['txv-search'].fire('input');
+  check('tx list: a search with no match shows no rows and says so',
+    txvRows().length === 0 && els['txv-rows'].children.some((c) => (c.className || '').indexOf('txv-none') !== -1), '');
+  els['txv-search'].value = '';
+  els['txv-search'].fire('input');
+  check('tx list: clearing the search brings the rows back', txvRows().length === activeCards.length, 'rows=' + txvRows().length);
+  // The Archived switch lists archived items (none yet, so it says so).
+  els['txv-seg-archived'].click();
+  check('tx list: the Archived switch is selected and its list is shown',
+    els['txv-seg-archived'].classList.contains('on') && !els['txv-seg-active'].classList.contains('on'), '');
+  els['txv-seg-active'].click();
+  check('tx list: back on Active, its rows return', txvRows().length === activeCards.length, 'rows=' + txvRows().length);
+
   // --- 12. status pill: "armed", not "Ready + armed" ---
   // A problem state reads "Label + armed"; disarmed reads "unarmed". A
   // shared input turns the card pill amber (the seeded txs all spend

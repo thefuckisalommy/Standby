@@ -1171,6 +1171,7 @@ function renderBitcoin() {
     noneArchived.textContent = 'No archived transactions yet.';
     archivedList.appendChild(noneArchived);
   }
+  renderTxIndex();
 }
 
 async function toggleTx(id, enabled) {

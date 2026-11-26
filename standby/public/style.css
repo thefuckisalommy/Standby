@@ -859,3 +859,106 @@ th { font-size: 11.5px; font-weight: 600; letter-spacing: 0.05em; text-transform
 th, td { border-bottom-color: var(--line); }
 #broadcast-log td:nth-child(3) { font-family: var(--mono); font-size: 13px; }
 .log-row { cursor: pointer; }
+
+/* Transactions: the list (left) and the selected one in full (right).
+   Every card is still in the page, inside its section; only the selected
+   one shows. On a narrow screen, the list, then a transaction's own
+   screen with a link back. */
+.txv { display: grid; grid-template-columns: 370px minmax(0, 1fr); gap: 20px; align-items: start; }
+.txv-list { margin: 0; padding: 14px; position: sticky; top: 74px; max-height: calc(100vh - 92px); overflow-y: auto; }
+.txv-tools { display: flex; gap: 8px; }
+.txv-tools input {
+  flex: 1 1 auto; min-width: 0; padding: 8px 10px 8px 32px; font-size: 14px;
+  -webkit-appearance: none; appearance: none; border: 1px solid var(--line-2); border-radius: 8px; color: var(--ink); outline: none;
+  background: var(--bg) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%238a94a3' stroke-width='2' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='m20 20-3.5-3.5'/%3E%3C/svg%3E") no-repeat 11px center;
+}
+.txv-tools input:focus { border-color: var(--accent); }
+.txv-tools .add-open-full { width: auto; flex: 0 0 auto; padding: 8px 14px; font-size: 14px; }
+.txv-seg { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2px; margin: 10px 0 4px; padding: 3px; border: 1px solid var(--line); border-radius: 9px; background: var(--bg); }
+.txv-seg button { background: transparent; border: 0; padding: 7px 4px; font-size: 13.5px; font-weight: 500; color: var(--muted); border-radius: 6px; white-space: nowrap; }
+.txv-seg button:hover { color: var(--ink); background: transparent; }
+.txv-seg button.on { background: var(--panel-2); color: var(--ink); }
+.txv-seg .n { color: var(--faint); margin-left: 2px; }
+.txv-seg .n.dot { color: var(--warn); }
+.txv-seg .n.dot::before { content: '\25CF\00a0'; font-size: 8px; vertical-align: 2px; }
+.txv-row { margin-top: 8px; padding: 12px 13px; border: 1px solid var(--line); border-radius: 10px; background: #0d1014; cursor: pointer; outline: none; }
+.txv-row:hover { border-color: var(--line-2); }
+.txv-row[data-armed="on"] { border-color: var(--armed-edge); }
+.txv-row[data-armed="off"] { opacity: 0.55; }
+.txv-row.sel { border-color: var(--muted); box-shadow: inset 3px 0 0 var(--muted); background: var(--panel-2); opacity: 1; }
+.txv-row.sel[data-armed="on"] { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+.txv-row:focus-visible { box-shadow: 0 0 0 2px var(--accent-bg), inset 3px 0 0 var(--accent); }
+.txv-r1 { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.txv-name { font-weight: 600; font-size: 15px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.txv-badge { flex: 0 0 auto; font-size: 10.5px; font-weight: 600; letter-spacing: 0.06em; color: var(--muted); border: 1px solid var(--line-2); border-radius: 5px; padding: 1px 6px; white-space: nowrap; }
+.txv-amt { margin-left: auto; flex: 0 0 auto; font-family: var(--mono); font-size: 13px; color: var(--ink-2); white-space: nowrap; }
+.txv-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
+.txv-chip { font-size: 12.5px; padding: 3px 8px; border-radius: 6px; background: color-mix(in srgb, currentColor 14%, transparent); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.txv-chip.t-checkin { color: var(--t-checkin); }
+.txv-chip.t-price { color: var(--t-price); }
+.txv-chip.t-utxo { color: var(--t-utxo); }
+.txv-chip.t-block { color: var(--t-block); }
+.txv-chip.t-date { color: var(--t-date); }
+.txv-chip.t-fee { color: var(--t-fee); }
+.txv-chip.t-manual { color: var(--t-manual); }
+.txv-op { font-size: 10.5px; font-weight: 600; letter-spacing: 0.08em; color: var(--faint); }
+.txv-prog { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+.txv-bar { flex: 1 1 auto; height: 4px; border-radius: 3px; background: var(--line-2); overflow: hidden; }
+.txv-bar i { display: block; height: 100%; border-radius: 3px; background: var(--ink-2); }
+.txv-left { margin-left: auto; font-size: 12.5px; color: var(--muted); white-space: nowrap; }
+.txv-flags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+.txv-flags .pill { font-size: 12px; padding: 2px 8px; font-weight: 500; }
+.txv-members { margin-top: 10px; padding-top: 6px; border-top: 1px solid var(--line); }
+.txv-member { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; gap: 8px; padding: 3px 0; font-size: 13px; }
+.txv-member-to { font-family: var(--mono); font-size: 12.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.txv-member-amt { font-family: var(--mono); font-size: 12.5px; color: var(--ink-2); }
+.txv-group { margin: 16px 2px 0; font-size: 11.5px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); }
+.txv-none { margin: 16px 4px 6px; }
+.card.txv-list p.btc-actions { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+.txv-list #btc-all-msg:empty { display: none; }
+
+.txv-back { display: none; }
+.txv-empty { margin: 0; }
+#tab-bitcoin .txv-detail details.card { margin: 0; padding: 0; border: 0; background: none; box-shadow: none; }
+#tab-bitcoin .txv-detail details.card:not(.txv-has),
+#tab-bitcoin .txv-detail details.card > summary,
+#tab-bitcoin .txv-detail details.card > p.muted,
+#tab-bitcoin .txv-detail .tx-card:not(.txv-sel),
+#btc-active-list > p.muted, #btc-pending-list > p.muted, #btc-archived-list > p.muted { display: none; }
+#tab-bitcoin .txv-detail .tx-card.txv-sel {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 16px;
+  margin-top: 0; padding: 22px 24px; border-radius: 14px; background: var(--card);
+}
+.txv-detail .tx-card.txv-sel > * { grid-column: 1 / -1; min-width: 0; }
+.txv-detail .tx-card.txv-sel > .tx-head { grid-column: 1; grid-row: 1; align-items: center; flex-wrap: wrap; gap: 10px; }
+.txv-detail .tx-card.txv-sel > .tx-head b { flex: 0 1 auto; font-size: 24px; font-weight: 650; letter-spacing: -0.01em; }
+.txv-detail .tx-card.txv-sel > .tx-head .pill { margin-left: 0; }
+.txv-detail .tx-card.txv-sel > .tx-actions { grid-column: 2; grid-row: 1; align-self: start; justify-content: flex-end; margin-top: 0; }
+.txv-detail .tx-card.txv-sel > .tx-stats { grid-row: 2; }
+.txv-detail .tx-card.txv-sel > .tx-amount,
+.txv-detail .tx-card.txv-sel > .tx-amount + p.muted { display: none; }
+#tab-bitcoin .txv-detail .tx-card.txv-sel[data-armed="off"] .tx-actions button { color: var(--ink-2) !important; }
+#tab-bitcoin .txv-detail .tx-card.txv-sel[data-armed="off"] .tx-actions button.danger { color: var(--bad) !important; }
+.tx-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 18px -24px 8px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.tx-stat { min-width: 0; padding: 14px 20px; border-left: 1px solid var(--line); }
+.tx-stat:first-child { border-left: 0; }
+.tx-stat-k { font-size: 11.5px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; color: var(--faint); }
+.tx-stat-v { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 6px; font-size: 16px; font-weight: 600; }
+.tx-stat-v .pill { font-size: 12px; font-weight: 500; padding: 2px 8px; }
+.tx-stat-sub { margin-top: 3px; font-size: 13px; color: var(--muted); }
+
+@media (max-width: 960px) {
+  .txv { grid-template-columns: minmax(0, 1fr); }
+  .txv-list { position: static; max-height: none; overflow: visible; }
+  .txv:not(.detail-open) .txv-detail { display: none; }
+  .txv.detail-open .txv-list { display: none; }
+  .txv-back { display: inline-block; margin: 0 0 10px; padding: 6px 0; border: 0; background: none; color: var(--muted); font-size: 15px; }
+  .txv-back:hover { color: var(--ink); background: none; }
+  #tab-bitcoin .txv-detail .tx-card.txv-sel { grid-template-columns: minmax(0, 1fr); padding: 18px 16px; }
+  .txv-detail .tx-card.txv-sel > .tx-actions { grid-column: 1; grid-row: 2; justify-content: flex-start; margin-top: 14px; }
+  .txv-detail .tx-card.txv-sel > .tx-stats { grid-row: 3; }
+  .tx-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 16px -16px 8px; }
+  .tx-stat { padding: 12px 16px; }
+  .tx-stat:nth-child(3) { border-left: 0; }
+  .tx-stat:nth-child(n+3) { border-top: 1px solid var(--line); }
+}

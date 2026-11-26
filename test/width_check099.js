@@ -25,7 +25,8 @@ function check(name, cond, detail) {
     const b = [...document.querySelectorAll('#tabs button')].find((x) => x.dataset.tab === 'bitcoin');
     if (b) b.click();
   });
-  await page.waitForSelector('.tx-card', { timeout: 10000 });
+  // The list shows first; each row opens its transaction's own screen.
+  await page.waitForSelector('.txv-row', { timeout: 10000 });
   await page.waitForTimeout(400);
 
   // No overflow inside the element and fully inside the 390px viewport.
@@ -75,8 +76,16 @@ function check(name, cond, detail) {
   // --- Trigger subcards: three stacked rows ---
   // Each card's subcard fits at 390px and its rows (header, condition,
   // state) each start below the previous.
-  const subcards = await page.evaluate(() => {
-    return [...document.querySelectorAll('.tx-card')].map((card) => {
+  // Open each row in turn (on a phone the list gives way to that
+  // transaction's screen) and measure its card, then go back.
+  const subcards = [];
+  const nRows = await page.locator('#txv-rows .txv-row').count();
+  for (let i = 0; i < nRows; i++) {
+    await page.locator('#txv-rows .txv-row').nth(i).click();
+    await page.waitForTimeout(150);
+    subcards.push(await page.evaluate(() => {
+      const card = document.querySelector('.tx-card.txv-sel');
+      if (!card) return null;
       // The first .tx-trigger is the blue tx subcard (.tx-item); the
       // trigger box is the first plain one.
       const box = card.querySelector('.tx-trigger:not(.tx-item)');
@@ -89,9 +98,14 @@ function check(name, cond, detail) {
       const hasDetails = !!item && !!item.querySelector(':scope > .tx-details');
       const br = box.getBoundingClientRect();
       return { sw: box.scrollWidth, cw: box.clientWidth, right: Math.round(br.right * 10) / 10,
-        visible: br.width > 0, rows, hasDetails };
-    });
-  });
+        visible: br.width > 0, rows, hasDetails, pageSw: document.documentElement.scrollWidth };
+    }));
+    await page.click('#txv-back');
+    await page.waitForTimeout(100);
+  }
+  check('width list: each transaction screen has no horizontal overflow',
+    subcards.length >= 4 && subcards.every((s) => s && s.pageSw <= 390),
+    JSON.stringify(subcards.map((s) => s && s.pageSw)));
   check('width subcards: every tx card has a subcard (at least the 4 seeded)',
     subcards.length >= 4 && subcards.every(Boolean),
     'subcards found: ' + subcards.filter(Boolean).length);
@@ -123,12 +137,15 @@ function check(name, cond, detail) {
   check('width subcards: every tx subcard holds its Details inside it (0.8.7 fix, round 3)',
     subcards.length >= 4 && subcards.every((s) => s && s.hasDetails),
     JSON.stringify(subcards.map((s) => s && s.hasDetails)));
-  // The Staged Transactions card (0.8.0): its summary is the
-  // card header and the collapse toggle — it fits at 390px.
-  await checkEl('width bitcoin: Staged Transactions summary fits', '#btc-card > summary');
-
-  // The "+ Add Tx" pill in the Staged Transactions header fits.
-  await checkEl('width bitcoin: "+ Add Tx" pill in the Staged header fits', '#btn-btc-add-pill');
+  // The list: search and Add, the Active / Pending / Archived switch and
+  // every row fit at 390px, and the back link returned to it.
+  await checkEl('width list: search and "+ Add" fit', '.txv-tools');
+  await checkEl('width list: the Active / Pending / Archived switch fits', '.txv-seg');
+  const rowFit = await page.evaluate(() => [...document.querySelectorAll('#txv-rows .txv-row')].map((r) => {
+    const b = r.getBoundingClientRect();
+    return b.width > 0 && r.scrollWidth <= r.clientWidth && b.right <= 390;
+  }));
+  check('width list: every row fits', rowFit.length >= 4 && rowFit.every(Boolean), JSON.stringify(rowFit));
 
   // --- Add form: every trigger type and the fallback row ---
   // Open the #add-modal popup before measuring.

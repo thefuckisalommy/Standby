@@ -621,6 +621,7 @@ function patchLive(status, checkins, blog) {
   var agreeSpan = $('price-sources-agreement');
   if (agreeSpan) agreeSpan.textContent = ((S.settings && typeof S.settings.priceAgreementPct === 'number') ? S.settings.priceAgreementPct : 5) + '%';
   updateFeeZoneBar();
+  renderTxIndex();
   renderAlerts();
 }
 // Whole days since the effective last check-in (same math as the
