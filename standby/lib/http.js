@@ -17,14 +17,32 @@ const MIME = {
   '.json': 'application/json; charset=utf-8',
 };
 
+// A standalone build (a Node single executable) carries the page files
+// inside the program, as assets named "public/<file>"; everywhere else
+// they are read from PUBLIC_DIR.
+const sea = (() => {
+  try { const m = require('node:sea'); return m.isSea() ? m : null; } catch { return null; }
+})();
+function seaAsset(name) {
+  try { return Buffer.from(sea.getAsset(name)); } catch { return null; }
+}
+
 function serveStatic(req, res, pathname) {
   let file = pathname === '/' ? 'index.html' : pathname.slice(1);
   // No path traversal: compare against the directory with a trailing
   // separator (a bare prefix would also match "public-old").
   const resolved = path.resolve(PUBLIC_DIR, file);
   if (!resolved.startsWith(PUBLIC_DIR + path.sep)) { sendError(res, 403, 'forbidden'); return; }
-  if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) { sendError(res, 404, 'not found'); return; }
   const ext = path.extname(resolved);
+  if (sea) {
+    const body = seaAsset('public/' + path.relative(PUBLIC_DIR, resolved).split(path.sep).join('/'));
+    if (!body) { sendError(res, 404, 'not found'); return; }
+    setSecurityHeaders(res);
+    res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
+    res.end(body);
+    return;
+  }
+  if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) { sendError(res, 404, 'not found'); return; }
   setSecurityHeaders(res);
   res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
   fs.createReadStream(resolved).pipe(res);
@@ -159,4 +177,4 @@ function saveMutation(mutator) {
   return fresh;
 }
 
-module.exports = { MIME, serveStatic, hostOf, hostnameOf, hostAllowed, describeAllowedHosts, startupSecurityNotes, MIN_PASSWORD_LENGTH, isLoopback, fetchSiteAllowed, csrfAllowed, saveMutation, setSecurityHeaders, CSP };
+module.exports = { MIME, isStandalone: () => !!sea, serveStatic, hostOf, hostnameOf, hostAllowed, describeAllowedHosts, startupSecurityNotes, MIN_PASSWORD_LENGTH, isLoopback, fetchSiteAllowed, csrfAllowed, saveMutation, setSecurityHeaders, CSP };
