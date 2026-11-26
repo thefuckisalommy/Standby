@@ -4,7 +4,7 @@ Standby holds presigned Bitcoin transactions. Read this before arming one.
 
 ## Signed transactions are bearer
 
-Whoever holds a signed transaction can broadcast it, with or without Standby, and it reveals destinations and amounts. Standby stores them unencrypted (it must read them unattended to broadcast), in a data directory readable only by the app's user (UID 1000). Root, anyone with Docker access, or a stolen drive can read them: protect the device.
+Whoever holds a signed transaction can broadcast it, with or without Standby, and it reveals destinations and amounts. Standby stores them unencrypted (it must read them unattended to broadcast), in a data directory readable only by the app's user (UID 1000). Root, anyone with Docker access, or a stolen drive can read them: protect the device. Every copy of the data folder holds them too, along with any saved node login: an Umbrel backup, a copy made by hand, or a Standby backup file saved without a password. Protect those copies like the device.
 
 Saves are written to a temporary file and swapped into place. On Linux the folder is also flushed to disk, so a power cut cannot lose the last save; Windows has no way to flush a folder, so there a power cut right after a save can lose that one save (the previous one stays intact).
 

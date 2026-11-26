@@ -28,6 +28,12 @@ description: |-
   - Broadcast manually: Send a prepared transaction whenever you decide it's time.
   - Automate: Each transaction carries its own trigger — the rule that fires it. Check-in (fire after N days of silence), BTC price (fire when the price crosses a value you set), UTXO moved (fire when a named outpoint is spent), Block height (fire when the chain reaches a height), Set date (fire at a date and time), Fee market (fire when the economy fee crosses a rate you set, up or down), or Manual only (never fires on its own).
 
+  Before you start
+
+  - Standby keeps fully signed transactions. Anyone who gets a copy of its data, including an Umbrel backup, can broadcast them: protect this device and its backups.
+  - Triggers are only checked while Standby is running.
+  - A broadcast transaction still has to confirm. If fees rise well above the fee it was signed with, it can wait a long time.
+
   Why Standby?
 
   Bitcoin gives you control over your money. Standby helps you plan for situations where you might not be available to exercise that control yourself.
