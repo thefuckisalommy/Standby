@@ -4,6 +4,10 @@ What changed in each Standby release, newest first. The newest few also appear i
 
 Code comments describe how the app works now; the history of why it changed lives here and in git.
 
+## 0.8.22
+
+Maintenance only: nothing changes in how Standby looks or works. The page's script, one file of almost 6,000 lines, is now split by area into eight files in standby/public/js/ (core, dashboard, transactions, sets, live, settings, setup, main), loaded in order and sharing one scope, so each part is easier to find and change. A new check makes sure the files never declare the same name twice and leave nothing unused, unused styles were removed, and one oddly indented block was tidied.
+
 ## 0.8.21
 
 Desktop: start with the computer, a tray icon, and an update check. The Windows and Linux downloads now start by themselves when you sign in, so triggers keep being checked after a restart (on by default; setup shows it with a switch to turn it off, and so does Settings > This computer, which also has Stop Standby). On Windows, Standby no longer opens a console window: it runs in the background with an icon next to the clock (Open Standby, Quit Standby), and its log goes to standby.log in the data folder. Starting it again while it runs just opens the page. Check for new versions: once a day Standby asks GitHub whether a newer release exists and, if so, says so with a download link (on by default for the downloads, off for Docker and plain Node, not on Umbrel, which updates apps itself; nothing is sent but the request, and nothing is installed automatically). Settings no longer has "Run setup again"; Start fresh still runs setup. The Windows program now shows Standby's own icon and name (in File Explorer, the taskbar, the tray and Task Manager) instead of Node's, and the README says how to remove Standby cleanly.

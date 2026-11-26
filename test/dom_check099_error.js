@@ -402,6 +402,15 @@ global.setInterval = (fn) => { global.__pollFn = fn; return 0; };
 global.clearInterval = () => {};
 
 const failures = [];
+// The page's scripts, in the order index.html loads them, as one text
+// (they share one scope, so one eval runs them as the browser does).
+async function pageScript() {
+  const idx = await realFetch(BASE + '/').then((r) => r.text());
+  const srcs = [...idx.matchAll(/<script src="([^"]+)"><\/script>/g)].map((m) => m[1]);
+  if (!srcs.length) throw new Error('no page scripts in index.html');
+  const parts = await Promise.all(srcs.map((s) => realFetch(BASE + s).then((r) => r.text())));
+  return parts.join('\n');
+}
 function check(name, cond, detail) {
   console.log((cond ? 'PASS' : 'FAIL'), '-', name, cond ? '' : '| ' + String(detail).slice(0, 200));
   if (!cond) failures.push(name);
@@ -491,7 +500,7 @@ function errorCardVisible() {
 }
 
 (async () => {
-  const appJs = await realFetch(BASE + '/app.js').then((r) => r.text());
+  const appJs = await pageScript();
   eval(appJs);
   await sleep(900); // load() fetches state + renders
 

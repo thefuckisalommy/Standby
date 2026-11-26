@@ -49,7 +49,7 @@ function serveStatic(req, res, pathname) {
 }
 
 // Security headers on every response: X-Frame-Options, nosniff and a
-// minimal CSP. Scripts only from 'self' (the page's one script is /app.js,
+// minimal CSP. Scripts only from 'self' (the page's scripts are in /js/,
 // no inline or eval); inline style attributes are used throughout, so
 // style-src allows 'unsafe-inline'. Also sent on API responses, where it
 // is inert.

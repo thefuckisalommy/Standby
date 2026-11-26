@@ -156,7 +156,7 @@ function sanitizeFeeHistory(raw, nowMs) {
   return out.slice(-FEE_HISTORY_MAX_ENTRIES);
 }
 // How a tx is named in a set's history tags (mirrors txDisplayName in
-// public/app.js): a member as '"<set label>" - Tx N', a standalone by its
+// public/js/dashboard.js): a member as '"<set label>" - Tx N', a standalone by its
 // label, else its short txid.
 function shortTxid16(txid) {
   const s = String(txid || '');
@@ -320,7 +320,7 @@ function normalizeTrigger(input) {
 
 // The tx's normalized rule set; missing or unusable means a 35-day check-
 // in rule, so no transaction is lost to an unreadable trigger. Mirrored in
-// public/app.js.
+// public/js/dashboard.js.
 function triggerOf(tx) {
   if (!tx || typeof tx !== 'object') return defaultTriggerSet();
   const r = normalizeTrigger(tx.trigger);
