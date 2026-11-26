@@ -838,6 +838,8 @@ def run():
                   "console.log(a.length===2&&a[1].method==='t2'&&b.length===1&&b[0].method==='w'&&tmp?'OK':'FAIL');"
                   % json.dumps(TMP + '/standby-test099-jsonl'))
     out, err = node_out(node_jsonl)
+    # Each append also writes an app-log line; the verdict is the last line.
+    out = out.split('\n')[-1] if out else out
     check('35 jsonl: append + rewrite round-trip with no .tmp', out == 'OK', out + err)
     # --- 36. uncaught exception ---
     # The app and the receiver must exit nonzero on an uncaught
