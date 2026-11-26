@@ -873,6 +873,7 @@ function renderUpdate() {
   try { dismissed = window.localStorage.getItem(UPDATE_DISMISS_KEY); } catch (e) { /* none */ }
   var show = u.enabled && u.newer && dismissed !== u.latest;
   banner.style.display = show ? '' : 'none';
+  renderAlerts();
   if (show) {
     $('update-banner-version').textContent = u.latest;
     $('update-banner-link').href = u.url || 'https://github.com/thefuckisalommy/Standby/releases';
@@ -882,6 +883,7 @@ $('update-banner-later').addEventListener('click', function (ev) {
   if (ev && ev.preventDefault) ev.preventDefault();
   try { if (updateInfo && updateInfo.latest) window.localStorage.setItem(UPDATE_DISMISS_KEY, updateInfo.latest); } catch (e) { /* this view only */ }
   $('update-banner').style.display = 'none';
+  renderAlerts();
 });
 $('update-check').addEventListener('change', async function () {
   var want = $('update-check').checked;

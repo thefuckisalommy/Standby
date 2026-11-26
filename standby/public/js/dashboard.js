@@ -18,6 +18,7 @@ async function load() {
   refreshConfirmations(); // fire-and-forget: the sent lines show the last known count, then update
   lastLiveSignature = liveSignature(S, status, apiKeys);
   syncSetup();
+  renderAlerts();
 }
 
 // State could not load and nothing was recovered: offer restore or start

@@ -360,7 +360,8 @@ function check(name, cond, detail) {
   // At phone width the tabs are a bar fixed along the bottom of the
   // screen (icons over labels), above the content, with an opaque
   // background; the page leaves room at the bottom so its last lines are
-  // not hidden behind it. The appbar stays sticky at the top.
+  // not hidden behind it. The top bar scrolls away with the page (the
+  // tabs are at the bottom).
   await page.evaluate(() => window.scrollTo(0, 0));
   await page.waitForTimeout(300);
   const tabBar = await page.evaluate(() => {
@@ -392,9 +393,9 @@ function check(name, cond, detail) {
     tabBar ? 'padding=' + tabBar.mainPadBottom + ' bar=' + tabBar.tabsHeight : 'no main');
   check('width tabs: every tab shows its icon on a phone',
     !!tabBar && tabBar.iconsShown === 4, tabBar ? 'icons=' + tabBar.iconsShown : 'no tabs');
-  check('width tabs: the appbar is still sticky at top 0, above the tab bar',
-    !!tabBar && tabBar.appbarPosition === 'sticky' && tabBar.appbarTop === '0px' && tabBar.appbarZ > tabBar.tabsZ,
-    tabBar ? 'position=' + tabBar.appbarPosition + ' top=' + tabBar.appbarTop + ' z=' + tabBar.appbarZ : 'no appbar');
+  check('width tabs: at 390px the top bar scrolls away with the page (not sticky)',
+    !!tabBar && tabBar.appbarPosition === 'static',
+    tabBar ? 'position=' + tabBar.appbarPosition : 'no appbar');
   // All four tabs on one row, equal widths.
   const tabRows = await page.evaluate(() => {
     const btns = [...document.querySelectorAll('nav.tabs button')];

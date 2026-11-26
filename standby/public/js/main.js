@@ -11,6 +11,7 @@ api('GET', '/api/auth/status').then(function (st) {
   authInfo = { required: !!st.required, source: st.source || (st.required ? 'env' : 'none'), deployment: st.deployment || '', dataFolder: st.dataFolder || '' };
   renderLoginCard();
   renderForgot();
+  renderHeaderButtons();
   if (st.required && !st.authenticated) showLogin();
   // Setup's pages depend on this computer's options; ask first (only
   // when logged in, or no login is needed).

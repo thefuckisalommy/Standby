@@ -61,27 +61,6 @@ header.appbar {
 .appbar-logo { height: 28px; width: 28px; flex-shrink: 0; border-radius: 7px; display: block; }
 .appbar-brand { display: flex; align-items: center; gap: 10px; }
 header .spacer { flex: 1; }
-/* Burger menu (three-line ☰). */
-.burger { position: relative; }
-.burger summary {
-  list-style: none; cursor: pointer;
-  width: 36px; height: 36px; border-radius: 8px; border: 1px solid var(--line);
-  display: flex; align-items: center; justify-content: center;
-  font-size: 18px; color: var(--muted);
-}
-.burger summary::-webkit-details-marker { display: none; }
-.burger summary:hover { background: var(--panel-2); color: var(--ink); }
-.burger nav {
-  position: absolute; right: 0; top: calc(100% + 8px); min-width: 12rem;
-  background: var(--card); border: 1px solid var(--line-2); border-radius: var(--radius);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
-  overflow: hidden;
-}
-.burger nav a {
-  display: block; padding: 11px 16px; color: var(--ink);
-  text-decoration: none; font-size: 14.5px;
-}
-.burger nav a:hover { background: var(--panel-2); }
 main { max-width: 1120px; margin: 0 auto; padding: 24px 24px 32px; }
 /* The tabs, in the top bar. */
 nav.tabs { display: flex; gap: 4px; align-items: center; }
@@ -629,7 +608,7 @@ p.inline-btns { display: flex; gap: 8px; flex-wrap: nowrap; align-items: center;
 .pw-toggle.on .eye-hide { display: inline; }
 
 /* First-open setup: one page per step, in place of the tabs. */
-body.setup-open #tabs, body.setup-open main section.tab, body.setup-open .burger { display: none !important; }
+body.setup-open #tabs, body.setup-open main section.tab, body.setup-open .hdr-actions { display: none !important; }
 .setup-card { padding: 22px 20px 20px; margin-top: 14px; }
 .setup-step { display: none; }
 .setup-step.on { display: block; }
@@ -784,4 +763,49 @@ button.btn-checkin-big { width: auto; flex: 0 0 auto; padding: 12px 22px; font-s
   .ck-tx { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "label left" "bar bar" "cap cap"; row-gap: 6px; }
   .ck-tx-left { display: flex; gap: 8px; align-items: baseline; }
   .ck-tx-left span { font-size: 12px; }
+}
+
+/* Top bar buttons: back to Umbrel, Alerts (with a count), Lock. */
+.hdr-actions { display: flex; align-items: center; gap: 8px; }
+.iconbtn {
+  position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  min-width: 36px; height: 36px; padding: 0 9px; border-radius: 8px;
+  border: 1px solid var(--line); background: transparent; color: var(--muted);
+  font-size: 13px; font-weight: 500; text-decoration: none; cursor: pointer;
+}
+.iconbtn:hover { background: var(--panel-2); color: var(--ink); }
+.iconbtn svg { flex: none; }
+.badge {
+  position: absolute; top: -6px; right: -6px; min-width: 18px; height: 18px; padding: 0 5px;
+  border-radius: 999px; background: var(--line-2); color: var(--ink);
+  font-size: 11px; font-weight: 700; line-height: 18px; text-align: center;
+  box-shadow: 0 0 0 2px var(--bg);
+}
+.badge.bad { background: var(--bad); color: #1d0b0b; }
+.badge.warn { background: var(--warn); color: #1d1606; }
+.badge.info { background: var(--line-2); color: var(--ink); }
+.alerts { position: relative; }
+.alerts-panel {
+  position: absolute; right: 0; top: calc(100% + 8px); width: 340px; z-index: 60;
+  background: var(--card); border: 1px solid var(--line-2); border-radius: var(--radius);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55); overflow: hidden;
+}
+.alerts-head { padding: 12px 16px; font-size: 12px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); border-bottom: 1px solid var(--line); }
+.alerts-list { list-style: none; margin: 0; padding: 0; max-height: 60vh; overflow-y: auto; }
+.alert-item { padding: 12px 16px 12px 30px; border-bottom: 1px solid var(--line); cursor: pointer; position: relative; }
+.alert-item:last-child { border-bottom: 0; }
+.alert-item:hover { background: var(--panel-2); }
+.alert-item::before { content: ""; position: absolute; left: 14px; top: 18px; width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+.alert-item.bad::before { background: var(--bad); }
+.alert-item.warn::before { background: var(--warn); }
+.alert-title { font-weight: 600; font-size: 14px; }
+.alert-detail { color: var(--muted); font-size: 13px; margin-top: 2px; }
+.alerts-none { padding: 16px; color: var(--muted); font-size: 13.5px; }
+#appbar-brand { cursor: pointer; }
+@media (max-width: 720px) {
+  /* The tabs are at the bottom, so the top bar scrolls away with the
+     page. */
+  header.appbar { position: static; }
+  .iconbtn.wide span { display: none; }
+  .alerts-panel { position: fixed; left: 12px; right: 12px; top: 62px; width: auto; }
 }

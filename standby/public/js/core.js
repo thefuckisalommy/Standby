@@ -306,22 +306,7 @@ try {
 // The first paint is the tab the URL names, not always Dashboard.
 showTab(tabFromHash(), false);
 
-// Exit App returns to the Umbrel home on whatever host this app was
-// reached on (protocol-relative root).
+// The Umbrel button returns to the Umbrel home on whatever host this app
+// was reached on (protocol-relative root); header.js shows it on Umbrel.
 var exitLink = $('exit-app');
 if (exitLink) exitLink.href = '//' + window.location.hostname + '/';
-// The menu also lists the tabs (as hash links) above Exit App; tapping
-// one switches and closes the menu.
-document.querySelectorAll('#burger-menu a[data-tab-link]').forEach(function (a) {
-  a.addEventListener('click', function (e) {
-    e.preventDefault();
-    var menu = $('burger-menu');
-    if (menu) menu.open = false;
-    showTab(a.dataset.tabLink);
-  });
-});
-// Tapping anywhere outside the open menu closes it.
-document.addEventListener('click', function (e) {
-  var menu = $('burger-menu');
-  if (menu && menu.open && !menu.contains(e.target)) menu.open = false;
-});
