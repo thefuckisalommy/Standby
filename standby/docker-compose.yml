@@ -2,11 +2,15 @@
 # Pattern: Umbrel injects `app_proxy`; the web service is reached via
 # APP_HOST: <app-id>_<service>_1 and APP_PORT (internal port).
 #
-# Both services run as UID/GID 1000, the owner Umbrel gives
-# app data — the image's `node` user, not root. Installs from before
-# 0.8.11.1 wrote their files as root; hooks/pre-start sets the ownership
-# (and moves the check-in directory under data/) on every start, before
-# the containers run.
+# One package for both stores (see umbrel-app.yml). Both services run as
+# UID/GID 1000, the owner Umbrel gives app data — the image's `node` user,
+# not root. The data folders are committed (data/checkin/.gitkeep), so
+# Umbrel creates them with that owner.
+#
+# Images are pinned as <version>@sha256:<digest> (the multi-arch digest),
+# as the official store requires. tools/bump-version.js writes the new tag
+# alone; once the image is built, the image workflow pins its digest
+# (tools/pin-image.js) and commits that to main.
 version: "3.7"
 
 services:
@@ -19,7 +23,7 @@ services:
     # Prebuilt for amd64 and arm64 by GitHub Actions
     # (.github/workflows/build-standby-image.yml), tagged with the app
     # version — installing the app just pulls it, no build step.
-    image: ghcr.io/thefuckisalommy/standby:0.8.22
+    image: ghcr.io/thefuckisalommy/standby:0.8.23
     user: "1000:1000"
     restart: on-failure
     stop_grace_period: 1m30s
@@ -55,9 +59,8 @@ services:
       CHECKIN_DIR: /checkin
     volumes:
       - ${APP_DATA_DIR}/data:/data
-      # The check-in directory lives under data/ now, so it
-      # moves with the rest of the app data (umbrelOS 2.0 storage
-      # relocation) — hooks/pre-start migrates the old location.
+      # The check-in directory lives under data/, so it moves with the
+      # rest of the app data (storage: dataRoot: data in umbrel-app.yml).
       - ${APP_DATA_DIR}/data/checkin:/checkin
     # Healthy while the API answers and the state file loads.
     healthcheck:
@@ -81,7 +84,7 @@ services:
   # a newer timestamp from last.json on every status read and on the
   # hourly tick.
   checkin:
-    image: ghcr.io/thefuckisalommy/standby:0.8.22
+    image: ghcr.io/thefuckisalommy/standby:0.8.23
     command: ["node", "checkin-receiver/server.js"]
     user: "1000:1000"
     restart: on-failure

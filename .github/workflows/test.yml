@@ -222,6 +222,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Lint shell scripts (shellcheck is preinstalled on ubuntu-latest)
-        run: shellcheck standby/hooks/pre-start test/smoke_compose.sh
+        run: shellcheck test/smoke_compose.sh test/bundle_nolib_check.sh test/make_bundled_app.sh
       - name: Image + compose smoke test (generic Docker and simulated Umbrel)
         run: bash test/smoke_compose.sh

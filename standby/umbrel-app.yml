@@ -1,21 +1,14 @@
-# Standby — Umbrel app manifest
-# Lives in its own community store (thefuckisalommy/Standby),
-# App id `standby`, port 3100.
+# Standby — Umbrel app manifest. One package for both stores: this
+# repository's community store installs it from this folder, and the
+# official Umbrel App Store submission is a copy of the same folder (see
+# umbrel-official/README.md). Fields in the official store's order.
 manifestVersion: 1
 id: standby
-category: automation
+storage:
+  dataRoot: data
+category: bitcoin
 name: Standby
-version: "0.8.22"
-releaseNotes: |-
-  0.8.22 — Maintenance only: nothing changes in how Standby looks or works. The page's script, one file of almost 6,000 lines, is now split by area into eight files in standby/public/js/ (core, dashboard, transactions, sets, live, settings, setup, main), loaded in order and sharing one scope, so each part is easier to find and change. The server's Bitcoin code (lib/bitcoin.js, about 2,400 lines) is split the same way into lib/bitcoin/: transactions, nodes, fees, prices, broadcasting, input checks, dry runs and the node Test. New checks make sure the page files never declare the same name twice or leave one unused, and that the page's copies of a few server rules (the fee verdict, reading a transaction's triggers, its name in history, the check-in danger zone) agree with the server on thousands of inputs. Unused styles were removed, and one oddly indented block was tidied.
-
-  0.8.21 — Desktop: start with the computer, a tray icon, and an update check. The Windows and Linux downloads now start by themselves when you sign in, so triggers keep being checked after a restart (on by default; setup shows it with a switch to turn it off, and so does Settings > This computer, which also has Stop Standby). On Windows, Standby no longer opens a console window: it runs in the background with an icon next to the clock (Open Standby, Quit Standby), and its log goes to standby.log in the data folder. Starting it again while it runs just opens the page. Check for new versions: once a day Standby asks GitHub whether a newer release exists and, if so, says so with a download link (on by default for the downloads, off for Docker and plain Node, not on Umbrel, which updates apps itself; nothing is sent but the request, and nothing is installed automatically). Settings no longer has "Run setup again"; Start fresh still runs setup. The Windows program now shows Standby's own icon and name (in File Explorer, the taskbar, the tray and Task Manager) instead of Node's, and the README says how to remove Standby cleanly.
-
-  0.8.20 — Standalone downloads. Standby now also comes as a single program for Windows (x64) and Linux (x64 and arm64) with nothing else to install: no Docker and no Node. Double-click it (or run ./standby): a window shows it is running and the page opens in your browser at http://localhost:3100; closing the window stops it. Your data is kept in your own user folder (%APPDATA%\Standby on Windows, ~/.local/share/standby on Linux), and "Forgot password?" names that folder. Each release has SHA-256 checksums and GitHub build attestations; the Windows build is not code-signed yet. Check-ins from other devices: on the download and a plain Node run, switch on "Accept check-ins from other devices" in Settings > Check-in API keys and Standby opens port 3101 for check-ins only (each needs an API key; nothing else in Standby can be reached through it). Docker and Umbrel keep the separate check-in receiver. Behind the scenes: the app can be bundled into one script (tools/bundle.js), and the test suites also run against that bundle.
-
-  0.8.19 — First-open setup and app password. A fresh install opens a short setup, one page per step: an app password (skippable, with a warning), the Bitcoin nodes and price sources (keep the defaults or choose your own), how each trigger works, and your first transaction (or skip). Without STANDBY_PASSWORD, a password can now be set, changed or removed in the app (Settings → App login); it is stored only as a hash, and a forgotten one is reset on the machine itself (start with --reset-password), never over the network. The login screen has "Forgot password?" instructions. Settings has Start fresh (delete all data and a password set in the app, with a typed confirmation and the password; setup then runs again) and Run setup again. Existing installs are not shown the setup.
-
-  Older releases: https://github.com/thefuckisalommy/Standby/blob/main/CHANGELOG.md
+version: "0.8.23"
 tagline: Presigned Bitcoin transactions, ready when they're needed.
 description: |-
   Standby helps you prepare Bitcoin transactions in advance and keep them ready for whenever the time comes to use them.
@@ -28,6 +21,12 @@ description: |-
   - Broadcast manually: Send a prepared transaction whenever you decide it's time.
   - Automate: Each transaction carries its own trigger — the rule that fires it. Check-in (fire after N days of silence), BTC price (fire when the price crosses a value you set), UTXO moved (fire when a named outpoint is spent), Block height (fire when the chain reaches a height), Set date (fire at a date and time), Fee market (fire when the economy fee crosses a rate you set, up or down), or Manual only (never fires on its own).
 
+  Before you start
+
+  - Standby keeps fully signed transactions. Anyone who gets a copy of its data, including an Umbrel backup, can broadcast them: protect this device and its backups.
+  - Triggers are only checked while Standby is running.
+  - A broadcast transaction still has to confirm. If fees rise well above the fee it was signed with, it can wait a long time.
+
   Why Standby?
 
   Bitcoin gives you control over your money. Standby helps you plan for situations where you might not be available to exercise that control yourself.
@@ -35,21 +34,38 @@ description: |-
   Prepare in advance. Stay in control. Be ready for the unexpected.
 
   Standby. Ready when you need it.
+releaseNotes: |-
+  0.8.23 — Umbrel: one package for both app stores. On Umbrel, Standby now opens at port 3102 instead of 3100 (3100 is taken in the official Umbrel App Store); your data and check-ins are kept, and check-ins still use port 3101. Its category is now Bitcoin, and the store description says up front that anyone holding the signed transactions, including from a backup, can broadcast them, that triggers only run while Standby runs, and that a broadcast still has to confirm. Behind the scenes: the Umbrel package follows the official store's rules (data folders included instead of a start-up script, images pinned to their exact build, pinned automatically after each release), so the same folder is used for this store and an official submission. SECURITY.md notes that every copy of the data folder holds the signed transactions. Nothing else changes in the app.
+
+  0.8.22 — Maintenance only: nothing changes in how Standby looks or works. The page's script, one file of almost 6,000 lines, is now split by area into eight files in standby/public/js/ (core, dashboard, transactions, sets, live, settings, setup, main), loaded in order and sharing one scope, so each part is easier to find and change. The server's Bitcoin code (lib/bitcoin.js, about 2,400 lines) is split the same way into lib/bitcoin/: transactions, nodes, fees, prices, broadcasting, input checks, dry runs and the node Test. New checks make sure the page files never declare the same name twice or leave one unused, and that the page's copies of a few server rules (the fee verdict, reading a transaction's triggers, its name in history, the check-in danger zone) agree with the server on thousands of inputs. Unused styles were removed, and one oddly indented block was tidied.
+
+  0.8.21 — Desktop: start with the computer, a tray icon, and an update check. The Windows and Linux downloads now start by themselves when you sign in, so triggers keep being checked after a restart (on by default; setup shows it with a switch to turn it off, and so does Settings > This computer, which also has Stop Standby). On Windows, Standby no longer opens a console window: it runs in the background with an icon next to the clock (Open Standby, Quit Standby), and its log goes to standby.log in the data folder. Starting it again while it runs just opens the page. Check for new versions: once a day Standby asks GitHub whether a newer release exists and, if so, says so with a download link (on by default for the downloads, off for Docker and plain Node, not on Umbrel, which updates apps itself; nothing is sent but the request, and nothing is installed automatically). Settings no longer has "Run setup again"; Start fresh still runs setup. The Windows program now shows Standby's own icon and name (in File Explorer, the taskbar, the tray and Task Manager) instead of Node's, and the README says how to remove Standby cleanly.
+
+  0.8.20 — Standalone downloads. Standby now also comes as a single program for Windows (x64) and Linux (x64 and arm64) with nothing else to install: no Docker and no Node. Double-click it (or run ./standby): a window shows it is running and the page opens in your browser at http://localhost:3100; closing the window stops it. Your data is kept in your own user folder (%APPDATA%\Standby on Windows, ~/.local/share/standby on Linux), and "Forgot password?" names that folder. Each release has SHA-256 checksums and GitHub build attestations; the Windows build is not code-signed yet. Check-ins from other devices: on the download and a plain Node run, switch on "Accept check-ins from other devices" in Settings > Check-in API keys and Standby opens port 3101 for check-ins only (each needs an API key; nothing else in Standby can be reached through it). Docker and Umbrel keep the separate check-in receiver. Behind the scenes: the app can be bundled into one script (tools/bundle.js), and the test suites also run against that bundle.
+
+  Older releases: https://github.com/thefuckisalommy/Standby/blob/main/CHANGELOG.md
 developer: Lommy
 website: https://github.com/thefuckisalommy/Standby
 dependencies: []
 repo: https://github.com/thefuckisalommy/Standby
 support: https://github.com/thefuckisalommy/Standby/issues
-port: 3100
-# (0.8.11.1) The app login: Umbrel shows its per-install APP_PASSWORD on
-# the app page, and docker-compose.yml passes it to the app as
-# STANDBY_PASSWORD.
-defaultUsername: ""
-defaultPassword: ""
-deterministicPassword: true
-torOnly: false
-icon: https://raw.githubusercontent.com/thefuckisalommy/Standby/main/standby/icon.jpg
+# The address Umbrel opens Standby at (its app proxy). 3100 is taken in the
+# official store, so 3102; the container still listens on 3100 (APP_PORT in
+# docker-compose.yml), and check-ins use port 3101.
+port: 3102
 gallery:
   - https://raw.githubusercontent.com/thefuckisalommy/Standby/main/standby/1.jpg
   - https://raw.githubusercontent.com/thefuckisalommy/Standby/main/standby/2.jpg
   - https://raw.githubusercontent.com/thefuckisalommy/Standby/main/standby/3.jpg
+path: ""
+# The app login: Umbrel shows its per-install APP_PASSWORD on the app page,
+# and docker-compose.yml passes it to the app as STANDBY_PASSWORD.
+defaultUsername: ""
+defaultPassword: ""
+deterministicPassword: true
+torOnly: false
+# The community store shows this icon; the official store hosts its own
+# copy (umbrel-official/icon.png goes with the pull request).
+icon: https://raw.githubusercontent.com/thefuckisalommy/Standby/main/standby/icon.jpg
+submitter: Lommy
+submission: ""
