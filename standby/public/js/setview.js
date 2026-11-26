@@ -1,7 +1,7 @@
 'use strict';
 // Settings in groups: a list on the left (search, each section with its
-// current state), one group at a time on the right; on a phone, the list
-// first, then a group's own screen with a link back. Sections that save
+// current state, by group), the chosen section alone on the right; on a
+// phone, the list first, then that section's own screen with a link back. Sections that save
 // share one Save bar: it appears once something changed and saves every
 // changed section with that section's own Save (the buttons are hidden).
 
@@ -31,6 +31,7 @@ var SETV_CARDS = {
   version: { name: 'Version' },
 };
 var setvGroup = 'safety';
+var setvCard = 'vacation'; // the section shown
 var setvOpen = false; // phone: a group's screen is showing
 var setvDirty = {}; // card key -> true while it has unsaved changes
 var setvQuery = '';
@@ -114,7 +115,7 @@ function renderSetNav() {
     grp.appendChild(setvEl('div', 'setnav-k', g.title));
     var list = setvEl('div', 'setnav-list');
     keys.forEach(function (k) {
-      var item = setvEl('button', 'setnav-item' + (g.id === setvGroup ? ' on' : ''));
+      var item = setvEl('button', 'setnav-item' + (k === setvCard ? ' on' : ''));
       item.type = 'button';
       var st = setvState(k);
       if (st.dot) item.appendChild(setvEl('span', 'dot ' + st.dot));
@@ -132,9 +133,20 @@ function renderSetNav() {
 }
 
 function setvApply() {
+  // A section that is not offered here (This computer outside the
+  // downloads) gives way to the first one of its group that is.
+  if (!setvCardShown(setvCard)) {
+    var g0 = SETV_GROUPS.filter(function (g) { return g.id === setvGroup; })[0];
+    var alt = g0 ? g0.cards.filter(setvCardShown)[0] : null;
+    if (alt) setvCard = alt;
+  }
   SETV_GROUPS.forEach(function (g) {
     var el = $('sg-' + g.id);
     if (el) el.classList.toggle('on', g.id === setvGroup);
+  });
+  Object.keys(SETV_CARDS).forEach(function (k) {
+    var c = $('card-' + k);
+    if (c) c.classList.toggle('setv-on', k === setvCard);
   });
   var v = $('setv');
   if (v) v.classList.toggle('open', setvOpen);
@@ -142,17 +154,13 @@ function setvApply() {
   renderSaveBar();
 }
 
-// Show a group (and on a phone, its screen); scroll to one section.
+// Show one section (on a phone, its own screen).
 function setvShow(groupId, cardKey) {
   setvGroup = groupId;
+  setvCard = cardKey;
   setvOpen = true;
   setvApply();
-  var card = cardKey ? $('card-' + cardKey) : null;
-  if (card && typeof card.scrollIntoView === 'function' && cardKey !== SETV_GROUPS.filter(function (g) { return g.id === groupId; })[0].cards[0]) {
-    card.scrollIntoView({ block: 'start', behavior: 'smooth' });
-  } else if (typeof window.scrollTo === 'function') {
-    window.scrollTo(0, 0);
-  }
+  if (typeof window.scrollTo === 'function') window.scrollTo(0, 0);
 }
 
 function renderSaveBar() {

@@ -299,9 +299,10 @@ function check(name, cond, detail) {
   check('width settings: Discard puts the value back and hides the bar',
     await page.evaluate(() => document.getElementById('set-check-cadence').value !== '75'
       && getComputedStyle(document.getElementById('savebar')).display === 'none'), '');
-  // The rest measures every section at once: show all groups.
+  // The rest measures every section at once: show them all.
   await page.evaluate(() => {
     document.querySelectorAll('.set-group').forEach((g) => g.classList.add('on'));
+    document.querySelectorAll('.set-group > .card').forEach((c) => c.classList.add('setv-on'));
   });
   await page.waitForTimeout(150);
   await checkPage('width settings: document has no horizontal overflow');

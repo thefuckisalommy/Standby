@@ -390,10 +390,18 @@ function renderStatusHead(status) {
   var pill = $('status-pill');
   pill.textContent = status.label;
   pill.className = 'pill ' + (PILL_CLASS[status.state] || 'muted');
+  // Every check-in transaction disarmed: nothing will fire, so the card
+  // says Disarmed (grey) whatever the clock reads.
+  var ckBars = checkinBarsData(status);
+  var allOff = ckBars.length > 0 && ckBars.every(function (b) { return b.enabled === false; });
+  if (allOff) { pill.textContent = 'Disarmed'; pill.className = 'pill muted'; }
+  var ckCard = $('checkin-card');
+  if (ckCard) ckCard.classList.toggle('ck-off', allOff);
   // The explainer line only appears when the state needs it.
   var line = $('status-line');
   line.textContent =
-    status.checkinReadError ? 'Warning: the check-in receiver state could not be read — releases are held until it can be read again.'
+    allOff ? 'Every check-in transaction is disarmed, so none will broadcast. Arm one on the Transactions tab to count down again.'
+    : status.checkinReadError ? 'Warning: the check-in receiver state could not be read — releases are held until it can be read again.'
     : status.state === 'not-started' ? 'No check-in recorded yet. Tap “Check in” to start the clock.'
     : status.state === 'vacation' ? 'Vacation mode is on' + (status.vacationUntil ? ' until ' + status.vacationUntil : ' until you say you\u2019re back') + '. The check-in countdown is frozen — the days away never count.'
     : status.state === 'grace' ? 'Grace period is active — the release is held until it ends.'

@@ -1980,6 +1980,24 @@ function check(name, cond, detail) {
   check('check-in resets: the status pill reads "On track" again (clock fresh, nothing past due)',
     els['status-pill'] && els['status-pill'].textContent === 'On track',
     els['status-pill'] && els['status-pill'].textContent);
+  // Every check-in holder disarmed: the pill reads a grey "Disarmed" and
+  // the card is marked off; arming them again restores it.
+  const stOff = await (await fetch('/api/state')).json();
+  const armedTx = (stOff.bitcoin.txs || []).filter((t) => t.enabled).map((t) => t.id);
+  const armedSets = (stOff.bitcoin.sets || []).filter((s) => s.enabled).map((s) => s.id);
+  for (const id of armedTx) await fetch('/api/bitcoin/txs/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: false }) });
+  for (const id of armedSets) await fetch('/api/bitcoin/sets/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: false }) });
+  await rerender(appJs);
+  check('check-in disarmed: with every check-in transaction disarmed the pill reads a grey "Disarmed"',
+    els['status-pill'].textContent === 'Disarmed' && els['status-pill'].className === 'pill muted',
+    els['status-pill'].textContent + ' / ' + els['status-pill'].className);
+  check('check-in disarmed: the card is marked off and says none will broadcast',
+    els['checkin-card'].classList.contains('ck-off') && /none will broadcast/.test(els['status-line'].textContent), els['status-line'].textContent);
+  for (const id of armedTx) await fetch('/api/bitcoin/txs/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: true }) });
+  for (const id of armedSets) await fetch('/api/bitcoin/sets/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: true }) });
+  await rerender(appJs);
+  check('check-in disarmed: armed again, the pill is back to "On track"',
+    els['status-pill'].textContent === 'On track' && !els['checkin-card'].classList.contains('ck-off'), els['status-pill'].textContent);
   check('check-in resets: the grace card is still visible — checking in does not clear the grace',
     els['grace-card'] && els['grace-card'].style.display !== 'none',
     els['grace-card'] && els['grace-card'].style.display);
