@@ -5264,7 +5264,7 @@
     $('login-card-app').style.display = src === 'app' ? '' : 'none';
     var env = $('login-card-env');
     env.style.display = src === 'env' ? '' : 'none';
-    env.textContent = 'A password is set. ' + envPasswordWhere() + ' It is changed there, not here.';
+    env.textContent = 'A password is set. ' + envPasswordWhere() + (authInfo.deployment === 'umbrel' ? '' : ' It is changed there, not here.');
     $('logout-row').style.display = authInfo.required ? '' : 'none';
     // Start fresh: what happens to the password, only where it matters.
     $('fresh-login-note').textContent = src === 'app' ? 'Your Standby password is removed too, so setup asks for a new one.'
