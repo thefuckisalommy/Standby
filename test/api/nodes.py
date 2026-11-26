@@ -650,7 +650,7 @@ def run():
     # (a) A batch whose outputs are all cached costs nothing. (b) Two
     # simultaneous singular lookups cost one request. (c) Two
     # simultaneous batch lookups cost one (called directly on
-    # lib/bitcoin.js: the API never overlaps them). (d) A failed
+    # lib/bitcoin/: the API never overlaps them). (d) A failed
     # request does not poison the in-flight map. Tick parked; stub
     # hooks cleared at the end.
     s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 3600})
@@ -731,7 +731,7 @@ def run():
     # move the counter by exactly one.
     node_probe_26 = TMP + '/standby-test099-batch-inflight.js'
     with open(node_probe_26, 'w') as f:
-        f.write("const bitcoin = require(" + json.dumps(APP + '/lib/bitcoin.js') + ");\n"
+        f.write("const bitcoin = require(" + json.dumps(APP + '/lib/bitcoin') + ");\n"
                 "(async () => {\n"
                 "  const eps = [{ label: 'primary', base: process.argv[2] }];\n"
                 "  const [a, b] = await Promise.all([\n"

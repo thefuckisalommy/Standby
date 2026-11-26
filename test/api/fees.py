@@ -132,7 +132,7 @@ def run():
         # history fixture is spaced 59 minutes apart so the hourly
         # dedupe does not block the append being tested.
         node_js = (
-            "const b = require('./lib/bitcoin.js');"
+            "const b = require('./lib/bitcoin');"
             "const s = require('./lib/store.js');"
             "const now = Date.now();"
             "const h = (n) => new Date(now - n * 3600000).toISOString();"

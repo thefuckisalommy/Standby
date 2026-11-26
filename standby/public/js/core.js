@@ -123,7 +123,7 @@ function fmtHistTime(iso) {
 }
 
 // A tx's live frozen time: banked offset plus any open inactive period
-// (mirrors lib/checkin.js), so the danger zone is measured from the
+// (mirrors lib/checkin.js; test/mirror_check.js), so the danger zone is measured from the
 // effective last check-in.
 function liveOffsetMs(tx) {
   var base = (typeof tx.checkinOffsetMs === 'number' && isFinite(tx.checkinOffsetMs) && tx.checkinOffsetMs >= 0) ? tx.checkinOffsetMs : 0;
@@ -176,7 +176,8 @@ function fmtRate(rate) {
   return String(r);
 }
 
-// Mirrors lib/bitcoin.js feeVerdict (the frontend cannot import it):
+// Mirrors lib/bitcoin/fees.js feeVerdict (the frontend cannot import it;
+// test/mirror_check.js checks they agree):
 // Critical below the current economy fee; otherwise Low at lowMult x the
 // 90-day peak, Medium between medMult x and lowMult x, High below. Null
 // without a peak or fee rate.

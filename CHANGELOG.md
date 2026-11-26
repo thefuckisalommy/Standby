@@ -6,7 +6,7 @@ Code comments describe how the app works now; the history of why it changed live
 
 ## 0.8.22
 
-Maintenance only: nothing changes in how Standby looks or works. The page's script, one file of almost 6,000 lines, is now split by area into eight files in standby/public/js/ (core, dashboard, transactions, sets, live, settings, setup, main), loaded in order and sharing one scope, so each part is easier to find and change. A new check makes sure the files never declare the same name twice and leave nothing unused, unused styles were removed, and one oddly indented block was tidied.
+Maintenance only: nothing changes in how Standby looks or works. The page's script, one file of almost 6,000 lines, is now split by area into eight files in standby/public/js/ (core, dashboard, transactions, sets, live, settings, setup, main), loaded in order and sharing one scope, so each part is easier to find and change. The server's Bitcoin code (lib/bitcoin.js, about 2,400 lines) is split the same way into lib/bitcoin/: transactions, nodes, fees, prices, broadcasting, input checks, dry runs and the node Test. New checks make sure the page files never declare the same name twice or leave one unused, and that the page's copies of a few server rules (the fee verdict, reading a transaction's triggers, its name in history, the check-in danger zone) agree with the server on thousands of inputs. Unused styles were removed, and one oddly indented block was tidied.
 
 ## 0.8.21
 

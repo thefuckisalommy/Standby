@@ -2263,11 +2263,11 @@ def main():
         s, r = req('PUT', '/api/settings', {'checkCadenceSeconds': 60})
         check('20 cadence restored to 60s', s == 200, (s, r))
         delete_all_txs()
-        # (f) Fee multipliers, on lib/bitcoin.js directly, peak 2.0: 4.0
+        # (f) Fee multipliers, on lib/bitcoin/ directly, peak 2.0: 4.0
         # sat/vB is Low at 2x/1x and Medium at 3x/1.5x; 2.5 is Medium,
         # then High. Critical does not move with them.
         node_js = (
-            "const b = require('./lib/bitcoin.js');"
+            "const b = require('./lib/bitcoin');"
             "console.log(JSON.stringify({"
             " d4: b.feeVerdict(4.0, 2.0, 1),"
             " c4: b.feeVerdict(4.0, 2.0, 1, 3, 1.5),"
