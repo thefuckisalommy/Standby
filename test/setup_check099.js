@@ -90,9 +90,17 @@ function check(name, cond, detail) {
     await p.fill('#fresh-password', 'another long password'); await p.click('#btn-fresh-go'); await p.waitForTimeout(1500);
     check('after start fresh, setup runs again', await vis('#setup-welcome'));
     await p.click('#btn-setup-start'); await p.waitForTimeout(150);
-    check('the password step says one is already set', await vis('#setup-password-done'));
+    check('start fresh removed the password: setup asks for a new one', await vis('#setup-pw1') && !(await vis('#setup-password-done')));
+    await p.fill('#setup-pw1', 'a brand new password'); await p.fill('#setup-pw2', 'a brand new password');
+    await p.click('#btn-setup-pw-set'); await p.waitForTimeout(500);
+    check('the new password is set from setup', await vis('#setup-nodes'));
+    await p.click('#btn-setup-back'); await p.waitForTimeout(150);
+    check('back on the password step it now says one is set', await vis('#setup-password-done'));
     await p.click('#btn-setup-back'); await p.click('#btn-setup-skip-all'); await p.waitForTimeout(800);
     check('skip setup with a password set goes straight to the dashboard', await vis('#tabs'));
+    await p.evaluate(() => localStorage.clear()); await p.reload(); await p.waitForTimeout(1000);
+    await p.fill('#login-password', 'a brand new password'); await p.click('#btn-login'); await p.waitForTimeout(1200);
+    check('the new password logs in', !(await vis('#login-modal .modal')));
     check('no page errors', errs.length === 0, JSON.stringify(errs));
   } catch (e) {
     check('ran to the end', false, e.message);

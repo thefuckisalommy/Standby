@@ -302,9 +302,14 @@ def run():
     check('40b fresh: start fresh without the password is 401', s == 401, (s, r))
     s, r = req('POST', '/api/state/reset', {'confirm': True, 'password': 'another app password'}, base=_ab, headers=_ah)
     check('40b fresh: start fresh with the password works', s == 200 and r.get('ok') is True, (s, r))
-    s, r = req('GET', '/api/state', base=_ab, headers=_ah)
-    check('40b fresh: the login survives start fresh, and setup runs again',
-          s == 200 and r.get('setup') == {'done': False} and os.path.exists(_lf), (s, r.get('setup')))
+    s, r = req('GET', '/api/auth/status', base=_ab)
+    check('40b fresh: start fresh removes the app password (setup asks for a new one)',
+          r.get('required') is False and r.get('source') == 'none' and not os.path.exists(_lf), r)
+    s, r = req('GET', '/api/state', base=_ab)
+    check('40b fresh: setup runs again', s == 200 and r.get('setup') == {'done': False}, (s, r.get('setup')))
+    s, r = req('POST', '/api/auth/password', {'password': 'another app password'}, base=_ab)
+    _ah = {'X-Standby-Token': r.get('token') or ''}
+    check('40b fresh: a new password can be set straight after', s == 200 and r.get('required') is True, (s, r))
     # A password sent as a Bearer token shares the login limit: wrong
     # guesses count, then even the right one is 429 (on both paths); a
     # session token keeps working.

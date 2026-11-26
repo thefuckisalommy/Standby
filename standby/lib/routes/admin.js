@@ -16,9 +16,11 @@ module.exports = async function adminRoutes(ctx) {
   // POST /api/state/reset { confirm: true, password }: start fresh, from
   // Settings or after an unrecoverable load failure (it runs while state
   // cannot load). Deletes the state file and every backup, empties the
-  // logs and receiver keys, writes a default state (so setup runs again).
-  // The app login and session are kept. With a login on, the password is
-  // asked again; a wrong one counts against the login limit.
+  // logs and receiver keys, writes a default state (so setup runs again),
+  // and removes a password set in the app, so setup asks for a new one. A
+  // password from Umbrel or STANDBY_PASSWORD cannot be removed here and
+  // stays. With a login on, the password is asked again; a wrong one
+  // counts against the login limit.
   if (req.method === 'POST' && pathname === '/api/state/reset') {
     const body = await readBody(req);
     if (!body || body.confirm !== true) {
@@ -42,6 +44,7 @@ module.exports = async function adminRoutes(ctx) {
     writeReceiverKeys(fresh);
     store.clearStateWarnings();
     startupWarnings.length = 0;
+    if (auth.source() === 'app') auth.clearAppPassword();
     clearCaches();
     rearmFullTick();
     console.log('Standby: all data deleted (start fresh)');
