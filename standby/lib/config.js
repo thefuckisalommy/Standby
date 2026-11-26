@@ -60,12 +60,17 @@ const CHECKIN_DIR = process.env.CHECKIN_DIR || path.join(DATA_DIR, 'checkin');
 // check-ins from other devices" is on (lib/remote-checkin.js); on all
 // network interfaces, so other devices can reach it.
 const CHECKIN_PORT = parseInt(process.env.STANDBY_CHECKIN_PORT || '3101', 10);
+// --background: started at sign-in (lib/autostart.js), so no browser.
+const BACKGROUND = process.argv.includes('--background');
 // A standalone build opens the page in the browser once it is listening
-// (STANDBY_OPEN_BROWSER=0 turns that off). Never in test mode.
-const OPEN_BROWSER = STANDALONE && process.env.STANDBY_OPEN_BROWSER !== '0' && process.env.STANDBY_TEST_MODE !== '1';
+// (STANDBY_OPEN_BROWSER=0 turns that off). Never in test mode, nor when
+// started in the background.
+const OPEN_BROWSER = STANDALONE && !BACKGROUND && process.env.STANDBY_OPEN_BROWSER !== '0' && process.env.STANDBY_TEST_MODE !== '1';
 // Also write the log to this file (relative to the working directory);
 // empty means console only.
-const LOG_FILE = (process.env.STANDBY_LOG_FILE || '').trim();
+// A standalone build always logs to standby.log in the data folder (the
+// Windows program has no console window to read).
+const LOG_FILE = (process.env.STANDBY_LOG_FILE || '').trim() || (STANDALONE ? path.join(DATA_DIR, 'standby.log') : '');
 // One source of truth for the version: package.json.
 const VERSION = require('../package.json').version;
 const MAX_BODY = 1024 * 1024; // 1 MB
@@ -101,6 +106,10 @@ const LOCK_REFRESH_MS = (() => {
 // Test-only endpoint overrides (test mode only): PRICE_API_URL points every
 // built-in price provider at one stub, which outside tests would collapse
 // the two-source agreement into one source. SLIPSTREAM_API_URL likewise.
+// Where "Check for new versions" asks (lib/updates.js); a test points it
+// at a stub with STANDBY_TEST_UPDATE_URL (test mode only).
+const UPDATE_URL = (TEST_MODE && (process.env.STANDBY_TEST_UPDATE_URL || '').trim())
+  || 'https://api.github.com/repos/thefuckisalommy/Standby/releases/latest';
 const PRICE_API_URL_OVERRIDE = TEST_MODE ? (process.env.PRICE_API_URL || '').trim() : '';
 const SLIPSTREAM_API_URL_OVERRIDE = TEST_MODE ? (process.env.SLIPSTREAM_API_URL || '').trim() : '';
 // Ignored-in-production overrides, named for the startup log.
@@ -113,7 +122,7 @@ const ALLOWED_HOSTS_EXTRA = (process.env.STANDBY_ALLOWED_HOSTS || '').split(',')
   .filter(Boolean);
 
 module.exports = {
-  STANDALONE, OPEN_BROWSER, DATA_FOLDER_HINT, CHECKIN_PORT,
+  STANDALONE, BACKGROUND, OPEN_BROWSER, DATA_FOLDER_HINT, CHECKIN_PORT, UPDATE_URL,
   PORT, BIND, DEPLOYMENT, DEPLOYMENTS, PASSWORD, TEST_MODE, STARTUP_TICK_MS, RESTORE_CHECK_MS, OFFLINE_REFRESH_MS, LOCK_REFRESH_MS, DATA_DIR, PUBLIC_DIR,
   CHECKIN_DIR, LOG_FILE, VERSION, MAX_BODY, MEMPOOL_OVERRIDE, PRICE_API_URL_OVERRIDE,
   SLIPSTREAM_API_URL_OVERRIDE, IGNORED_TEST_OVERRIDES, ALLOWED_HOSTS_EXTRA,

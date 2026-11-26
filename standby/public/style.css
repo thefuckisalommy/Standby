@@ -685,3 +685,6 @@ body.setup-open #tabs, body.setup-open main section.tab, body.setup-open .burger
 .trigger-explain { border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; margin: 8px 0; }
 .trigger-explain summary { cursor: pointer; font-weight: 600; }
 .trigger-explain p { color: var(--muted); font-size: 14px; margin: 8px 0 2px; }
+
+/* The dashboard's "new version" notice: its Not now link is quiet. */
+.muted-link { color: var(--muted); }

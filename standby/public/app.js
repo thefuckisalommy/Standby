@@ -4611,6 +4611,8 @@
   // ---------- settings ----------
   function renderSettings() {
     loadRemoteCheckin();
+    loadDesktop();
+    loadUpdate();
     $('set-vacation').checked = !!S.settings.vacationMode;
     $('set-vacation-until').value = S.settings.vacationUntil || '';
     // No end date means indefinite; the checkbox mirrors it and disables
@@ -5403,6 +5405,107 @@
     } catch (e) { setMsg($('logout-msg'), e.message, false); }
   });
 
+  // This computer (standalone builds): start with the computer, and Stop
+  // Standby. desktopInfo is GET /api/desktop; null until known.
+  var desktopInfo = null;
+  function loadDesktop() {
+    return api('GET', '/api/desktop').then(function (d) { desktopInfo = d; renderDesktop(); })
+      .catch(function () { /* older server: nothing to show */ });
+  }
+  function renderDesktop() {
+    var d = desktopInfo;
+    $('card-desktop').style.display = (d && d.available) ? '' : 'none';
+    if (!d || !d.available) return;
+    $('desktop-autostart').checked = !!d.startAtLogin;
+    if (d.error) setMsg($('desktop-msg'), 'Could not change the sign-in list: ' + d.error, false);
+  }
+  async function setStartAtLogin(want, msgEl) {
+    try {
+      S.settings = await api('PUT', '/api/settings', { startAtLogin: want });
+      await loadDesktop();
+      setMsg(msgEl, '', true);
+    } catch (e) {
+      setMsg(msgEl, e.message, false);
+      await loadDesktop();
+    }
+  }
+  $('desktop-autostart').addEventListener('change', function () { setStartAtLogin($('desktop-autostart').checked, $('desktop-msg')); });
+  $('btn-app-stop').addEventListener('click', function () {
+    showConfirm('Stop Standby?', 'Triggers are not checked until you start Standby again.', async function () {
+      try {
+        await api('POST', '/api/app/stop');
+        setMsg($('desktop-msg'), 'Standby has stopped. Start it again by opening the Standby program.', true);
+      } catch (e) { setMsg($('desktop-msg'), e.message, false); }
+    }, 'Stop Standby');
+  });
+
+  // Check for new versions: GET /api/update. The dashboard notice shows a
+  // newer version until "Not now" for that version (in this browser).
+  var UPDATE_DISMISS_KEY = 'standby.updateDismissed';
+  var updateInfo = null;
+  function loadUpdate() {
+    return api('GET', '/api/update').then(function (u) { updateInfo = u; renderUpdate(); })
+      .catch(function () { /* older server: nothing to show */ });
+  }
+  function renderUpdate() {
+    var u = updateInfo;
+    var avail = !!(u && u.available);
+    $('update-box').style.display = avail ? '' : 'none';
+    $('btn-update-now').style.display = (avail && u.enabled) ? '' : 'none';
+    var banner = $('update-banner');
+    if (!avail) { banner.style.display = 'none'; return; }
+    $('update-check').checked = !!u.enabled;
+    var notice = $('update-notice');
+    if (u.enabled && u.newer) {
+      notice.style.display = '';
+      notice.innerHTML = '';
+      notice.appendChild(document.createTextNode('Standby ' + u.latest + ' is available. '));
+      var a = document.createElement('a');
+      a.href = u.url || 'https://github.com/thefuckisalommy/Standby/releases';
+      a.target = '_blank';
+      a.rel = 'noopener';
+      a.textContent = 'Download it from GitHub';
+      notice.appendChild(a);
+      notice.appendChild(document.createTextNode('. Your data stays where it is.'));
+    } else {
+      notice.style.display = 'none';
+    }
+    if (u.enabled && u.error) setMsg($('update-msg'), 'Could not check: ' + u.error, false);
+    else if (u.enabled && u.checkedAt && !u.newer) setMsg($('update-msg'), 'You have the latest version (checked ' + fmtCheckedAt(u.checkedAt) + ').', true);
+    else setMsg($('update-msg'), '', true);
+    var dismissed = null;
+    try { dismissed = window.localStorage.getItem(UPDATE_DISMISS_KEY); } catch (e) { /* none */ }
+    var show = u.enabled && u.newer && dismissed !== u.latest;
+    banner.style.display = show ? '' : 'none';
+    if (show) {
+      $('update-banner-version').textContent = u.latest;
+      $('update-banner-link').href = u.url || 'https://github.com/thefuckisalommy/Standby/releases';
+    }
+  }
+  $('update-banner-later').addEventListener('click', function (ev) {
+    if (ev && ev.preventDefault) ev.preventDefault();
+    try { if (updateInfo && updateInfo.latest) window.localStorage.setItem(UPDATE_DISMISS_KEY, updateInfo.latest); } catch (e) { /* this view only */ }
+    $('update-banner').style.display = 'none';
+  });
+  $('update-check').addEventListener('change', async function () {
+    var want = $('update-check').checked;
+    try {
+      S.settings = await api('PUT', '/api/settings', { updateCheck: want });
+      if (want) {
+        setMsg($('update-msg'), 'Checking…', true);
+        await new Promise(function (r) { setTimeout(r, 1500); });
+      }
+      await loadUpdate();
+    } catch (e) {
+      $('update-check').checked = !want;
+      setMsg($('update-msg'), e.message, false);
+    }
+  });
+  $('btn-update-now').addEventListener('click', async function () {
+    setMsg($('update-msg'), 'Checking…', true);
+    try { updateInfo = await api('POST', '/api/update/check'); renderUpdate(); } catch (e) { setMsg($('update-msg'), e.message, false); }
+  });
+
   // First-open setup: one page per step (Welcome, App password, Bitcoin
   // nodes, Price sources, How triggers work, First transaction, Done),
   // while state.setup.done is false.
@@ -5413,7 +5516,9 @@
   var setup = { open: false, steps: [], i: 0, nodesOwn: false, pricesOwn: false, nodesTested: false, pricesTested: false, homes: {}, afterSkip: null };
 
   function setupSteps() {
-    return ['welcome', 'password', 'nodes', 'prices', 'checkin', 'tx', 'done'];
+    var steps = ['welcome', 'password', 'nodes', 'prices', 'checkin', 'tx'];
+    if (desktopInfo && desktopInfo.available) steps.push('startup');
+    return steps.concat(['done']);
   }
   function nodesAreDefault() {
     var st = (S && S.settings) || {};
@@ -5472,7 +5577,7 @@
 
   function showSetupStep() {
     var name = setup.steps[setup.i];
-    ['welcome', 'password', 'nodes', 'prices', 'checkin', 'tx', 'done'].forEach(function (n) {
+    ['welcome', 'password', 'nodes', 'prices', 'checkin', 'tx', 'startup', 'done'].forEach(function (n) {
       $('setup-' + n).classList.toggle('on', n === name);
     });
     var counted = setup.steps.length - 1; // the welcome page is not a step
@@ -5488,6 +5593,7 @@
     if (name === 'nodes') renderSetupNodes();
     if (name === 'prices') renderSetupPrices();
     if (name === 'tx') renderSetupTx();
+    if (name === 'startup') renderSetupStartup();
     if (window.scrollTo) window.scrollTo(0, 0);
   }
   function setupGo(delta) {
@@ -5671,6 +5777,21 @@
   // Step: how triggers work (information only).
   $('btn-setup-checkin-next').addEventListener('click', function () { setupGo(1); });
 
+  // Step: start with this computer (downloads only); on by default, and
+  // switching it off here takes effect at once.
+  function renderSetupStartup() {
+    var on = !!(desktopInfo && desktopInfo.startAtLogin);
+    $('setup-autostart').checked = on;
+    $('setup-autostart-note').textContent = on
+      ? 'On. You can turn this off here, or later in Settings → This computer.'
+      : 'Off. Standby only runs when you start it yourself; triggers wait while it is closed. Turn it back on here or in Settings → This computer.';
+  }
+  $('setup-autostart').addEventListener('change', async function () {
+    await setStartAtLogin($('setup-autostart').checked, $('setup-startup-msg'));
+    renderSetupStartup();
+  });
+  $('btn-setup-startup-next').addEventListener('click', function () { setupGo(1); });
+
   // Step: first transaction (the usual Add form, over the setup page).
   function renderSetupTx() {
     var n = ((S && S.bitcoin && S.bitcoin.txs) || []).length;
@@ -5732,6 +5853,10 @@
     renderLoginCard();
     renderForgot();
     if (st.required && !st.authenticated) showLogin();
+    // Setup's pages depend on this computer's options; ask first (only
+    // when logged in, or no login is needed).
+    if (!st.required || st.authenticated) return loadDesktop();
+    return null;
   }).catch(function () { /* older server or offline: nothing to show */ }).then(function () {
     authKnown = true;
     syncSetup();

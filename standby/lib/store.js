@@ -54,6 +54,12 @@ function defaultState() {
       // Accept check-ins from other devices: a desktop or plain run opens
       // a check-in-only port (lib/remote-checkin.js). Off by default.
       acceptRemoteCheckins: false,
+      // Start with this computer (standalone builds; lib/autostart.js). On
+      // by default; setup shows it and can switch it off.
+      startAtLogin: true,
+      // Check for new versions (lib/updates.js): null means this install's
+      // default (on for the downloads, off for Docker and plain Node).
+      updateCheck: null,
     },
     // Transactions: a list, each with its own arm and release record. Only
     // signed hex is stored; the server never sees keys.

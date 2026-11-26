@@ -7,7 +7,13 @@ when DATA_DIR is unset (with the folder named, without the user's name,
 for "Forgot password?"), honours --reset-password, opens its own
 check-in port when "Accept check-ins from other devices" is on, and
 keeps everything across a restart (an armed transaction and its
-trigger, a check-in key, settings, the check-in clock). The
+trigger, a check-in key, settings, the check-in clock). 0.8.21: it adds
+itself to the sign-in list by default (the Windows Run key, or
+~/.config/autostart) and removes itself when that is switched off; the
+update check is on by default; a second start exits and leaves the
+running one; Stop Standby shuts it down; it logs to standby.log in the
+data folder; and on Windows the program is windowed (no console) and
+shows its tray icon. Any sign-in entry is removed at the end. The
 browser is not opened (STANDBY_OPEN_BROWSER=0). Ports 3477/3476. Prints PASS/FAIL per check, then FAILURES: N.
 """
 import json
@@ -91,10 +97,30 @@ archives = [f for f in os.listdir(DIST) if f.endswith(('.zip', '.tar.gz'))] if o
 check('one archive was packed, named with the version', len(archives) == 1 and ('-' + VERSION + '-') in archives[0], archives)
 
 home = tempfile.mkdtemp()
-base_env = {k: v for k, v in os.environ.items() if k not in ('DATA_DIR', 'CHECKIN_DIR', 'XDG_DATA_HOME')}
+base_env = {k: v for k, v in os.environ.items() if k not in ('DATA_DIR', 'CHECKIN_DIR', 'XDG_DATA_HOME', 'XDG_CONFIG_HOME')}
 base_env.update({'PORT': '3477', 'STANDBY_CHECKIN_PORT': '3476', 'STANDBY_OPEN_BROWSER': '0', 'HOME': home, 'USERPROFILE': home,
                  'APPDATA': os.path.join(home, 'AppData', 'Roaming')})
 B = 'http://127.0.0.1:3477'
+RUN_KEY = r'HKCU\Software\Microsoft\Windows\CurrentVersion\Run'
+
+
+def autostart_entry():
+    # The sign-in entry's text, or None.
+    if os.name == 'nt':
+        r = subprocess.run(['reg', 'query', RUN_KEY, '/v', 'Standby'], capture_output=True, text=True)
+        return r.stdout if r.returncode == 0 else None
+    f = os.path.join(home, '.config', 'autostart', 'standby.desktop')
+    return open(f).read() if os.path.exists(f) else None
+
+
+if os.name == 'nt':
+    subprocess.run(['reg', 'delete', RUN_KEY, '/v', 'Standby', '/f'], capture_output=True)
+    # The program is windowed: PE Subsystem 2, not 3 (console).
+    with open(app_exe, 'rb') as f:
+        exe_head = f.read(4096)
+    pe = int.from_bytes(exe_head[0x3c:0x40], 'little')
+    check('the Windows program is windowed (no console window)', int.from_bytes(exe_head[pe + 24 + 68:pe + 24 + 70], 'little') == 2,
+          int.from_bytes(exe_head[pe + 24 + 68:pe + 24 + 70], 'little'))
 
 # 1. Default data folder (the user's own), nothing beside the program.
 p = launch(app_exe, base_env)
@@ -115,6 +141,22 @@ check('deployment is desktop, data folder named without the user name',
       st.get('deployment') == 'desktop' and st.get('dataFolder') == want_hint, st)
 data_dir = os.path.join(home, 'AppData', 'Roaming', 'Standby') if os.name == 'nt' else os.path.join(home, '.local', 'share', 'standby')
 check('state is kept in the user folder', os.path.isfile(os.path.join(data_dir, 'state.json')), data_dir)
+entry = autostart_entry()
+check('it adds itself to the sign-in list by default, to start in the background',
+      entry is not None and app_exe in entry and '--background' in entry, entry)
+_, d = call('GET', B + '/api/desktop')
+check('This computer is offered, start with the computer on', (d or {}).get('available') is True and d.get('startAtLogin') is True and d.get('stop') is True, d)
+_, u = call('GET', B + '/api/update')
+check('the update check is on by default', (u or {}).get('available') is True and u.get('enabled') is True, u)
+if os.name == 'nt':
+    log_file = os.path.join(data_dir, 'standby.log')
+    shown = False
+    for _ in range(40):
+        if os.path.exists(log_file) and 'tray icon shown' in open(log_file, encoding='utf-8', errors='replace').read():
+            shown = True
+            break
+        time.sleep(0.5)
+    check('the tray icon is shown', shown, open(log_file, encoding='utf-8', errors='replace').read()[-600:] if os.path.exists(log_file) else 'no log')
 s, body = get(B + '/api/remote-checkin')
 check('the check-in port is offered, and off by default', s == 200 and json.loads(body).get('available') is True
       and get('http://127.0.0.1:3476/health')[0] is None, body)
@@ -165,6 +207,37 @@ check('after a restart the settings, check-in clock and key are kept',
       and any(k.get('label') == 'standalone check' for k in (after or {}).get('checkinKeys', [])),
       {'settings': {k: (after or {}).get('settings', {}).get(k) for k in ('checkCadenceSeconds', 'graceOfflineDays', 'acceptRemoteCheckins')},
        'checkin': (after or {}).get('checkin')})
+
+# 3. Start with the computer off and on again; a second start; the log;
+#    Stop Standby.
+s, _ = call('PUT', B + '/api/settings', {'startAtLogin': False})
+check('switched off, the sign-in entry is removed', s == 200 and autostart_entry() is None, autostart_entry())
+s, _ = call('PUT', B + '/api/settings', {'startAtLogin': True})
+check('switched on again, it is back', s == 200 and autostart_entry() is not None, s)
+second = launch(app_exe, base_env)
+try:
+    out2, _ = second.communicate(timeout=20)
+except subprocess.TimeoutExpired:
+    second.kill()
+    out2, _ = second.communicate()
+check('a second start leaves the running one and exits', second.returncode == 0 and 'already running' in (out2 or '')
+      and get(B + '/api/health')[0] == 200, (second.returncode, (out2 or '')[-300:]))
+log_text = open(os.path.join(data_dir, 'standby.log'), encoding='utf-8', errors='replace').read() if os.path.exists(os.path.join(data_dir, 'standby.log')) else ''
+check('it logs to standby.log in the data folder', 'listening on' in log_text, log_text[-300:])
+s, _ = call('POST', B + '/api/app/stop', {})
+try:
+    code = p.wait(timeout=15)
+except subprocess.TimeoutExpired:
+    code = None
+check('Stop Standby shuts it down cleanly', s == 200 and code == 0 and get(B + '/api/health')[0] is None, (s, code))
+if p.poll() is None:
+    stop(p)
+
+# Leave no sign-in entry behind (a temporary run on the real account).
+p = launch(app_exe, base_env)
+wait(B + '/api/health')
+call('PUT', B + '/api/settings', {'startAtLogin': False})
+check('the sign-in entry is removed at the end', autostart_entry() is None, autostart_entry())
 out = stop(p)
 
 shutil.rmtree(home, ignore_errors=True)

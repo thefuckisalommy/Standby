@@ -128,6 +128,16 @@
       <div class="setup-actions"><button class="primary" id="btn-setup-tx-add">+ Add a pre-signed transaction</button><button id="btn-setup-tx-skip">Skip for now</button></div>
     </div>
 
+    <div class="setup-step" id="setup-startup">
+      <h2>Start with this computer</h2>
+      <p class="lead">Standby only checks your triggers while it is running. So that it keeps running after a restart, it starts by itself when you sign in to this computer, quietly in the background with its icon next to the clock.</p>
+      <label class="switch green switch-row"><span>Start Standby when I sign in</span>
+        <input type="checkbox" id="setup-autostart"><span class="slider"></span></label>
+      <p class="muted" id="setup-autostart-note"></p>
+      <div class="setup-actions"><button class="primary" id="btn-setup-startup-next">Continue</button></div>
+      <p id="setup-startup-msg" class="muted"></p>
+    </div>
+
     <div class="setup-step" id="setup-done">
       <div class="setup-done-logo"><img src="/logo.jpg" alt=""></div>
       <h2 class="center">You're set up</h2>
@@ -149,6 +159,12 @@
 
   <!-- ============ DASHBOARD ============ -->
   <section class="tab active" id="tab-dashboard">
+    <!-- A newer version is out (GET /api/update); "Not now" hides it for
+         that version in this browser. -->
+    <div class="card" id="update-banner" style="display:none">
+      <p style="margin:0">Standby <strong id="update-banner-version"></strong> is available. <a id="update-banner-link" href="#" target="_blank" rel="noopener">Download</a> · <a href="#" id="update-banner-later" class="muted-link">Not now</a></p>
+    </div>
+
     <div class="card empty-state" id="getting-started-card" style="display:none">
       <h2>Getting Started</h2>
       <p>Standby broadcasts presigned transactions based on the trigger criteria you define. Sign a transaction on your wallet, then add it here.</p>
@@ -578,12 +594,34 @@
     </div>
 
     <!-- App version from /api/health, at the bottom of General settings. -->
+    <!-- This computer: the Windows and Linux downloads only (GET
+         /api/desktop). Start with the computer, and Stop Standby. -->
+    <div class="card" id="card-desktop" style="display:none">
+      <div class="section-head">
+        <h2>This computer</h2>
+      </div>
+      <label class="switch green switch-row"><span>Start Standby when I sign in</span>
+        <input type="checkbox" id="desktop-autostart"><span class="slider"></span></label>
+      <p class="muted" id="desktop-autostart-note">Standby starts in the background when you sign in to this computer, with its icon next to the clock. Triggers are only checked while Standby runs.</p>
+      <p class="inline-btns"><button id="btn-app-stop" class="danger">Stop Standby</button></p>
+      <p class="muted">Stops Standby until you start it again (open the Standby program, or sign in with the switch above on).</p>
+      <p id="desktop-msg" class="muted"></p>
+    </div>
+
     <div class="card" id="card-version">
       <div class="section-head">
         <h2>App version</h2>
       </div>
       <p>Installed version: <strong id="app-version">—</strong></p>
-      <p class="inline-btns"><button id="btn-setup-rerun">Run setup again</button></p>
+      <!-- Check for new versions (GET /api/update); not on Umbrel. -->
+      <div id="update-box" style="display:none">
+        <label class="switch green switch-row"><span>Check for new versions</span>
+          <input type="checkbox" id="update-check"><span class="slider"></span></label>
+        <p class="muted">Once a day Standby asks GitHub for the latest release. Nothing about you or your transactions is sent; GitHub sees this computer's internet address.</p>
+        <p class="notice" id="update-notice" style="display:none"></p>
+        <p id="update-msg" class="muted"></p>
+      </div>
+      <p class="inline-btns"><button id="btn-update-now" style="display:none">Check now</button> <button id="btn-setup-rerun">Run setup again</button></p>
     </div>
 
     <!-- Start fresh: delete all data (POST /api/state/reset). -->

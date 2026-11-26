@@ -27,7 +27,9 @@ on:
       - 'LICENSE'
       - '.github/workflows/standalone.yml'
   push:
-    branches: [main]
+    # TEMPORARY: 0.8.21 runs here so the Windows tray and sign-in entry are
+    # checked before the PR (workflow_dispatch needs the file on main).
+    branches: [main, '0.8.21']
     paths:
       - 'standby/**'
       - 'tools/**'

@@ -59,6 +59,24 @@ function build(entry, name, assets) {
 
 build('server.js', 'standby', publicAssets());
 
+// Windows: make the program windowed, so starting it opens no console
+// window (the tray icon shows it is running, and the log goes to a file;
+// see lib/desktop.js). The PE header's Subsystem field: 3 (console) to 2
+// (windows). Node writes nothing to a console it does not have.
+if (OS === 'windows') {
+  const exe = path.join(OUT, 'standby' + EXE);
+  const buf = fs.readFileSync(exe);
+  const pe = buf.readUInt32LE(0x3c);
+  if (buf.toString('latin1', pe, pe + 4) !== 'PE\0\0') throw new Error('not a PE program: ' + exe);
+  const optional = pe + 24;
+  if (buf.readUInt16LE(optional) !== 0x20b) throw new Error('not a 64-bit PE program: ' + exe);
+  const SUBSYSTEM = optional + 68;
+  if (buf.readUInt16LE(SUBSYSTEM) !== 3) throw new Error('unexpected PE subsystem ' + buf.readUInt16LE(SUBSYSTEM));
+  buf.writeUInt16LE(2, SUBSYSTEM);
+  fs.writeFileSync(exe, buf);
+  console.log('made ' + path.basename(exe) + ' a windowed program (no console window)');
+}
+
 // The archive: the program, the licence and a short README.
 const pkg = 'standby-' + VERSION + '-' + OS + '-' + process.arch;
 const stage = path.join(WORK, pkg);

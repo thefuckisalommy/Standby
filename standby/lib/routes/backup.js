@@ -400,6 +400,8 @@ module.exports = async function backupRoutes(ctx) {
     for (const s of restoredSets) syncCheckinFreeze(s, restored, now);
     store.saveState(DATA_DIR, restored);
     require('../remote-checkin').sync(restored);
+    require('../autostart').sync(!(restored.settings && restored.settings.startAtLogin === false));
+    require('../updates').sync(restored.settings || {});
     // The warnings described the replaced state; clear them.
     store.clearStateWarnings();
     startupWarnings.length = 0;

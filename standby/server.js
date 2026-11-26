@@ -11,7 +11,7 @@
 // the app merges.
 
 const http = require('http');
-const { PORT, BIND, VERSION, DATA_DIR, CHECKIN_DIR, LOG_FILE, STARTUP_TICK_MS, DEPLOYMENT, PASSWORD, MEMPOOL_OVERRIDE, IGNORED_TEST_OVERRIDES, OPEN_BROWSER, STANDALONE } = require('./lib/config');
+const { PORT, BIND, VERSION, DATA_DIR, PUBLIC_DIR, CHECKIN_DIR, LOG_FILE, STARTUP_TICK_MS, DEPLOYMENT, PASSWORD, MEMPOOL_OVERRIDE, IGNORED_TEST_OVERRIDES, OPEN_BROWSER, STANDALONE, BACKGROUND } = require('./lib/config');
 require('./lib/logfile').install(LOG_FILE);
 const instance = require('./lib/instance');
 const { requireWritable } = require('./lib/startup');
@@ -37,6 +37,13 @@ requireWritable([
 // evaluate triggers and could broadcast twice.
 {
   const lock = instance.acquire(DATA_DIR, store.DATA_FILE_MODE);
+  if (!lock.ok && STANDALONE) {
+    // Started again (double-clicked, or at sign-in) while it runs: open the
+    // running one instead of refusing.
+    console.log('Standby is already running (pid ' + lock.pid + ').' + (BACKGROUND ? '' : ' Opening it.'));
+    if (OPEN_BROWSER) require('./lib/desktop').openBrowser('http://localhost:' + PORT + '/');
+    process.exit(0);
+  }
   if (!lock.ok) {
     console.error('Standby: another copy is already running on this data folder (' + DATA_DIR + ', pid ' + lock.pid + ').'
       + ' Stop it first, or give this copy its own DATA_DIR. Two copies could both broadcast.');
@@ -145,8 +152,14 @@ server.listen(PORT, BIND, () => {
   // Compare the check-in keys in state with the receiver's
   // key list once at startup — see verifyCheckinKeyStore above.
   verifyCheckinKeyStore();
-  // The check-in port for other devices, if it is switched on.
-  try { require('./lib/remote-checkin').sync(); } catch (e) { console.error('Standby: check-in port:', e.message); }
+  // The check-in port for other devices, if it is switched on; starting
+  // with the computer (standalone builds); the daily update check.
+  try {
+    const st = store.loadState(DATA_DIR);
+    require('./lib/remote-checkin').sync(st);
+    require('./lib/autostart').sync(st.settings.startAtLogin !== false);
+    require('./lib/updates').sync(st.settings);
+  } catch (e) { console.error('Standby: startup settings:', e.message); }
   if (STANDALONE) desktopWelcome();
 });
 
@@ -155,24 +168,22 @@ server.listen(PORT, BIND, () => {
 // (a Linux server, a Raspberry Pi) the address is printed for another
 // device to open.
 function desktopWelcome() {
+  const desktop = require('./lib/desktop');
   const url = 'http://localhost:' + PORT + '/';
   console.log('');
   console.log('  Standby is running: open ' + url + ' in your browser.');
-  console.log('  Keep this window open; closing it stops Standby.');
+  console.log(process.platform === 'win32'
+    ? '  Its icon is next to the clock: Open Standby, or Quit Standby to stop it.'
+    : '  Keep this window open; closing it stops Standby.');
   console.log('');
-  if (!OPEN_BROWSER) return;
-  const { spawn } = require('child_process');
-  let cmd = null;
-  let args = [];
-  if (process.platform === 'win32') { cmd = 'cmd'; args = ['/c', 'start', '', url]; }
-  else if (process.platform === 'darwin') { cmd = 'open'; args = [url]; }
-  else if (process.env.DISPLAY || process.env.WAYLAND_DISPLAY) { cmd = 'xdg-open'; args = [url]; }
-  if (!cmd) return;
-  try {
-    const child = spawn(cmd, args, { detached: true, stdio: 'ignore', windowsHide: true });
-    child.on('error', () => { /* no browser: the address is printed above */ });
-    child.unref();
-  } catch { /* the address is printed above */ }
+  desktop.onQuit(flushHeartbeatAndExit);
+  if (process.platform === 'win32') {
+    try {
+      const icon = desktop.writeTrayIcon(DATA_DIR, PUBLIC_DIR);
+      desktop.startTray({ iconFile: icon, version: VERSION, onOpen: () => desktop.openBrowser(url) });
+    } catch (e) { console.warn('Standby: could not show the tray icon: ' + e.message); }
+  }
+  if (OPEN_BROWSER) desktop.openBrowser(url);
 }
 
 // Timers: the full tick runs shortly after startup and every check
