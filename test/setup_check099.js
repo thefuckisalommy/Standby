@@ -63,6 +63,8 @@ function check(name, cond, detail) {
     await p.goto(BASE + '#settings'); await p.waitForTimeout(800);
     check('the price choice was saved', (await p.inputValue('#set-price-source2')) === 'kraken');
     check('App login: the no-password notice', await vis('#login-card-none'));
+    check('Check-in API keys: the "Accept check-ins from other devices" switch is offered, off',
+      await vis('#remote-checkin') && !(await p.isChecked('#remote-checkin-on')) && !(await vis('#api-keys-receiver-line')));
     await p.fill('#login-new1', 'correct horse battery'); await p.fill('#login-new2', 'correct horse battery');
     await p.click('#btn-login-set'); await p.waitForTimeout(400);
     check('a password set in Settings', await vis('#login-card-app') && !/requires/.test(await p.textContent('#login-card-app')));

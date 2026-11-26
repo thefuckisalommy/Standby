@@ -145,6 +145,8 @@ server.listen(PORT, BIND, () => {
   // Compare the check-in keys in state with the receiver's
   // key list once at startup — see verifyCheckinKeyStore above.
   verifyCheckinKeyStore();
+  // The check-in port for other devices, if it is switched on.
+  try { require('./lib/remote-checkin').sync(); } catch (e) { console.error('Standby: check-in port:', e.message); }
   if (STANDALONE) desktopWelcome();
 });
 

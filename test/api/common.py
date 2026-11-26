@@ -255,7 +255,7 @@ _bind_log = TMP + '/standby-test099-bind.log'
 _bind_data = TMP + '/standby-test099-bind'
 _bind_checkin = TMP + '/standby-test099-bind-checkin'
 # Every port a group may use, for the end-of-run check.
-ALL_PORTS = (PORT, RECEIVER_PORT, STUB_P, STUB_S, 18190, 18191, 18197, 18198, 3440, 3441)
+ALL_PORTS = (PORT, RECEIVER_PORT, STUB_P, STUB_S, 18190, 18191, 18197, 18198, 3440, 3441, 3442)
 
 
 

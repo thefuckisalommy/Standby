@@ -56,6 +56,10 @@ const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 // last.json in). Docker and Umbrel set it; a bare run (Linux, macOS or
 // Windows) uses the checkin folder inside the data directory.
 const CHECKIN_DIR = process.env.CHECKIN_DIR || path.join(DATA_DIR, 'checkin');
+// The check-in port a desktop or plain run opens itself when "Accept
+// check-ins from other devices" is on (lib/remote-checkin.js); on all
+// network interfaces, so other devices can reach it.
+const CHECKIN_PORT = parseInt(process.env.STANDBY_CHECKIN_PORT || '3101', 10);
 // A standalone build opens the page in the browser once it is listening
 // (STANDBY_OPEN_BROWSER=0 turns that off). Never in test mode.
 const OPEN_BROWSER = STANDALONE && process.env.STANDBY_OPEN_BROWSER !== '0' && process.env.STANDBY_TEST_MODE !== '1';
@@ -109,7 +113,7 @@ const ALLOWED_HOSTS_EXTRA = (process.env.STANDBY_ALLOWED_HOSTS || '').split(',')
   .filter(Boolean);
 
 module.exports = {
-  STANDALONE, OPEN_BROWSER, DATA_FOLDER_HINT,
+  STANDALONE, OPEN_BROWSER, DATA_FOLDER_HINT, CHECKIN_PORT,
   PORT, BIND, DEPLOYMENT, DEPLOYMENTS, PASSWORD, TEST_MODE, STARTUP_TICK_MS, RESTORE_CHECK_MS, OFFLINE_REFRESH_MS, LOCK_REFRESH_MS, DATA_DIR, PUBLIC_DIR,
   CHECKIN_DIR, LOG_FILE, VERSION, MAX_BODY, MEMPOOL_OVERRIDE, PRICE_API_URL_OVERRIDE,
   SLIPSTREAM_API_URL_OVERRIDE, IGNORED_TEST_OVERRIDES, ALLOWED_HOSTS_EXTRA,

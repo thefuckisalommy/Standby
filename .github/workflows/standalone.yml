@@ -5,8 +5,8 @@
 #     node --build-sea; a build is only made for the system it runs on)
 #     and launch-tests the result (test/standalone_check.py): it starts
 #     from an empty folder, serves its page from inside the program,
-#     keeps its data in the user's folder, and the check-in receiver
-#     answers.
+#     keeps its data in the user's folder, and opens its own check-in
+#     port when that is switched on (there is no separate receiver).
 #   - Pull requests and manual runs stop there; the archives are kept as
 #     workflow artifacts for 30 days.
 #   - On main: SHA256SUMS.txt, a GitHub build attestation for every
@@ -14,7 +14,7 @@
 #     thefuckisalommy/Standby`), and a DRAFT release v<version> with the
 #     archives and the checksums. Publishing it is a manual step. An
 #     existing release is never changed.
-#   - The builds are not code-signed yet (see ROADMAP.md).
+#   - The builds are not code-signed yet.
 #   - Third-party actions are pinned to commit SHAs (tag in the comment).
 name: standalone
 
@@ -27,9 +27,7 @@ on:
       - 'LICENSE'
       - '.github/workflows/standalone.yml'
   push:
-    # TEMPORARY: 0.8.20 runs here so the builds are checked before the
-    # PR (workflow_dispatch only works once this file is on main).
-    branches: [main, '0.8.20']
+    branches: [main]
     paths:
       - 'standby/**'
       - 'tools/**'

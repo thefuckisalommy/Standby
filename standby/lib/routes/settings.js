@@ -5,6 +5,7 @@ const { sanitizeState, syncCheckinFreeze } = require('../checkin');
 const { saveMutation } = require('../http');
 const { priceSourceError } = require('../prices');
 const { rearmFullTick } = require('../release');
+const remoteCheckin = require('../remote-checkin');
 const { CHECK_CADENCE_SECONDS_MAX, CHECK_CADENCE_SECONDS_MIN, FEE_LOW_MULT_MAX, FEE_LOW_MULT_MIN, FEE_MED_MULT_MAX, FEE_MED_MULT_MIN, GRACE_DURATION_DAYS, GRACE_OFFLINE_DAYS, PRICE_AGREEMENT_PCT_MAX, PRICE_AGREEMENT_PCT_MIN, asStr, readBody, sendError, sendJson } = require('../util');
 const { NEXT } = require('./shared');
 
@@ -16,6 +17,13 @@ module.exports = async function settingsRoutes(ctx) {
   // fresh (bypassing the cache) and return { provider, price, error }.
   // Changes nothing. A failing provider is a 200 with the error; only an
   // unknown id is a 400.
+  // GET /api/remote-checkin: the check-in port for other devices —
+  // { available (not on Docker/Umbrel), listening, port, error,
+  // addresses (this computer's IPv4 addresses) }.
+  if (req.method === 'GET' && pathname === '/api/remote-checkin') {
+    return sendJson(res, 200, remoteCheckin.status());
+  }
+
   // POST /api/setup { done }: the first-open setup finished or skipped
   // (true), or "Run setup again" (false).
   if (req.method === 'POST' && pathname === '/api/setup') {
@@ -165,6 +173,13 @@ module.exports = async function settingsRoutes(ctx) {
     // last day away, null (or a legacy '') until back. A change re-syncs
     // every check-in tx's freeze.
     if (body.vacationMode !== undefined) s.vacationMode = !!body.vacationMode;
+    if (body.acceptRemoteCheckins !== undefined) {
+      if (typeof body.acceptRemoteCheckins !== 'boolean') return sendError(res, 400, 'acceptRemoteCheckins must be true or false');
+      if (body.acceptRemoteCheckins && !remoteCheckin.AVAILABLE) {
+        return sendError(res, 400, 'here the separate check-in receiver accepts check-ins from other devices');
+      }
+      s.acceptRemoteCheckins = body.acceptRemoteCheckins;
+    }
     if (body.vacationUntil === null) s.vacationUntil = null;
     else if (body.vacationUntil !== undefined) s.vacationUntil = asStr(body.vacationUntil, 10) || null;
     // Only the changed settings are saved into fresh state; the fee pair
@@ -183,6 +198,7 @@ module.exports = async function settingsRoutes(ctx) {
     // A new cadence takes effect immediately — the running fast
     // tick is cleared and restarted with the new delay.
     if (cadenceChanged) rearmFullTick();
+    if (body.acceptRemoteCheckins !== undefined) remoteCheckin.sync(fresh);
     return sendJson(res, 200, sanitizeState(fresh).settings);
   }
   return NEXT;

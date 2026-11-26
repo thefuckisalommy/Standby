@@ -387,6 +387,49 @@ def run():
     check('40b damaged: and its password logs in', s == 200 and str(r.get('token', '')).startswith('v1.'), (s, r))
     stop(_auth_app)
     os.remove(_lf)
+    # --- 40c. the check-in port a desktop or plain run opens itself ---
+    # "Accept check-ins from other devices": off by default; on, the app
+    # opens a check-in-only port (here 3442) serving the receiver's two
+    # routes and nothing else; it reopens after a restart; off closes it.
+    # Not offered on Docker/Umbrel (the separate receiver does it).
+    _rc = 'http://127.0.0.1:3442'
+    _rce = dict(_e, STANDBY_CHECKIN_PORT='3442')
+    _auth_app = start(['node', 'server.js'], env=_rce, cwd=APP, log=_bind_log)
+    check('40c check-in port: instance comes up', wait_up(_ab))
+    s, r = req('GET', '/api/remote-checkin', base=_ab)
+    check('40c check-in port: offered on a plain run, off by default',
+          s == 200 and r.get('available') is True and r.get('listening') is False and r.get('port') == 3442, r)
+    check('40c check-in port: nothing listens while off', port_closed(3442))
+    s, r = req('PUT', '/api/settings', {'acceptRemoteCheckins': 'yes'}, base=_ab)
+    check('40c check-in port: the setting must be true or false', s == 400, (s, r))
+    s, r = req('PUT', '/api/settings', {'acceptRemoteCheckins': True}, base=_ab)
+    check('40c check-in port: switched on', s == 200 and r.get('acceptRemoteCheckins') is True, (s, r))
+    check('40c check-in port: the port opens', wait_up(_rc, path='/health'))
+    s, r = req('POST', '/api/checkin-keys', {'label': '40c'}, base=_ab)
+    _k40c = r.get('plain') if isinstance(r, dict) else None
+    s, r = req('POST', '/checkin', {}, base=_rc, headers={'Authorization': 'Bearer ' + (_k40c or '')})
+    check('40c check-in port: a check-in with the key is recorded', s == 200 and r.get('ok') is True, (s, r))
+    s, r = req('POST', '/checkin', {}, base=_rc, headers={'Authorization': 'Bearer not-a-key'})
+    check('40c check-in port: a wrong key is 401', s == 401, (s, r))
+    for _p in ('/api/state', '/api/health', '/'):
+        s, r = req('GET', _p, base=_rc)
+        check('40c check-in port: %s is not served there (404)' % _p, s == 404, (s, r))
+    s, st = req('GET', '/api/state', base=_ab)
+    check('40c check-in port: the app sees the check-in', bool((st.get('checkin') or {}).get('lastCheckinAt')), st.get('checkin'))
+    stop(_auth_app)
+    _auth_app = start(['node', 'server.js'], env=_rce, cwd=APP, log=_bind_log)
+    check('40c check-in port: it reopens after a restart', wait_up(_ab) and wait_up(_rc, path='/health'))
+    s, r = req('PUT', '/api/settings', {'acceptRemoteCheckins': False}, base=_ab)
+    time.sleep(0.5)
+    check('40c check-in port: switched off, the port closes', s == 200 and port_closed(3442), (s, r))
+    stop(_auth_app)
+    _auth_app = start(['node', 'server.js'], env=dict(_rce, STANDBY_DEPLOYMENT='docker'), cwd=APP, log=_bind_log)
+    check('40c check-in port: docker instance comes up', wait_up(_ab))
+    s, r = req('GET', '/api/remote-checkin', base=_ab)
+    check('40c check-in port: not offered on Docker', s == 200 and r.get('available') is False, r)
+    s, r = req('PUT', '/api/settings', {'acceptRemoteCheckins': True}, base=_ab)
+    check('40c check-in port: switching it on there is refused', s == 400, (s, r))
+    stop(_auth_app)
     # An install from before setup existed loads as set up.
     _sf = os.path.join(_bind_data, 'state.json')
     _st = json.load(open(_sf))

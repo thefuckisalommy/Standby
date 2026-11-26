@@ -3,10 +3,10 @@
 // Build Standby's standalone programs for the system this runs on, with
 // the Node running this script built in (Node's single executable apps):
 //   node tools/build-standalone.js [out dir]      (default: dist/)
-// Makes, in the out dir:
-//   standby[.exe]          the app, with the page files inside it
-//   standby-checkin[.exe]  the optional check-in receiver
-// then packs them with LICENSE and a short README into
+// Makes standby[.exe] in the out dir: the app, with the page files
+// inside it. (No separate check-in receiver: a desktop build opens its own
+// check-in port when "Accept check-ins from other devices" is on.) Then
+// packs it with LICENSE and a short README into
 //   standby-<version>-<os>-<arch>.zip (Windows) or .tar.gz (Linux, macOS).
 // Needs Node 25.5+ (node --build-sea). Builds only for this system; CI
 // runs it on each one.
@@ -58,13 +58,12 @@ function build(entry, name, assets) {
 }
 
 build('server.js', 'standby', publicAssets());
-build('checkin-receiver/server.js', 'standby-checkin', {});
 
-// The archive: the two programs, the licence and a short README.
+// The archive: the program, the licence and a short README.
 const pkg = 'standby-' + VERSION + '-' + OS + '-' + process.arch;
 const stage = path.join(WORK, pkg);
 fs.mkdirSync(stage);
-for (const f of ['standby' + EXE, 'standby-checkin' + EXE]) fs.copyFileSync(path.join(OUT, f), path.join(stage, f));
+fs.copyFileSync(path.join(OUT, 'standby' + EXE), path.join(stage, 'standby' + EXE));
 fs.copyFileSync(path.join(REPO, 'LICENSE'), path.join(stage, 'LICENSE.txt'));
 const dataFolder = OS === 'windows' ? '%APPDATA%\\Standby' : OS === 'macos' ? '~/Library/Application Support/Standby' : '~/.local/share/standby';
 const start = OS === 'windows' ? 'Double-click standby.exe.' : 'Run ./standby in a terminal.';
@@ -76,8 +75,8 @@ fs.writeFileSync(path.join(stage, 'README.txt'), [
   'stops Standby, and triggers are only checked while it runs.',
   '',
   'Your data is kept in ' + dataFolder + '.',
-  'standby-checkin' + EXE + ' is optional: it accepts check-ins from other devices',
-  'with an API key (port 3101).',
+  'To check in from a phone or script, turn on "Accept check-ins from other',
+  'devices" in Settings > Check-in API keys (port 3101, check-ins only).',
   '',
   ...(OS === 'windows' ? ['This build is not code-signed yet: Windows may say "Windows protected your PC".', 'Choose "More info", then "Run anyway".', ''] : []),
   'Check the download against SHA256SUMS.txt from the same release.',
