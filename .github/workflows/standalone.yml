@@ -1,0 +1,121 @@
+# Standalone builds: Standby as one program, with Node built in (no
+# Docker, no Node install), for Windows x64, Linux x64 and Linux arm64.
+#
+#   - Each platform builds on its own runner (tools/build-standalone.js:
+#     node --build-sea; a build is only made for the system it runs on)
+#     and launch-tests the result (test/standalone_check.py): it starts
+#     from an empty folder, serves its page from inside the program,
+#     keeps its data in the user's folder, and the check-in receiver
+#     answers.
+#   - Pull requests and manual runs stop there; the archives are kept as
+#     workflow artifacts for 30 days.
+#   - On main: SHA256SUMS.txt, a GitHub build attestation for every
+#     archive (verify with `gh attestation verify <file> --repo
+#     thefuckisalommy/Standby`), and a DRAFT release v<version> with the
+#     archives and the checksums. Publishing it is a manual step. An
+#     existing release is never changed.
+#   - The builds are not code-signed yet (see ROADMAP.md).
+#   - Third-party actions are pinned to commit SHAs (tag in the comment).
+name: standalone
+
+on:
+  pull_request:
+    paths:
+      - 'standby/**'
+      - 'tools/**'
+      - 'test/standalone_check.py'
+      - 'LICENSE'
+      - '.github/workflows/standalone.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'standby/**'
+      - 'tools/**'
+      - 'test/standalone_check.py'
+      - 'LICENSE'
+      - '.github/workflows/standalone.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: windows-latest, target: windows-x64 }
+          - { runner: ubuntu-latest, target: linux-x64 }
+          - { runner: ubuntu-24.04-arm, target: linux-arm64 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '26'
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.11'
+      - name: Build (${{ matrix.target }})
+        run: node tools/build-standalone.js dist
+      - name: Launch test
+        run: python test/standalone_check.py dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: standby-${{ matrix.target }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum standby-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: 'dist/standby-*'
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v="$(node -p "require('./standby/package.json').version")"
+          if gh release view "v$v" >/dev/null 2>&1; then
+            echo "::warning::release v$v already exists; it was not changed. Bump the version to release a change."
+            exit 0
+          fi
+          # The release notes: this version's CHANGELOG section, then how
+          # to check a download.
+          awk -v h="## $v" '$0 == h {on=1; next} /^## / && on {exit} on' CHANGELOG.md > notes.md
+          {
+            echo
+            echo '### Downloads'
+            echo 'Windows: unzip and double-click `standby.exe` (not code-signed yet: Windows may say "Windows protected your PC"; choose More info, then Run anyway). Linux: extract and run `./standby`.'
+            echo
+            echo 'Check a download: compare `sha256sum <file>` with `SHA256SUMS.txt`, or run `gh attestation verify <file> --repo thefuckisalommy/Standby`.'
+          } >> notes.md
+          gh release create "v$v" dist/standby-* dist/SHA256SUMS.txt \
+            --draft --title "Standby $v" --notes-file notes.md --target "$GITHUB_SHA"
+          echo "Draft release v$v created: publish it on GitHub when ready." >> "$GITHUB_STEP_SUMMARY"
