@@ -51,6 +51,9 @@ function defaultState() {
       // until the owner returns; a legacy '' loads as null.
       vacationMode: false,
       vacationUntil: null,
+      // Accept check-ins from other devices: a desktop or plain run opens
+      // a check-in-only port (lib/remote-checkin.js). Off by default.
+      acceptRemoteCheckins: false,
     },
     // Transactions: a list, each with its own arm and release record. Only
     // signed hex is stored; the server never sees keys.

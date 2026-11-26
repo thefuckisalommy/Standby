@@ -399,6 +399,7 @@ module.exports = async function backupRoutes(ctx) {
     }
     for (const s of restoredSets) syncCheckinFreeze(s, restored, now);
     store.saveState(DATA_DIR, restored);
+    require('../remote-checkin').sync(restored);
     // The warnings described the replaced state; clear them.
     store.clearStateWarnings();
     startupWarnings.length = 0;

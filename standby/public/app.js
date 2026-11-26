@@ -795,6 +795,7 @@
         var priceEl = $('readiness-exchange-' + (i + 1) + '-price');
         if (!host || !pill) return;
         host.textContent = src.label || src.provider || '';
+        host.title = host.textContent;
         // Checked line: "checked 11:53 PM - $61,392.8" (one refresh time
         // for both sources), or just the time before any price.
         var checked = (S.bitcoin && S.bitcoin.currentPriceAt) ? 'checked ' + fmtCheckedAt(S.bitcoin.currentPriceAt) : '';
@@ -1371,6 +1372,7 @@
     var slotName = (prefix === 'readiness-' && secondaryDisabled) ? 'Secondary Node' : null;
     if (!url) {
       host.textContent = slotName || 'Not set';
+      host.title = host.textContent;
       pill.textContent = 'Not set';
       pill.className = 'pill muted';
       if (checksEl) checksEl.style.display = 'none';
@@ -1381,6 +1383,7 @@
     // never as failing.
     if (secondaryDisabled) {
       host.textContent = slotName || hostOf(url);
+      host.title = host.textContent;
       pill.textContent = 'Disabled';
       pill.className = 'pill muted';
       pill.title = 'Secondary node is off — Standby talks to the primary node only.';
@@ -1389,6 +1392,8 @@
       return;
     }
     host.textContent = slotName || hostOf(url);
+    // A long name is cut to one line with "…"; the full name is its title.
+    host.title = host.textContent;
     var res = (conn.results || []).find(function (r) { return r.endpoint === label && r.base === url; });
     var stamp = conn.nodeCheckedAt && conn.nodeCheckedAt[label];
     if (checkedEl) checkedEl.textContent = (res && stamp) ? 'checked ' + fmtCheckedAt(stamp) : '';
@@ -3911,6 +3916,53 @@
   }
   fillConnectLine();
 
+  // "Accept check-ins from other devices" (desktop and plain runs): the
+  // switch, this computer's addresses for the port, and whether it opened.
+  var remoteCheckin = null;
+  function renderRemoteCheckin() {
+    var r = remoteCheckin;
+    var box = $('remote-checkin');
+    if (!r || !r.available) { box.style.display = 'none'; return; }
+    box.style.display = '';
+    var on = !!(S && S.settings && S.settings.acceptRemoteCheckins);
+    $('remote-checkin-on').checked = on;
+    $('remote-checkin-off-note').style.display = on ? 'none' : '';
+    $('remote-checkin-on-note').style.display = on ? '' : 'none';
+    // The old one-line address is the separate receiver's; here the switch
+    // and the addresses below replace it.
+    $('api-keys-receiver-line').style.display = 'none';
+    $('api-keys-routes').style.display = on ? '' : 'none';
+    document.querySelectorAll('.remote-checkin-port').forEach(function (el) { el.textContent = String(r.port); });
+    var urls = $('remote-checkin-urls');
+    urls.innerHTML = '';
+    var hosts = (r.addresses && r.addresses.length) ? r.addresses : ['<this computer\'s address>'];
+    hosts.forEach(function (h, i) {
+      if (i) urls.appendChild(document.createElement('br'));
+      var c = document.createElement('code');
+      c.textContent = 'http://' + h + ':' + r.port + '/checkin';
+      urls.appendChild(c);
+    });
+    if (on && r.error) setMsg($('remote-checkin-msg'), 'Could not open the check-in port: ' + r.error, false);
+    else if (on && !r.listening) setMsg($('remote-checkin-msg'), 'Opening the check-in port…', true);
+    else setMsg($('remote-checkin-msg'), '', true);
+  }
+  function loadRemoteCheckin() {
+    return api('GET', '/api/remote-checkin').then(function (r) { remoteCheckin = r; renderRemoteCheckin(); })
+      .catch(function () { /* older server: nothing to show */ });
+  }
+  $('remote-checkin-on').addEventListener('change', async function () {
+    var want = $('remote-checkin-on').checked;
+    try {
+      S.settings = await api('PUT', '/api/settings', { acceptRemoteCheckins: want });
+      // The port opens asynchronously; ask again once it has had a moment.
+      await new Promise(function (r) { setTimeout(r, 300); });
+      await loadRemoteCheckin();
+    } catch (e) {
+      $('remote-checkin-on').checked = !want;
+      setMsg($('remote-checkin-msg'), e.message, false);
+    }
+  });
+
   // A clicked log entry: full TXID, what happened, and the full hex if the
   // tx is still stored (the log keeps only a preview).
   function showBroadcastDetails(e) {
@@ -4558,6 +4610,7 @@
 
   // ---------- settings ----------
   function renderSettings() {
+    loadRemoteCheckin();
     $('set-vacation').checked = !!S.settings.vacationMode;
     $('set-vacation-until').value = S.settings.vacationUntil || '';
     // No end date means indefinite; the checkbox mirrors it and disables
@@ -5275,7 +5328,13 @@
   // here can show or reset the password.
   function renderForgot() {
     var body = $('login-forgot-body');
-    if (authInfo.source === 'app') {
+    if (authInfo.source === 'app' && authInfo.dataFolder) {
+      // A standalone build: no command line needed.
+      body.innerHTML = '<p>It cannot be shown or reset from this page. On the computer running Standby:</p>'
+        + '<ol><li>Close Standby (close its window).</li><li>Open the folder <code></code> and delete the file <code>login.json</code> in it.</li><li>Start Standby again and set a new password.</li></ol>'
+        + '<p>Your transactions, triggers and settings are kept.</p>';
+      body.querySelector('code').textContent = authInfo.dataFolder;
+    } else if (authInfo.source === 'app') {
       body.innerHTML = '<p>It cannot be shown or reset from this page. On the computer running Standby:</p>'
         + '<ol><li>Close Standby.</li><li>Start it again with <code>--reset-password</code>, or delete <code>login.json</code> from the Standby data folder'
         + (authInfo.deployment === 'docker' ? ' (<code>data</code>, next to <code>docker-compose.yml</code>)' : '') + '.</li><li>Open Standby and set a new password.</li></ol>'
@@ -5669,7 +5728,7 @@
   });
 
   api('GET', '/api/auth/status').then(function (st) {
-    authInfo = { required: !!st.required, source: st.source || (st.required ? 'env' : 'none'), deployment: st.deployment || '' };
+    authInfo = { required: !!st.required, source: st.source || (st.required ? 'env' : 'none'), deployment: st.deployment || '', dataFolder: st.dataFolder || '' };
     renderLoginCard();
     renderForgot();
     if (st.required && !st.authenticated) showLogin();

@@ -7,3 +7,5 @@ standby/data/*
 standby/data/checkin/*
 !standby/data/checkin/.gitkeep
 __pycache__/
+standby-bundled/
+dist/

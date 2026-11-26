@@ -2,7 +2,7 @@
 
 Presigned Bitcoin transactions, broadcast when a condition you set is met. You sign in your own wallet; Standby stores the signed transaction and broadcasts it when its trigger fires. It never sees your keys.
 
-Runs on Umbrel (community app store) or any Linux machine with Docker (arm64 and amd64).
+Runs on Umbrel (community app store), on any Linux machine with Docker (arm64 and amd64), or as a single download for Windows (x64) and Linux (x64 and arm64) with nothing else to install.
 
 ## Features
 
@@ -23,6 +23,15 @@ Runs on Umbrel (community app store) or any Linux machine with Docker (arm64 and
 - **Two nodes**: a primary and an optional fallback. Each is a mempool API (mempool.space, Blockstream, your own mempool or Esplora) or Bitcoin Core over RPC.
 - **Slipstream**: optionally broadcast through MARA's private mempool, with an opt-in public fallback after 1–90 days.
 - **Backup and restore**: encrypted by default. A restore re-checks every transaction against your node.
+
+## Download for Windows or Linux
+
+From the [releases page](https://github.com/thefuckisalommy/Standby/releases), download the archive for your system and unpack it:
+
+- **Windows:** double-click `standby.exe`. The build is not code-signed yet, so Windows may say "Windows protected your PC": choose **More info**, then **Run anyway**.
+- **Linux:** run `./standby`.
+
+A window shows that Standby is running and the page opens in your browser at `http://localhost:3100`. Keep the window open: closing it stops Standby, and triggers are only checked while it runs. Your data is kept in `%APPDATA%\Standby` (Windows) or `~/.local/share/standby` (Linux). To check a download, compare it with `SHA256SUMS.txt` from the same release, or run `gh attestation verify <file> --repo thefuckisalommy/Standby`.
 
 ## Install on Umbrel
 
@@ -53,7 +62,7 @@ Both run read-only, without Linux capabilities, with `no-new-privileges`.
 
 **Updating:** change the image tag (or download the new compose file), then `docker compose pull && docker compose up -d`. Data lives in `./data` and `./checkin`.
 
-**Without Docker** (Linux, macOS or Windows): Node 26+, `cd standby && node server.js` (localhost:3100, data in `./data`). The check-in receiver is `node checkin-receiver/server.js` (port 3101). On Windows, Ctrl+C or Ctrl+Break stops it cleanly. Only one copy runs per data folder; a second refuses to start. Forgot a password set in the app? Start it once with `node server.js --reset-password` (see [SECURITY.md](SECURITY.md#login)).
+**Without Docker** (Linux, macOS or Windows): Node 26+, `cd standby && node server.js` (localhost:3100, data in `./data`). For check-ins from other devices, switch on "Accept check-ins from other devices" in Settings (port 3101), or run the separate receiver, `node checkin-receiver/server.js`. On Windows, Ctrl+C or Ctrl+Break stops it cleanly. Only one copy runs per data folder; a second refuses to start. Forgot a password set in the app? Start it once with `node server.js --reset-password` (see [SECURITY.md](SECURITY.md#login)).
 
 ### Configuration
 
@@ -64,14 +73,15 @@ All optional; see `standby/lib/config.js`.
 | `STANDBY_PASSWORD` | unset | The app login, for setups that manage it outside the app (Umbrel sets it from its app password; with Docker, a `STANDBY_PASSWORD=` line in `.env`). Unset, you choose a password in the app (setup, or Settings → App login). |
 | `STANDBY_BIND` | `127.0.0.1` | Listen address. Docker sets `0.0.0.0` inside the container. |
 | `STANDBY_ALLOWED_HOSTS` | unset | Extra hostnames, comma-separated. |
-| `STANDBY_WEB_PORT`, `STANDBY_CHECKIN_PORT` | `3100`, `3101` | Host ports in `docker-compose.yml`. |
+| `STANDBY_WEB_PORT`, `STANDBY_CHECKIN_PORT` | `3100`, `3101` | Host ports in `docker-compose.yml`. `STANDBY_CHECKIN_PORT` is also the port the download and a plain run open for check-ins from other devices. |
+| `STANDBY_OPEN_BROWSER` | on for the download | `0` stops the download opening the page in the browser at start. |
 | `PORT`, `DATA_DIR`, `CHECKIN_DIR` | `3100`, `./data`, `./data/checkin` | Listen port and data locations (Docker and Umbrel set `/data` and `/checkin`). |
 | `MEMPOOL_HOST`, `MEMPOOL_PORT`, `MEMPOOL_PROTOCOL` | unset | Override a mempool primary node. |
 | `STANDBY_LOG_FILE` | unset | Also write the log to this file (rotates at 1 MB). Give the receiver its own file. |
 
 ## Check-ins
 
-Create a key in the Check-in API keys card (shown once). Then:
+Create a key in the Check-in API keys card (shown once). On the download or a plain run, also switch on **Accept check-ins from other devices** there: Standby then opens port 3101 for check-ins only (nothing else in Standby can be reached through it). On Docker and Umbrel the separate receiver does this. Then:
 
 ```sh
 curl -X POST http://<host>:3101/checkin -H "Authorization: Bearer <key>"
@@ -100,5 +110,4 @@ Standby is a helper, not an inheritance plan. It runs on one device that can fai
 
 - [SECURITY.md](SECURITY.md): read before arming a transaction.
 - [CHANGELOG.md](CHANGELOG.md): what changed in each release.
-- [ROADMAP.md](ROADMAP.md): what is planned.
 - [LICENSE](LICENSE): MIT.

@@ -1,18 +1,26 @@
 'use strict';
 // Every environment variable the app reads is parsed here; modules never
 // read process.env.
+const os = require('os');
 const path = require('path');
+
+// A standalone build (a Node single executable: the Windows .exe and the
+// Linux programs) runs from one file with no folder of its own.
+const STANDALONE = (() => {
+  try { return require('node:sea').isSea(); } catch { return false; }
+})();
 
 const PORT = parseInt(process.env.PORT || '3100', 10);
 // Bind address, default 127.0.0.1 so a bare run is not exposed to the LAN.
 // Docker sets 0.0.0.0 (a loopback bind would never see forwarded traffic);
 // there the port mapping or proxy, plus the app login, is the boundary.
 const BIND = process.env.STANDBY_BIND || '127.0.0.1';
-// Where this runs: 'umbrel', 'docker' or 'bare' (the default), so startup
-// checks and messages can be specific.
-const DEPLOYMENTS = ['umbrel', 'docker', 'bare'];
+// Where this runs: 'umbrel', 'docker', 'desktop' (a standalone build) or
+// 'bare' (plain Node, the default), so startup checks and messages can be
+// specific.
+const DEPLOYMENTS = ['umbrel', 'docker', 'desktop', 'bare'];
 const DEPLOYMENT = DEPLOYMENTS.includes(process.env.STANDBY_DEPLOYMENT)
-  ? process.env.STANDBY_DEPLOYMENT : 'bare';
+  ? process.env.STANDBY_DEPLOYMENT : (STANDALONE ? 'desktop' : 'bare');
 // The app login; empty means none. Umbrel sets it to APP_PASSWORD (shown
 // on the app's page).
 const PASSWORD = process.env.STANDBY_PASSWORD || '';
@@ -26,12 +34,35 @@ const STARTUP_TICK_MS = (() => {
   const ms = parseInt(process.env.STANDBY_TEST_STARTUP_TICK_MS || '', 10);
   return (Number.isFinite(ms) && ms >= 0) ? ms : 5000;
 })();
-const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
+// The data folder. A standalone build keeps it in the user's own folder
+// (it has no folder of its own): %APPDATA%\\Standby on Windows,
+// ~/Library/Application Support/Standby on macOS, and
+// $XDG_DATA_HOME/standby (~/.local/share/standby) elsewhere. DATA_FOLDER_HINT
+// names it without the user's name, for "Forgot password?"; null when
+// DATA_DIR is set or this is not a standalone build.
+const USER_DATA = (() => {
+  const home = os.homedir();
+  if (process.platform === 'win32') {
+    return { dir: path.join(process.env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'Standby'), hint: '%APPDATA%\\Standby' };
+  }
+  if (process.platform === 'darwin') return { dir: path.join(home, 'Library', 'Application Support', 'Standby'), hint: '~/Library/Application Support/Standby' };
+  if (process.env.XDG_DATA_HOME) return { dir: path.join(process.env.XDG_DATA_HOME, 'standby'), hint: '$XDG_DATA_HOME/standby' };
+  return { dir: path.join(home, '.local', 'share', 'standby'), hint: '~/.local/share/standby' };
+})();
+const DATA_DIR = process.env.DATA_DIR || (STANDALONE ? USER_DATA.dir : path.join(__dirname, '..', 'data'));
+const DATA_FOLDER_HINT = (!process.env.DATA_DIR && STANDALONE) ? USER_DATA.hint : null;
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 // The directory shared with the check-in receiver (keys.json out,
 // last.json in). Docker and Umbrel set it; a bare run (Linux, macOS or
 // Windows) uses the checkin folder inside the data directory.
 const CHECKIN_DIR = process.env.CHECKIN_DIR || path.join(DATA_DIR, 'checkin');
+// The check-in port a desktop or plain run opens itself when "Accept
+// check-ins from other devices" is on (lib/remote-checkin.js); on all
+// network interfaces, so other devices can reach it.
+const CHECKIN_PORT = parseInt(process.env.STANDBY_CHECKIN_PORT || '3101', 10);
+// A standalone build opens the page in the browser once it is listening
+// (STANDBY_OPEN_BROWSER=0 turns that off). Never in test mode.
+const OPEN_BROWSER = STANDALONE && process.env.STANDBY_OPEN_BROWSER !== '0' && process.env.STANDBY_TEST_MODE !== '1';
 // Also write the log to this file (relative to the working directory);
 // empty means console only.
 const LOG_FILE = (process.env.STANDBY_LOG_FILE || '').trim();
@@ -82,6 +113,7 @@ const ALLOWED_HOSTS_EXTRA = (process.env.STANDBY_ALLOWED_HOSTS || '').split(',')
   .filter(Boolean);
 
 module.exports = {
+  STANDALONE, OPEN_BROWSER, DATA_FOLDER_HINT, CHECKIN_PORT,
   PORT, BIND, DEPLOYMENT, DEPLOYMENTS, PASSWORD, TEST_MODE, STARTUP_TICK_MS, RESTORE_CHECK_MS, OFFLINE_REFRESH_MS, LOCK_REFRESH_MS, DATA_DIR, PUBLIC_DIR,
   CHECKIN_DIR, LOG_FILE, VERSION, MAX_BODY, MEMPOOL_OVERRIDE, PRICE_API_URL_OVERRIDE,
   SLIPSTREAM_API_URL_OVERRIDE, IGNORED_TEST_OVERRIDES, ALLOWED_HOSTS_EXTRA,

@@ -1,6 +1,6 @@
 'use strict';
 const auth = require('../auth');
-const { DEPLOYMENT } = require('../config');
+const { DEPLOYMENT, DATA_FOLDER_HINT } = require('../config');
 const { readBody, sendError, sendJson } = require('../util');
 const { NEXT } = require('./shared');
 
@@ -12,8 +12,11 @@ module.exports = async function authRoutes(ctx) {
   if (req.method === 'GET' && pathname === '/api/auth/status') {
     // source: 'env' (STANDBY_PASSWORD; on Umbrel its app password), 'app'
     // (set in Settings) or 'none'. The login screen words its "Forgot
-    // password?" help from it.
-    return sendJson(res, 200, { required: auth.enabled(), authenticated: auth.requestAuthorized(req, now.getTime()), source: auth.source(), deployment: DEPLOYMENT });
+    // password?" help from it, and from dataFolder: where a standalone
+    // build keeps its data, written without the user's name.
+    const st = { required: auth.enabled(), authenticated: auth.requestAuthorized(req, now.getTime()), source: auth.source(), deployment: DEPLOYMENT };
+    if (DATA_FOLDER_HINT) st.dataFolder = DATA_FOLDER_HINT;
+    return sendJson(res, 200, st);
   }
 
   // POST /api/auth/password { current, password }: set the app password

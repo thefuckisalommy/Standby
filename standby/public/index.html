@@ -506,8 +506,22 @@
         <h2>Check-in API keys</h2>
         <button class="help-btn" id="help-keys" data-help="keys" aria-label="About this setting" title="About this setting">?</button>
       </div>
-      <p>Your connection IP is:<br><code id="api-keys-receiver-url"></code></p>
-      <p class="muted">POST /checkin to check in, GET /health to test — the key goes as an Authorization: Bearer token.</p>
+      <!-- Desktop and plain runs: Standby opens the check-in port itself
+           when this is on (GET /api/remote-checkin). Hidden on Docker and
+           Umbrel, where the separate receiver does it. -->
+      <div id="remote-checkin" style="display:none">
+        <label class="switch green switch-row"><span>Accept check-ins from other devices</span>
+          <input type="checkbox" id="remote-checkin-on"><span class="slider"></span></label>
+        <p class="muted" id="remote-checkin-off-note">Off: only this page can check in. On: Standby opens port <span class="remote-checkin-port">3101</span> on this computer for check-ins only, each needing an API key below. Nothing else can be reached through it.</p>
+        <div id="remote-checkin-on-note" style="display:none">
+          <p>Other devices check in at:<br><span id="remote-checkin-urls"></span></p>
+          <p class="muted">Port <span class="remote-checkin-port">3101</span> on this computer only records check-ins, and only with an API key below. Nothing else in Standby can be reached through it. To check in from outside your network, forward that port or use a VPN such as Tailscale.</p>
+        </div>
+        <p id="remote-checkin-msg" class="muted"></p>
+      </div>
+      <p id="api-keys-receiver-line">Your connection IP is:<br><code id="api-keys-receiver-url"></code></p>
+      <p class="muted" id="api-keys-routes">POST /checkin to check in, GET /health to test — the key goes as an Authorization: Bearer token.</p>
+      <p class="notice" id="api-keys-warning">Treat each key like a password. Someone with a key can't see or send your transactions, but they can check in for you, which keeps your check-in triggers from firing. Give each device its own key, and revoke any key you think has leaked.</p>
       <div id="api-keys-list"></div>
       <label for="api-key-label">Label for the new key</label>
       <input id="api-key-label" type="text" placeholder="e.g. Check-in bot">

@@ -1,0 +1,157 @@
+#!/usr/bin/env node
+'use strict';
+// Bundle one of Standby's entry scripts and every file it requires into a
+// single script, with no dependencies:
+//   node tools/bundle.js server.js out/server.js
+//   node tools/bundle.js checkin-receiver/server.js out/receiver.js
+// The entry is relative to standby/. A single-file build (Node's single
+// executable applications) can embed only one script, and that script
+// cannot load the app's other files from disk.
+// - Only literal require('...') calls are allowed; any other form fails
+//   the bundle. Relative requires (and .json files) are bundled; anything
+//   else (Node's built-in modules) is required as usual at run time.
+// - At run time a relative require that is not in the bundle throws: the
+//   bundle never falls back to the app's files on disk.
+// - Each module sees __dirname and __filename as if it were still in its
+//   place, with the app folder at STANDBY_ROOT (set by the caller) or, by
+//   default, where the entry would sit relative to this bundle. So a
+//   bundle written over the entry script behaves like the original.
+const fs = require('fs');
+const path = require('path');
+
+// BUNDLE_ROOT: another app folder (test/bundle_check.js uses one).
+const ROOT = process.env.BUNDLE_ROOT ? path.resolve(process.env.BUNDLE_ROOT) : path.join(__dirname, '..', 'standby');
+const [entryArg, outArg] = process.argv.slice(2);
+function fail(msg) { console.error('bundle: ' + msg); process.exit(1); }
+if (!entryArg || !outArg) fail('usage: node tools/bundle.js <entry relative to standby/> <out file>');
+
+const posix = path.posix;
+const entry = posix.normalize(entryArg.split(path.sep).join('/'));
+const LITERAL = /\brequire\((['"])([^'"]+)\1\)/g;
+const ANY_REQUIRE = /\brequire\s*\(/g;
+
+function idFile(id) { return path.join(ROOT, ...id.split('/')); }
+function resolveId(fromId, spec) {
+  const base = posix.normalize(posix.join(posix.dirname(fromId), spec));
+  if (base.startsWith('../')) fail(fromId + ': require(\'' + spec + '\') leaves the app folder');
+  for (const cand of [base, base + '.js', base + '.json', base + '/index.js']) {
+    const f = idFile(cand);
+    if (fs.existsSync(f) && fs.statSync(f).isFile()) return cand;
+  }
+  return fail(fromId + ': require(\'' + spec + '\') not found');
+}
+// The code without its comments, so a comment mentioning require(...)
+// does not count. A small scanner, not a pattern: strings, template
+// strings and regex literals are kept whole, so "//" or "/*" inside them
+// is not mistaken for a comment. A "/" starts a regex literal where an
+// expression can start (after an operator, a bracket or a keyword such as
+// return), otherwise it is division.
+const REGEX_AFTER = /[(,=:[!&|?{};+\-*%<>~^]/;
+const REGEX_AFTER_WORDS = /\b(return|typeof|instanceof|in|of|new|delete|void|throw|case|do|else|yield|await)$/;
+function stripComments(src) {
+  let out = '';
+  let i = 0;
+  let prev = ''; // the last character of code that was not white space
+  const n = src.length;
+  while (i < n) {
+    const c = src[i];
+    const d = src[i + 1];
+    if (c === '/' && d === '/') { while (i < n && src[i] !== '\n') i++; continue; }
+    if (c === '/' && d === '*') {
+      const end = src.indexOf('*/', i + 2);
+      i = end === -1 ? n : end + 2;
+      out += ' ';
+      continue;
+    }
+    if (c === '\'' || c === '"' || c === '`') {
+      const start = i++;
+      while (i < n && src[i] !== c) i += src[i] === '\\' ? 2 : 1;
+      i++;
+      out += src.slice(start, i);
+      prev = c;
+      continue;
+    }
+    if (c === '/' && (prev === '' || REGEX_AFTER.test(prev) || REGEX_AFTER_WORDS.test(out.trimEnd()))) {
+      const start = i++;
+      let inClass = false;
+      while (i < n && src[i] !== '\n') {
+        if (src[i] === '\\') { i += 2; continue; }
+        if (src[i] === '[') inClass = true;
+        else if (src[i] === ']') inClass = false;
+        else if (src[i] === '/' && !inClass) break;
+        i++;
+      }
+      i++;
+      while (i < n && /[a-z]/i.test(src[i])) i++; // flags
+      out += src.slice(start, i);
+      prev = '/';
+      continue;
+    }
+    out += c;
+    if (!/\s/.test(c)) prev = c;
+    i++;
+  }
+  return out;
+}
+
+const modules = new Map(); // id -> { source, map }
+const queue = [entry];
+while (queue.length) {
+  const id = queue.shift();
+  if (modules.has(id)) continue;
+  const text = fs.readFileSync(idFile(id), 'utf8');
+  if (id.endsWith('.json')) {
+    JSON.parse(text); // must be valid
+    modules.set(id, { source: 'module.exports = ' + text.trim() + ';', map: {} });
+    continue;
+  }
+  const code = stripComments(text);
+  const literal = [...code.matchAll(LITERAL)];
+  const total = (code.match(ANY_REQUIRE) || []).length;
+  if (literal.length !== total) fail(id + ': only literal require(\'...\') calls can be bundled');
+  const map = {};
+  for (const m of literal) {
+    const spec = m[2];
+    if (!spec.startsWith('.')) continue; // a built-in module
+    map[spec] = resolveId(id, spec);
+    queue.push(map[spec]);
+  }
+  modules.set(id, { source: text.replace(/^#!.*\n/, ''), map });
+}
+
+const up = posix.relative(posix.dirname(entry), '.') || '.';
+const out = [];
+out.push("'use strict';");
+out.push('// Generated by tools/bundle.js from standby/' + entry + ' (' + modules.size + ' files). Do not edit.');
+out.push('const __bPath = require(\'path\');');
+out.push('const __bRequire = require;');
+out.push('const __bRoot = process.env.STANDBY_ROOT || __bPath.resolve(__dirname, ' + JSON.stringify(up) + ');');
+out.push('const __bMaps = ' + JSON.stringify(Object.fromEntries([...modules].map(([id, m]) => [id, m.map]))) + ';');
+out.push('const __bSources = {');
+for (const [id, m] of modules) {
+  out.push(JSON.stringify(id) + ': function (exports, require, module, __filename, __dirname) {');
+  out.push(m.source);
+  out.push('},');
+}
+out.push('};');
+out.push(`const __bCache = {};
+function __bLoad(id) {
+  if (__bCache[id]) return __bCache[id].exports;
+  const module = { id, exports: {}, loaded: false };
+  __bCache[id] = module;
+  const map = __bMaps[id];
+  const req = (spec) => {
+    if (Object.prototype.hasOwnProperty.call(map, spec)) return __bLoad(map[spec]);
+    if (spec.startsWith('.')) throw new Error('bundle: ' + id + ' requires ' + spec + ', which is not in this bundle');
+    return __bRequire(spec);
+  };
+  const filename = __bPath.join(__bRoot, ...id.split('/'));
+  __bSources[id].call(module.exports, module.exports, req, module, filename, __bPath.dirname(filename));
+  module.loaded = true;
+  return module.exports;
+}
+module.exports = __bLoad(${JSON.stringify(entry)});`);
+
+fs.mkdirSync(path.dirname(path.resolve(outArg)), { recursive: true });
+fs.writeFileSync(outArg, out.join('\n') + '\n');
+console.log('bundle: standby/' + entry + ' -> ' + outArg + ' (' + modules.size + ' files)');
