@@ -27,7 +27,9 @@ on:
       - 'LICENSE'
       - '.github/workflows/standalone.yml'
   push:
-    branches: [main]
+    # TEMPORARY: 0.8.20 runs here so the builds are checked before the
+    # PR (workflow_dispatch only works once this file is on main).
+    branches: [main, '0.8.20']
     paths:
       - 'standby/**'
       - 'tools/**'
