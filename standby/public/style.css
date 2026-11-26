@@ -623,3 +623,61 @@ p.inline-btns { display: flex; gap: 8px; flex-wrap: nowrap; align-items: center;
 .pw-toggle .eye-hide { display: none; }
 .pw-toggle.on .eye-show { display: none; }
 .pw-toggle.on .eye-hide { display: inline; }
+
+/* First-open setup: one page per step, in place of the tabs. */
+body.setup-open #tabs, body.setup-open main section.tab, body.setup-open .burger { display: none !important; }
+.setup-card { padding: 22px 20px 20px; margin-top: 14px; }
+.setup-step { display: none; }
+.setup-step.on { display: block; }
+.setup-head { display: flex; align-items: center; justify-content: space-between; color: var(--muted); font-size: 13px; margin-bottom: 14px; }
+.setup-dots { display: flex; gap: 6px; }
+.setup-dots i { width: 8px; height: 8px; border-radius: 50%; background: #3a404b; display: block; }
+.setup-dots i.on { background: var(--accent); }
+.setup-dots i.done { background: #7a5a2a; }
+.setup-card h2 { font-size: 20px; margin: 0 0 8px; }
+.setup-card .lead { color: var(--muted); font-size: 15px; margin: 0 0 14px; }
+.setup-card .center { text-align: center; }
+.setup-logo { width: 56px; height: 56px; border-radius: 12px; margin: 4px 0 10px; }
+.setup-card .choice { display: block; border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px 12px 42px; margin: 10px 0; position: relative; cursor: pointer; font-weight: 400; }
+.setup-card .choice input { position: absolute; left: 14px; top: 14px; margin: 0; accent-color: var(--accent); width: 16px; height: 16px; }
+.setup-card .choice.sel { border-color: var(--accent); background: #1c1a17; }
+.setup-card .choice strong { display: block; }
+.setup-card .choice span { color: var(--muted); font-size: 14px; }
+.setup-defs { background: #161a20; border-radius: 8px; padding: 4px 12px; margin: 10px 0 14px; }
+.setup-def { display: flex; justify-content: space-between; padding: 8px 0; border-top: 1px solid var(--line); font-size: 15px; }
+.setup-def:first-child { border-top: 0; }
+.setup-def b { font-weight: 600; }
+.setup-def span { color: var(--muted); }
+.setup-status { display: flex; align-items: center; gap: 8px; margin: 4px 0; color: var(--muted); font-size: 14px; }
+.setup-actions { display: flex; flex-direction: column; gap: 8px; margin-top: 18px; }
+.setup-actions button { width: 100%; padding: 12px; font-size: 16px; }
+.setup-actions .primary { font-weight: 600; }
+.setup-back { background: none; border: 0; color: var(--muted); padding: 10px 0 0; font-size: 14px; }
+.linkish { background: none; border: 0; color: var(--muted); text-decoration: underline; padding: 6px 0; font-size: 14px; }
+/* Setup's last page: the logo with two broadcast rings pulsing out. */
+.setup-done-logo { position: relative; width: 84px; height: 84px; margin: 18px auto 16px; }
+.setup-done-logo img { position: relative; z-index: 1; width: 84px; height: 84px; border-radius: 18px; display: block; }
+.setup-done-logo::before, .setup-done-logo::after {
+  content: ''; position: absolute; inset: 0; border-radius: 18px; border: 2px solid var(--accent);
+  animation: setup-pulse 2.4s ease-out infinite; opacity: 0;
+}
+.setup-done-logo::after { animation-delay: 1.2s; }
+@keyframes setup-pulse { 0% { transform: scale(1); opacity: 0.7; } 100% { transform: scale(1.6); opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .setup-done-logo::before, .setup-done-logo::after { animation: none; } }
+/* A Settings card moved into setup ("Choose own"): no second frame or title. */
+.setup-card .card { border: 0; background: none; padding: 0; margin: 8px 0 0; box-shadow: none; }
+.setup-card .card > .section-head { display: none; }
+
+/* Login screen: "Forgot password?" (instructions only). */
+.forgot { margin-top: 10px; font-size: 14px; }
+.forgot summary { color: var(--accent); cursor: pointer; }
+.forgot ol { padding-left: 20px; margin: 8px 0; color: var(--muted); }
+.forgot li { margin: 4px 0; }
+.forgot p { color: var(--muted); }
+
+/* Start fresh: red edge, like other irreversible actions. */
+.danger-card { border-left: 4px solid var(--bad); }
+/* Setup: how each trigger works, one expandable entry each. */
+.trigger-explain { border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; margin: 8px 0; }
+.trigger-explain summary { cursor: pointer; font-weight: 600; }
+.trigger-explain p { color: var(--muted); font-size: 14px; margin: 8px 0 2px; }

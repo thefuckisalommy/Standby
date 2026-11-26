@@ -6,7 +6,8 @@
 #   - Regression suite: python3 test/verify099-regress.py    (~5 min)
 #   - DOM suite:        python3 test/dom_launcher099.py      (~4 min, TZ set)
 #     (boots the app + stubs, runs dom_check099.js, the 390px
-#     width check, and the error-screen script dom_check099_error.js)
+#     width check, the error-screen script dom_check099_error.js, and
+#     the first-open setup check setup_check099.js)
 #   Each of the three runs twice, in a matrix: the default profile
 #   (code defaults, loopback bind) and STANDBY_TEST_PROFILE=umbrel
 #   (STANDBY_BIND=0.0.0.0 and STANDBY_ALLOWED_HOSTS, as on Umbrel).
@@ -37,7 +38,8 @@
 #     each 15 minutes so a slow runner does not flake the run.
 #   - Ports: API 3438/3439 + stubs 18235/18236, regression
 #     3448/3449 + stubs 18245/18246, DOM shares the API ports plus
-#     an error phase on 3468/3469 + stubs 18265/18266. API and
+#     an error phase on 3468/3469 + stubs 18265/18266 and a setup
+#     phase on 3458 + stub 18255. API and
 #     regression run in parallel (distinct ports); DOM runs after
 #     API because it shares its ports.
 #

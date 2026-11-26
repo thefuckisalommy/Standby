@@ -2,8 +2,12 @@
 // App login. The Host allowlist does not stop clients that connect by IP,
 // and on Umbrel every app shares one Docker network while Umbrel's login
 // only guards its proxy. A password checked here closes that path. Umbrel
-// sets STANDBY_PASSWORD from APP_PASSWORD; elsewhere it is optional (empty
-// means off).
+// sets STANDBY_PASSWORD from APP_PASSWORD; elsewhere it is optional.
+// Without STANDBY_PASSWORD the owner can set one in the app: it is kept as
+// a scrypt hash in DATA_DIR/login.json, never readable back. Forgotten, it
+// is reset only on the machine itself (delete login.json, or start with
+// --reset-password); nothing over HTTP can reset it. The password guards
+// the API; it does not encrypt the data folder.
 // The UI logs in once (POST /api/login) and sends the session token as
 // X-Standby-Token from localStorage. Not a cookie: cookies are scoped by
 // host, not port, so every app on umbrel.local would receive it;
@@ -21,24 +25,126 @@ const { PASSWORD, DATA_DIR } = require('./config');
 const store = require('./store');
 
 const SESSION_FILE = 'session.key';
+const LOGIN_FILE = 'login.json';
+const LOGIN_FORMAT = 'standby-login';
+const MIN_PASSWORD_LENGTH = 12;
+const MAX_PASSWORD_LENGTH = 1024;
+const KDF = { N: 2 ** 15, r: 8, p: 1, keylen: 32 };
+const SALT_BYTES = 16;
+const SCRYPT_MAXMEM = 256 * 1024 * 1024;
 const TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const TOKEN_SKEW_MS = 5 * 60 * 1000; // a token "issued" further ahead than this is refused
 const LOGIN_WINDOW_MS = 60 * 1000;
 const LOGIN_MAX_FAILURES = 10; // per window, across all clients
 
-function enabled() {
-  return PASSWORD.length > 0;
-}
-
 function sha256(s) {
   return crypto.createHash('sha256').update(String(s), 'utf8').digest();
 }
 
-// Constant-time password check: both sides are hashed first, so the
-// comparison runs on equal-length buffers whatever was sent.
+// The password set in the app: { salt, hash } as Buffers, or null.
+let appLogin;
+function loginPath() { return path.join(DATA_DIR, LOGIN_FILE); }
+function readAppLogin() {
+  let doc;
+  try { doc = JSON.parse(fs.readFileSync(loginPath(), 'utf8')); } catch (e) {
+    if (e.code === 'ENOENT') return null;
+    // A damaged file must not silently turn the login off.
+    throw new Error(LOGIN_FILE + ' in the data folder is unreadable (' + e.message + '). Delete it to remove the app password.');
+  }
+  const problem = loginDocProblem(doc);
+  if (problem) {
+    throw new Error(LOGIN_FILE + ' in the data folder is not a usable Standby login file (' + problem + '). Delete it to remove the app password.');
+  }
+  return { salt: Buffer.from(doc.salt, 'base64'), hash: Buffer.from(doc.hash, 'base64'), kdf: { N: doc.kdf.N, r: doc.kdf.r, p: doc.kdf.p, keylen: doc.kdf.keylen } };
+}
+
+// Why a login document cannot be used, or null. Everything is checked at
+// startup, so a damaged file stops the start instead of failing every
+// login later (scrypt silently falls back to its defaults when a
+// parameter is missing, which would read as "wrong password" forever).
+const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+function loginDocProblem(doc) {
+  if (!doc || typeof doc !== 'object' || doc.format !== LOGIN_FORMAT || doc.version !== 1) return 'not a login file';
+  const k = doc.kdf;
+  if (!k || typeof k !== 'object' || k.name !== 'scrypt') return 'kdf must be scrypt';
+  const isInt = (v, lo, hi) => Number.isInteger(v) && v >= lo && v <= hi;
+  if (!isInt(k.N, 2 ** 14, 2 ** 20) || (k.N & (k.N - 1)) !== 0) return 'scrypt N out of range';
+  if (!isInt(k.r, 1, 16) || !isInt(k.p, 1, 4)) return 'scrypt r or p out of range';
+  if (128 * k.N * k.r * k.p > SCRYPT_MAXMEM) return 'scrypt parameters need too much memory';
+  if (k.keylen !== KDF.keylen) return 'hash length must be ' + KDF.keylen + ' bytes';
+  for (const [name, want] of [['salt', SALT_BYTES], ['hash', KDF.keylen]]) {
+    const v = doc[name];
+    if (typeof v !== 'string' || !BASE64.test(v) || Buffer.from(v, 'base64').length !== want) return name + ' must be ' + want + ' bytes of base64';
+  }
+  return null;
+}
+function appLoginNow() {
+  if (appLogin === undefined) appLogin = readAppLogin();
+  return appLogin;
+}
+function derive(plain, salt, kdf) {
+  return crypto.scryptSync(plain, salt, kdf.keylen, { N: kdf.N, r: kdf.r, p: kdf.p, maxmem: SCRYPT_MAXMEM });
+}
+
+// Where the login comes from: 'env' (STANDBY_PASSWORD, Umbrel's
+// APP_PASSWORD), 'app' (set in Settings) or 'none'.
+function source() {
+  if (PASSWORD.length > 0) return 'env';
+  return appLoginNow() ? 'app' : 'none';
+}
+function enabled() {
+  return source() !== 'none';
+}
+
+// Constant-time password check. The scrypt check is costly, so the last
+// match is remembered (scripts sending the password on every call).
+let lastMatch = null;
 function passwordMatches(plain) {
-  if (!enabled() || typeof plain !== 'string' || !plain) return false;
-  return crypto.timingSafeEqual(sha256(plain), sha256(PASSWORD));
+  if (typeof plain !== 'string' || !plain || plain.length > MAX_PASSWORD_LENGTH) return false;
+  const src = source();
+  if (src === 'env') return crypto.timingSafeEqual(sha256(plain), sha256(PASSWORD));
+  if (src !== 'app') return false;
+  const digest = sha256(plain);
+  if (lastMatch && crypto.timingSafeEqual(digest, lastMatch)) return true;
+  const ok = crypto.timingSafeEqual(derive(plain, appLogin.salt, appLogin.kdf), appLogin.hash);
+  if (ok) lastMatch = digest;
+  return ok;
+}
+
+// null when the password is acceptable, else why not.
+function passwordProblem(plain) {
+  if (typeof plain !== 'string' || plain.length < MIN_PASSWORD_LENGTH) return 'the password must be at least ' + MIN_PASSWORD_LENGTH + ' characters';
+  if (plain.length > MAX_PASSWORD_LENGTH) return 'the password is too long';
+  return null;
+}
+
+// Set or replace the app password. Every session signed with the old one
+// stops working (the token is bound to the password).
+function setAppPassword(plain) {
+  const salt = crypto.randomBytes(SALT_BYTES);
+  const hash = derive(plain, salt, KDF);
+  const doc = { format: LOGIN_FORMAT, version: 1, kdf: { name: 'scrypt', N: KDF.N, r: KDF.r, p: KDF.p, keylen: KDF.keylen }, salt: salt.toString('base64'), hash: hash.toString('base64') };
+  store.writeFileDurable(loginPath(), JSON.stringify(doc) + '\n', store.DATA_FILE_MODE);
+  appLogin = { salt, hash, kdf: doc.kdf };
+  lastMatch = null;
+}
+
+// Remove the app password (from Settings, or --reset-password at start).
+// true when there was one.
+function clearAppPassword() {
+  let had = false;
+  try { fs.unlinkSync(loginPath()); had = true; } catch (e) { if (e.code !== 'ENOENT') throw e; }
+  appLogin = null;
+  lastMatch = null;
+  return had;
+}
+
+// What a session token is bound to: changes whenever the password does.
+function passwordFingerprint() {
+  const src = source();
+  if (src === 'env') return sha256(PASSWORD).toString('hex');
+  if (src === 'app') return sha256(appLogin.hash).toString('hex');
+  return '';
 }
 
 let secretCache = null;
@@ -61,7 +167,7 @@ function rotateSessionSecret() {
 
 function signature(issuedMs) {
   return crypto.createHmac('sha256', sessionSecret())
-    .update('v1.' + issuedMs + '.' + sha256(PASSWORD).toString('hex'))
+    .update('v1.' + issuedMs + '.' + passwordFingerprint())
     .digest('base64url');
 }
 
@@ -82,12 +188,22 @@ function tokenValid(token, nowMs) {
   return want.length === got.length && crypto.timingSafeEqual(want, got);
 }
 
+// A password sent as a Bearer token is a guess like one at the login
+// screen: it shares the same limit (wrong ones count; while limited even
+// the right one is refused and req.standbyLoginLimited is set, so the API
+// answers 429).
 function requestAuthorized(req, nowMs) {
   if (!enabled()) return true;
   const token = req.headers['x-standby-token'];
   if (typeof token === 'string' && tokenValid(token, nowMs)) return true;
   const auth = req.headers.authorization;
-  if (typeof auth === 'string' && auth.startsWith('Bearer ')) return passwordMatches(auth.slice(7).trim());
+  if (typeof auth === 'string' && auth.startsWith('Bearer ')) {
+    if (loginLimited(nowMs)) { req.standbyLoginLimited = true; return false; }
+    if (passwordMatches(auth.slice(7).trim())) return true;
+    recordLoginFailure(nowMs);
+    console.warn('Standby: failed login attempt (Bearer)');
+    return false;
+  }
   return false;
 }
 
@@ -115,7 +231,7 @@ function recordLoginFailure(nowMs) {
 }
 
 module.exports = {
-  SESSION_FILE, TOKEN_TTL_MS, LOGIN_MAX_FAILURES, LOGIN_WINDOW_MS,
-  enabled, passwordMatches, issueToken, tokenValid, requestAuthorized, routeIsPublic,
+  SESSION_FILE, LOGIN_FILE, TOKEN_TTL_MS, LOGIN_MAX_FAILURES, LOGIN_WINDOW_MS, MIN_PASSWORD_LENGTH,
+  source, enabled, passwordMatches, passwordProblem, setAppPassword, clearAppPassword, issueToken, tokenValid, requestAuthorized, routeIsPublic,
   rotateSessionSecret, loginLimited, recordLoginFailure,
 };

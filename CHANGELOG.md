@@ -4,6 +4,10 @@ What changed in each Standby release, newest first. The newest few also appear i
 
 Code comments describe how the app works now; the history of why it changed lives here and in git.
 
+## 0.8.19
+
+First-open setup and app password. A fresh install opens a short setup, one page per step: an app password (skippable, with a warning), the Bitcoin nodes and price sources (keep the defaults or choose your own), how each trigger works, and your first transaction (or skip). Without STANDBY_PASSWORD, a password can now be set, changed or removed in the app (Settings → App login); it is stored only as a hash, and a forgotten one is reset on the machine itself (start with --reset-password), never over the network. The login screen has "Forgot password?" instructions. Settings has Start fresh (delete all data and a password set in the app, with a typed confirmation and the password; setup then runs again) and Run setup again. Existing installs are not shown the setup. Docker installs no longer need a password in `.env`: setup asks you to choose one (a `STANDBY_PASSWORD` in `.env` still works, and the app then says exactly where it is). The dashboard's check-in card now appears only once a transaction has a check-in trigger. Also: a password sent by a script as a Bearer token now counts toward the ten-wrong-passwords-a-minute limit (it did not before), and Standby refuses to start on a login file that parses but cannot be used, instead of rejecting the right password later. Standby is now released under the MIT licence.
+
 ## 0.8.18
 
 Maintenance release with no change to how the app works: a one-command version bump for releases (tools/bump-version.js), the tests read the version from package.json, code lint runs in CI, and these release notes keep only the latest few releases (the full history is in CHANGELOG.md).

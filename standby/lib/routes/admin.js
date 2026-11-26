@@ -6,20 +6,32 @@ const { clearCaches } = require('../caches');
 const { startupWarnings, writeReceiverKeys } = require('../checkin');
 const { CHECKIN_DIR, DATA_DIR, TEST_MODE, VERSION } = require('../config');
 const { rearmFullTick } = require('../release');
+const auth = require('../auth');
 const { readBody, sendError, sendJson } = require('../util');
 const { NEXT } = require('./shared');
 
 module.exports = async function adminRoutes(ctx) {
-  const { req, res, pathname } = ctx;
+  const { req, res, pathname, now } = ctx;
 
-  // POST /api/state/reset { confirm: true }: start fresh after an
-  // unrecoverable load failure (it runs while state cannot load). Deletes
-  // the state file and every backup, empties the logs and receiver keys,
-  // writes a default state. Anything but { confirm: true } is a 400.
+  // POST /api/state/reset { confirm: true, password }: start fresh, from
+  // Settings or after an unrecoverable load failure (it runs while state
+  // cannot load). Deletes the state file and every backup, empties the
+  // logs and receiver keys, writes a default state (so setup runs again),
+  // and removes a password set in the app, so setup asks for a new one. A
+  // password from Umbrel or STANDBY_PASSWORD cannot be removed here and
+  // stays. With a login on, the password is asked again; a wrong one
+  // counts against the login limit.
   if (req.method === 'POST' && pathname === '/api/state/reset') {
     const body = await readBody(req);
     if (!body || body.confirm !== true) {
       return sendError(res, 400, 'reset requires {confirm:true}');
+    }
+    if (auth.enabled()) {
+      if (auth.loginLimited(now.getTime())) return sendError(res, 429, 'too many wrong passwords — wait a minute and try again');
+      if (!auth.passwordMatches(body.password)) {
+        auth.recordLoginFailure(now.getTime());
+        return sendError(res, 401, 'wrong password');
+      }
     }
     store.resetStateFiles(DATA_DIR);
     // Also drop the receiver's last.json, or the next read would merge the
@@ -32,7 +44,10 @@ module.exports = async function adminRoutes(ctx) {
     writeReceiverKeys(fresh);
     store.clearStateWarnings();
     startupWarnings.length = 0;
+    if (auth.source() === 'app') auth.clearAppPassword();
+    clearCaches();
     rearmFullTick();
+    console.log('Standby: all data deleted (start fresh)');
     return sendJson(res, 200, { ok: true });
   }
 

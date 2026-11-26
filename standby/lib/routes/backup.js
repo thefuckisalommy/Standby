@@ -359,6 +359,7 @@ module.exports = async function backupRoutes(ctx) {
     }
     const restored = {
       version: 7,
+      setup: { done: true }, // a restored install is set up
       createdAt: (typeof bs.createdAt === 'string' && bs.createdAt) ? bs.createdAt : now.toISOString(),
       updatedAt: now.toISOString(),
       settings,

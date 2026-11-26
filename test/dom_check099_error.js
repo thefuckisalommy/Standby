@@ -554,16 +554,19 @@ function errorCardVisible() {
   check('error: error card shows again on the second break', errorCardVisible(), '');
   document.getElementById('btn-state-reset').click();
   await sleep(200);
-  check('error: start-fresh opens the confirm modal',
-    document.getElementById('confirm-modal').classList.contains('open'), '');
-  check('error: confirm title is Start fresh?',
-    document.getElementById('confirm-title').textContent === 'Start fresh?',
-    document.getElementById('confirm-title').textContent || '');
-  check('error: confirm button reads Start fresh',
-    document.getElementById('confirm-proceed').textContent === 'Start fresh',
-    document.getElementById('confirm-proceed').textContent || '');
+  check('error: start-fresh opens the delete-all modal',
+    document.getElementById('fresh-modal').classList.contains('open'), '');
+  check('error: no "download a backup first" here (nothing loads to back up)',
+    document.getElementById('fresh-backup-row').style.display === 'none',
+    document.getElementById('fresh-backup-row').style.display);
   global.__reloaded = false;
-  document.getElementById('confirm-proceed').click();
+  document.getElementById('btn-fresh-go').click();
+  await sleep(300);
+  check('error: start fresh needs DELETE typed first',
+    global.__reloaded === false && /Type DELETE/.test(document.getElementById('fresh-msg').textContent),
+    document.getElementById('fresh-msg').textContent);
+  document.getElementById('fresh-confirm').value = 'DELETE';
+  document.getElementById('btn-fresh-go').click();
   await sleep(800);
   check('error: start-fresh reloads the page', global.__reloaded === true, '');
   check('error: health 200 again after start fresh', (await waitHealth(200)) === 200, '');
@@ -572,10 +575,9 @@ function errorCardVisible() {
     (st2.bitcoin.txs || []).length === 0, (st2.bitcoin.txs || []).length);
   await rerender(appJs); // simulate the reload
   check('error: error card hidden after start fresh + reload', !errorCardVisible(), '');
-  check('error: Getting Started shows on the fresh state (no staged txs)',
-    document.getElementById('getting-started-card')
-      && document.getElementById('getting-started-card').style.display !== 'none',
-    document.getElementById('getting-started-card') && document.getElementById('getting-started-card').style.display);
+  check('error: a fresh state runs setup (setup.done false)',
+    st2.setup && st2.setup.done === false && document.getElementById('setup-card').style.display !== 'none',
+    JSON.stringify(st2.setup) + ' ' + document.getElementById('setup-card').style.display);
 
   // --- load-failure notice escapes markup ---
   // A non-state load error whose message is markup must render as text,

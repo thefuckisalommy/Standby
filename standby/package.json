@@ -3,12 +3,12 @@
   "engines": {
     "node": ">=26"
   },
-  "license": "UNLICENSED",
+  "license": "MIT",
   "main": "server.js",
   "name": "standby",
   "private": true,
   "scripts": {
     "start": "node server.js"
   },
-  "version": "0.8.18"
+  "version": "0.8.19"
 }

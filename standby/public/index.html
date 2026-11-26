@@ -38,6 +38,108 @@
     <p id="state-error-msg" class="muted"></p>
   </div>
 
+  <!-- First-open setup: one page per step (Welcome, App password, Bitcoin
+       nodes, Price sources, How triggers work, First transaction, Done). Shown while
+       state.setup.done is false; every step keeps its default or skips.
+       "Choose own" moves the Settings card for nodes or prices in here. -->
+  <div class="card setup-card" id="setup-card" style="display:none">
+    <div class="setup-head" id="setup-head"><span id="setup-stepno"></span><span class="setup-dots" id="setup-dots"></span></div>
+
+    <div class="setup-step" id="setup-welcome">
+      <div class="center"><img class="setup-logo" src="/logo.jpg" alt=""></div>
+      <h2 class="center">Welcome to Standby</h2>
+      <p class="lead center">Standby holds Bitcoin transactions you have already signed and broadcasts them when your conditions are met.</p>
+      <p class="lead center">Setup takes a few minutes, and everything can be changed later in Settings.</p>
+      <div class="setup-actions"><button class="primary" id="btn-setup-start">Start setup</button><button id="btn-setup-restore">Restore from a backup</button></div>
+      <p class="center"><button class="linkish" id="btn-setup-skip-all">Skip setup and use the defaults</button></p>
+      <p id="setup-welcome-msg" class="muted center"></p>
+    </div>
+
+    <div class="setup-step" id="setup-password">
+      <h2>App password</h2>
+      <div id="setup-password-form">
+      <p class="lead">Without one, anyone who can open this page — including other accounts on this computer — can broadcast your transactions or change your triggers.</p>
+      <label for="setup-pw1">New password</label>
+      <div class="pw-wrap"><input type="password" id="setup-pw1" autocomplete="new-password"><button type="button" class="pw-toggle" id="setup-pw1-show" aria-label="Show password" title="Show password"><svg class="eye-show" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg><svg class="eye-hide" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 19c-6.5 0-10-7-10-7a18.5 18.5 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c6.5 0 10 7 10 7a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="2" y1="2" x2="22" y2="22"/></svg></button></div>
+      <label for="setup-pw2">Confirm password</label>
+      <div class="pw-wrap"><input type="password" id="setup-pw2" autocomplete="new-password"><button type="button" class="pw-toggle" id="setup-pw2-show" aria-label="Show password" title="Show password"><svg class="eye-show" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg><svg class="eye-hide" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 19c-6.5 0-10-7-10-7a18.5 18.5 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c6.5 0 10 7 10 7a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="2" y1="2" x2="22" y2="22"/></svg></button></div>
+      <p class="muted">At least 12 characters. It is never shown again; if you forget it, you can reset it on this computer.</p>
+      <div class="setup-actions"><button class="primary" id="btn-setup-pw-set">Set password and continue</button><button id="btn-setup-pw-skip">Skip</button></div>
+      </div>
+      <div id="setup-password-env" style="display:none">
+        <p class="lead" id="setup-password-env-text"></p>
+        <div class="setup-actions"><button class="primary" id="btn-setup-pw-env-next">Continue</button></div>
+      </div>
+      <div id="setup-password-done" style="display:none">
+        <p class="lead">A password is set. You can change or remove it any time in Settings → App login.</p>
+        <div class="setup-actions"><button class="primary" id="btn-setup-pw-next">Continue</button></div>
+      </div>
+      <p id="setup-password-msg" class="muted"></p>
+    </div>
+
+    <div class="setup-step" id="setup-nodes">
+      <h2>Bitcoin nodes</h2>
+      <p class="lead">Standby asks a node about the blockchain and sends your transactions through it. A second node is used if the first fails.</p>
+      <label class="choice" id="setup-nodes-public-choice"><input type="radio" name="setup-nodes" id="setup-nodes-public" value="public"><strong>Use public nodes (default)</strong><span>mempool.space, then blockstream.info. Works right away; those services see which transactions you look up.</span></label>
+      <label class="choice" id="setup-nodes-own-choice"><input type="radio" name="setup-nodes" id="setup-nodes-own" value="own"><strong>Choose own nodes</strong><span>A mempool instance or Bitcoin Core (RPC) — more private. Keeping a secondary means a release still goes out if your primary node is down.</span></label>
+      <div id="setup-nodes-slot"></div>
+      <div id="setup-nodes-status"></div>
+      <div class="setup-actions" id="setup-nodes-public-actions"><button class="primary" id="btn-setup-nodes-keep">Keep defaults and continue</button><button id="btn-setup-nodes-test">Test connection</button></div>
+      <div class="setup-actions" id="setup-nodes-own-actions" style="display:none"><button class="primary" id="btn-setup-nodes-save">Save and continue</button></div>
+      <p id="setup-nodes-msg" class="muted"></p>
+    </div>
+
+    <div class="setup-step" id="setup-prices">
+      <h2>Bitcoin price</h2>
+      <p class="lead">Used only by price triggers. Two sources are read, and a price is trusted only when they agree.</p>
+      <div id="setup-prices-defaults">
+        <div class="setup-defs"><div class="setup-def"><b>Primary</b><span>CoinGecko</span></div><div class="setup-def"><b>Secondary</b><span>Coinbase</span></div></div>
+        <div id="setup-prices-status"></div>
+        <div class="setup-actions"><button class="primary" id="btn-setup-prices-keep">Keep defaults and continue</button><button id="btn-setup-prices-own">Choose other sources</button></div>
+      </div>
+      <div id="setup-prices-slot"></div>
+      <div class="setup-actions" id="setup-prices-own-actions" style="display:none"><button class="primary" id="btn-setup-prices-save">Save and continue</button><button id="btn-setup-prices-default">Use the defaults instead</button></div>
+      <p id="setup-prices-msg" class="muted"></p>
+    </div>
+
+    <div class="setup-step" id="setup-checkin">
+      <h2>How triggers work</h2>
+      <p class="lead">Each transaction waits for its triggers. When they are met, Standby broadcasts it. Tap a trigger to read how it works.</p>
+      <details class="trigger-explain"><summary>Check-in</summary>
+        <p>How Standby knows you are still around. You are expected to check in regularly — by tapping "Check in — I'm here" on the dashboard, or automatically through the check-in API (from a script or another app). If you stop checking in for longer than the window you set on a transaction, Standby broadcasts it.</p></details>
+      <details class="trigger-explain"><summary>Set date</summary>
+        <p>Broadcasts on or after a date you choose.</p></details>
+      <details class="trigger-explain"><summary>Bitcoin price</summary>
+        <p>Broadcasts when the BTC price rises above, or falls below, a price you choose. Two price sources must agree first.</p></details>
+      <details class="trigger-explain"><summary>Block height</summary>
+        <p>Broadcasts once the blockchain reaches a block number you choose.</p></details>
+      <details class="trigger-explain"><summary>UTXO</summary>
+        <p>Broadcasts when a coin you name (an unspent output) is spent — for example, when another transaction moves it.</p></details>
+      <details class="trigger-explain"><summary>Fee market</summary>
+        <p>Broadcasts when network fees fall below, or rise above, a rate you choose.</p></details>
+      <p class="muted">A transaction can combine triggers: all must be met, or any one of them.</p>
+      <div class="setup-actions"><button class="primary" id="btn-setup-checkin-next">Got it — continue</button></div>
+    </div>
+
+    <div class="setup-step" id="setup-tx">
+      <h2>Your first transaction</h2>
+      <p class="lead">Sign a transaction in your wallet without broadcasting it, then add it here with its triggers. Nothing is sent until the triggers are met.</p>
+      <p class="muted" id="setup-tx-count"></p>
+      <div class="setup-actions"><button class="primary" id="btn-setup-tx-add">+ Add a pre-signed transaction</button><button id="btn-setup-tx-skip">Skip for now</button></div>
+    </div>
+
+    <div class="setup-step" id="setup-done">
+      <div class="setup-done-logo"><img src="/logo.jpg" alt=""></div>
+      <h2 class="center">You're set up</h2>
+      <p class="notice">After adding transactions, download an encrypted backup (Settings → Data backup). It is the only way to get them back if this device fails.</p>
+      <p class="muted center">Nodes, price sources, the grace period, check cadence and more can be changed any time in Settings, where you can also run this setup again.</p>
+      <div class="setup-actions"><button class="primary" id="btn-setup-finish">Go to the dashboard</button></div>
+      <p id="setup-done-msg" class="muted"></p>
+    </div>
+
+    <button class="setup-back" id="btn-setup-back">‹ Back</button>
+  </div>
+
   <nav class="tabs" id="tabs">
     <button data-tab="dashboard" class="active">Dashboard</button>
     <button data-tab="bitcoin">Transactions</button>
@@ -429,14 +531,35 @@
       <p id="backup-msg" class="muted"></p>
     </div>
 
-    <!-- Session: only shown when the app login is on.
-         Logging out signs out every device. -->
-    <div class="card" id="card-session" style="display:none">
+    <!-- App login: the password (set here, or by STANDBY_PASSWORD / Umbrel,
+         when it is only described), and Log out, which signs out every
+         device. -->
+    <div class="card" id="card-session">
       <div class="section-head">
-        <h2>Session</h2>
+        <h2>App login</h2>
       </div>
-      <p class="muted">Standby requires a password. Logging out signs out every browser that is logged in.</p>
-      <p class="inline-btns"><button id="btn-logout">Log out</button></p>
+      <div id="login-card-none" style="display:none">
+        <p class="notice bad">No password set. Anyone who can open this page can use Standby.</p>
+        <label for="login-new1">New password</label>
+      <div class="pw-wrap"><input type="password" id="login-new1" autocomplete="new-password"><button type="button" class="pw-toggle" id="login-new1-show" aria-label="Show password" title="Show password"><svg class="eye-show" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg><svg class="eye-hide" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 19c-6.5 0-10-7-10-7a18.5 18.5 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c6.5 0 10 7 10 7a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="2" y1="2" x2="22" y2="22"/></svg></button></div>
+        <label for="login-new2">Confirm new password</label>
+      <div class="pw-wrap"><input type="password" id="login-new2" autocomplete="new-password"><button type="button" class="pw-toggle" id="login-new2-show" aria-label="Show password" title="Show password"><svg class="eye-show" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg><svg class="eye-hide" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 19c-6.5 0-10-7-10-7a18.5 18.5 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c6.5 0 10 7 10 7a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="2" y1="2" x2="22" y2="22"/></svg></button></div>
+        <p class="inline-btns"><button id="btn-login-set" class="primary">Set password</button></p>
+      </div>
+      <div id="login-card-app" style="display:none">
+        <p class="muted">A password is set. It cannot be shown; if you forget it, reset it on the computer running Standby (see "Forgot password?" on the login screen).</p>
+        <label for="login-cur">Current password</label>
+      <div class="pw-wrap"><input type="password" id="login-cur" autocomplete="current-password"><button type="button" class="pw-toggle" id="login-cur-show" aria-label="Show password" title="Show password"><svg class="eye-show" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg><svg class="eye-hide" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 19c-6.5 0-10-7-10-7a18.5 18.5 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c6.5 0 10 7 10 7a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="2" y1="2" x2="22" y2="22"/></svg></button></div>
+        <label for="login-chg1">New password</label>
+      <div class="pw-wrap"><input type="password" id="login-chg1" autocomplete="new-password"><button type="button" class="pw-toggle" id="login-chg1-show" aria-label="Show password" title="Show password"><svg class="eye-show" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg><svg class="eye-hide" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 19c-6.5 0-10-7-10-7a18.5 18.5 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c6.5 0 10 7 10 7a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="2" y1="2" x2="22" y2="22"/></svg></button></div>
+        <label for="login-chg2">Confirm new password</label>
+      <div class="pw-wrap"><input type="password" id="login-chg2" autocomplete="new-password"><button type="button" class="pw-toggle" id="login-chg2-show" aria-label="Show password" title="Show password"><svg class="eye-show" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg><svg class="eye-hide" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 19c-6.5 0-10-7-10-7a18.5 18.5 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c6.5 0 10 7 10 7a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="2" y1="2" x2="22" y2="22"/></svg></button></div>
+        <p class="inline-btns"><button id="btn-login-change" class="primary">Change password</button></p>
+        <p class="muted">Remove the password (asks for the current one):</p>
+        <p class="inline-btns"><button id="btn-login-remove" class="danger">Remove password</button></p>
+      </div>
+      <p id="login-card-env" class="muted" style="display:none"></p>
+      <p class="inline-btns" id="logout-row" style="display:none"><button id="btn-logout">Log out everywhere</button></p>
       <p id="logout-msg" class="muted"></p>
     </div>
 
@@ -446,6 +569,16 @@
         <h2>App version</h2>
       </div>
       <p>Installed version: <strong id="app-version">—</strong></p>
+      <p class="inline-btns"><button id="btn-setup-rerun">Run setup again</button></p>
+    </div>
+
+    <!-- Start fresh: delete all data (POST /api/state/reset). -->
+    <div class="card danger-card" id="card-fresh">
+      <div class="section-head">
+        <h2>Start fresh</h2>
+      </div>
+      <p class="muted">Delete every transaction, set, trigger, check-in, log, API key and saved node login, and the automatic backups on this device. Standby restarts as a new install. <span id="fresh-login-note"></span></p>
+      <p class="inline-btns"><button id="btn-fresh-backup">Download a backup first</button> <button id="btn-fresh-delete" class="danger">Delete all data…</button></p>
     </div>
   </section>
 </main>
@@ -673,8 +806,37 @@
   </div>
 </div>
 
-<!-- App login: covers the page until a login succeeds (only when
-     STANDBY_PASSWORD is set). -->
+<!-- Setup: skipping the app password. -->
+<div id="setup-skip-modal" class="modal-overlay">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="setup-skip-title">
+    <h3 id="setup-skip-title">Continue without a password?</h3>
+    <p class="notice bad">Anyone who can open Standby on this computer — any user account, or any program — can broadcast your transactions, delete triggers or change your check-in.</p>
+    <p class="muted">Only skip on a computer no one else uses. You can set a password any time in Settings → App login.</p>
+    <p class="inline-btns"><button id="btn-setup-skip-back" class="primary">Set a password</button> <button id="btn-setup-skip-confirm" class="danger">Skip anyway</button></p>
+  </div>
+</div>
+
+<!-- Start fresh: delete all data. Also opened by the could-not-load
+     screen (without the backup button: there is nothing to back up). -->
+<div id="fresh-modal" class="modal-overlay">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="fresh-title">
+    <button id="fresh-modal-x" class="modal-x" aria-label="Close">×</button>
+    <h3 id="fresh-title">Delete all data?</h3>
+    <p class="notice bad">This cannot be undone. Every transaction and trigger is deleted, and nothing will be broadcast. Without a backup, they are gone.</p>
+    <p class="inline-btns" id="fresh-backup-row"><button id="btn-fresh-modal-backup">Download a backup first</button></p>
+    <div id="fresh-password-row" style="display:none">
+      <label for="fresh-password">Your Standby password</label>
+      <div class="pw-wrap"><input type="password" id="fresh-password" autocomplete="current-password"><button type="button" class="pw-toggle" id="fresh-password-show" aria-label="Show password" title="Show password"><svg class="eye-show" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg><svg class="eye-hide" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 19c-6.5 0-10-7-10-7a18.5 18.5 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c6.5 0 10 7 10 7a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="2" y1="2" x2="22" y2="22"/></svg></button></div>
+    </div>
+    <label for="fresh-confirm">Type <strong>DELETE</strong> to confirm</label>
+    <input id="fresh-confirm" type="text" autocomplete="off" spellcheck="false">
+    <p class="inline-btns"><button id="btn-fresh-go" class="danger">Delete all data</button> <button id="btn-fresh-cancel">Cancel</button></p>
+    <p id="fresh-msg" class="muted"></p>
+  </div>
+</div>
+
+<!-- App login: covers the page until a login succeeds (only when a
+     password is set). -->
 <div id="login-modal" class="modal-overlay">
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="login-title">
     <h3 id="login-title">Log in to Standby</h3>
@@ -684,6 +846,7 @@
       <div class="pw-wrap"><input type="password" id="login-password" autocomplete="current-password" required><button type="button" class="pw-toggle" id="login-password-show" aria-label="Show password" title="Show password"><svg class="eye-show" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg><svg class="eye-hide" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 19c-6.5 0-10-7-10-7a18.5 18.5 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c6.5 0 10 7 10 7a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="2" y1="2" x2="22" y2="22"/></svg></button></div>
       <p class="inline-btns"><button type="submit" class="primary" id="btn-login">Log in</button></p>
       <p id="login-msg" class="muted"></p>
+      <details class="forgot" id="login-forgot"><summary>Forgot password?</summary><div id="login-forgot-body"></div></details>
     </form>
   </div>
 </div>

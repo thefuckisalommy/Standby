@@ -13,9 +13,15 @@ Saves are written to a temporary file and swapped into place. On Linux the folde
 Every API request is checked against the app's own login.
 
 - **Umbrel:** the password shown on Standby's app page. Umbrel's login only guards its proxy, and all Umbrel apps share one Docker network, so Standby's own login keeps other apps out of its API.
-- **Docker or Node:** set `STANDBY_PASSWORD`. Without it, anything that can reach port 3100 controls the app (by default only the machine itself). Standby warns at startup if it is reachable from the network without one.
+- **Docker or Node:** set `STANDBY_PASSWORD`, or set a password in the app (first-open setup, or Settings → App login). Without one, anything that can reach port 3100 controls the app (by default only the machine itself, but every account and program on it). Standby warns at startup if it is reachable from the network without one.
 
-Sessions last 30 days; Settings → Session → Log out ends them all. The token is kept in the browser's storage for this address, not in a cookie (a cookie on `umbrel.local` would reach every app there). Ten wrong passwords in a minute lock the login for that minute.
+A password set in the app is stored as a scrypt hash in `login.json` in the data folder; it cannot be read back. Changing or removing it needs the current one. **Forgot it:** nothing over the network can reset it. On the machine, start Standby with `--reset-password` (or stop it and delete `login.json`), then set a new one; transactions and settings are kept. This is safe because whoever can do that can already read the data folder. A `STANDBY_PASSWORD` is changed where it is set (on Umbrel it is Umbrel's app password, shown on Standby's page).
+
+The password guards the app's controls (the web page and API); it does not encrypt the data folder. Anyone who can read that folder (your own account, an administrator, a stolen disk) can read the signed transactions: protect the machine with its own login and disk encryption (BitLocker, FileVault, LUKS).
+
+**Start fresh** (Settings) deletes every transaction, set, log, API key, saved node login and automatic backup in the data folder, after asking for the password and a typed DELETE. A password set in the app is removed too, so setup asks for a new one; one from Umbrel or `STANDBY_PASSWORD` stays.
+
+Sessions last 30 days; Settings → App login → Log out everywhere ends them all. The token is kept in the browser's storage for this address, not in a cookie (a cookie on `umbrel.local` would reach every app there). Ten wrong passwords in a minute, counted together wherever they are sent (the login screen, a password change, Start fresh, or a script's `Authorization: Bearer` header), lock the login for that minute; a browser already logged in keeps working.
 
 Standby does not encrypt its own connection. Over plain `http://` the password and session token can be captured on the network: use HTTPS, SSH or Tailscale where the network is not yours.
 

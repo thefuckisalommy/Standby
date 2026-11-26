@@ -23,6 +23,7 @@ async function handleApi(req, res, pathname) {
   // App login (lib/auth.js), before any state loads; off without
   // STANDBY_PASSWORD. login: true tells the UI to show its login screen.
   if (auth.enabled() && !auth.routeIsPublic(req.method, pathname) && !auth.requestAuthorized(req, now.getTime())) {
+    if (req.standbyLoginLimited) return sendError(res, 429, 'too many wrong passwords — wait a minute and try again');
     return sendJson(res, 401, { error: 'login required', login: true });
   }
   const pre = await authRoutes({ req, res, pathname, now });

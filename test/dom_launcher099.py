@@ -197,6 +197,37 @@ try:
             rc = 1
         else:
             print('all 099 error-phase ports closed (3468, 3469, 18265, 18266)')
+    # Setup phase: a fresh install (first-open setup, App login, Start
+    # fresh) on its own instance, port 3458 with a stub on 18255. The
+    # nodes are pointed at the stub first, so setup opens on "Choose own
+    # nodes" and nothing reaches a real service.
+    setup_data = TMP + '/standby-test099-dom-setup'
+    setup_checkin = TMP + '/standby-test099-dom-setup-checkin'
+    shutil.rmtree(setup_data, ignore_errors=True)
+    shutil.rmtree(setup_checkin, ignore_errors=True)
+    os.makedirs(setup_checkin, exist_ok=True)
+    s1 = v.start(['node', v.STUB, '18255'], log=LOG)
+    sapp = v.start(['node', 'server.js'],
+                   env=_with_profile({'PORT': '3458', 'DATA_DIR': setup_data, 'CHECKIN_DIR': setup_checkin,
+                        'SLIPSTREAM_API_URL': 'http://127.0.0.1:18255',
+                        'PRICE_API_URL': 'http://127.0.0.1:18255'}),
+                   cwd=BRANCH, log=LOG)
+    try:
+        assert v.wait_up('http://127.0.0.1:3458'), 'setup-phase app did not come up'
+        s, r = v.req('PUT', '/api/settings', {'primaryApiUrl': 'http://127.0.0.1:18255', 'secondaryEnabled': False},
+                     base='http://127.0.0.1:3458')
+        assert s == 200, r
+        src = subprocess.run(['node', TESTDIR + '/setup_check099.js'], env=_pw_env).returncode
+        rc = rc or src
+    finally:
+        for p in (sapp, s1):
+            v.stop(p)
+        setup_open = [port for port in (3458, 18255) if not port_closed(port)]
+        if setup_open:
+            print('SETUP PHASE STILL LISTENING:', setup_open)
+            rc = 1
+        else:
+            print('all 099 setup-phase ports closed (3458, 18255)')
 finally:
     for p in (app, recv, p1, p2):
         v.stop(p)
