@@ -6,7 +6,8 @@
 // - standby/umbrel-app.yml: version, and a new release-notes entry on top
 //   (the notes keep the newest KEEP_NOTES releases and point to
 //   CHANGELOG.md for the rest)
-// - both compose files' image tags
+// - both compose files' image tags (dropping the Umbrel one's old digest
+//   pin; the image workflow pins the new one)
 // - CHANGELOG.md: a new section on top
 // Without --notes the new entries say "Release notes to come." for you to
 // fill in. Writes nothing if the version is malformed or already current.
@@ -35,10 +36,12 @@ const current = JSON.parse(pkg).version;
 if (current === version) fail('already at ' + version);
 edits.push(['standby/package.json', pkg.replace(/("version":\s*")[^"]+(")/, '$1' + version + '$2')]);
 
-// Compose image tags.
+// Compose image tags. The new tag alone: an old digest pin belongs to the
+// old version. The image workflow pins the new digest once the image is
+// built (tools/pin-image.js).
 for (const rel of ['docker-compose.yml', 'standby/docker-compose.yml']) {
   const text = read(rel);
-  const next = text.replace(/(ghcr\.io\/thefuckisalommy\/standby:)[0-9.]+/g, '$1' + version);
+  const next = text.replace(/(ghcr\.io\/thefuckisalommy\/standby:)[0-9.]+(?:@sha256:[0-9a-f]{64})?/g, '$1' + version);
   if (next === text) fail(rel + ': no image tag found');
   edits.push([rel, next]);
 }

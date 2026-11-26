@@ -9,11 +9,12 @@
 #        1000, the login is required, a check-in key works through the
 #        receiver, the receiver cannot reach the web container, and
 #        the data files are owner-only.
-#   2. Umbrel (standby/docker-compose.yml + standby/hooks/pre-start),
-#      simulated: an old root-owned layout with the check-in directory
-#      outside data/, then the hook, then the compose (without Umbrel's
-#      app_proxy placeholder). The hook must move the check-in files
-#      and set ownership; the app must require its login and accept
+#   2. Umbrel (the standby/ package), simulated as a fresh install:
+#      Umbrel copies the package, with its committed data/checkin/
+#      folder, as UID 1000, then starts the compose (here without
+#      Umbrel's app_proxy placeholder, and with the digest pin dropped so
+#      the image built above runs). There is no hook. Both containers
+#      must become healthy; the app must require its login and accept
 #      the Tor address as a Host.
 #
 # Needs: docker with the compose plugin, curl, python3, and root or
@@ -116,29 +117,26 @@ check "generic: state.json is 0600" bash -c "[ \"\$($SUDO stat -c %a data/state.
 docker compose -p sbsmoke-generic down >/dev/null 2>&1
 
 # ----------------------------------------------------------------- umbrel
-echo "== Umbrel install (simulated upgrade from a root-owned layout)"
+echo "== Umbrel install (simulated fresh install of the standby/ package)"
+check "umbrel: the package has no hooks" test ! -e "$ROOT/standby/hooks"
+check "umbrel: the package commits data/checkin/" \
+  bash -c "git -C '$ROOT' ls-files --error-unmatch standby/data/checkin/.gitkeep >/dev/null"
+check "umbrel: the package pins its images by digest, or by tag before the image exists" \
+  bash -c "[ \"\$(grep -cE 'image: ghcr.io/thefuckisalommy/standby:${VERSION}(@sha256:[0-9a-f]{64})?\$' '$ROOT/standby/docker-compose.yml')\" = 2 ]"
 A="$WORK/umbrel/app-data/standby"
-mkdir -p "$A/hooks" "$A/data" "$A/checkin"
-cp "$ROOT/standby/docker-compose.yml" "$A/"
-cp "$ROOT/standby/hooks/pre-start" "$A/hooks/"
-# The old layout: root-owned state, check-in files outside data/.
-echo '{"keys":[]}' > "$A/checkin/keys.json"
-echo '{"lastCheckinAt":"2026-01-01T00:00:00.000Z"}' > "$A/checkin/last.json"
-$SUDO chown -R 0:0 "$A/data" "$A/checkin"
+mkdir -p "$A/data/checkin"
+cp "$ROOT/standby/docker-compose.yml" "$ROOT/standby/umbrel-app.yml" "$A/"
+cp "$ROOT/standby/data/checkin/.gitkeep" "$A/data/checkin/"
+$SUDO chown -R 1000:1000 "$A/data"
 # Umbrel injects app_proxy; outside Umbrel it has no image, so drop it.
+# Drop the digest pin too, so the image built above is the one that runs.
 python3 - "$A/docker-compose.yml" <<'PY'
-import sys
+import re, sys
 p = sys.argv[1]; s = open(p).read()
 i = s.index('  app_proxy:'); j = s.index('  web:')
-open(p, 'w').write(s[:i] + s[j:])
+s = re.sub(r'@sha256:[0-9a-f]{64}', '', s[:i] + s[j:])
+open(p, 'w').write(s)
 PY
-$SUDO env APP_DATA_DIR="$A" bash "$A/hooks/pre-start"
-check "umbrel: the hook moved keys.json under data/checkin" test -f "$A/data/checkin/keys.json"
-check "umbrel: the hook moved last.json under data/checkin" test -f "$A/data/checkin/last.json"
-check "umbrel: the old check-in directory is gone" test ! -e "$A/checkin"
-check "umbrel: data is owned by UID 1000" bash -c "[ \"\$(stat -c %u '$A/data')\" = 1000 ] && [ \"\$(stat -c %u '$A/data/checkin/keys.json')\" = 1000 ]"
-$SUDO env APP_DATA_DIR="$A" bash "$A/hooks/pre-start"
-check "umbrel: the hook is safe to run twice" test -f "$A/data/checkin/last.json"
 
 cd "$A"
 export APP_DATA_DIR="$A" APP_PASSWORD="umbrel-smoke-password-1" APP_DOMAIN="umbrel.local" APP_HIDDEN_SERVICE="smoketest.onion"

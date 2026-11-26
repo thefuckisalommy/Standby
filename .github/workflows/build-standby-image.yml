@@ -16,8 +16,13 @@ name: Build standby image
 #   - Third-party actions are pinned to commit SHAs (tag in the
 #     comment), so a moved tag cannot change what runs with the
 #     package-write token.
-#   - The pushed digest is printed in the job summary, for pinning the
-#     compose files as <tag>@sha256:<digest>.
+#   - The pushed digest is printed in the job summary. Then the pin job
+#     pins the Umbrel package (standby/docker-compose.yml) to it
+#     (tools/pin-image.js) and commits that to main, so standby/ is ready
+#     to copy to the official Umbrel App Store as is. It also runs when the
+#     build was skipped, so a missing pin is filled in. Its push (with
+#     GITHUB_TOKEN) starts no other workflow. If main ever refuses the
+#     push, run `node tools/pin-image.js` and commit by hand.
 
 on:
   push:
@@ -117,3 +122,38 @@ jobs:
             echo
             echo "\`$IMAGE:${{ steps.version.outputs.version }}@${{ steps.build.outputs.digest }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  pin:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '26'
+      - name: Pin the Umbrel package to the image digest and commit it
+        run: |
+          node tools/pin-image.js
+          if git diff --quiet; then
+            echo "standby/docker-compose.yml is already pinned." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          v="$(node -p "require('./standby/package.json').version")"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -q -m "Umbrel package: pin the $v image digest" -- standby/docker-compose.yml
+          for i in 1 2 3; do
+            if git push -q origin HEAD:main; then
+              echo "Pinned and committed: $(grep -m1 -o 'ghcr.io/[^ ]*' standby/docker-compose.yml)" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            git pull -q --rebase origin main
+          done
+          echo "::error::could not push the digest pin to main; run node tools/pin-image.js and commit by hand"
+          exit 1

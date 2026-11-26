@@ -4,6 +4,10 @@ What changed in each Standby release, newest first. The newest few also appear i
 
 Code comments describe how the app works now; the history of why it changed lives here and in git.
 
+## 0.8.23
+
+Umbrel: one package for both app stores. On Umbrel, Standby now opens at port 3102 instead of 3100 (3100 is taken in the official Umbrel App Store); your data and check-ins are kept, and check-ins still use port 3101. Its category is now Bitcoin, and the store description says up front that anyone holding the signed transactions, including from a backup, can broadcast them, that triggers only run while Standby runs, and that a broadcast still has to confirm. Behind the scenes: the Umbrel package follows the official store's rules (data folders included instead of a start-up script, images pinned to their exact build, pinned automatically after each release), so the same folder is used for this store and an official submission. SECURITY.md notes that every copy of the data folder holds the signed transactions. Nothing else changes in the app.
+
 ## 0.8.22
 
 Maintenance only: nothing changes in how Standby looks or works. The page's script, one file of almost 6,000 lines, is now split by area into eight files in standby/public/js/ (core, dashboard, transactions, sets, live, settings, setup, main), loaded in order and sharing one scope, so each part is easier to find and change. The server's Bitcoin code (lib/bitcoin.js, about 2,400 lines) is split the same way into lib/bitcoin/: transactions, nodes, fees, prices, broadcasting, input checks, dry runs and the node Test. New checks make sure the page files never declare the same name twice or leave one unused, and that the page's copies of a few server rules (the fee verdict, reading a transaction's triggers, its name in history, the check-in danger zone) agree with the server on thousands of inputs. Unused styles were removed, and one oddly indented block was tidied.

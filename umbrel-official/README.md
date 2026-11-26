@@ -1,58 +1,52 @@
 # Standby for the official Umbrel App Store
 
-This folder is Standby packaged the way the official store
-([getumbrel/umbrel-apps](https://github.com/getumbrel/umbrel-apps)) wants
-it. It is not used by this repository's own community store (that is
-`standby/`), and Umbrel does not read it from here.
+`standby/` at the top of this repository is the one Umbrel package for both
+stores: this repository's community store installs it from there, and the
+official store ([getumbrel/umbrel-apps](https://github.com/getumbrel/umbrel-apps))
+gets a copy of the same folder. It follows the official store's rules:
+fields in its order, `storage: dataRoot: data`, category `bitcoin`, port
+3102 (3100 is taken there), the data folders committed
+(`data/checkin/.gitkeep`) instead of a hook, and both images pinned to the
+release's multi-arch digest.
 
-- `standby/`: the app folder to copy into a fork of `getumbrel/umbrel-apps`.
-  - `umbrel-app.yml`: the same app as `standby/umbrel-app.yml`, with the
-    official store's fields: `storage: dataRoot: data` (the data can be
-    moved to another drive), category `bitcoin`, no `icon` (Umbrel hosts
-    it), `gallery: []` and `releaseNotes: ""` (Umbrel fills them),
-    `submitter` and `submission`. `port` is 3102, because 3100 is taken in
-    the official store (by core-lightning-rtl): there Standby opens at
-    port 3102. The container still listens on 3100 (`APP_PORT`), and the
-    check-in port stays 3101 (free there).
-  - `docker-compose.yml`: the same as `standby/docker-compose.yml`, with
-    both images pinned to the release's multi-arch digest.
-  - `data/checkin/.gitkeep`: the data folders, committed empty, so Umbrel
-    creates them owned by the app's user. There is no `hooks/pre-start`
-    here: the community package's hook only migrates installs from before
-    0.8.11.1, which an official install never has.
-- `icon.png`: the icon for the pull request, a plain 512 px square (Umbrel
-  rounds it). Made by `tools/make-icon.py` from `assets/icon-source.png`.
+The digest pin is automatic: `tools/bump-version.js` writes the new tag
+alone, and once the image is built the image workflow runs
+`tools/pin-image.js` and commits the pin to main. By hand:
+`node tools/pin-image.js` (`--check` only reports).
 
-## For each release
-
-1. Copy `version` and `description` from `standby/umbrel-app.yml` into
-   `standby/umbrel-app.yml` here (keep `port: 3102`), and the compose file
-   over this one (keeping the header comment).
-2. Pin both images to the new tag's digest (the image workflow prints it
-   in its summary), the multi-arch index digest, not a per-architecture one:
-   `docker buildx imagetools inspect ghcr.io/thefuckisalommy/standby:<version>`
-3. In the fork: copy `standby/` over the store's `standby/`, then run
-   `npm run lint:apps -- standby --check-images` and `git diff --check`.
-   Expect two warnings, both answered in the pull request notes: each
-   service sets `security_opt`.
+This folder holds what goes with the pull request: `icon.png`, a plain
+512 px square (Umbrel rounds it), made by `tools/make-icon.py` from
+`assets/icon-source.png`.
 
 ## First submission
 
-1. Fork `getumbrel/umbrel-apps`, add this `standby/` folder, and run the
-   linter. Checked against the store as of this package (0.8.22): with a
-   pull request URL in `submission` it reports 0 errors and the two
-   `security_opt` warnings. It also checks ports: if 3102 or 3101 has been
-   taken since, change `port` in `umbrel-app.yml` (or the 3101 mapping).
-2. Test on an Umbrel (a plain `docker compose up` does not count): install
+1. Fork `getumbrel/umbrel-apps` and copy this repository's `standby/` into
+   it as `standby/` (once main has the digest pin for the release).
+2. For a new app, Umbrel's guidance also asks for, in the fork's copy:
+   `icon:` removed (they host it), `gallery: []` and `releaseNotes: ""`
+   (they fill them). The linter accepts ours, so this is only if the
+   reviewers ask; our copy keeps them because the community store shows
+   them.
+3. Run `npm run lint:apps -- standby --check-images` and `git diff --check`.
+   Checked against the store as of 0.8.22: with a pull request URL in
+   `submission` it reports 0 errors and two warnings, both answered below
+   (each service sets `security_opt`). It also checks ports: if 3102 or
+   3101 has been taken since, change them here, in `standby/`.
+4. Test on an Umbrel (a plain `docker compose up` does not count): install
    from the fork, open Standby from the dashboard (port 3102), log in with
    the shown password, finish setup, add a transaction, check in from
    another device on port 3101; restart the app and check everything is
-   kept. For a later release, also install the previous version, then
-   update and check again.
-3. Open the pull request with the icon, screenshots, and set `submission`
-   to its URL.
+   kept.
+5. Open the pull request with the icon and screenshots, and set
+   `submission` to its URL (in `standby/` here too).
 
-### Pull request notes
+## Each release after that
+
+Copy `standby/` into the fork again (after the pin commit) and open a pull
+request. Before, test the update on an Umbrel: install the previous
+version, then update and check everything is kept.
+
+## Pull request notes
 
 - **Upstream:** https://github.com/thefuckisalommy/Standby (MIT). Image:
   `ghcr.io/thefuckisalommy/standby`, built for amd64 and arm64 by the

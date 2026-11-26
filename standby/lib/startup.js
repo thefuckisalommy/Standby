@@ -54,7 +54,7 @@ function ownershipHint(deployment) {
       + 'then `docker compose up -d` again. (Standby runs as UID 1000, not root, since 0.8.11.)';
   }
   if (deployment === 'umbrel') {
-    return 'Fix: restart Standby from the Umbrel dashboard — its pre-start hook sets the ownership of the app data to UID 1000. If this message persists, run on the Umbrel:\n'
+    return 'Fix: on the Umbrel, give the app data to UID 1000 (Standby does not run as root), then restart Standby from the Umbrel dashboard:\n'
       + '  sudo chown -R 1000:1000 ~/umbrel/app-data/standby/data';
   }
   return process.platform === 'win32'
