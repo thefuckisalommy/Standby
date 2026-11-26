@@ -142,7 +142,7 @@
       <div class="setup-done-logo"><img src="/logo.jpg" alt=""></div>
       <h2 class="center">You're set up</h2>
       <p class="notice">After adding transactions, download an encrypted backup (Settings → Data backup). It is the only way to get them back if this device fails.</p>
-      <p class="muted center">Nodes, price sources, the grace period, check cadence and more can be changed any time in Settings, where you can also run this setup again.</p>
+      <p class="muted center">Nodes, price sources, the grace period, check cadence and more can be changed any time in Settings.</p>
       <div class="setup-actions"><button class="primary" id="btn-setup-finish">Go to the dashboard</button></div>
       <p id="setup-done-msg" class="muted"></p>
     </div>
@@ -621,7 +621,7 @@
         <p class="notice" id="update-notice" style="display:none"></p>
         <p id="update-msg" class="muted"></p>
       </div>
-      <p class="inline-btns"><button id="btn-update-now" style="display:none">Check now</button> <button id="btn-setup-rerun">Run setup again</button></p>
+      <p class="inline-btns" id="update-now-row"><button id="btn-update-now" style="display:none">Check now</button></p>
     </div>
 
     <!-- Start fresh: delete all data (POST /api/state/reset). -->

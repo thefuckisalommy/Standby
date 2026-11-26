@@ -5452,6 +5452,7 @@
     var avail = !!(u && u.available);
     $('update-box').style.display = avail ? '' : 'none';
     $('btn-update-now').style.display = (avail && u.enabled) ? '' : 'none';
+    $('update-now-row').style.display = (avail && u.enabled) ? '' : 'none';
     var banner = $('update-banner');
     if (!avail) { banner.style.display = 'none'; return; }
     $('update-check').checked = !!u.enabled;
@@ -5809,13 +5810,6 @@
   $('btn-setup-tx-skip').addEventListener('click', function () { setupGo(1); });
 
   $('btn-setup-finish').addEventListener('click', function () { finishSetup($('setup-done-msg')); });
-  $('btn-setup-rerun').addEventListener('click', async function () {
-    try {
-      await api('POST', '/api/setup', { done: false });
-      S.setup = { done: false };
-      syncSetup();
-    } catch (e) { setMsg($('logout-msg'), e.message, false); }
-  });
 
   // Start fresh: delete all data. From Settings (with "Download a backup
   // first") or the could-not-load screen.

@@ -25,6 +25,10 @@ Sessions last 30 days; Settings → App login → Log out everywhere ends them a
 
 Standby does not encrypt its own connection. Over plain `http://` the password and session token can be captured on the network: use HTTPS, SSH or Tailscale where the network is not yours.
 
+## Update check
+
+With **Check for new versions** on (default for the downloads, off for Docker and plain Node, not offered on Umbrel), Standby sends one plain `GET` a day to GitHub's API for the latest release. Nothing about you, your settings or your transactions is sent; GitHub sees the computer's internet address. Standby only reports a newer version and links to it; it never downloads or runs anything.
+
 ## Requests from other sites
 
 A request a browser marks as coming from another site or another port (another Umbrel app) is refused. State-changing requests must also come from the app's own origin with a JSON content type. Unknown hostnames get 421, which blocks DNS rebinding.

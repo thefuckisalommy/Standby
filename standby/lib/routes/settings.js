@@ -57,7 +57,7 @@ module.exports = async function settingsRoutes(ctx) {
   }
 
   // POST /api/setup { done }: the first-open setup finished or skipped
-  // (true), or "Run setup again" (false).
+  // (true), or shown again (false; Start fresh also does this).
   if (req.method === 'POST' && pathname === '/api/setup') {
     const body = await readBody(req);
     if (!body || typeof body.done !== 'boolean') return sendError(res, 400, 'done must be true or false');
