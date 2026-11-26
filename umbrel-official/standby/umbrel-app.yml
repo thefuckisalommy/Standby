@@ -39,7 +39,7 @@ website: https://github.com/thefuckisalommy/Standby
 dependencies: []
 repo: https://github.com/thefuckisalommy/Standby
 support: https://github.com/thefuckisalommy/Standby/issues
-port: 3100
+port: 3102
 gallery: []
 path: ""
 defaultUsername: ""

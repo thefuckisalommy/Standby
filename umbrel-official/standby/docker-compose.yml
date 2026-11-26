@@ -1,6 +1,8 @@
 # Standby — Umbrel docker-compose (official App Store package; the same as
 # standby/docker-compose.yml in thefuckisalommy/Standby, with both images
-# pinned to the multi-arch digest of the release).
+# pinned to the multi-arch digest of the release). The notes below on
+# hooks/pre-start are about the community package; this one has no hook
+# (the data folders are committed, see umbrel-official/README.md).
 # Pattern: Umbrel injects `app_proxy`; the web service is reached via
 # APP_HOST: <app-id>_<service>_1 and APP_PORT (internal port).
 #
