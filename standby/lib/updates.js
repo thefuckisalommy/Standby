@@ -27,6 +27,12 @@ function parse(v) {
   const m = /^v?(\d+(?:\.\d+){1,3})$/.exec(String(v || '').trim());
   return m ? m[1].split('.').map(Number) : null;
 }
+// The release page the app links to: only one of Standby's own on GitHub
+// (else null, and the page links to the releases list instead).
+const RELEASE_PAGE = /^https:\/\/github\.com\/thefuckisalommy\/Standby\//;
+function releasePage(url) {
+  return typeof url === 'string' && RELEASE_PAGE.test(url) ? url : null;
+}
 function newer(a, b) {
   const x = parse(a);
   const y = parse(b);
@@ -49,7 +55,7 @@ async function check() {
     if (res.status !== 200) throw new Error('GitHub answered HTTP ' + res.status);
     const doc = JSON.parse(res.body);
     if (!parse(doc.tag_name)) throw new Error('the latest release has no version tag');
-    last = { latest: String(doc.tag_name).replace(/^v/, ''), url: typeof doc.html_url === 'string' ? doc.html_url : null, checkedAt: new Date().toISOString(), error: null };
+    last = { latest: String(doc.tag_name).replace(/^v/, ''), url: releasePage(doc.html_url), checkedAt: new Date().toISOString(), error: null };
     if (newer(last.latest, VERSION)) console.log('Standby: version ' + last.latest + ' is available (this is ' + VERSION + ')');
   } catch (e) {
     last = { ...last, checkedAt: new Date().toISOString(), error: e.message };

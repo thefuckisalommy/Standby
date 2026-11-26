@@ -244,6 +244,8 @@ try:
 except subprocess.TimeoutExpired:
     code = None
 check('Stop Standby shuts it down cleanly', s == 200 and code == 0 and get(B + '/api/health')[0] is None, (s, code))
+check('Stop Standby releases its lock (the next start is not refused)', not os.path.exists(os.path.join(data_dir, 'standby.lock')),
+      os.listdir(data_dir))
 if p.poll() is None:
     stop(p)
 

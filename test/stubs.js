@@ -162,8 +162,10 @@ const unknownParents = new Set();
 // GitHub's latest release, for "Check for new versions"
 // (STANDBY_TEST_UPDATE_URL): GET /repos/<owner>/<repo>/releases/latest
 // answers { tag_name, html_url }; POST /__test__/release { tag } sets the
-// tag (default v0.0.1), { status } makes it answer that HTTP status.
+// tag (default v0.0.1), { status } makes it answer that HTTP status, and
+// { url } sends that html_url instead of the release's GitHub page.
 let releaseTag = 'v0.0.1';
+let releaseUrl = null;
 let releaseStatus = 200;
 let releaseRequests = 0;
 
@@ -188,7 +190,7 @@ const server = http.createServer((req, res) => {
   if (req.method === 'GET' && /^\/repos\/[^/]+\/[^/]+\/releases\/latest$/.test(p)) {
     releaseRequests++;
     res.writeHead(releaseStatus, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify(releaseStatus === 200 ? { tag_name: releaseTag, html_url: 'https://example.invalid/releases/' + releaseTag } : { message: 'stub error' }));
+    return res.end(JSON.stringify(releaseStatus === 200 ? { tag_name: releaseTag, html_url: releaseUrl || 'https://github.com/thefuckisalommy/Standby/releases/tag/' + releaseTag } : { message: 'stub error' }));
   }
   if (req.method === 'GET' && p === '/__test__/release-count') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -202,6 +204,7 @@ const server = http.createServer((req, res) => {
       try { j = JSON.parse(body || '{}'); } catch { /* empty */ }
       if (typeof j.tag === 'string') releaseTag = j.tag;
       releaseStatus = Number.isInteger(j.status) ? j.status : 200;
+      releaseUrl = typeof j.url === 'string' ? j.url : null;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, tag: releaseTag, status: releaseStatus }));
     });

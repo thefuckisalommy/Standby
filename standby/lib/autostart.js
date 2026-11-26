@@ -19,6 +19,16 @@ const { STANDALONE } = require('./config');
 const RUN_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
 const AVAILABLE = STANDALONE && (process.platform === 'win32' || process.platform === 'linux');
 
+// The Exec= value for the program at exe, per the Desktop Entry spec: the
+// path is a quoted argument (inside quotes, ", `, $ and \ take a
+// backslash), then the whole value takes the string escapes (\ for a
+// backslash, \n for a newline), and a literal % is %%. So a backslash in
+// the path ends up as four.
+function desktopExec(exe) {
+  const quoted = '"' + String(exe).replace(/(["`$\\])/g, '\\$1') + '"';
+  return quoted.replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/%/g, '%%') + ' --background';
+}
+
 function linuxFile() {
   const base = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config');
   return path.join(base, 'autostart', 'standby.desktop');
@@ -36,7 +46,7 @@ function enable() {
       'Type=Application',
       'Name=Standby',
       'Comment=Broadcasts presigned Bitcoin transactions when their triggers are met',
-      'Exec="' + exe.replace(/(["`$\\])/g, '\\$1') + '" --background',
+      'Exec=' + desktopExec(exe),
       'Terminal=false',
       'X-GNOME-Autostart-enabled=true',
       '',
@@ -71,4 +81,4 @@ function status() {
   return { available: AVAILABLE, error: lastError, platform: process.platform };
 }
 
-module.exports = { sync, status, AVAILABLE };
+module.exports = { sync, status, desktopExec, AVAILABLE };

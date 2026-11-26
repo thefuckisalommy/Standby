@@ -437,7 +437,7 @@ def run():
     _rel = STUB_BASE_P + '/repos/thefuckisalommy/Standby/releases/latest'
     _ue = dict(_e, STANDBY_TEST_UPDATE_URL=_rel)
     req('POST', '/__test__/release', {'tag': 'v99.0.0'}, base=STUB_BASE_P)
-    _auth_app = start(['node', 'server.js'], env=_ue, cwd=APP, log=_bind_log)
+    _auth_app = start(['node', 'server.js'], env=dict(_ue, STANDBY_CHECKIN_PORT='3442'), cwd=APP, log=_bind_log)
     check('40d updates: instance comes up', wait_up(_ab))
     s, r = req('GET', '/api/update', base=_ab)
     check('40d updates: offered on a plain run, off by default',
@@ -453,7 +453,22 @@ def run():
           wait_until(lambda: (req('GET', '/api/update', base=_ab)[1] or {}).get('latest') == '99.0.0', 8), req('GET', '/api/update', base=_ab)[1])
     s, r = req('GET', '/api/update', base=_ab)
     check('40d updates: a newer release is reported, with its page',
-          r.get('newer') is True and r.get('latest') == '99.0.0' and 'v99.0.0' in (r.get('url') or ''), r)
+          r.get('newer') is True and r.get('latest') == '99.0.0'
+          and r.get('url') == 'https://github.com/thefuckisalommy/Standby/releases/tag/v99.0.0', r)
+    req('POST', '/__test__/release', {'tag': 'v99.0.0', 'url': 'https://example.invalid/standby-v99.zip'}, base=STUB_BASE_P)
+    s, r = req('POST', '/api/update/check', {}, base=_ab)
+    check('40d updates: a release page that is not Standby\'s on GitHub is not linked',
+          s == 200 and r.get('newer') is True and r.get('url') is None, r)
+    req('POST', '/__test__/release', {'tag': 'nightly'}, base=STUB_BASE_P)
+    s, r = req('POST', '/api/update/check', {}, base=_ab)
+    check('40d updates: a release without a version tag is reported', s == 200 and 'no version tag' in (r.get('error') or ''), r)
+    req('POST', '/__test__/release', {'tag': 'v' + VERSION + '.1'}, base=STUB_BASE_P)
+    s, r = req('POST', '/api/update/check', {}, base=_ab)
+    check('40d updates: a four-part version after this one is "newer"',
+          s == 200 and r.get('newer') is True and r.get('latest') == VERSION + '.1' and r.get('error') is None, r)
+    req('POST', '/__test__/release', {'tag': 'v0.0.1.5'}, base=STUB_BASE_P)
+    s, r = req('POST', '/api/update/check', {}, base=_ab)
+    check('40d updates: an older four-part version is not "newer"', s == 200 and r.get('newer') is False, r)
     req('POST', '/__test__/release', {'tag': 'v0.0.1'}, base=STUB_BASE_P)
     s, r = req('POST', '/api/update/check', {}, base=_ab)
     check('40d updates: an older release is not "newer"', s == 200 and r.get('newer') is False and r.get('latest') == '0.0.1', r)
@@ -464,6 +479,15 @@ def run():
     s, r = req('POST', '/api/update/check', {}, base=_ab)
     check('40d updates: a failed check is reported, not fatal', s == 200 and 'HTTP 503' in (r.get('error') or ''), r)
     req('POST', '/__test__/release', {'tag': 'v0.0.1'}, base=STUB_BASE_P)
+    # Start fresh puts both back to their defaults (off on a plain run).
+    s, r = req('PUT', '/api/settings', {'acceptRemoteCheckins': True}, base=_ab)
+    check('40d fresh: check-in port open before start fresh', s == 200 and wait_up('http://127.0.0.1:3442', path='/health'), (s, r))
+    s, r = req('POST', '/api/state/reset', {'confirm': True}, base=_ab)
+    check('40d fresh: start fresh works', s == 200 and r.get('ok') is True, (s, r))
+    time.sleep(0.5)
+    s, r = req('GET', '/api/update', base=_ab)
+    check('40d fresh: start fresh turns the update check back to its default (off)', r.get('enabled') is False, r)
+    check('40d fresh: start fresh closes the check-in port', port_closed(3442))
     s, r = req('PUT', '/api/settings', {'updateCheck': False}, base=_ab)
     _c1 = req('GET', '/__test__/release-count', base=STUB_BASE_P)[1].get('count')
     s, r = req('POST', '/api/update/check', {}, base=_ab)

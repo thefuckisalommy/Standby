@@ -124,6 +124,8 @@ jobs:
           python-version: '3.11'
       - name: The bundle tool on awkward sources
         run: node test/bundle_check.js
+      - name: The Linux sign-in entry on awkward program paths
+        run: node test/autostart_check.js
       - name: Build the bundled copy
         run: bash test/make_bundled_app.sh
       - name: API suite against the bundles
