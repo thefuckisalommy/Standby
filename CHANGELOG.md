@@ -4,6 +4,10 @@ What changed in each Standby release, newest first. The newest few also appear i
 
 Code comments describe how the app works now; the history of why it changed lives here and in git.
 
+## 0.8.24
+
+A new look, starting with the Dashboard. Darker and calmer: near-black panels, thinner lines, one orange accent for the main action and for what is armed, and colour only where it means something (green OK, amber watch, red risk). The tabs sit in the top bar on a computer and along the bottom of the screen on a phone. Dashboard: the Check-in card has the button beside your last check-in, and each check-in transaction shows its days left and due day, with the last quarter of its window hatched; a new Connections card shows both nodes and both price sources; Active transactions show an orange edge while armed and turn grey when disarmed, with each trigger in its own colour. The top bar replaces the menu with three buttons: Alerts (a bell with a count: a check-in deadline close or due, a node or price source failing, a transaction that cannot go out cleanly, broadcasts waiting to confirm, a new version), Lock (logs this browser out, shown when a password is set) and, on Umbrel, a button back to the Umbrel home. The other tabs keep their layout for now in the new style.
+
 ## 0.8.23
 
 Umbrel: one package for both app stores. On Umbrel, Standby now opens at port 3102 instead of 3100 (3100 is taken in the official Umbrel App Store); your data and check-ins are kept, and check-ins still use port 3101. Its category is now Bitcoin, and the store description says up front that anyone holding the signed transactions, including from a backup, can broadcast them, that triggers only run while Standby runs, and that a broadcast still has to confirm. Behind the scenes: the Umbrel package follows the official store's rules (data folders included instead of a start-up script, images pinned to their exact build, pinned automatically after each release), so the same folder is used for this store and an official submission. SECURITY.md notes that every copy of the data folder holds the signed transactions. Nothing else changes in the app.
