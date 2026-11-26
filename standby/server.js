@@ -11,7 +11,7 @@
 // the app merges.
 
 const http = require('http');
-const { PORT, BIND, VERSION, DATA_DIR, CHECKIN_DIR, LOG_FILE, STARTUP_TICK_MS, DEPLOYMENT, PASSWORD, MEMPOOL_OVERRIDE, IGNORED_TEST_OVERRIDES } = require('./lib/config');
+const { PORT, BIND, VERSION, DATA_DIR, CHECKIN_DIR, LOG_FILE, STARTUP_TICK_MS, DEPLOYMENT, PASSWORD, MEMPOOL_OVERRIDE, IGNORED_TEST_OVERRIDES, OPEN_BROWSER, STANDALONE } = require('./lib/config');
 require('./lib/logfile').install(LOG_FILE);
 const instance = require('./lib/instance');
 const { requireWritable } = require('./lib/startup');
@@ -75,8 +75,12 @@ function flushHeartbeatAndExit() {
 }
 process.on('SIGTERM', flushHeartbeatAndExit);
 process.on('SIGINT', flushHeartbeatAndExit);
-// Windows sends no SIGTERM; Ctrl+Break arrives as SIGBREAK.
-if (process.platform === 'win32') process.on('SIGBREAK', flushHeartbeatAndExit);
+// Windows sends no SIGTERM; Ctrl+Break arrives as SIGBREAK, and closing
+// the console window as SIGHUP.
+if (process.platform === 'win32') {
+  process.on('SIGBREAK', flushHeartbeatAndExit);
+  process.on('SIGHUP', flushHeartbeatAndExit);
+}
 
 const server = http.createServer((req, res) => {
   // Host allowlist first, before parsing, routing or auth: anything but an
@@ -141,7 +145,33 @@ server.listen(PORT, BIND, () => {
   // Compare the check-in keys in state with the receiver's
   // key list once at startup — see verifyCheckinKeyStore above.
   verifyCheckinKeyStore();
+  if (STANDALONE) desktopWelcome();
 });
+
+// A standalone build is started by double-clicking it: say where the app
+// is and how to stop it, and open it in the browser. Without a desktop
+// (a Linux server, a Raspberry Pi) the address is printed for another
+// device to open.
+function desktopWelcome() {
+  const url = 'http://localhost:' + PORT + '/';
+  console.log('');
+  console.log('  Standby is running: open ' + url + ' in your browser.');
+  console.log('  Keep this window open; closing it stops Standby.');
+  console.log('');
+  if (!OPEN_BROWSER) return;
+  const { spawn } = require('child_process');
+  let cmd = null;
+  let args = [];
+  if (process.platform === 'win32') { cmd = 'cmd'; args = ['/c', 'start', '', url]; }
+  else if (process.platform === 'darwin') { cmd = 'open'; args = [url]; }
+  else if (process.env.DISPLAY || process.env.WAYLAND_DISPLAY) { cmd = 'xdg-open'; args = [url]; }
+  if (!cmd) return;
+  try {
+    const child = spawn(cmd, args, { detached: true, stdio: 'ignore', windowsHide: true });
+    child.on('error', () => { /* no browser: the address is printed above */ });
+    child.unref();
+  } catch { /* the address is printed above */ }
+}
 
 // Timers: the full tick runs shortly after startup and every check
 // cadence; the hourly tick shortly after startup and hourly; the stored-
