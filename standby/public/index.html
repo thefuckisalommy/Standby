@@ -236,21 +236,39 @@
 
   <!-- ============ LOGS ============ -->
   <section class="tab" id="tab-logs">
-    <div class="card">
-      <h2>Broadcast log</h2>
-      <p class="muted">Every dry-run, broadcast, and release attempt is recorded here. Tap a row for the full details of that entry, including the signed transaction hex.</p>
-      <div class="scroll-table">
-      <table><thead><tr><th>When</th><th>Kind</th><th>TXID</th><th>Status</th></tr></thead>
-      <tbody id="broadcast-log"><tr><td colspan="4" class="muted">Nothing logged yet.</td></tr></tbody></table>
+    <!-- Activity: dry runs, broadcasts and check-ins as one timeline.
+         App log: Standby's own recent log lines. js/logs.js. -->
+    <div class="page-head">
+      <h1>Logs</h1>
+      <div class="seg" role="tablist" aria-label="Log view">
+        <button type="button" id="logs-seg-activity" class="on" role="tab">Activity</button>
+        <button type="button" id="logs-seg-app" role="tab">App log</button>
       </div>
     </div>
-
-    <div class="card">
-      <h2>Recent check-ins</h2>
-      <div class="scroll-table">
-      <table><thead><tr><th>When</th><th>Method</th><th>From</th></tr></thead>
-      <tbody id="recent-checkins"><tr><td colspan="3" class="muted">None yet.</td></tr></tbody></table>
+    <div class="card logs-card" id="logs-activity">
+      <div class="logs-tools">
+        <button type="button" class="fchip on" id="logs-f-all">All <span class="n" id="logs-n-all"></span></button>
+        <button type="button" class="fchip" id="logs-f-broadcast">Broadcasts <span class="n" id="logs-n-broadcast"></span></button>
+        <button type="button" class="fchip" id="logs-f-dryrun">Dry runs <span class="n" id="logs-n-dryrun"></span></button>
+        <button type="button" class="fchip" id="logs-f-checkin">Check-ins <span class="n" id="logs-n-checkin"></span></button>
+        <input id="logs-search" class="logs-search" type="search" placeholder="Search name or txid" aria-label="Search the activity" autocomplete="off">
       </div>
+      <div id="logs-activity-list"><p class="muted logs-none">Nothing logged yet.</p></div>
+    </div>
+    <div id="logs-app" style="display:none">
+      <div class="card logs-card">
+        <div class="logs-tools">
+          <button type="button" class="fchip on" id="logs-lv-all">All <span class="n" id="logs-lvn-all"></span></button>
+          <button type="button" class="fchip" id="logs-lv-info">Info <span class="n" id="logs-lvn-info"></span></button>
+          <button type="button" class="fchip warn" id="logs-lv-warn">Warnings <span class="n" id="logs-lvn-warn"></span></button>
+          <button type="button" class="fchip bad" id="logs-lv-error">Errors <span class="n" id="logs-lvn-error"></span></button>
+          <input id="logs-app-search" class="logs-search" type="search" placeholder="Filter lines" aria-label="Filter log lines" autocomplete="off">
+          <label class="switch small green logs-follow" title="Keep the newest line in view"><input type="checkbox" id="logs-follow" checked><span class="slider"></span><span class="lbl">Follow</span></label>
+          <button type="button" id="logs-download">Download</button>
+        </div>
+        <div class="console" id="logs-console"><p class="muted">Loading…</p></div>
+      </div>
+      <p class="muted logs-foot" id="logs-app-foot"></p>
     </div>
   </section>
 
@@ -302,6 +320,17 @@
          threshold. -->
     <!-- Settings filter: reads the same triggers array as the "?" pop-outs
          (SETTINGS_HELP in app.js). -->
+    <div class="setv" id="setv">
+    <!-- Sections in groups: a list on the left (search, each section with its
+         state), one group at a time on the right; on a phone, the list, then
+         a group's own screen. One Save bar for every changed section.
+         js/setview.js. -->
+    <div class="card setnav" id="setnav">
+      <input id="set-search" class="set-search" type="search" placeholder="Search settings" aria-label="Search settings" autocomplete="off">
+      <div id="setnav-groups"></div>
+    </div>
+    <div class="set-content" id="set-content">
+    <button type="button" class="set-back" id="set-back">‹ Settings</button>
     <div class="settings-filter" id="settings-filter">
       <label for="filter-select">Show:</label>
       <select id="filter-select" aria-label="Filter settings">
@@ -316,6 +345,8 @@
       </select>
     </div>
 
+    <div class="set-group" id="sg-safety" data-group="safety">
+      <div class="set-group-head"><h1>Safety</h1><p class="lead">Pause or hold what would fire.</p></div>
     <div class="card" id="card-vacation">
       <div class="section-head">
         <h2>Vacation mode</h2>
@@ -331,6 +362,40 @@
       <p id="vacation-msg" class="muted"></p>
     </div>
 
+    <div class="card" id="card-grace">
+      <div class="section-head">
+        <h2>Grace period</h2>
+        <label class="switch green" id="grace-enabled-wrap" title="Grace period on — triggers pause after an offline gap">
+          <input type="checkbox" id="grace-enabled" checked>
+          <span class="slider"></span>
+        </label>
+        <button class="help-btn" id="help-grace" data-help="grace" aria-label="About this setting" title="About this setting">?</button>
+      </div>
+      <div id="grace-fields">
+      <label for="set-grace-offline">Trigger grace after offline for</label>
+      <select id="set-grace-offline">
+        <option value="1">1 day</option>
+        <option value="3">3 days</option>
+        <option value="7" selected>7 days</option>
+        <option value="14">14 days</option>
+        <option value="30">30 days</option>
+      </select>
+      <label for="set-grace-duration">Grace period lasts</label>
+      <select id="set-grace-duration">
+        <option value="1">1 day</option>
+        <option value="3">3 days</option>
+        <option value="7" selected>7 days</option>
+        <option value="14">14 days</option>
+        <option value="30">30 days</option>
+        <option value="indefinite">Indefinite — until you resume</option>
+      </select>
+      </div>
+      <p>
+        <button id="btn-save-grace" class="primary">Save grace period</button>
+      </p>
+      <p id="grace-settings-msg" class="muted"></p>
+    </div>
+
     <div class="card" id="card-arm">
       <div class="section-head">
         <h2>Global Arm/Disarm</h2>
@@ -340,6 +405,9 @@
       <p id="arm-all-msg" class="muted"></p>
     </div>
 
+    </div>
+    <div class="set-group" id="sg-connections" data-group="connections">
+      <div class="set-group-head"><h1>Connections</h1><p class="lead">Where Standby reads the chain and the BTC price, and broadcasts.</p></div>
     <div class="card" id="card-nodes">
       <div class="section-head">
         <h2>Bitcoin nodes</h2>
@@ -452,40 +520,6 @@
       <p id="price-sources-msg" class="muted"></p>
     </div>
 
-    <div class="card" id="card-grace">
-      <div class="section-head">
-        <h2>Grace period</h2>
-        <label class="switch green" id="grace-enabled-wrap" title="Grace period on — triggers pause after an offline gap">
-          <input type="checkbox" id="grace-enabled" checked>
-          <span class="slider"></span>
-        </label>
-        <button class="help-btn" id="help-grace" data-help="grace" aria-label="About this setting" title="About this setting">?</button>
-      </div>
-      <div id="grace-fields">
-      <label for="set-grace-offline">Trigger grace after offline for</label>
-      <select id="set-grace-offline">
-        <option value="1">1 day</option>
-        <option value="3">3 days</option>
-        <option value="7" selected>7 days</option>
-        <option value="14">14 days</option>
-        <option value="30">30 days</option>
-      </select>
-      <label for="set-grace-duration">Grace period lasts</label>
-      <select id="set-grace-duration">
-        <option value="1">1 day</option>
-        <option value="3">3 days</option>
-        <option value="7" selected>7 days</option>
-        <option value="14">14 days</option>
-        <option value="30">30 days</option>
-        <option value="indefinite">Indefinite — until you resume</option>
-      </select>
-      </div>
-      <p>
-        <button id="btn-save-grace" class="primary">Save grace period</button>
-      </p>
-      <p id="grace-settings-msg" class="muted"></p>
-    </div>
-
     <div class="card" id="card-agreement">
       <div class="section-head">
         <h2>Price agreement</h2>
@@ -499,6 +533,9 @@
       <p id="price-agreement-msg" class="muted"></p>
     </div>
 
+    </div>
+    <div class="set-group" id="sg-checks" data-group="checks">
+      <div class="set-group-head"><h1>Checks and fees</h1><p class="lead">How often triggers are checked, and how a broadcast fee is judged.</p></div>
     <div class="card" id="card-cadence">
       <div class="section-head">
         <h2>Check cadence</h2>
@@ -539,6 +576,9 @@
       <p id="fee-history-note" class="muted"></p>
     </div>
 
+    </div>
+    <div class="set-group" id="sg-checkin" data-group="checkin">
+      <div class="set-group-head"><h1>Check-in</h1><p class="lead">Check in from your phone or another device.</p></div>
     <div class="card" id="card-keys">
       <div class="section-head">
         <h2>Check-in API keys</h2>
@@ -569,23 +609,9 @@
       <p id="api-keys-msg" class="muted"></p>
     </div>
 
-    <div class="card" id="card-backup">
-      <div class="section-head">
-        <h2>Data backup</h2>
-        <button class="help-btn" id="help-backup" data-help="backup" aria-label="About this setting" title="About this setting">?</button>
-      </div>
-      <p class="muted">Download an encrypted backup (recommended) or an unencrypted one.</p>
-      <p class="inline-btns">
-        <button id="btn-backup-download">Download Backup</button>
-        <button id="btn-backup-restore">Restore</button>
-        <input type="file" id="backup-file" accept="application/json,.json" style="display:none">
-      </p>
-      <p id="backup-msg" class="muted"></p>
     </div>
-
-    <!-- App login: the password (set here, or by STANDBY_PASSWORD / Umbrel,
-         when it is only described), and Log out, which signs out every
-         device. -->
+    <div class="set-group" id="sg-security" data-group="security">
+      <div class="set-group-head"><h1>Security and data</h1><p class="lead">Who can open Standby, and your data.</p></div>
     <div class="card" id="card-session">
       <div class="section-head">
         <h2>App login</h2>
@@ -618,6 +644,33 @@
     <!-- App version from /api/health, at the bottom of General settings. -->
     <!-- This computer: the Windows and Linux downloads only (GET
          /api/desktop). Start with the computer, and Stop Standby. -->
+    <div class="card" id="card-backup">
+      <div class="section-head">
+        <h2>Data backup</h2>
+        <button class="help-btn" id="help-backup" data-help="backup" aria-label="About this setting" title="About this setting">?</button>
+      </div>
+      <p class="muted">Download an encrypted backup (recommended) or an unencrypted one.</p>
+      <p class="inline-btns">
+        <button id="btn-backup-download">Download Backup</button>
+        <button id="btn-backup-restore">Restore</button>
+        <input type="file" id="backup-file" accept="application/json,.json" style="display:none">
+      </p>
+      <p id="backup-msg" class="muted"></p>
+    </div>
+
+    <!-- App login: the password (set here, or by STANDBY_PASSWORD / Umbrel,
+         when it is only described), and Log out, which signs out every
+         device. -->
+    <div class="card danger-card" id="card-fresh">
+      <div class="section-head">
+        <h2>Start fresh</h2>
+      </div>
+      <p class="muted">Delete every transaction, set, trigger, check-in, log, API key and saved node login, and the automatic backups on this device. Standby restarts as a new install. <span id="fresh-login-note"></span></p>
+      <p class="inline-btns"><button id="btn-fresh-backup">Download a backup first</button> <button id="btn-fresh-delete" class="danger">Delete all data…</button></p>
+    </div>
+    </div>
+    <div class="set-group" id="sg-app" data-group="app">
+      <div class="set-group-head"><h1>App</h1><p class="lead">This computer and the app version.</p></div>
     <div class="card" id="card-desktop" style="display:none">
       <div class="section-head">
         <h2>This computer</h2>
@@ -647,12 +700,13 @@
     </div>
 
     <!-- Start fresh: delete all data (POST /api/state/reset). -->
-    <div class="card danger-card" id="card-fresh">
-      <div class="section-head">
-        <h2>Start fresh</h2>
-      </div>
-      <p class="muted">Delete every transaction, set, trigger, check-in, log, API key and saved node login, and the automatic backups on this device. Standby restarts as a new install. <span id="fresh-login-note"></span></p>
-      <p class="inline-btns"><button id="btn-fresh-backup">Download a backup first</button> <button id="btn-fresh-delete" class="danger">Delete all data…</button></p>
+    </div>
+    <div class="savebar" id="savebar" style="display:none">
+      <span class="savebar-t"><b>Unsaved changes</b> · <span id="savebar-what"></span></span>
+      <button type="button" id="savebar-discard">Discard</button>
+      <button type="button" id="savebar-save" class="primary">Save changes</button>
+    </div>
+    </div>
     </div>
   </section>
 </main>
@@ -986,7 +1040,9 @@
 <script src="/js/txview.js"></script>
 <script src="/js/live.js"></script>
 <script src="/js/settings.js"></script>
+<script src="/js/setview.js"></script>
 <script src="/js/setup.js"></script>
+<script src="/js/logs.js"></script>
 <script src="/js/header.js"></script>
 <script src="/js/main.js"></script>
 </body>

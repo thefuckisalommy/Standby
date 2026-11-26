@@ -18,6 +18,8 @@ function check(name, cond, detail) {
   const errs = [];
   p.on('pageerror', (e) => errs.push(e.message));
   const vis = (sel) => p.isVisible(sel);
+  // Settings shows one group at a time: open the one holding a section.
+  const openSection = async (name) => { if (await vis('#set-back')) { await p.click('#set-back'); await p.waitForTimeout(100); } await p.locator('.setnav-item').filter({ hasText: name }).first().click(); await p.waitForTimeout(150); };
   try {
     // The download's "Start with this computer" page, before Done: this
     // run is not a download, so its answers are faked in the browser.
@@ -98,8 +100,10 @@ function check(name, cond, detail) {
 
     await p.goto(BASE + '#settings'); await p.waitForTimeout(800);
     check('the price choice was saved', (await p.inputValue('#set-price-source2')) === 'kraken');
+    await openSection('App login');
     check('App login: the no-password notice', await vis('#login-card-none'));
     check('This computer is not offered outside the downloads', !(await vis('#card-desktop')));
+    await openSection('Version');
     check('Check for new versions: offered on a plain run, off by default', await vis('#update-box') && !(await p.isChecked('#update-check')));
     await fetch('http://127.0.0.1:18255/__test__/release', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"tag":"v99.0.0"}' });
     await p.click('#update-box .slider'); await p.waitForTimeout(2200);
@@ -124,8 +128,10 @@ function check(name, cond, detail) {
     await p.mouse.click(5, 300); await p.waitForTimeout(100);
     check('Alerts: a tap outside closes the panel', !(await vis('#alerts-panel')));
     await p.goto(BASE + '#settings'); await p.waitForTimeout(800);
+    await openSection('Check-ins from other devices');
     check('Check-in API keys: the "Accept check-ins from other devices" switch is offered, off',
       await vis('#remote-checkin') && !(await p.isChecked('#remote-checkin-on')) && !(await vis('#api-keys-receiver-line')));
+    await openSection('App login');
     await p.fill('#login-new1', 'correct horse battery'); await p.fill('#login-new2', 'correct horse battery');
     await p.click('#btn-login-set'); await p.waitForTimeout(400);
     check('a password set in Settings', await vis('#login-card-app') && !/requires/.test(await p.textContent('#login-card-app')));
@@ -147,6 +153,7 @@ function check(name, cond, detail) {
     check('logged in', !(await vis('#login-modal .modal')));
 
     await p.goto(BASE + '#settings'); await p.waitForTimeout(800);
+    await openSection('App login');
     await p.fill('#login-cur', 'wrong password here'); await p.fill('#login-chg1', 'another long password'); await p.fill('#login-chg2', 'another long password');
     await p.click('#btn-login-change'); await p.waitForTimeout(400);
     check('a wrong current password is refused', /current password is wrong/.test(await p.textContent('#logout-msg')));

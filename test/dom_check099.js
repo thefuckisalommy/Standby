@@ -1793,6 +1793,41 @@ function check(name, cond, detail) {
   els['txv-seg-active'].click();
   check('tx list: back on Active, its rows return', txvRows().length === activeCards.length, 'rows=' + txvRows().length);
 
+  // --- 11d. Settings groups and the Save bar (js/setview.js) ---
+  // An edit in a section that saves shows the bar, naming the section;
+  // Save presses that section's own (hidden) Save, once; Discard redraws.
+  const navNames = () => els['setnav-groups'].children.flatMap((g) => (g.children[1] || { children: [] }).children)
+    .map((it) => elText(it.children.find((c) => c.className === 'setnav-name') || {}));
+  check('settings nav: lists the sections by group (Vacation mode, Bitcoin nodes, App login)',
+    ['Vacation mode', 'Bitcoin nodes', 'App login'].every((n) => navNames().includes(n)), JSON.stringify(navNames()));
+  check('settings nav: the Save bar is hidden with nothing changed', els['savebar'].style.display === 'none', '');
+  els['card-cadence'].fire('input');
+  check('settings nav: an edit shows the Save bar naming the section',
+    els['savebar'].style.display === '' && els['savebar-what'].textContent === 'Check cadence', els['savebar-what'].textContent);
+  const cadSave = els['btn-save-check-cadence'];
+  const cadListeners = cadSave.listeners.click;
+  let cadPressed = 0;
+  cadSave.listeners.click = [() => { cadPressed += 1; }];
+  els['savebar-save'].click();
+  cadSave.listeners.click = cadListeners;
+  check('settings nav: Save presses the section’s own Save once and hides the bar',
+    cadPressed === 1 && els['savebar'].style.display === 'none', 'pressed=' + cadPressed);
+  els['card-vacation'].fire('change');
+  els['savebar-discard'].click();
+  check('settings nav: Discard redraws and hides the bar', els['savebar'].style.display === 'none', '');
+  els['set-search'].value = 'cadence';
+  els['set-search'].fire('input');
+  check('settings nav: search narrows the list', navNames().length >= 1 && navNames().every((n) => n === 'Check cadence'), JSON.stringify(navNames()));
+  els['set-search'].value = '';
+  els['set-search'].fire('input');
+
+  // --- 11e. Logs: Activity and App log (js/logs.js) ---
+  els['logs-seg-app'].click();
+  check('logs: App log shows its view and hides Activity',
+    els['logs-app'].style.display === '' && els['logs-activity'].style.display === 'none', '');
+  els['logs-seg-activity'].click();
+  check('logs: Activity comes back', els['logs-activity'].style.display === '' && els['logs-app'].style.display === 'none', '');
+
   // --- 12. status pill: "armed", not "Ready + armed" ---
   // A problem state reads "Label + armed"; disarmed reads "unarmed". A
   // shared input turns the card pill amber (the seeded txs all spend
@@ -2067,9 +2102,9 @@ function check(name, cond, detail) {
     && idx.indexOf('id="grace-enabled"') < idx.indexOf('id="help-grace"'), '');
   check('grace settings static: the grace fields wrapper exists in the HTML',
     idx.indexOf('id="grace-fields"') !== -1, '');
-  check('grace settings static: the grace card sits after the Bitcoin price source card',
-    idx.indexOf('id="btn-save-grace"') !== -1 && idx.indexOf('id="btn-save-price-sources"') !== -1
-    && idx.indexOf('id="btn-save-grace"') > idx.indexOf('id="btn-save-price-sources"'), '');
+  check('grace settings static: the grace card sits in Safety, after Vacation mode',
+    idx.indexOf('id="sg-safety"') !== -1 && idx.indexOf('id="card-vacation"') > idx.indexOf('id="sg-safety"')
+    && idx.indexOf('id="card-grace"') > idx.indexOf('id="card-vacation"') && idx.indexOf('id="card-grace"') < idx.indexOf('id="sg-connections"'), '');
   check('grace settings static: the offline dropdown offers 1/3/7/14/30 days',
     JSON.stringify(selectValues(idx, 'set-grace-offline')) === JSON.stringify(['1', '3', '7', '14', '30']),
     JSON.stringify(selectValues(idx, 'set-grace-offline')));

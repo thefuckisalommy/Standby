@@ -769,42 +769,6 @@ function renderDashboard(status) {
   renderExchangeRows(status);
 }
 
-// The Logs tab: broadcast log and recent check-ins.
-function renderLogs(checkins, blog) {
-  var tbody = $('broadcast-log');
-  tbody.innerHTML = '';
-  if (!blog.length) {
-    tbody.innerHTML = '<tr><td colspan="4" class="muted">Nothing logged yet.</td></tr>';
-  } else {
-    blog.forEach(function (e) {
-      var tr = document.createElement('tr');
-      tr.className = 'log-row';
-      tr.innerHTML = '<td></td><td></td><td></td><td></td>';
-      tr.children[0].textContent = fmtDate(e.ts);
-      tr.children[1].textContent = e.kind || '';
-      tr.children[2].textContent = (e.txid || '').slice(0, 4) + '…';
-      tr.children[3].textContent = (e.status || '') + (e.method ? ' (' + e.method + ')' : '');
-      tr.title = 'Click for details';
-      tr.addEventListener('click', function () { showBroadcastDetails(e); });
-      tbody.appendChild(tr);
-    });
-  }
-  var cbody = $('recent-checkins');
-  cbody.innerHTML = '';
-  if (!checkins.length) {
-    cbody.innerHTML = '<tr><td colspan="3" class="muted">None yet.</td></tr>';
-  } else {
-    checkins.forEach(function (c) {
-      var tr = document.createElement('tr');
-      tr.innerHTML = '<td></td><td></td><td></td>';
-      tr.children[0].textContent = fmtDate(c.ts);
-      tr.children[1].textContent = c.method || 'app';
-      tr.children[2].textContent = c.sourceIp || '\u2014';
-      cbody.appendChild(tr);
-    });
-  }
-}
-
 // A check-in shows no success line (the refreshed bars are the
 // confirmation); a failure shows its error.
 $('btn-checkin').addEventListener('click', async function () {

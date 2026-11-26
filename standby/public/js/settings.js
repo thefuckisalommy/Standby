@@ -93,6 +93,7 @@ function renderSettings() {
       : 'Fee history is still building: ' + fobs + ' of 24 hourly observations. The peak appears after a day.';
   }
   renderApiKeys();
+  setvRefresh();
 }
 
 // Price sources: each row's pill reads OK, Failed or Not Tested. A test

@@ -1052,10 +1052,21 @@ function readJsonl(dataDir, file, limit) {
   return limit ? entries.slice(-limit) : entries;
 }
 
-function appendCheckin(dataDir, entry) { appendJsonl(dataDir, CHECKIN_LOG, entry); }
+// Each check-in, dry run and broadcast also gets one line in the app log
+// (the Logs tab's App log), never with the hex.
+function appendCheckin(dataDir, entry) {
+  appendJsonl(dataDir, CHECKIN_LOG, entry);
+  console.log('Standby: check-in (' + (entry.keyLabel ? 'API key "' + entry.keyLabel + '"' : entry.method || 'app') + ')');
+}
 function readCheckins(dataDir, limit) { return readJsonl(dataDir, CHECKIN_LOG, limit); }
 function writeCheckins(dataDir, entries) { writeJsonl(dataDir, CHECKIN_LOG, entries); }
-function appendBroadcastLog(dataDir, entry) { appendJsonl(dataDir, BROADCAST_LOG, entry); }
+function appendBroadcastLog(dataDir, entry) {
+  appendJsonl(dataDir, BROADCAST_LOG, entry);
+  const txid = String(entry.txid || '');
+  const line = 'Standby: ' + (entry.kind || 'log') + ' ' + (txid ? txid.slice(0, 8) + '\u2026' + txid.slice(-4) : '') + ': '
+    + (entry.status || '') + (entry.method ? ' via ' + entry.method : '') + (entry.status === 'failed' && entry.note ? ' \u2014 ' + entry.note : '');
+  if (entry.status === 'failed') console.warn(line); else console.log(line);
+}
 function readBroadcastLog(dataDir, limit) { return readJsonl(dataDir, BROADCAST_LOG, limit); }
 function writeBroadcastLog(dataDir, entries) { writeJsonl(dataDir, BROADCAST_LOG, entries); }
 

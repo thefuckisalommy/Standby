@@ -280,6 +280,30 @@ function check(name, cond, detail) {
     if (b) b.click();
   });
   await page.waitForTimeout(400);
+  // Popups opened above for measuring are closed first.
+  await page.evaluate(() => document.querySelectorAll('.modal-overlay.open').forEach((m) => m.classList.remove('open')));
+  // The Settings list (groups and sections) fits; a section opens its
+  // group's screen with a link back.
+  await checkEl('width settings: the section list fits', '#setnav');
+  await page.locator('.setnav-item').filter({ hasText: 'Check cadence' }).first().click();
+  await page.waitForTimeout(200);
+  check('width settings: a section opens its group, with the list hidden',
+    await page.evaluate(() => getComputedStyle(document.getElementById('setnav')).display === 'none'
+      && getComputedStyle(document.getElementById('sg-checks')).display !== 'none'), '');
+  // One Save bar for changed sections: it appears on an edit and fits.
+  await page.fill('#set-check-cadence', '75');
+  await page.waitForTimeout(150);
+  await checkEl('width settings: the Save bar fits', '#savebar');
+  await page.click('#savebar-discard');
+  await page.waitForTimeout(150);
+  check('width settings: Discard puts the value back and hides the bar',
+    await page.evaluate(() => document.getElementById('set-check-cadence').value !== '75'
+      && getComputedStyle(document.getElementById('savebar')).display === 'none'), '');
+  // The rest measures every section at once: show all groups.
+  await page.evaluate(() => {
+    document.querySelectorAll('.set-group').forEach((g) => g.classList.add('on'));
+  });
+  await page.waitForTimeout(150);
   await checkPage('width settings: document has no horizontal overflow');
   await checkInput('width settings: price Source 1 select fits', '#set-price-source1');
   await checkInput('width settings: price Source 2 select fits', '#set-price-source2');
@@ -289,7 +313,6 @@ function check(name, cond, detail) {
   await checkEl('width settings: Source 1 status pill fits', '#price-source1-status');
   await checkEl('width settings: Source 2 status pill fits', '#price-source2-status');
   // One Test connection button, right of Save; results land on the rows.
-  await checkEl('width settings: Save price sources button fits', '#btn-save-price-sources');
   await checkEl('width settings: Test connection button fits', '#btn-test-price-sources');
   // Rows read name, price and pill; fill row 1 with the longest provider
   // label and a price, then check both fit.
@@ -309,16 +332,13 @@ function check(name, cond, detail) {
   await checkPage('width settings: document has no horizontal overflow (user controls)');
   await checkInput('width settings: price agreement input fits', '#set-price-agreement');
   await checkEl('width settings: price agreement row (input + % unit) fits', '#set-price-agreement-row');
-  await checkEl('width settings: Save price agreement button fits', '#btn-save-price-agreement');
   await checkInput('width settings: check cadence input fits', '#set-check-cadence');
   await checkEl('width settings: check cadence row (input + seconds unit) fits', '#set-check-cadence-row');
-  await checkEl('width settings: Save check cadence button fits', '#btn-save-check-cadence');
   await checkInput('width settings: fee Low input fits', '#set-fee-low');
   await checkInput('width settings: fee Medium input fits', '#set-fee-medium');
   await checkEl('width settings: fee Low row (input + x peak tx fee unit) fits', '#set-fee-low-row');
   await checkEl('width settings: fee Medium row (input + x peak tx fee unit) fits', '#set-fee-medium-row');
   await checkEl('width settings: fee zone bar fits', '#zone-bar');
-  await checkEl('width settings: Save fee verdict button fits', '#btn-save-fee-verdict');
   // Fill the msg lines with an error (the longest case) before measuring.
   await page.evaluate(() => {
     for (const [id, text] of [
@@ -355,7 +375,6 @@ function check(name, cond, detail) {
   await checkCard('width settings: Vacation mode card fits', 'Vacation mode');
   await checkCard('width settings: Global Arm/Disarm card fits', 'Global Arm/Disarm');
   await checkInput('width settings: vacation until date input fits', '#set-vacation-until');
-  await checkEl('width settings: Save vacation button fits', '#btn-save-vacation');
   await checkEl('width settings: Arm all button fits', '#btn-arm-all');
   await checkEl('width settings: Disarm all button fits', '#btn-disarm-all');
   // The msg lines are empty until a Save is run, so give them
@@ -469,35 +488,8 @@ function check(name, cond, detail) {
     helpLayout.length === 0, helpLayout.join('; ') || 'all ten OK');
   await checkPage('width help: document has no horizontal overflow with the "?" buttons');
 
-  // --- Settings filter ---
-  // One row at the top: fits without wrapping, overflowing or overlapping
-  // the first card.
-  await checkEl('width filter: the dropdown fits', '#filter-select');
-  await checkEl('width filter: the filter row fits', '#settings-filter');
-  const filterLayout = await page.evaluate(() => {
-    const row = document.getElementById('settings-filter');
-    if (!row) return null;
-    const rr = row.getBoundingClientRect();
-    const first = document.getElementById('card-vacation');
-    const fr = first ? first.getBoundingClientRect() : null;
-    const sel = document.getElementById('filter-select');
-    const sr = sel ? sel.getBoundingClientRect() : null;
-    return {
-      rowRight: Math.round(rr.right), rowBottom: Math.round(rr.bottom),
-      rowHeight: Math.round(rr.height),
-      firstCardTop: fr ? Math.round(fr.top) : null,
-      selectRight: sr ? Math.round(sr.right) : null,
-      selectBottom: sr ? Math.round(sr.bottom) : null,
-      viewportWidth: window.innerWidth,
-    };
-  });
-  check('width filter: the dropdown stays inside the 390px viewport on one row',
-    !!filterLayout && filterLayout.selectRight <= 390 && filterLayout.rowRight <= 390 && filterLayout.rowHeight <= 60,
-    JSON.stringify(filterLayout));
-  check('width filter: the row sits above the first card with a gap (no overlap)',
-    !!filterLayout && filterLayout.firstCardTop !== null && filterLayout.rowBottom < filterLayout.firstCardTop,
-    JSON.stringify(filterLayout));
-  await checkPage('width filter: document has no horizontal overflow with the filter row');
+  // (The old "Show:" filter row is gone from view: the Settings list's
+  // search replaces it; its fit is checked above.)
 
   // --- Dashboard tab: the Exchange Status section (0.8.0) ---
   // The launcher seeds a Dom Price tx, so the section is visible.
