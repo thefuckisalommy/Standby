@@ -45,7 +45,8 @@ function untarFile(tgz, wanted) {
 function brandedNode() {
   const dir = path.join(WORK, 'rcedit');
   fs.mkdirSync(dir, { recursive: true });
-  run('npm', ['pack', 'rcedit@' + RCEDIT.version], { cwd: dir, shell: true });
+  // One fixed command line (npm is npm.cmd on Windows, which needs a shell).
+  execFileSync('npm pack rcedit@' + RCEDIT.version, { cwd: dir, shell: true, stdio: 'inherit' });
   const tgz = path.join(dir, 'rcedit-' + RCEDIT.version + '.tgz');
   const got = 'sha512-' + require('crypto').createHash('sha512').update(fs.readFileSync(tgz)).digest('base64');
   if (got !== RCEDIT.integrity) throw new Error('rcedit ' + RCEDIT.version + ' does not match its published SHA-512');

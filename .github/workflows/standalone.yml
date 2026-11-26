@@ -29,9 +29,7 @@ on:
       - 'LICENSE'
       - '.github/workflows/standalone.yml'
   push:
-    # TEMPORARY: 0.8.21 runs here to check the Windows icon and name step
-    # before the PR (workflow_dispatch needs the file on main).
-    branches: [main, '0.8.21']
+    branches: [main]
     paths:
       - 'standby/**'
       - 'tools/**'
