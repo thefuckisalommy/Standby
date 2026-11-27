@@ -86,7 +86,7 @@ function txvEl(tag, cls, text) {
 }
 
 var TXV_TYPE = {
-  checkin: ['Check-in', 't-checkin'], price: ['Price', 't-price'], utxo: ['Coin', 't-utxo'],
+  checkin: ['Check-in', 't-checkin'], price: ['Price', 't-price'], utxo: ['UTXO', 't-utxo'],
   blockheight: ['Block', 't-block'], setdate: ['Date', 't-date'], feemarket: ['Fees', 't-fee'], manual: ['Manual', 't-manual'],
 };
 
@@ -98,63 +98,51 @@ function txvUsdShort(v) {
   if (Math.abs(n) >= 1000) return '$' + (Math.round(n / 100) / 10) + 'k';
   return '$' + Math.round(n);
 }
-function txvUsd(v) { return '$' + Math.round(Number(v)).toLocaleString('en-US'); }
 
 function txvDate(iso) {
   var d = new Date(iso);
   return isFinite(d.getTime()) ? d.toLocaleString(undefined, { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }) : String(iso);
 }
 
-// One trigger in words, short for a list card or long for the detail:
+// One trigger in a few words, the same in a list card and the detail:
 // { text, frac (check-in bar, or null) }.
-function txvRuleWords(rule, ts, long) {
+function txvRuleWords(rule, ts) {
   ts = ts || {};
   var p = rule.params || {};
   if (rule.type === 'checkin') {
     if (typeof ts.daysSince === 'number' && typeof ts.windowDays === 'number' && ts.windowDays > 0) {
-      var t = ts.daysSince + ' of ' + ts.windowDays + ' days';
-      if (long) t = 'No check-in for ' + p.thresholdDays + ' days · ' + t + (ts.nextDue ? ', due ' + fmtDueDay(ts.nextDue) : '');
-      return { text: t, frac: ts.daysSince / ts.windowDays };
+      return { text: ts.daysSince + ' of ' + ts.windowDays + ' days', frac: ts.daysSince / ts.windowDays };
     }
-    return { text: (long ? 'No check-in for ' + p.thresholdDays + ' days · ' : '') + (ts.reason || 'not started'), frac: null };
+    return { text: ts.reason || 'Not started', frac: null };
   }
   if (rule.type === 'price') {
-    var op = p.op === '>=' ? '≥ ' : '≤ ';
     var lp = (typeof ts.lastPrice === 'number' && isFinite(ts.lastPrice)) ? ts.lastPrice : null;
-    if (long) return { text: 'BTC ' + op + txvUsd(p.value) + ' · ' + (lp !== null ? 'now ' + txvUsd(lp) : 'price unknown'), frac: null };
-    return { text: op + txvUsdShort(p.value) + ' · ' + (lp !== null ? 'now ' + txvUsdShort(lp) : 'unknown'), frac: null };
+    return { text: (p.op === '>=' ? '≥ ' : '≤ ') + txvUsdShort(p.value) + ' · ' + (lp !== null ? 'now ' + txvUsdShort(lp) : 'price unknown'), frac: null };
   }
   if (rule.type === 'utxo') {
     var parts = String(p.outpoint || '').split(':');
-    var op2 = txvShortOut(parts[0], 4, 4) + (parts.length > 1 ? ':' + parts[1] : '');
     var spent = ts.status === 'due' || ts.status === 'release-due';
-    if (long) {
-      var cf = p.confirmations === 0 ? 0 : (p.confirmations || 1);
-      return { text: 'Output ' + op2 + ' is spent' + (cf === 0 ? ' (unconfirmed)' : cf > 1 ? ' (' + cf + ' confirmations)' : '') + ' · ' + (ts.reason || (spent ? 'spent' : 'unspent')), frac: null };
-    }
-    return { text: op2 + ' · ' + (spent ? 'spent' : 'unspent'), frac: null };
+    return { text: txvShortOut(parts[0], 4, 4) + (parts.length > 1 ? ':' + parts[1] : '') + ' · ' + (spent ? 'spent' : 'unspent'), frac: null };
   }
   if (rule.type === 'blockheight') {
-    var tip = (typeof ts.lastTipHeight === 'number' && isFinite(ts.lastTipHeight)) ? ts.lastTipHeight : null;
-    var tgt = Number(p.targetHeight);
-    var togo = tip !== null ? tgt - tip : null;
-    var tail = togo === null ? 'tip unknown' : togo > 0 ? togo.toLocaleString('en-US') + ' to go' : 'reached';
-    return { text: (long ? 'Block ' : '') + tgt.toLocaleString('en-US') + (long && tip !== null ? ' · now ' + tip.toLocaleString('en-US') : '') + ' · ' + tail, frac: null };
+    var tip = (typeof ts.lastTipHeight === 'number' && isFinite(ts.lastTipHeight)) ? ts.lastTipHeight.toLocaleString('en-US') : '?';
+    return { text: tip + ' / ' + Number(p.targetHeight).toLocaleString('en-US'), frac: null };
   }
   if (rule.type === 'setdate') {
-    var at = new Date(p.fireAt).getTime();
-    return { text: (long ? 'On ' : '') + txvDate(p.fireAt) + ' · ' + (isFinite(at) ? txvLeftText(at - Date.now()) : ''), frac: null };
+    var d = new Date(p.fireAt);
+    if (!isFinite(d.getTime())) return { text: String(p.fireAt), frac: null };
+    return { text: d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) + ' · ' + txvLeftText(d.getTime() - Date.now()), frac: null };
   }
   if (rule.type === 'feemarket') {
     var ef = (typeof ts.lastEconomyFee === 'number' && isFinite(ts.lastEconomyFee)) ? ts.lastEconomyFee : null;
-    return { text: (long ? 'Fees ' : '') + (p.direction === 'above' ? '≥ ' : '≤ ') + p.maxFeeRate + ' sat/vB · ' + (ef !== null ? 'now ' + ef : 'unknown'), frac: null };
+    return { text: (p.direction === 'above' ? '≥ ' : '≤ ') + p.maxFeeRate + ' sat/vB · ' + (ef !== null ? 'now ' + ef : 'unknown'), frac: null };
   }
-  return { text: long ? 'Only when you broadcast it' : 'By hand only', frac: null };
+  return { text: 'By hand only', frac: null };
 }
 
 // The trigger lines: type (with AND / OR before every rule after the
 // first), the words, an inline bar for check-in, and the Met pill.
-function txvRuleLines(holder, long) {
+function txvRuleLines(holder) {
   var box = txvEl('div', 'txv-rules');
   var set = triggerSetOf(holder);
   var states = triggerStatesOf(holder);
@@ -165,7 +153,7 @@ function txvRuleLines(holder, long) {
     if (i > 0) tyEl.appendChild(txvEl('i', 'txv-op', set.op === 'AND' ? 'AND' : 'OR'));
     tyEl.appendChild(txvEl('span', '', ty[0]));
     line.appendChild(tyEl);
-    var words = txvRuleWords(rule, states[i], long);
+    var words = txvRuleWords(rule, states[i]);
     var cr = txvEl('span', 'txv-cr');
     if (words.frac !== null) {
       var bar = txvEl('span', 'txv-mini');
@@ -174,7 +162,9 @@ function txvRuleLines(holder, long) {
       bar.appendChild(fill);
       cr.appendChild(bar);
     }
-    cr.appendChild(txvEl('span', 'txv-crt', words.text));
+    var crt = txvEl('span', 'txv-crt', words.text);
+    crt.title = triggerCondition(rule) + ' · ' + triggerStateLine(rule, states[i] || {});
+    cr.appendChild(crt);
     line.appendChild(cr);
     var pill = ruleStatePill(rule, states[i] || {});
     line.appendChild(pill ? txvEl('span', 'pill txv-st ' + pill.cls, pill.text) : txvEl('span', ''));
@@ -201,10 +191,14 @@ function txvTxState(t, overlaps) {
   return null;
 }
 
+// The fee rate, coloured by its fee risk ("● 14 sat/vB"); the risk in
+// words on hover.
 function txvFeeDot(t) {
   var v = txFeeVerdict(t);
-  if (!v) return null;
-  return txvEl('span', 'txv-fr ' + feeVerdictCls(v), v.replace(' Risk', ''));
+  if (!v || typeof t.feeRateSatVb !== 'number' || !isFinite(t.feeRateSatVb)) return null;
+  var el = txvEl('span', 'txv-fr ' + feeVerdictCls(v), fmtRate(t.feeRateSatVb) + ' sat/vB');
+  el.title = 'Fee risk: ' + v.replace(' Risk', '');
+  return el;
 }
 
 function txvSwitch(it) {
@@ -234,7 +228,7 @@ function txvRow(it, overlaps) {
   r1.appendChild(txvEl('span', 'txv-chev', '›'));
   if (it.section === 'active') r1.appendChild(txvSwitch(it));
   row.appendChild(r1);
-  row.appendChild(txvRuleLines(it.holder, false));
+  row.appendChild(txvRuleLines(it.holder));
   var txs = txvEl('div', 'txv-txs');
   it.members.forEach(function (t, i) {
     var line = txvEl('div', 'txv-tl');
@@ -287,42 +281,19 @@ function txvKv(box, k, v, onClick) {
   box.appendChild(vv);
 }
 
-// One transaction in the detail: where it pays and the amount; fee, risk
-// and txid; any problem in a line; Details with inputs, outputs and more.
+// One transaction in the detail: its txid and amount; its Details
+// (inputs, outputs, fee and risk, txid, route, locktime, when added); any
+// problem or warning at the bottom.
 function txvTxBlock(it, t, i, overlaps) {
   var b = txvEl('div', 'txv-txb');
   var l1 = txvEl('div', 'txv-txb1');
   l1.appendChild(txvEl('b', '', it.members.length > 1 ? 'Tx ' + (i + 1) : 'Tx'));
-  l1.appendChild(txvEl('span', 'mono', txvPaysTo(t, 10, 6)));
-  l1.appendChild(txvEl('span', 'mono txv-v', fmtBtc(t.totalOutSats)));
-  b.appendChild(l1);
-  var l2 = txvEl('div', 'txv-txb2');
-  if (t.feeSats !== null && t.feeSats !== undefined) {
-    l2.appendChild(txvEl('span', '', 'Fee ' + fmtRate(t.feeRateSatVb) + ' sat/vB · ' + fmtSats(t.feeSats) + ' sats'));
-    var fv = txFeeVerdict(t);
-    if (fv) {
-      var pill = txvEl('span', 'pill txv-link ' + feeVerdictCls(fv), fv.replace(' Risk', ' risk'));
-      pill.title = 'How this risk was worked out';
-      pill.addEventListener('click', function () { showFeePopout(t, txFeeVerdict(t) || fv); });
-      l2.appendChild(pill);
-    }
-  }
-  var st = txvTxState(t, overlaps);
-  if (st && st.text !== 'Shared input') l2.appendChild(txvEl('span', 'pill ' + st.cls, st.text));
-  var tid = txvEl('span', 'mono txv-link', txvShortOut(t.txid, 8, 4));
+  var tid = txvEl('span', 'mono txv-link', t.txid.slice(0, 16) + '…');
   tid.title = 'Show the full TXID';
   tid.addEventListener('click', function () { showTxidPopout(t); });
-  l2.appendChild(tid);
-  b.appendChild(l2);
-  (overlaps[t.id] || []).forEach(function (w) {
-    var n = String(w.others).split(', ').length;
-    var line = txvEl('div', 'txv-txw', 'Shares an input with ' + (n > 2 ? n + ' other transactions' : w.others) + ': only one of them can confirm.');
-    line.title = 'Input ' + shortInput(w.input) + ' is also spent by ' + w.others;
-    b.appendChild(line);
-  });
-  if (t.release || t.broadcasted) b.appendChild(txvEl('div', broadcastLineCls(t) + ' txv-txl', txReleaseLine(t)));
-  var dr = dryRunResults[t.id];
-  if (dr && dr.verdict === 'timelocked') b.appendChild(txvEl('div', 'txv-txw', dr.text));
+  l1.appendChild(tid);
+  l1.appendChild(txvEl('span', 'mono txv-v', fmtBtc(t.totalOutSats) + ' BTC'));
+  b.appendChild(l1);
   var open = !!txvOpenTx[t.id];
   var tog = txvEl('button', 'txv-more', (open ? '⌄ ' : '› ') + 'Details');
   tog.type = 'button';
@@ -342,14 +313,42 @@ function txvTxBlock(it, t, i, overlaps) {
           function () { showOutputPopout(t, out, k); });
       });
     }
+    if (t.feeSats !== null && t.feeSats !== undefined) {
+      var fv = txFeeVerdict(t);
+      d.appendChild(txvEl('span', 'txv-dk', 'Fee'));
+      var fee = txvEl('span', 'txv-dv', fmtSats(t.feeSats) + ' sats · ' + fmtRate(t.feeRateSatVb) + ' sat/vB');
+      if (fv) {
+        var pill = txvEl('span', 'pill txv-link ' + feeVerdictCls(fv), fv);
+        pill.title = 'How this risk was worked out';
+        pill.addEventListener('click', function () { showFeePopout(t, txFeeVerdict(t) || fv); });
+        fee.appendChild(pill);
+      }
+      d.appendChild(fee);
+    }
     txvKv(d, 'TXID', txvShortOut(t.txid, 16, 8), function () { showTxidPopout(t); });
-    txvKv(d, 'Broadcast via', t.broadcastVia === 'slipstream' ? 'Slipstream (MARA)' : 'Public mempool, primary then secondary node');
+    txvKv(d, 'Broadcast via', t.broadcastVia === 'slipstream' ? 'Slipstream (MARA)' : 'Public mempool');
     if (t.broadcastVia === 'slipstream' && t.publicFallbackDays !== null && t.publicFallbackDays !== undefined) txvKv(d, 'Public fallback', txFallbackText(t, txStatus(t)));
     if (t.locktime > 0) txvKv(d, 'Locktime', String(t.locktime));
     txvKv(d, 'Added', fmtDate(t.createdAt));
     if (t.notes) txvKv(d, 'Notes', t.notes);
     b.appendChild(d);
   }
+  // Problems and warnings last.
+  var st = txvTxState(t, overlaps);
+  if (st && st.text !== 'Shared input') {
+    var sl = txvEl('div', 'txv-txs-state');
+    sl.appendChild(txvEl('span', 'pill ' + st.cls, st.text));
+    b.appendChild(sl);
+  }
+  if (t.release || t.broadcasted) b.appendChild(txvEl('div', broadcastLineCls(t) + ' txv-txl', txReleaseLine(t)));
+  var dr = dryRunResults[t.id];
+  if (dr && dr.verdict === 'timelocked') b.appendChild(txvEl('div', 'txv-txw', dr.text));
+  (overlaps[t.id] || []).forEach(function (w) {
+    var n = String(w.others).split(', ').length;
+    var line = txvEl('div', 'txv-txw', 'Shares an input with ' + (n > 2 ? n + ' other transactions' : w.others) + ': only one of them can confirm.');
+    line.title = 'Input ' + shortInput(w.input) + ' is also spent by ' + w.others;
+    b.appendChild(line);
+  });
   return b;
 }
 
@@ -371,8 +370,10 @@ function renderTxPanel(it, overlaps) {
   t1.appendChild(arm);
   h.appendChild(t1);
   var acts = txvEl('div', 'txv-acts');
-  [['Dry run', 'Dry-run', ''], ['Edit', 'Edit', ''], ['Broadcast now', 'Broadcast Now', 'danger']].forEach(function (a) {
+  [['Dry run', 'Dry-run', ''], ['Edit', 'Edit', ''], ['Broadcast', 'Broadcast Now', 'danger'],
+    ['Broadcast publicly', 'Broadcast publicly', 'danger'], ['Delete', 'Delete', 'danger']].forEach(function (a) {
     var src = txvCardButton(it, a[1]);
+    if (!src && a[1] === 'Broadcast publicly') return;
     var b = txvEl('button', a[2], a[0]);
     b.type = 'button';
     b.disabled = !src || src.disabled;
@@ -380,27 +381,6 @@ function renderTxPanel(it, overlaps) {
     b.addEventListener('click', function () { txvPress(it, a[1]); });
     acts.appendChild(b);
   });
-  // More: Delete (and, for a Slipstream wait, Broadcast publicly).
-  var more = txvEl('div', 'txv-more-wrap');
-  var mb = txvEl('button', 'txv-more-btn', '⋯');
-  mb.type = 'button';
-  mb.title = 'More';
-  var menu = txvEl('div', 'txv-menu');
-  menu.style.display = 'none';
-  [['Broadcast publicly', 'Broadcast publicly'], ['Delete', 'Delete']].forEach(function (a) {
-    if (!txvCardButton(it, a[1])) return;
-    var mi = txvEl('button', 'danger', a[0]);
-    mi.type = 'button';
-    mi.addEventListener('click', function () { menu.style.display = 'none'; txvPress(it, a[1]); });
-    menu.appendChild(mi);
-  });
-  mb.addEventListener('click', function (e) {
-    if (e && e.stopPropagation) e.stopPropagation();
-    menu.style.display = menu.style.display === 'none' ? '' : 'none';
-  });
-  more.appendChild(mb);
-  more.appendChild(menu);
-  acts.appendChild(more);
   h.appendChild(acts);
   panel.appendChild(h);
   // Two boxes: what it sends, and what it is made of.
@@ -420,7 +400,7 @@ function renderTxPanel(it, overlaps) {
   boxes.appendChild(b2);
   panel.appendChild(boxes);
   var fires = txvSec('Fires when');
-  fires.appendChild(txvRuleLines(it.holder, true));
+  fires.appendChild(txvRuleLines(it.holder));
   panel.appendChild(fires);
   var txsec = txvSec('Transactions');
   it.members.forEach(function (t, i) { txsec.appendChild(txvTxBlock(it, t, i, overlaps)); });

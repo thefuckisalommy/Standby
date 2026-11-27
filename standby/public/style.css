@@ -723,8 +723,7 @@ button.btn-checkin-big { width: auto; flex: 0 0 auto; padding: 12px 22px; font-s
    grey when disarmed. The condition line takes its trigger's colour. */
 .readiness-tx { background: transparent; border: 1px solid var(--armed-edge); border-radius: 8px; padding: 10px 12px; margin: 10px 0 0; }
 .readiness-tx-row b { font-weight: 600; font-size: 14.5px; }
-.readiness-tx-state { font-size: 13px; margin-top: 4px; display: flex; align-items: baseline; gap: 7px; }
-.readiness-tx-state::before { content: ""; width: 7px; height: 7px; border-radius: 2px; background: currentColor; flex: none; transform: translateY(-1px); }
+.readiness-tx-state { font-size: 13px; margin-top: 4px; }
 .readiness-tx-state.t-checkin { color: var(--t-checkin); }
 .readiness-tx-state.t-price { color: var(--t-price); }
 .readiness-tx-state.t-utxo { color: var(--t-utxo); }
@@ -737,7 +736,7 @@ button.btn-checkin-big { width: auto; flex: 0 0 auto; padding: 12px 22px; font-s
 .readiness-tx.off { border-color: var(--line); }
 .readiness-tx.off, .readiness-tx.off .readiness-tx-state, .readiness-tx.off .pill { color: var(--faint); }
 .readiness-tx.off .pill { background: rgba(255, 255, 255, 0.04); box-shadow: none; }
-.readiness-tx-member { margin-left: 15px; color: var(--ink-2); }
+.readiness-tx-member { margin-left: 0; color: var(--ink-2); }
 
 /* Phones and narrow windows. */
 @media (max-width: 860px) {
@@ -941,10 +940,6 @@ th, td { border-bottom-color: var(--line); }
 .txv-armwrap { margin-left: auto; display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
 .txv-acts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .txv-acts button { padding: 7px 12px; font-size: 14px; }
-.txv-more-wrap { position: relative; }
-.txv-menu { position: absolute; top: calc(100% + 4px); left: 0; z-index: 20; min-width: 190px; padding: 4px; border: 1px solid var(--line-2); border-radius: 10px; background: var(--card); box-shadow: 0 12px 28px rgba(0, 0, 0, 0.5); }
-.txv-menu button { display: block; width: 100%; text-align: left; border: 0; background: transparent; }
-.txv-menu button:hover { background: var(--panel-2); }
 .txv-boxes { display: grid; grid-template-columns: 1fr 1fr; border-top: 1px solid var(--line); }
 .txv-box { padding: 12px 22px; min-width: 0; }
 .txv-box + .txv-box { border-left: 1px solid var(--line); }
@@ -955,8 +950,6 @@ th, td { border-bottom-color: var(--line); }
 .txv-sh { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
 .txv-sec .txv-rl { grid-template-columns: 110px minmax(0, 1fr) auto; font-size: 14px; padding: 5px 0; }
 .txv-sec .txv-mini { flex-basis: 110px; }
-.txv-sec .txv-cr { white-space: normal; }
-.txv-sec .txv-crt { overflow: visible; }
 .txv-txb { margin-top: 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; background: #0d1014; }
 .txv-txb1 { display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; gap: 8px; align-items: baseline; font-size: 13.5px; }
 .txv-txb1 b { font-weight: 600; }
@@ -971,6 +964,9 @@ th, td { border-bottom-color: var(--line); }
 .txv-more { margin: 6px 0 0 46px; padding: 0; border: 0; background: none; font-size: 12.5px; color: var(--muted); }
 .txv-more:hover { background: none; color: var(--ink); }
 .txv-dl { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 4px 12px; margin: 8px 0 2px 46px; font-size: 12.5px; }
+.txv-dl .pill { font-size: 11px; padding: 0 7px; margin-left: 8px; }
+.txv-txs-state { margin-top: 6px; padding-left: 46px; }
+.txv-txs-state .pill { font-size: 11px; padding: 0 7px; }
 .txv-dk { color: var(--faint); }
 .txv-dv { color: var(--ink-2); overflow-wrap: anywhere; }
 .txv-checks { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13px; color: var(--ink-2); }
@@ -1006,7 +1002,7 @@ th, td { border-bottom-color: var(--line); }
   .txv-dhead, .txv-sec, .txv-box { padding-left: 16px; padding-right: 16px; }
   .txv-sec .txv-rl { grid-template-columns: 90px minmax(0, 1fr) auto; font-size: 13px; }
   .txv-sec .txv-mini { flex-basis: 50px; }
-  .txv-txb2, .txv-txw, .txv-txl { padding-left: 0; }
+  .txv-txb2, .txv-txw, .txv-txl, .txv-txs-state { padding-left: 0; }
   .txv-more { margin-left: 0; }
   .txv-dl { margin-left: 0; grid-template-columns: 90px minmax(0, 1fr); }
 }
