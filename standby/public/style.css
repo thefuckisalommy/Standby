@@ -563,6 +563,8 @@ p.inline-btns { display: flex; gap: 8px; flex-wrap: nowrap; align-items: center;
 #confirm-body, #modal-details { overflow-wrap: anywhere; white-space: pre-line; }
 .modal .kv { grid-template-columns: 110px 1fr; }
 .modal .kv dd { overflow-wrap: anywhere; }
+.modal .kv.fee-kv { grid-template-columns: 1fr auto; gap: 8px 12px; border-top: 1px solid var(--line); margin-top: 12px; padding-top: 12px; }
+.modal .kv.fee-kv dd { text-align: right; white-space: nowrap; }
 /* The log details' <pre> hex wraps too, keeping vertical scroll. */
 .modal pre { white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-all; max-height: 240px; overflow-y: auto; }
 #backup-modal, #restore-pw-modal { z-index: 105; }
@@ -898,6 +900,7 @@ th, td { border-bottom-color: var(--line); }
 .txv-arm { margin-left: auto; }
 /* Trigger lines (list and detail). */
 .txv-rules { margin-top: 8px; }
+.txv-row .txv-rules { padding-top: 6px; border-top: 1px solid var(--line); }
 .txv-rl { display: grid; grid-template-columns: 92px minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 3px 0; font-size: 13px; }
 .txv-ty { font-size: 10.5px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; white-space: nowrap; }
 .txv-ty.t-checkin { color: var(--t-checkin); }
@@ -927,7 +930,6 @@ th, td { border-bottom-color: var(--line); }
 .txv-fr.warn { color: var(--warn); }
 .txv-fr.bad-soft { color: var(--bad-soft); }
 .txv-fr.bad { color: var(--bad); }
-.txv-group { margin: 16px 2px 0; font-size: 11.5px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); }
 .txv-none { margin: 16px 4px 6px; }
 /* The detail. */
 .txv-back { display: none; }

@@ -77,6 +77,7 @@ function txvLeftText(ms) {
 }
 
 var txvOpenTx = {}; // tx id -> true while its Details are open in the detail
+var txvHistOpen = {};
 
 function txvEl(tag, cls, text) {
   var el = document.createElement(tag);
@@ -226,7 +227,12 @@ function txvRow(it, overlaps) {
   var r1 = txvEl('div', 'txv-r1');
   r1.appendChild(txvEl('span', 'txv-name', txvName(it)));
   r1.appendChild(txvEl('span', 'txv-chev', '›'));
-  if (it.section === 'active') r1.appendChild(txvSwitch(it));
+  if (it.section === 'active') {
+    var arm = txvEl('span', 'txv-armwrap');
+    if (it.holder.enabled === false) arm.appendChild(txvEl('span', 'pill muted txv-st', 'Disarmed'));
+    arm.appendChild(txvSwitch(it));
+    r1.appendChild(arm);
+  }
   row.appendChild(r1);
   row.appendChild(txvRuleLines(it.holder));
   var txs = txvEl('div', 'txv-txs');
@@ -428,8 +434,18 @@ function renderTxPanel(it, overlaps) {
   }
   var hist = it.kind === 'set' ? it.holder.history : it.holder.history;
   if (Array.isArray(hist) && hist.length) {
-    var hsec = txvSec('History');
-    hsec.appendChild(buildHistoryList(hist.slice().reverse()));
+    var hsec = txvEl('div', 'txv-sec');
+    var htog = txvEl('button', 'txv-more', (txvHistOpen[it.key] ? '⌄ ' : '› ') + 'History');
+    htog.type = 'button';
+    var hlist = buildHistoryList(hist.slice().reverse());
+    hlist.style.display = txvHistOpen[it.key] ? '' : 'none';
+    htog.addEventListener('click', function () {
+      txvHistOpen[it.key] = !txvHistOpen[it.key];
+      htog.textContent = (txvHistOpen[it.key] ? '⌄ ' : '› ') + 'History';
+      hlist.style.display = txvHistOpen[it.key] ? '' : 'none';
+    });
+    hsec.appendChild(htog);
+    hsec.appendChild(hlist);
     panel.appendChild(hsec);
   }
 }
@@ -462,13 +478,7 @@ function renderTxIndex() {
     txvSelected = inSec.length ? inSec[0].key : null;
   }
   rowsEl.innerHTML = '';
-  var armed = inSec.filter(function (it) { return txvSection !== 'active' || it.holder.enabled !== false; });
-  var off = inSec.filter(function (it) { return txvSection === 'active' && it.holder.enabled === false; });
-  armed.forEach(function (it) { rowsEl.appendChild(txvRow(it, overlaps)); });
-  if (off.length) {
-    rowsEl.appendChild(txvEl('div', 'txv-group', 'Disarmed'));
-    off.forEach(function (it) { rowsEl.appendChild(txvRow(it, overlaps)); });
-  }
+  inSec.forEach(function (it) { rowsEl.appendChild(txvRow(it, overlaps)); });
   if (!inSec.length) {
     rowsEl.appendChild(txvEl('p', 'muted txv-none', q ? 'Nothing matches “' + txvQuery.trim() + '”.'
       : txvSection === 'active' ? 'No transactions yet. Add a pre-signed transaction to get started.'
