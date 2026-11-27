@@ -77,6 +77,7 @@ function txvLeftText(ms) {
 }
 
 var txvOpenTx = {}; // tx id -> true while its Details are open in the detail
+var txvHistOpen = {};
 
 function txvEl(tag, cls, text) {
   var el = document.createElement(tag);
@@ -433,8 +434,18 @@ function renderTxPanel(it, overlaps) {
   }
   var hist = it.kind === 'set' ? it.holder.history : it.holder.history;
   if (Array.isArray(hist) && hist.length) {
-    var hsec = txvSec('History');
-    hsec.appendChild(buildHistoryList(hist.slice().reverse()));
+    var hsec = txvEl('div', 'txv-sec');
+    var htog = txvEl('button', 'txv-more', (txvHistOpen[it.key] ? '⌄ ' : '› ') + 'History');
+    htog.type = 'button';
+    var hlist = buildHistoryList(hist.slice().reverse());
+    hlist.style.display = txvHistOpen[it.key] ? '' : 'none';
+    htog.addEventListener('click', function () {
+      txvHistOpen[it.key] = !txvHistOpen[it.key];
+      htog.textContent = (txvHistOpen[it.key] ? '⌄ ' : '› ') + 'History';
+      hlist.style.display = txvHistOpen[it.key] ? '' : 'none';
+    });
+    hsec.appendChild(htog);
+    hsec.appendChild(hlist);
     panel.appendChild(hsec);
   }
 }

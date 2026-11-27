@@ -238,6 +238,9 @@ function showFeePopout(tx, verdict) {
   var peakLabel = (typeof win === 'number' && win < 90)
     ? 'peak over the last ' + win + (win === 1 ? ' day' : ' days') + ' of observations'
     : '90-day peak';
+  var peakShort = (typeof win === 'number' && win < 90)
+    ? 'Peak (' + win + (win === 1 ? ' day' : ' days') + ')'
+    : '90-day peak';
   var econ = S.bitcoin.currentFees && S.bitcoin.currentFees.economyFee;
   var rate = tx.feeRateSatVb;
   // The owner's own ladder thresholds, so the pop-out explains the
@@ -254,11 +257,11 @@ function showFeePopout(tx, verdict) {
   } else { // High Risk
     body = 'The ' + peakLabel + ' is ' + fmtRate(peak) + ' sat/vB. Your fee is ' + fmtRate(rate) + ' sat/vB. Because it is below ' + fmtRate(med * peak) + ' sat/vB (' + med + '× the peak), it is ranked High Risk.';
   }
-  var html = '<dl class="kv">'
-    + '<dt>' + peakLabel + '</dt><dd>' + escapeHtml(fmtRate(peak) + ' sat/vB') + '</dd>'
+  var html = '<dl class="kv fee-kv">'
+    + '<dt>' + peakShort + '</dt><dd>' + escapeHtml(fmtRate(peak) + ' sat/vB') + '</dd>'
     + '<dt>Your fee</dt><dd>' + escapeHtml(fmtRate(rate) + ' sat/vB') + '</dd>'
     + ((typeof econ === 'number')
-      ? '<dt>Current economy fee</dt><dd>' + escapeHtml(fmtRate(econ) + ' sat/vB') + '</dd>' : '')
+      ? '<dt>Economy fee</dt><dd>' + escapeHtml(fmtRate(econ) + ' sat/vB') + '</dd>' : '')
     + '</dl>';
   showDetails('Fee risk', body, html);
 }

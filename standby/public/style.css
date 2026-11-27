@@ -563,6 +563,8 @@ p.inline-btns { display: flex; gap: 8px; flex-wrap: nowrap; align-items: center;
 #confirm-body, #modal-details { overflow-wrap: anywhere; white-space: pre-line; }
 .modal .kv { grid-template-columns: 110px 1fr; }
 .modal .kv dd { overflow-wrap: anywhere; }
+.modal .kv.fee-kv { grid-template-columns: 1fr auto; gap: 8px 12px; border-top: 1px solid var(--line); margin-top: 12px; padding-top: 12px; }
+.modal .kv.fee-kv dd { text-align: right; white-space: nowrap; }
 /* The log details' <pre> hex wraps too, keeping vertical scroll. */
 .modal pre { white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-all; max-height: 240px; overflow-y: auto; }
 #backup-modal, #restore-pw-modal { z-index: 105; }
