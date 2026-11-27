@@ -928,7 +928,6 @@ th, td { border-bottom-color: var(--line); }
 .txv-fr.warn { color: var(--warn); }
 .txv-fr.bad-soft { color: var(--bad-soft); }
 .txv-fr.bad { color: var(--bad); }
-.txv-group { margin: 16px 2px 0; font-size: 11.5px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); }
 .txv-none { margin: 16px 4px 6px; }
 /* The detail. */
 .txv-back { display: none; }

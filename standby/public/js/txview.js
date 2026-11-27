@@ -227,8 +227,10 @@ function txvRow(it, overlaps) {
   r1.appendChild(txvEl('span', 'txv-name', txvName(it)));
   r1.appendChild(txvEl('span', 'txv-chev', '›'));
   if (it.section === 'active') {
-    if (it.holder.enabled === false) r1.appendChild(txvEl('span', 'pill muted txv-st', 'Disarmed'));
-    r1.appendChild(txvSwitch(it));
+    var arm = txvEl('span', 'txv-armwrap');
+    if (it.holder.enabled === false) arm.appendChild(txvEl('span', 'pill muted txv-st', 'Disarmed'));
+    arm.appendChild(txvSwitch(it));
+    r1.appendChild(arm);
   }
   row.appendChild(r1);
   row.appendChild(txvRuleLines(it.holder));
@@ -465,13 +467,7 @@ function renderTxIndex() {
     txvSelected = inSec.length ? inSec[0].key : null;
   }
   rowsEl.innerHTML = '';
-  var armed = inSec.filter(function (it) { return txvSection !== 'active' || it.holder.enabled !== false; });
-  var off = inSec.filter(function (it) { return txvSection === 'active' && it.holder.enabled === false; });
-  armed.forEach(function (it) { rowsEl.appendChild(txvRow(it, overlaps)); });
-  if (off.length) {
-    rowsEl.appendChild(txvEl('div', 'txv-group', 'Disarmed'));
-    off.forEach(function (it) { rowsEl.appendChild(txvRow(it, overlaps)); });
-  }
+  inSec.forEach(function (it) { rowsEl.appendChild(txvRow(it, overlaps)); });
   if (!inSec.length) {
     rowsEl.appendChild(txvEl('p', 'muted txv-none', q ? 'Nothing matches “' + txvQuery.trim() + '”.'
       : txvSection === 'active' ? 'No transactions yet. Add a pre-signed transaction to get started.'
