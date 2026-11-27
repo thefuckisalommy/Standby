@@ -73,70 +73,30 @@ function check(name, cond, detail) {
     check(name, sw <= 390, 'document scrollWidth ' + sw);
   }
 
-  // --- Trigger subcards: three stacked rows ---
-  // Each card's subcard fits at 390px and its rows (header, condition,
-  // state) each start below the previous.
-  // Open each row in turn (on a phone the list gives way to that
-  // transaction's screen) and measure its card, then go back.
-  const subcards = [];
+  // --- The list cards and each transaction's screen ---
+  // Each trigger is one line in a list card; each card's screen (opened
+  // from the list, closed with the back link) fits at 390px.
+  const ruleLines = await page.evaluate(() => [...document.querySelectorAll('#txv-rows .txv-rl')].map((l) => Math.round(l.getBoundingClientRect().height)));
+  check('width list: every trigger in a list card takes one line',
+    ruleLines.length >= 4 && ruleLines.every((h) => h > 0 && h <= 30), JSON.stringify(ruleLines));
+  const screens = [];
   const nRows = await page.locator('#txv-rows .txv-row').count();
   for (let i = 0; i < nRows; i++) {
-    await page.locator('#txv-rows .txv-row').nth(i).click();
+    await page.locator('#txv-rows .txv-row .txv-name').nth(i).click();
     await page.waitForTimeout(150);
-    subcards.push(await page.evaluate(() => {
-      const card = document.querySelector('.tx-card.txv-sel');
-      if (!card) return null;
-      // The first .tx-trigger is the blue tx subcard (.tx-item); the
-      // trigger box is the first plain one.
-      const box = card.querySelector('.tx-trigger:not(.tx-item)');
-      if (!box) return null;
-      const rows = [...box.children].filter((el) => !el.classList.contains('tx-details')).map((el) => {
-        const r = el.getBoundingClientRect();
-        return { top: Math.round(r.top * 10) / 10, bottom: Math.round(r.bottom * 10) / 10 };
-      });
-      const item = card.querySelector('.tx-trigger.tx-item');
-      const hasDetails = !!item && !!item.querySelector(':scope > .tx-details');
-      const br = box.getBoundingClientRect();
-      return { sw: box.scrollWidth, cw: box.clientWidth, right: Math.round(br.right * 10) / 10,
-        visible: br.width > 0, rows, hasDetails, pageSw: document.documentElement.scrollWidth };
+    screens.push(await page.evaluate(() => {
+      const p = document.getElementById('txv-panel');
+      const r = p.getBoundingClientRect();
+      return { visible: r.width > 0, sw: p.scrollWidth, cw: p.clientWidth, right: Math.round(r.right), pageSw: document.documentElement.scrollWidth,
+        rules: p.querySelectorAll('.txv-rl').length, txs: p.querySelectorAll('.txv-txb').length };
     }));
     await page.click('#txv-back');
     await page.waitForTimeout(100);
   }
-  check('width list: each transaction screen has no horizontal overflow',
-    subcards.length >= 4 && subcards.every((s) => s && s.pageSw <= 390),
-    JSON.stringify(subcards.map((s) => s && s.pageSw)));
-  check('width subcards: every tx card has a subcard (at least the 4 seeded)',
-    subcards.length >= 4 && subcards.every(Boolean),
-    'subcards found: ' + subcards.filter(Boolean).length);
-  // One log line per subcard, so a failure survives check()'s 200-char
-  // truncation.
-  const fitsOk = subcards.length >= 4 && subcards.every((s) => s && s.visible && s.sw <= s.cw && s.right <= 390);
-  if (!fitsOk) {
-    subcards.forEach((s, i) => console.log('  width subcards fit: subcard ' + i + ': ' + JSON.stringify(s && { sw: s.sw, cw: s.cw, right: s.right, visible: s.visible })));
-  }
-  const fitsFailing = subcards.map((s, i) => (s && s.visible && s.sw <= s.cw && s.right <= 390) ? null : i).filter((i) => i !== null);
-  check('width subcards: every subcard fits at 390px',
-    fitsOk,
-    fitsFailing.length ? 'failing subcard(s): ' + fitsFailing.join(', ') : 'fewer than 4 subcards (' + subcards.length + ')');
-  // A 1px tolerance forgives rounding differences between Chromium builds;
-  // a real overlap is tens of pixels. The row count stays exact.
-  function rowsStacked(rows) {
-    return rows.length === 3
-      && rows[1].top >= rows[0].bottom - 1
-      && rows[2].top >= rows[1].bottom - 1;
-  }
-  const stackedOk = subcards.length >= 4 && subcards.every((s) => s && rowsStacked(s.rows));
-  if (!stackedOk) {
-    subcards.forEach((s, i) => console.log('  width subcards rows: subcard ' + i + ': ' + JSON.stringify(s && s.rows)));
-  }
-  const stackedFailing = subcards.map((s, i) => (s && rowsStacked(s.rows)) ? null : i).filter((i) => i !== null);
-  check('width subcards: every subcard has 3 rows stacked on separate lines',
-    stackedOk,
-    stackedFailing.length ? 'failing subcard(s): ' + stackedFailing.join(', ') : 'fewer than 4 subcards (' + subcards.length + ')');
-  check('width subcards: every tx subcard holds its Details inside it (0.8.7 fix, round 3)',
-    subcards.length >= 4 && subcards.every((s) => s && s.hasDetails),
-    JSON.stringify(subcards.map((s) => s && s.hasDetails)));
+  check('width list: each transaction screen opens and fits at 390px (no overflow)',
+    screens.length >= 4 && screens.every((x) => x.visible && x.sw <= x.cw && x.right <= 390 && x.pageSw <= 390), JSON.stringify(screens));
+  check('width list: each screen lists its triggers and transactions',
+    screens.length >= 4 && screens.every((x) => x.rules >= 1 && x.txs >= 1), JSON.stringify(screens.map((x) => [x.rules, x.txs])));
   // The list: search and Add, the Active / Pending / Archived switch and
   // every row fit at 390px, and the back link returned to it.
   await checkEl('width list: search and "+ Add" fit', '.txv-tools');
@@ -374,7 +334,7 @@ function check(name, cond, detail) {
     check(name, f.ok, f.why);
   }
   await checkCard('width settings: Vacation mode card fits', 'Vacation mode');
-  await checkCard('width settings: Global Arm/Disarm card fits', 'Global Arm/Disarm');
+  await checkCard('width settings: All transactions card fits', 'All transactions');
   await checkInput('width settings: vacation until date input fits', '#set-vacation-until');
   await checkEl('width settings: Arm all button fits', '#btn-arm-all');
   await checkEl('width settings: Disarm all button fits', '#btn-disarm-all');

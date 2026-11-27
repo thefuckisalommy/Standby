@@ -279,7 +279,8 @@
     <div class="txv" id="txv">
       <div class="card txv-list" id="txv-list">
         <div class="txv-tools">
-          <input id="txv-search" type="search" placeholder="Search name, txid, address" aria-label="Search transactions" autocomplete="off">
+          <input id="txv-search" type="search" placeholder="Search" title="Search by name, txid or address" aria-label="Search transactions by name, txid or address" autocomplete="off">
+          <button id="btn-btc-test-all">Dry-run all</button>
           <button id="btn-btc-add-open" class="primary add-open-full">+ Add</button>
         </div>
         <div class="txv-seg" role="tablist" aria-label="Section">
@@ -287,16 +288,13 @@
           <button type="button" id="txv-seg-pending" role="tab">Pending <span class="n" id="txv-n-pending"></span></button>
           <button type="button" id="txv-seg-archived" role="tab">Archived <span class="n" id="txv-n-archived"></span></button>
         </div>
-        <div id="txv-rows"></div>
-        <p class="btc-actions">
-          <button id="btn-btc-test-all">Dry-run all</button>
-          <button id="btn-btc-broadcast-armed" class="danger">Broadcast armed</button>
-        </p>
         <p id="btc-all-msg" class="muted"></p>
+        <div id="txv-rows"></div>
       </div>
       <div class="txv-detail" id="txv-detail">
         <button type="button" class="txv-back" id="txv-back">‹ Transactions</button>
         <div class="card txv-empty" id="txv-empty"><p class="muted">Select a transaction to see it in full.</p></div>
+        <div class="card txv-panel" id="txv-panel" style="display:none"></div>
         <details class="card staged" id="btc-card" open>
           <summary><span class="sum-text">Active</span><button id="btn-btc-add-pill" class="add-tx-pill" type="button">+ Add Tx</button></summary>
           <div id="btc-active-list"></div>
@@ -398,10 +396,10 @@
 
     <div class="card" id="card-arm">
       <div class="section-head">
-        <h2>Global Arm/Disarm</h2>
+        <h2>All transactions</h2>
         <button class="help-btn" id="help-arm" data-help="arm" aria-label="About this setting" title="About this setting">?</button>
       </div>
-      <p><button id="btn-arm-all" class="primary">Arm all</button> <button id="btn-disarm-all">Disarm all</button></p>
+      <p><button id="btn-arm-all" class="primary">Arm all</button> <button id="btn-disarm-all">Disarm all</button> <button id="btn-btc-broadcast-armed" class="danger">Broadcast armed</button></p>
       <p id="arm-all-msg" class="muted"></p>
     </div>
 

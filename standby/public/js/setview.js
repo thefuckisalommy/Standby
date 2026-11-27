@@ -17,7 +17,7 @@ var SETV_GROUPS = [
 var SETV_CARDS = {
   vacation: { name: 'Vacation mode', save: 'btn-save-vacation' },
   grace: { name: 'Grace period', save: 'btn-save-grace' },
-  arm: { name: 'Arm or disarm all' },
+  arm: { name: 'All transactions' },
   nodes: { name: 'Bitcoin nodes', save: 'btn-btc-save-nodes' },
   'price-sources': { name: 'Price sources', save: 'btn-save-price-sources' },
   agreement: { name: 'Price agreement', save: 'btn-save-price-agreement' },

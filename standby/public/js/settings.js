@@ -323,8 +323,8 @@ var SETTINGS_HELP = {
     triggers: ['checkin'],
   },
   arm: {
-    title: 'Global Arm/Disarm',
-    body: 'Arms or disarms every staged transaction at once \u2014 check-in, BTC price, UTXO, block height, set date, fee market, and manual.\n\nDisarming stops automatic firing for all triggers \u2014 nothing broadcasts on its own. A manual broadcast still works while disarmed.\n\nDisarmed check-in transactions freeze their countdown and resume from the same spot when re-armed.\n\n\u2018Arm all\u2019 arms everything, including transactions you had individually disarmed before.',
+    title: 'All transactions',
+    body: 'Arms or disarms every staged transaction at once \u2014 check-in, BTC price, UTXO, block height, set date, fee market, and manual.\n\nDisarming stops automatic firing for all triggers \u2014 nothing broadcasts on its own. A manual broadcast still works while disarmed.\n\nDisarmed check-in transactions freeze their countdown and resume from the same spot when re-armed.\n\n\u2018Arm all\u2019 arms everything, including transactions you had individually disarmed before.\n\n\u2018Broadcast armed\u2019 sends every armed transaction now, after a confirm naming how many.',
     triggers: ['general'],
   },
   nodes: {
@@ -441,7 +441,7 @@ $('set-vacation-indefinite').addEventListener('change', function () {
   $('set-vacation-until').disabled = $('set-vacation-indefinite').checked;
 });
 
-// Global Arm/Disarm: one call arms or disarms every
+// All transactions (Arm all, Disarm all): one call arms or disarms every
 // staged transaction. The server answers with the updated list.
 async function armAll(enabled) {
   try {

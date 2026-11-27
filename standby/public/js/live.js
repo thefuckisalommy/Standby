@@ -221,7 +221,7 @@ async function broadcastArmed() {
   var pending = (S.bitcoin.txs || []).filter(function (t) { return !txStatus(t).settled && !txStatus(t).pending && !setOfTxId(t.id); });
   var armedSets = (S.bitcoin.sets || []).filter(function (s) { return s.enabled && !setStatus(s).settled && !setStatus(s).pending && setMembersOf(s).length; });
   if (!pending.length && !armedSets.length) {
-    setMsg($('btc-all-msg'),
+    setMsg($('arm-all-msg'),
       (S.bitcoin.txs || []).length
         ? 'Nothing to broadcast — every transaction is already archived or pending.'
         : 'Nothing to broadcast — no transactions stored.',
@@ -230,7 +230,7 @@ async function broadcastArmed() {
   }
   var armed = pending.filter(function (t) { return t.enabled; });
   if (!armed.length && !armedSets.length) {
-    setMsg($('btc-all-msg'), 'Nothing to broadcast — no armed transactions to broadcast.', true);
+    setMsg($('arm-all-msg'), 'Nothing to broadcast — no armed transactions to broadcast.', true);
     return;
   }
   var parts = [];
@@ -247,7 +247,7 @@ async function broadcastArmed() {
 async function runBroadcastAll(targets, armedOnly, label, setTargets) {
   setTargets = setTargets || [];
   if (!targets.length && !setTargets.length) {
-    setMsg($('btc-all-msg'), 'Nothing to broadcast — no armed transactions to broadcast.', true);
+    setMsg($('arm-all-msg'), 'Nothing to broadcast — no armed transactions to broadcast.', true);
     return;
   }
   // Standalone targets only; a label-less one reads its short txid.
@@ -276,7 +276,7 @@ async function runBroadcastAll(targets, armedOnly, label, setTargets) {
     var stale = allResults.filter(function (x) { return x.action === 'stale'; }).length;
     var failed = allResults.filter(function (x) { return x.action === 'failed'; }).length;
     var summary = label + ': ' + sent + ' broadcast' + (stale ? ', ' + stale + ' stale' : '') + (failed ? ', ' + failed + ' failed' : '') + '.';
-    setMsg($('btc-all-msg'), summary, failed === 0);
+    setMsg($('arm-all-msg'), summary, failed === 0);
     await load();
     await refreshConfirmations();
     if ($('confirm-modal').classList.contains('open')) {
@@ -291,7 +291,7 @@ async function runBroadcastAll(targets, armedOnly, label, setTargets) {
         }).join('') + '</ul>');
     }
   } catch (e) {
-    setMsg($('btc-all-msg'), e.message, false);
+    setMsg($('arm-all-msg'), e.message, false);
     if ($('confirm-modal').classList.contains('open')) showDetails(label + ' — failed', e.message, '');
   }
 }

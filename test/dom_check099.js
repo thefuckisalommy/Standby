@@ -1765,8 +1765,19 @@ function check(name, cond, detail) {
   check('tx list: exactly one card is shown, the first row’s',
     selCards().length === 1 && cardTitle(selCards()[0]) === elText(txvRows()[0].children[0].children[0]),
     'selected=' + selCards().length);
-  check('tx list: every card has a summary strip of 4 cells (Armed, Sends, Fee, Route / Transactions)',
-    activeCards.every((c) => { const st = c.children.find((x) => x.className === 'tx-stats'); return st && st.children.length === 4; }), '');
+  // A list card: name, then its arm switch; one line per trigger; one
+  // line per transaction. The detail: two boxes (Sends, Made of).
+  const firstRow = txvRows()[0];
+  const rowKids = firstRow.children.map((c) => c.className);
+  check('tx list: a card is the name line, the trigger lines and the transaction lines',
+    rowKids[0] === 'txv-r1' && rowKids[1] === 'txv-rules' && rowKids[2] === 'txv-txs', JSON.stringify(rowKids));
+  check('tx list: an active card carries its arm switch',
+    firstRow.children[0].children.some((c) => (c.className || '').indexOf('txv-arm') !== -1), '');
+  check('tx list: no trigger line says ALL or ANY (AND / OR only)',
+    txvRows().every((r) => r.children[1].children.every((l) => !/\b(ALL|ANY)\b/.test(elText(l)))), '');
+  const boxes = els['txv-panel'].children.find((c) => c.className === 'txv-boxes');
+  check('tx detail: two boxes, Sends and Made of',
+    !!boxes && boxes.children.length === 2 && elText(boxes.children[0].children[0]) === 'Sends' && elText(boxes.children[1].children[0]) === 'Made of', '');
   // A row opens its card (on a phone, its own screen); back returns.
   const row2 = txvRows()[1];
   const row2Name = elText(row2.children[0].children[0]);
@@ -2839,7 +2850,7 @@ function check(name, cond, detail) {
     '');
   check('redesign static: the vacation card has the indefinite option ("Until I say I\'m back")',
     idx.indexOf('id="set-vacation-indefinite"') !== -1 && idx.indexOf("Until I say I'm back") !== -1, '');
-  const armIdx = idx.indexOf('<h2>Global Arm/Disarm</h2>');
+  const armIdx = idx.indexOf('<h2>All transactions</h2>');
   const armBlock = armIdx === -1 ? '' : idx.slice(armIdx, armIdx + 900);
   check('redesign static: the Global Arm/Disarm card exists with Arm all / Disarm all buttons',
     armIdx !== -1 && idx.indexOf('id="btn-arm-all"') !== -1 && idx.indexOf('id="btn-disarm-all"') !== -1,
@@ -2940,7 +2951,7 @@ function check(name, cond, detail) {
   // to"; it closes via Close and X.
   const HELP_KEYS = [
     { key: 'vacation', title: 'Vacation mode', bodyPhrase: 'Freezes the check-in countdown', appliesPhrase: 'Check-in triggers only' },
-    { key: 'arm', title: 'Global Arm/Disarm', bodyPhrase: 'Arms or disarms every staged transaction', appliesPhrase: 'General' },
+    { key: 'arm', title: 'All transactions', bodyPhrase: 'Arms or disarms every staged transaction', appliesPhrase: 'General' },
     { key: 'nodes', title: 'Bitcoin nodes', bodyPhrase: 'The Bitcoin nodes Standby talks to', appliesPhrase: 'General' },
     { key: 'price-sources', title: 'Bitcoin price source', bodyPhrase: 'The two price sources Standby reads', appliesPhrase: 'BTC price triggers only' },
     { key: 'grace', title: 'Grace period', bodyPhrase: 'A pause for ALL triggers', appliesPhrase: 'Check-in, BTC price, UTXO, Block height, Set date, and Fee market triggers' },
