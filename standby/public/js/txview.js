@@ -226,7 +226,10 @@ function txvRow(it, overlaps) {
   var r1 = txvEl('div', 'txv-r1');
   r1.appendChild(txvEl('span', 'txv-name', txvName(it)));
   r1.appendChild(txvEl('span', 'txv-chev', '›'));
-  if (it.section === 'active') r1.appendChild(txvSwitch(it));
+  if (it.section === 'active') {
+    if (it.holder.enabled === false) r1.appendChild(txvEl('span', 'pill muted txv-st', 'Disarmed'));
+    r1.appendChild(txvSwitch(it));
+  }
   row.appendChild(r1);
   row.appendChild(txvRuleLines(it.holder));
   var txs = txvEl('div', 'txv-txs');

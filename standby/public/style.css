@@ -898,6 +898,7 @@ th, td { border-bottom-color: var(--line); }
 .txv-arm { margin-left: auto; }
 /* Trigger lines (list and detail). */
 .txv-rules { margin-top: 8px; }
+.txv-row .txv-rules { padding-top: 6px; border-top: 1px solid var(--line); }
 .txv-rl { display: grid; grid-template-columns: 92px minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 3px 0; font-size: 13px; }
 .txv-ty { font-size: 10.5px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; white-space: nowrap; }
 .txv-ty.t-checkin { color: var(--t-checkin); }
