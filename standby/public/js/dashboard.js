@@ -18,6 +18,7 @@ async function load() {
   refreshConfirmations(); // fire-and-forget: the sent lines show the last known count, then update
   lastLiveSignature = liveSignature(S, status, apiKeys);
   syncSetup();
+  renderAlerts();
 }
 
 // State could not load and nothing was recovered: offer restore or start
@@ -389,10 +390,18 @@ function renderStatusHead(status) {
   var pill = $('status-pill');
   pill.textContent = status.label;
   pill.className = 'pill ' + (PILL_CLASS[status.state] || 'muted');
+  // Every check-in transaction disarmed: nothing will fire, so the card
+  // says Disarmed (grey) whatever the clock reads.
+  var ckBars = checkinBarsData(status);
+  var allOff = ckBars.length > 0 && ckBars.every(function (b) { return b.enabled === false; });
+  if (allOff) { pill.textContent = 'Disarmed'; pill.className = 'pill muted'; }
+  var ckCard = $('checkin-card');
+  if (ckCard) ckCard.classList.toggle('ck-off', allOff);
   // The explainer line only appears when the state needs it.
   var line = $('status-line');
   line.textContent =
-    status.checkinReadError ? 'Warning: the check-in receiver state could not be read — releases are held until it can be read again.'
+    allOff ? 'Every check-in transaction is disarmed, so none will broadcast. Arm one on the Transactions tab to count down again.'
+    : status.checkinReadError ? 'Warning: the check-in receiver state could not be read — releases are held until it can be read again.'
     : status.state === 'not-started' ? 'No check-in recorded yet. Tap “Check in” to start the clock.'
     : status.state === 'vacation' ? 'Vacation mode is on' + (status.vacationUntil ? ' until ' + status.vacationUntil : ' until you say you\u2019re back') + '. The check-in countdown is frozen — the days away never count.'
     : status.state === 'grace' ? 'Grace period is active — the release is held until it ends.'
@@ -409,6 +418,33 @@ function renderStatusHead(status) {
 // Check-in bars as data, one per active check-in rule: from
 // status.checkinTxs, or derived for an older server. Shared by the
 // render and the live patch.
+// The right-hand side of a check-in bar: time left in bold, the due day
+// under it ("32 days left" / "Mon 29 Dec"); disarmed, due or held by a
+// grace say so instead. Shared by the render, the refresh and the tick.
+function fillCkLeft(el, daysSince, windowDays, nextDue, frozen, grace) {
+  if (!el) return;
+  var left = Math.max(0, windowDays - daysSince);
+  var main = frozen ? 'Disarmed' : grace ? 'Held by grace' : left <= 0 ? 'Due now' : left + (left === 1 ? ' day left' : ' days left');
+  var sub = frozen ? 'clock paused' : fmtDueDay(nextDue);
+  el.textContent = '';
+  var b = document.createElement('b');
+  b.textContent = main;
+  el.appendChild(b);
+  if (sub) {
+    var s = document.createElement('span');
+    s.textContent = sub;
+    el.appendChild(s);
+  }
+}
+// The trigger-type class for a readiness condition line: the one type of
+// all its rules, or 'multi' when they differ.
+function triggerTypeClass(holder) {
+  var types = {};
+  triggerSetOf(holder).rules.forEach(function (r) { types[r.type] = true; });
+  var keys = Object.keys(types);
+  return 't-' + (keys.length === 1 ? keys[0] : 'multi');
+}
+
 function checkinBarsData(status) {
   var bars = status.checkinTxs || [];
   if (!bars.length) {
@@ -642,6 +678,11 @@ function renderDashboard(status) {
     cap.className = 'progress-label';
     cap.textContent = daysSince + ' of ' + windowDays + ' days elapsed' + (frozen ? ' — disarmed, frozen' : b.state === 'grace' ? ' — held by grace' : '');
     block.appendChild(cap);
+    block.dataset.nextDue = b.nextDue || '';
+    var leftEl = document.createElement('div');
+    leftEl.className = 'ck-tx-left';
+    fillCkLeft(leftEl, daysSince, windowDays, b.nextDue, frozen, b.state === 'grace');
+    block.appendChild(leftEl);
     barsEl.appendChild(block);
   });
   // Active transactions only (pending and archived never broadcast at
@@ -657,7 +698,8 @@ function renderDashboard(status) {
       // One block per armed rule: label and pills, then the condition
       // ("Fires when ...").
       var item = document.createElement('div');
-      item.className = 'readiness-tx';
+      var holder = e.kind === 'set' ? e.set : e.tx;
+      item.className = 'readiness-tx' + (holder.enabled === false ? ' off' : ' armed');
       var row = document.createElement('div');
       row.className = 'readiness-tx-row';
       var label = document.createElement('b');
@@ -692,7 +734,7 @@ function renderDashboard(status) {
       if (fpill) row.appendChild(fpill);
       item.appendChild(row);
       var stateLine = document.createElement('div');
-      stateLine.className = 'readiness-tx-state';
+      stateLine.className = 'readiness-tx-state ' + triggerTypeClass(holder);
       // The state line is the card's condition text (one row per rule);
       // current values live on the card and in the status sections.
       stateLine.textContent = triggerSetCondition(e.kind === 'set' ? e.set : e.tx);
@@ -733,42 +775,6 @@ function renderDashboard(status) {
   renderNodeStatus('readiness-', 'primary', nodeBase('primary', status.nodeBases), conn);
   renderNodeStatus('readiness-', 'secondary', nodeBase('secondary', status.nodeBases), conn);
   renderExchangeRows(status);
-}
-
-// The Logs tab: broadcast log and recent check-ins.
-function renderLogs(checkins, blog) {
-  var tbody = $('broadcast-log');
-  tbody.innerHTML = '';
-  if (!blog.length) {
-    tbody.innerHTML = '<tr><td colspan="4" class="muted">Nothing logged yet.</td></tr>';
-  } else {
-    blog.forEach(function (e) {
-      var tr = document.createElement('tr');
-      tr.className = 'log-row';
-      tr.innerHTML = '<td></td><td></td><td></td><td></td>';
-      tr.children[0].textContent = fmtDate(e.ts);
-      tr.children[1].textContent = e.kind || '';
-      tr.children[2].textContent = (e.txid || '').slice(0, 4) + '…';
-      tr.children[3].textContent = (e.status || '') + (e.method ? ' (' + e.method + ')' : '');
-      tr.title = 'Click for details';
-      tr.addEventListener('click', function () { showBroadcastDetails(e); });
-      tbody.appendChild(tr);
-    });
-  }
-  var cbody = $('recent-checkins');
-  cbody.innerHTML = '';
-  if (!checkins.length) {
-    cbody.innerHTML = '<tr><td colspan="3" class="muted">None yet.</td></tr>';
-  } else {
-    checkins.forEach(function (c) {
-      var tr = document.createElement('tr');
-      tr.innerHTML = '<td></td><td></td><td></td>';
-      tr.children[0].textContent = fmtDate(c.ts);
-      tr.children[1].textContent = c.method || 'app';
-      tr.children[2].textContent = c.sourceIp || '\u2014';
-      cbody.appendChild(tr);
-    });
-  }
 }
 
 // A check-in shows no success line (the refreshed bars are the

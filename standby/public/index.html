@@ -8,19 +8,28 @@
 </head>
 <body>
 <header class="appbar">
-  <img class="appbar-logo" src="/logo.jpg" alt="Standby logo">
-  <span class="appbar-title">Standby</span>
+  <span class="appbar-brand" id="appbar-brand" title="Dashboard"><img class="appbar-logo" src="/logo.jpg" alt="Standby logo"><span class="appbar-title">Standby</span></span>
+  <nav class="tabs" id="tabs">
+    <button data-tab="dashboard" class="active"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M4 11l8-6.5 8 6.5V20H4z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>Dashboard</button>
+    <button data-tab="bitcoin"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M8 7h12M8 12h12M8 17h12M4 7h.01M4 12h.01M4 17h.01" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>Transactions</button>
+    <button data-tab="settings"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 3v2.5M12 18.5V21M3 12h2.5M18.5 12H21M5.6 5.6l1.8 1.8M16.6 16.6l1.8 1.8M5.6 18.4l1.8-1.8M16.6 7.4l1.8-1.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>Settings</button>
+    <button data-tab="logs"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M3 12h4l3-7 4 14 3-7h4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>Logs</button>
+  </nav>
   <span class="spacer"></span>
-  <details class="burger" id="burger-menu">
-    <summary title="Menu" aria-label="Menu">&#9776;</summary>
-    <nav>
-      <a href="#dashboard" data-tab-link="dashboard">Dashboard</a>
-      <a href="#transactions" data-tab-link="bitcoin">Transactions</a>
-      <a href="#settings" data-tab-link="settings">Settings</a>
-      <a href="#logs" data-tab-link="logs">Logs</a>
-      <a href="#" id="exit-app">Exit App</a>
-    </nav>
-  </details>
+  <div class="hdr-actions">
+    <!-- Back to the Umbrel home: shown on Umbrel only. -->
+    <a class="iconbtn wide" id="exit-app" href="#" style="display:none" title="Back to Umbrel"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M9 14L4 9l5-5M4 9h10a6 6 0 010 12h-3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Umbrel</span></a>
+    <!-- Alerts: what needs a look now (header.js). -->
+    <div class="alerts">
+      <button class="iconbtn" id="btn-alerts" type="button" title="Alerts" aria-label="Alerts" aria-expanded="false"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M6 16V11a6 6 0 0112 0v5l1.5 2h-15L6 16zM10 20.5a2 2 0 004 0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/></svg><span class="badge" id="alerts-count" style="display:none"></span></button>
+      <div class="alerts-panel" id="alerts-panel" style="display:none">
+        <div class="alerts-head">Alerts</div>
+        <ul class="alerts-list" id="alerts-list"></ul>
+      </div>
+    </div>
+    <!-- Lock: forget this browser's login (shown when a password is set). -->
+    <button class="iconbtn" id="btn-lock" type="button" style="display:none" title="Lock (log out this browser)" aria-label="Lock"><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><rect x="5" y="10.5" width="14" height="9.5" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8 10.5V8a4 4 0 018 0v2.5" fill="none" stroke="currentColor" stroke-width="1.8"/></svg></button>
+  </div>
 </header>
 
 <main>
@@ -150,13 +159,6 @@
     <button class="setup-back" id="btn-setup-back">‹ Back</button>
   </div>
 
-  <nav class="tabs" id="tabs">
-    <button data-tab="dashboard" class="active">Dashboard</button>
-    <button data-tab="bitcoin">Transactions</button>
-    <button data-tab="settings">Settings</button>
-    <button data-tab="logs">Logs</button>
-  </nav>
-
   <!-- ============ DASHBOARD ============ -->
   <section class="tab active" id="tab-dashboard">
     <!-- A newer version is out (GET /api/update); "Not now" hides it for
@@ -188,28 +190,25 @@
       <p id="grace-msg" class="muted"></p>
     </div>
 
+    <div class="dash-top">
     <div class="card" id="checkin-card">
-      <div class="section-head">
-        <h2>Check-in</h2>
-        <span id="status-pill" class="pill muted">—</span>
+      <div class="ck-head">
+        <div class="ck-title">
+          <div class="section-head">
+            <h2>Check-in</h2>
+            <span id="status-pill" class="pill muted">—</span>
+          </div>
+          <p class="ck-meta">Last check-in <span id="last-checkin">—</span></p>
+        </div>
+        <button id="btn-checkin" class="primary big btn-checkin-big">✓ Check in now</button>
       </div>
       <div id="checkin-tx-bars"></div>
       <p id="status-line" class="muted">Loading…</p>
-      <dl class="kv" style="margin-top:12px">
-        <dt>Last check-in</dt><dd id="last-checkin">—</dd>
-      </dl>
-      <p style="margin-top:16px">
-        <button id="btn-checkin" class="primary big btn-checkin-big">✓ Check in — I'm here</button>
-      </p>
       <p id="checkin-msg" class="muted"></p>
     </div>
 
-    <div class="card">
-      <h2>Release readiness</h2>
-      <div class="readiness-item">
-        <div class="readiness-label">Transaction</div>
-        <div id="readiness-txs" class="tx-list"></div>
-      </div>
+    <div class="card" id="connections-card">
+      <h2>Connections</h2>
       <div class="readiness-status">
         <div class="readiness-item" id="readiness-node-item">
           <div class="readiness-label">Node Status</div>
@@ -227,50 +226,89 @@
         </div>
       </div>
     </div>
+    </div>
+
+    <div class="card" id="armed-card">
+      <h2>Active transactions</h2>
+      <div id="readiness-txs" class="tx-list"></div>
+    </div>
   </section>
 
   <!-- ============ LOGS ============ -->
   <section class="tab" id="tab-logs">
-    <div class="card">
-      <h2>Broadcast log</h2>
-      <p class="muted">Every dry-run, broadcast, and release attempt is recorded here. Tap a row for the full details of that entry, including the signed transaction hex.</p>
-      <div class="scroll-table">
-      <table><thead><tr><th>When</th><th>Kind</th><th>TXID</th><th>Status</th></tr></thead>
-      <tbody id="broadcast-log"><tr><td colspan="4" class="muted">Nothing logged yet.</td></tr></tbody></table>
+    <!-- Activity: dry runs, broadcasts and check-ins as one timeline.
+         App log: Standby's own recent log lines. js/logs.js. -->
+    <div class="page-head">
+      <h1>Logs</h1>
+      <div class="seg" role="tablist" aria-label="Log view">
+        <button type="button" id="logs-seg-activity" class="on" role="tab">Activity</button>
+        <button type="button" id="logs-seg-app" role="tab">App log</button>
       </div>
     </div>
-
-    <div class="card">
-      <h2>Recent check-ins</h2>
-      <div class="scroll-table">
-      <table><thead><tr><th>When</th><th>Method</th><th>From</th></tr></thead>
-      <tbody id="recent-checkins"><tr><td colspan="3" class="muted">None yet.</td></tr></tbody></table>
+    <div class="card logs-card" id="logs-activity">
+      <div class="logs-tools">
+        <button type="button" class="fchip on" id="logs-f-all">All <span class="n" id="logs-n-all"></span></button>
+        <button type="button" class="fchip" id="logs-f-broadcast">Broadcasts <span class="n" id="logs-n-broadcast"></span></button>
+        <button type="button" class="fchip" id="logs-f-dryrun">Dry runs <span class="n" id="logs-n-dryrun"></span></button>
+        <button type="button" class="fchip" id="logs-f-checkin">Check-ins <span class="n" id="logs-n-checkin"></span></button>
+        <input id="logs-search" class="logs-search" type="search" placeholder="Search name or txid" aria-label="Search the activity" autocomplete="off">
       </div>
+      <div id="logs-activity-list"><p class="muted logs-none">Nothing logged yet.</p></div>
+    </div>
+    <div id="logs-app" style="display:none">
+      <div class="card logs-card">
+        <div class="logs-tools">
+          <button type="button" class="fchip on" id="logs-lv-all">All <span class="n" id="logs-lvn-all"></span></button>
+          <button type="button" class="fchip" id="logs-lv-info">Info <span class="n" id="logs-lvn-info"></span></button>
+          <button type="button" class="fchip warn" id="logs-lv-warn">Warnings <span class="n" id="logs-lvn-warn"></span></button>
+          <button type="button" class="fchip bad" id="logs-lv-error">Errors <span class="n" id="logs-lvn-error"></span></button>
+          <input id="logs-app-search" class="logs-search" type="search" placeholder="Filter lines" aria-label="Filter log lines" autocomplete="off">
+          <label class="switch small green logs-follow" title="Keep the newest line in view"><input type="checkbox" id="logs-follow" checked><span class="slider"></span><span class="lbl">Follow</span></label>
+          <button type="button" id="logs-download">Download</button>
+        </div>
+        <div class="console" id="logs-console"><p class="muted">Loading…</p></div>
+      </div>
+      <p class="muted logs-foot" id="logs-app-foot"></p>
     </div>
   </section>
 
   <!-- ============ BITCOIN ============ -->
   <section class="tab" id="tab-bitcoin">
-    <details class="card staged" id="btc-card" open>
-      <summary><span class="sum-text">Staged Transactions</span><button id="btn-btc-add-pill" class="add-tx-pill" type="button">+ Add Tx</button></summary>
-      <p class="btc-actions">
-        <button id="btn-btc-test-all">Dry-run all</button>
-        <button id="btn-btc-broadcast-armed" class="danger">Broadcast armed</button>
-      </p>
-      <p id="btc-all-msg" class="muted"></p>
-      <div id="btc-active-list"></div>
-    </details>
-    <details class="card pending" id="pending-card" open>
-      <summary>Pending Transactions</summary>
-      <div id="btc-pending-list"></div>
-    </details>
-    <details class="card archived" id="archived-card">
-      <summary>Archived Transactions</summary>
-      <p class="muted">Transactions that have already been broadcast, or whose inputs were declared spent.</p>
-      <div id="btc-archived-list"></div>
-    </details>
-    <div class="card">
-      <button id="btn-btc-add-open" class="primary add-open-full">+ Add a pre-signed transaction</button>
+    <!-- A list (left) and the selected transaction in full (right); on a
+         phone the list, then the transaction's own screen. js/txview.js. -->
+    <div class="txv" id="txv">
+      <div class="card txv-list" id="txv-list">
+        <div class="txv-tools">
+          <input id="txv-search" type="search" placeholder="Search" title="Search by name, txid or address" aria-label="Search transactions by name, txid or address" autocomplete="off">
+          <button id="btn-btc-test-all">Dry-run all</button>
+          <button id="btn-btc-add-open" class="primary add-open-full">+ Add</button>
+        </div>
+        <div class="txv-seg" role="tablist" aria-label="Section">
+          <button type="button" id="txv-seg-active" class="on" role="tab">Active <span class="n" id="txv-n-active"></span></button>
+          <button type="button" id="txv-seg-pending" role="tab">Pending <span class="n" id="txv-n-pending"></span></button>
+          <button type="button" id="txv-seg-archived" role="tab">Archived <span class="n" id="txv-n-archived"></span></button>
+        </div>
+        <p id="btc-all-msg" class="muted"></p>
+        <div id="txv-rows"></div>
+      </div>
+      <div class="txv-detail" id="txv-detail">
+        <button type="button" class="txv-back" id="txv-back">‹ Transactions</button>
+        <div class="card txv-empty" id="txv-empty"><p class="muted">Select a transaction to see it in full.</p></div>
+        <div class="card txv-panel" id="txv-panel" style="display:none"></div>
+        <details class="card staged" id="btc-card" open>
+          <summary><span class="sum-text">Active</span><button id="btn-btc-add-pill" class="add-tx-pill" type="button">+ Add Tx</button></summary>
+          <div id="btc-active-list"></div>
+        </details>
+        <details class="card pending" id="pending-card" open>
+          <summary>Pending</summary>
+          <div id="btc-pending-list"></div>
+        </details>
+        <details class="card archived" id="archived-card">
+          <summary>Archived</summary>
+          <p class="muted">Transactions that have already been broadcast, or whose inputs were declared spent.</p>
+          <div id="btc-archived-list"></div>
+        </details>
+      </div>
     </div>
   </section>
 
@@ -280,6 +318,17 @@
          threshold. -->
     <!-- Settings filter: reads the same triggers array as the "?" pop-outs
          (SETTINGS_HELP in app.js). -->
+    <div class="setv" id="setv">
+    <!-- Sections in groups: a list on the left (search, each section with its
+         state), one group at a time on the right; on a phone, the list, then
+         a group's own screen. One Save bar for every changed section.
+         js/setview.js. -->
+    <div class="card setnav" id="setnav">
+      <input id="set-search" class="set-search" type="search" placeholder="Search settings" aria-label="Search settings" autocomplete="off">
+      <div id="setnav-groups"></div>
+    </div>
+    <div class="set-content" id="set-content">
+    <button type="button" class="set-back" id="set-back">‹ Settings</button>
     <div class="settings-filter" id="settings-filter">
       <label for="filter-select">Show:</label>
       <select id="filter-select" aria-label="Filter settings">
@@ -294,6 +343,8 @@
       </select>
     </div>
 
+    <div class="set-group" id="sg-safety" data-group="safety">
+      <div class="set-group-head"><h1>Safety</h1><p class="lead">Pause or hold what would fire.</p></div>
     <div class="card" id="card-vacation">
       <div class="section-head">
         <h2>Vacation mode</h2>
@@ -309,15 +360,52 @@
       <p id="vacation-msg" class="muted"></p>
     </div>
 
+    <div class="card" id="card-grace">
+      <div class="section-head">
+        <h2>Grace period</h2>
+        <label class="switch green" id="grace-enabled-wrap" title="Grace period on — triggers pause after an offline gap">
+          <input type="checkbox" id="grace-enabled" checked>
+          <span class="slider"></span>
+        </label>
+        <button class="help-btn" id="help-grace" data-help="grace" aria-label="About this setting" title="About this setting">?</button>
+      </div>
+      <div id="grace-fields">
+      <label for="set-grace-offline">Trigger grace after offline for</label>
+      <select id="set-grace-offline">
+        <option value="1">1 day</option>
+        <option value="3">3 days</option>
+        <option value="7" selected>7 days</option>
+        <option value="14">14 days</option>
+        <option value="30">30 days</option>
+      </select>
+      <label for="set-grace-duration">Grace period lasts</label>
+      <select id="set-grace-duration">
+        <option value="1">1 day</option>
+        <option value="3">3 days</option>
+        <option value="7" selected>7 days</option>
+        <option value="14">14 days</option>
+        <option value="30">30 days</option>
+        <option value="indefinite">Indefinite — until you resume</option>
+      </select>
+      </div>
+      <p>
+        <button id="btn-save-grace" class="primary">Save grace period</button>
+      </p>
+      <p id="grace-settings-msg" class="muted"></p>
+    </div>
+
     <div class="card" id="card-arm">
       <div class="section-head">
-        <h2>Global Arm/Disarm</h2>
+        <h2>All transactions</h2>
         <button class="help-btn" id="help-arm" data-help="arm" aria-label="About this setting" title="About this setting">?</button>
       </div>
-      <p><button id="btn-arm-all" class="primary">Arm all</button> <button id="btn-disarm-all">Disarm all</button></p>
+      <p><button id="btn-arm-all" class="primary">Arm all</button> <button id="btn-disarm-all">Disarm all</button> <button id="btn-btc-broadcast-armed" class="danger">Broadcast armed</button></p>
       <p id="arm-all-msg" class="muted"></p>
     </div>
 
+    </div>
+    <div class="set-group" id="sg-connections" data-group="connections">
+      <div class="set-group-head"><h1>Connections</h1><p class="lead">Where Standby reads the chain and the BTC price, and broadcasts.</p></div>
     <div class="card" id="card-nodes">
       <div class="section-head">
         <h2>Bitcoin nodes</h2>
@@ -430,40 +518,6 @@
       <p id="price-sources-msg" class="muted"></p>
     </div>
 
-    <div class="card" id="card-grace">
-      <div class="section-head">
-        <h2>Grace period</h2>
-        <label class="switch green" id="grace-enabled-wrap" title="Grace period on — triggers pause after an offline gap">
-          <input type="checkbox" id="grace-enabled" checked>
-          <span class="slider"></span>
-        </label>
-        <button class="help-btn" id="help-grace" data-help="grace" aria-label="About this setting" title="About this setting">?</button>
-      </div>
-      <div id="grace-fields">
-      <label for="set-grace-offline">Trigger grace after offline for</label>
-      <select id="set-grace-offline">
-        <option value="1">1 day</option>
-        <option value="3">3 days</option>
-        <option value="7" selected>7 days</option>
-        <option value="14">14 days</option>
-        <option value="30">30 days</option>
-      </select>
-      <label for="set-grace-duration">Grace period lasts</label>
-      <select id="set-grace-duration">
-        <option value="1">1 day</option>
-        <option value="3">3 days</option>
-        <option value="7" selected>7 days</option>
-        <option value="14">14 days</option>
-        <option value="30">30 days</option>
-        <option value="indefinite">Indefinite — until you resume</option>
-      </select>
-      </div>
-      <p>
-        <button id="btn-save-grace" class="primary">Save grace period</button>
-      </p>
-      <p id="grace-settings-msg" class="muted"></p>
-    </div>
-
     <div class="card" id="card-agreement">
       <div class="section-head">
         <h2>Price agreement</h2>
@@ -477,6 +531,9 @@
       <p id="price-agreement-msg" class="muted"></p>
     </div>
 
+    </div>
+    <div class="set-group" id="sg-checks" data-group="checks">
+      <div class="set-group-head"><h1>Checks and fees</h1><p class="lead">How often triggers are checked, and how a broadcast fee is judged.</p></div>
     <div class="card" id="card-cadence">
       <div class="section-head">
         <h2>Check cadence</h2>
@@ -517,6 +574,9 @@
       <p id="fee-history-note" class="muted"></p>
     </div>
 
+    </div>
+    <div class="set-group" id="sg-checkin" data-group="checkin">
+      <div class="set-group-head"><h1>Check-in</h1><p class="lead">Check in from your phone or another device.</p></div>
     <div class="card" id="card-keys">
       <div class="section-head">
         <h2>Check-in API keys</h2>
@@ -547,23 +607,9 @@
       <p id="api-keys-msg" class="muted"></p>
     </div>
 
-    <div class="card" id="card-backup">
-      <div class="section-head">
-        <h2>Data backup</h2>
-        <button class="help-btn" id="help-backup" data-help="backup" aria-label="About this setting" title="About this setting">?</button>
-      </div>
-      <p class="muted">Download an encrypted backup (recommended) or an unencrypted one.</p>
-      <p class="inline-btns">
-        <button id="btn-backup-download">Download Backup</button>
-        <button id="btn-backup-restore">Restore</button>
-        <input type="file" id="backup-file" accept="application/json,.json" style="display:none">
-      </p>
-      <p id="backup-msg" class="muted"></p>
     </div>
-
-    <!-- App login: the password (set here, or by STANDBY_PASSWORD / Umbrel,
-         when it is only described), and Log out, which signs out every
-         device. -->
+    <div class="set-group" id="sg-security" data-group="security">
+      <div class="set-group-head"><h1>Security and data</h1><p class="lead">Who can open Standby, and your data.</p></div>
     <div class="card" id="card-session">
       <div class="section-head">
         <h2>App login</h2>
@@ -596,6 +642,33 @@
     <!-- App version from /api/health, at the bottom of General settings. -->
     <!-- This computer: the Windows and Linux downloads only (GET
          /api/desktop). Start with the computer, and Stop Standby. -->
+    <div class="card" id="card-backup">
+      <div class="section-head">
+        <h2>Data backup</h2>
+        <button class="help-btn" id="help-backup" data-help="backup" aria-label="About this setting" title="About this setting">?</button>
+      </div>
+      <p class="muted">Download an encrypted backup (recommended) or an unencrypted one.</p>
+      <p class="inline-btns">
+        <button id="btn-backup-download">Download Backup</button>
+        <button id="btn-backup-restore">Restore</button>
+        <input type="file" id="backup-file" accept="application/json,.json" style="display:none">
+      </p>
+      <p id="backup-msg" class="muted"></p>
+    </div>
+
+    <!-- App login: the password (set here, or by STANDBY_PASSWORD / Umbrel,
+         when it is only described), and Log out, which signs out every
+         device. -->
+    <div class="card danger-card" id="card-fresh">
+      <div class="section-head">
+        <h2>Start fresh</h2>
+      </div>
+      <p class="muted">Delete every transaction, set, trigger, check-in, log, API key and saved node login, and the automatic backups on this device. Standby restarts as a new install. <span id="fresh-login-note"></span></p>
+      <p class="inline-btns"><button id="btn-fresh-backup">Download a backup first</button> <button id="btn-fresh-delete" class="danger">Delete all data…</button></p>
+    </div>
+    </div>
+    <div class="set-group" id="sg-app" data-group="app">
+      <div class="set-group-head"><h1>App</h1><p class="lead">This computer and the app version.</p></div>
     <div class="card" id="card-desktop" style="display:none">
       <div class="section-head">
         <h2>This computer</h2>
@@ -625,12 +698,13 @@
     </div>
 
     <!-- Start fresh: delete all data (POST /api/state/reset). -->
-    <div class="card danger-card" id="card-fresh">
-      <div class="section-head">
-        <h2>Start fresh</h2>
-      </div>
-      <p class="muted">Delete every transaction, set, trigger, check-in, log, API key and saved node login, and the automatic backups on this device. Standby restarts as a new install. <span id="fresh-login-note"></span></p>
-      <p class="inline-btns"><button id="btn-fresh-backup">Download a backup first</button> <button id="btn-fresh-delete" class="danger">Delete all data…</button></p>
+    </div>
+    <div class="savebar" id="savebar" style="display:none">
+      <span class="savebar-t"><b>Unsaved changes</b> · <span id="savebar-what"></span></span>
+      <button type="button" id="savebar-discard">Discard</button>
+      <button type="button" id="savebar-save" class="primary">Save changes</button>
+    </div>
+    </div>
     </div>
   </section>
 </main>
@@ -961,9 +1035,13 @@
 <script src="/js/dashboard.js"></script>
 <script src="/js/transactions.js"></script>
 <script src="/js/sets.js"></script>
+<script src="/js/txview.js"></script>
 <script src="/js/live.js"></script>
 <script src="/js/settings.js"></script>
+<script src="/js/setview.js"></script>
 <script src="/js/setup.js"></script>
+<script src="/js/logs.js"></script>
+<script src="/js/header.js"></script>
 <script src="/js/main.js"></script>
 </body>
 </html>

@@ -2,7 +2,10 @@
 const store = require('../store');
 const bitcoin = require('../bitcoin');
 const { applyGrace, checkinLiveOffsetMs, checkinStatus, graceStatus, mergeExternalCheckin, sanitizeState, startupWarnings } = require('../checkin');
-const { DATA_DIR } = require('../config');
+const fs = require('fs');
+const path = require('path');
+const applog = require('../applog');
+const { DATA_DIR, LOG_FILE } = require('../config');
 const { exchangeStatusFor, priceAgreementPctOf, priceCacheForState, priceSourcesOf } = require('../prices');
 const { currentFeesForState, evaluateRelease, feePeakForState, refreshMaraWaiting, refreshPublicFallbacks } = require('../release');
 const { checkTriggerNow, triggerStatusFor } = require('../rules');
@@ -125,6 +128,23 @@ module.exports = async function stateRoutes(ctx) {
   // GET /api/broadcast/log — dry-runs, broadcasts, release attempts.
   if (req.method === 'GET' && pathname === '/api/broadcast/log') {
     return sendJson(res, 200, store.readBroadcastLog(DATA_DIR, 50).reverse());
+  }
+
+  // GET /api/logs/app — the app's recent log lines (?after=N for newer
+  // ones only), and whether a log file holds older ones.
+  if (req.method === 'GET' && pathname === '/api/logs/app') {
+    let file = null;
+    try { if (LOG_FILE && fs.statSync(LOG_FILE).isFile()) file = path.basename(LOG_FILE); } catch { /* none yet */ }
+    const after = new URL(req.url, 'http://x').searchParams.get('after');
+    return sendJson(res, 200, { lines: applog.recent(after), max: applog.MAX_LINES, file });
+  }
+
+  // GET /api/logs/app/file — the log file itself (the downloads), as text.
+  if (req.method === 'GET' && pathname === '/api/logs/app/file') {
+    let text;
+    try { text = fs.readFileSync(LOG_FILE, 'utf8'); } catch { return sendError(res, 404, 'No log file on this install.'); }
+    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Content-Disposition': 'attachment; filename="standby.log"', 'Cache-Control': 'no-store' });
+    return res.end(text);
   }
 
   // POST /api/release/check: run the release evaluation now (the full tick

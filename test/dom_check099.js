@@ -1689,8 +1689,8 @@ function check(name, cond, detail) {
 
   // --- 11. Staged Transactions card ---
   // A <details>, open by default.
-  check('staged card: the card is titled "Staged Transactions" (static HTML)',
-    idx.indexOf('Staged Transactions') !== -1 && idx.indexOf('id="btc-card"') !== -1, '');
+  check('staged card: the card is titled "Active" (static HTML)',
+    idx.indexOf('<span class="sum-text">Active</span>') !== -1 && idx.indexOf('id="btc-card"') !== -1, '');
   check('staged card: the old "Pre-signed Bitcoin transactions" title is gone (static HTML)',
     idx.indexOf('Pre-signed Bitcoin transactions') === -1, '');
   const btcTag = (idx.match(/<details[^>]*id="btc-card"[^>]*>/) || [''])[0];
@@ -1748,6 +1748,96 @@ function check(name, cond, detail) {
   check('add popup: Cancel closes the popup',
     els['add-modal'] && !els['add-modal'].classList.contains('open'),
     els['add-modal'] ? 'open=' + els['add-modal'].classList.contains('open') : 'no add-modal');
+
+  // --- 11c. Transactions list and detail (js/txview.js) ---
+  // One row per active card, the Active count matches, exactly one card
+  // is selected (the first row's), and each card carries a 4-cell
+  // summary strip.
+  const txvRows = () => els['txv-rows'].children.filter((r) => r.className === 'txv-row');
+  const activeCards = els['btc-active-list'].children.filter((c) => (c.className || '').indexOf('tx-card') !== -1);
+  const selCards = () => ['btc-active-list', 'btc-pending-list', 'btc-archived-list']
+    .flatMap((id) => els[id].children).filter((c) => c.classList && c.classList.contains('txv-sel'));
+  check('tx list: one row per active card',
+    txvRows().length === activeCards.length && activeCards.length >= 2,
+    'rows=' + txvRows().length + ' cards=' + activeCards.length);
+  check('tx list: the Active count matches the rows',
+    els['txv-n-active'].textContent === String(txvRows().length), 'count=' + els['txv-n-active'].textContent);
+  check('tx list: exactly one card is shown, the first row’s',
+    selCards().length === 1 && cardTitle(selCards()[0]) === elText(txvRows()[0].children[0].children[0]),
+    'selected=' + selCards().length);
+  // A list card: name, then its arm switch; one line per trigger; one
+  // line per transaction. The detail: two boxes (Sends, Made of).
+  const firstRow = txvRows()[0];
+  const rowKids = firstRow.children.map((c) => c.className);
+  check('tx list: a card is the name line, the trigger lines and the transaction lines',
+    rowKids[0] === 'txv-r1' && rowKids[1] === 'txv-rules' && rowKids[2] === 'txv-txs', JSON.stringify(rowKids));
+  check('tx list: an active card carries its arm switch',
+    firstRow.children[0].children.some((c) => (c.className || '').indexOf('txv-arm') !== -1), '');
+  check('tx list: no trigger line says ALL or ANY (AND / OR only)',
+    txvRows().every((r) => r.children[1].children.every((l) => !/\b(ALL|ANY)\b/.test(elText(l)))), '');
+  const boxes = els['txv-panel'].children.find((c) => c.className === 'txv-boxes');
+  check('tx detail: two boxes, Sends and Made of',
+    !!boxes && boxes.children.length === 2 && elText(boxes.children[0].children[0]) === 'Sends' && elText(boxes.children[1].children[0]) === 'Made of', '');
+  // A row opens its card (on a phone, its own screen); back returns.
+  const row2 = txvRows()[1];
+  const row2Name = elText(row2.children[0].children[0]);
+  row2.click();
+  check('tx list: tapping a row shows that card',
+    selCards().length === 1 && cardTitle(selCards()[0]) === row2Name, 'want ' + row2Name);
+  check('tx list: tapping a row opens its screen (phone)', els['txv'].classList.contains('detail-open'), '');
+  els['txv-back'].click();
+  check('tx list: back returns to the list', !els['txv'].classList.contains('detail-open'), '');
+  check('tx list: the selection stays after going back',
+    selCards().length === 1 && cardTitle(selCards()[0]) === row2Name, '');
+  // Search narrows the rows; clearing it brings them back.
+  els['txv-search'].value = 'zz-no-such-transaction';
+  els['txv-search'].fire('input');
+  check('tx list: a search with no match shows no rows and says so',
+    txvRows().length === 0 && els['txv-rows'].children.some((c) => (c.className || '').indexOf('txv-none') !== -1), '');
+  els['txv-search'].value = '';
+  els['txv-search'].fire('input');
+  check('tx list: clearing the search brings the rows back', txvRows().length === activeCards.length, 'rows=' + txvRows().length);
+  // The Archived switch lists archived items (none yet, so it says so).
+  els['txv-seg-archived'].click();
+  check('tx list: the Archived switch is selected and its list is shown',
+    els['txv-seg-archived'].classList.contains('on') && !els['txv-seg-active'].classList.contains('on'), '');
+  els['txv-seg-active'].click();
+  check('tx list: back on Active, its rows return', txvRows().length === activeCards.length, 'rows=' + txvRows().length);
+
+  // --- 11d. Settings groups and the Save bar (js/setview.js) ---
+  // An edit in a section that saves shows the bar, naming the section;
+  // Save presses that section's own (hidden) Save, once; Discard redraws.
+  const navNames = () => els['setnav-groups'].children.flatMap((g) => (g.children[1] || { children: [] }).children)
+    .map((it) => elText(it.children.find((c) => c.className === 'setnav-name') || {}));
+  check('settings nav: lists the sections by group (Vacation mode, Bitcoin nodes, App login)',
+    ['Vacation mode', 'Bitcoin nodes', 'App login'].every((n) => navNames().includes(n)), JSON.stringify(navNames()));
+  check('settings nav: the Save bar is hidden with nothing changed', els['savebar'].style.display === 'none', '');
+  els['card-cadence'].fire('input');
+  check('settings nav: an edit shows the Save bar naming the section',
+    els['savebar'].style.display === '' && els['savebar-what'].textContent === 'Check cadence', els['savebar-what'].textContent);
+  const cadSave = els['btn-save-check-cadence'];
+  const cadListeners = cadSave.listeners.click;
+  let cadPressed = 0;
+  cadSave.listeners.click = [() => { cadPressed += 1; }];
+  els['savebar-save'].click();
+  cadSave.listeners.click = cadListeners;
+  check('settings nav: Save presses the section’s own Save once and hides the bar',
+    cadPressed === 1 && els['savebar'].style.display === 'none', 'pressed=' + cadPressed);
+  els['card-vacation'].fire('change');
+  els['savebar-discard'].click();
+  check('settings nav: Discard redraws and hides the bar', els['savebar'].style.display === 'none', '');
+  els['set-search'].value = 'cadence';
+  els['set-search'].fire('input');
+  check('settings nav: search narrows the list', navNames().length >= 1 && navNames().every((n) => n === 'Check cadence'), JSON.stringify(navNames()));
+  els['set-search'].value = '';
+  els['set-search'].fire('input');
+
+  // --- 11e. Logs: Activity and App log (js/logs.js) ---
+  els['logs-seg-app'].click();
+  check('logs: App log shows its view and hides Activity',
+    els['logs-app'].style.display === '' && els['logs-activity'].style.display === 'none', '');
+  els['logs-seg-activity'].click();
+  check('logs: Activity comes back', els['logs-activity'].style.display === '' && els['logs-app'].style.display === 'none', '');
 
   // --- 12. status pill: "armed", not "Ready + armed" ---
   // A problem state reads "Label + armed"; disarmed reads "unarmed". A
@@ -1901,6 +1991,24 @@ function check(name, cond, detail) {
   check('check-in resets: the status pill reads "On track" again (clock fresh, nothing past due)',
     els['status-pill'] && els['status-pill'].textContent === 'On track',
     els['status-pill'] && els['status-pill'].textContent);
+  // Every check-in holder disarmed: the pill reads a grey "Disarmed" and
+  // the card is marked off; arming them again restores it.
+  const stOff = await (await fetch('/api/state')).json();
+  const armedTx = (stOff.bitcoin.txs || []).filter((t) => t.enabled).map((t) => t.id);
+  const armedSets = (stOff.bitcoin.sets || []).filter((s) => s.enabled).map((s) => s.id);
+  for (const id of armedTx) await fetch('/api/bitcoin/txs/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: false }) });
+  for (const id of armedSets) await fetch('/api/bitcoin/sets/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: false }) });
+  await rerender(appJs);
+  check('check-in disarmed: with every check-in transaction disarmed the pill reads a grey "Disarmed"',
+    els['status-pill'].textContent === 'Disarmed' && els['status-pill'].className === 'pill muted',
+    els['status-pill'].textContent + ' / ' + els['status-pill'].className);
+  check('check-in disarmed: the card is marked off and says none will broadcast',
+    els['checkin-card'].classList.contains('ck-off') && /none will broadcast/.test(els['status-line'].textContent), els['status-line'].textContent);
+  for (const id of armedTx) await fetch('/api/bitcoin/txs/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: true }) });
+  for (const id of armedSets) await fetch('/api/bitcoin/sets/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: true }) });
+  await rerender(appJs);
+  check('check-in disarmed: armed again, the pill is back to "On track"',
+    els['status-pill'].textContent === 'On track' && !els['checkin-card'].classList.contains('ck-off'), els['status-pill'].textContent);
   check('check-in resets: the grace card is still visible — checking in does not clear the grace',
     els['grace-card'] && els['grace-card'].style.display !== 'none',
     els['grace-card'] && els['grace-card'].style.display);
@@ -2023,9 +2131,9 @@ function check(name, cond, detail) {
     && idx.indexOf('id="grace-enabled"') < idx.indexOf('id="help-grace"'), '');
   check('grace settings static: the grace fields wrapper exists in the HTML',
     idx.indexOf('id="grace-fields"') !== -1, '');
-  check('grace settings static: the grace card sits after the Bitcoin price source card',
-    idx.indexOf('id="btn-save-grace"') !== -1 && idx.indexOf('id="btn-save-price-sources"') !== -1
-    && idx.indexOf('id="btn-save-grace"') > idx.indexOf('id="btn-save-price-sources"'), '');
+  check('grace settings static: the grace card sits in Safety, after Vacation mode',
+    idx.indexOf('id="sg-safety"') !== -1 && idx.indexOf('id="card-vacation"') > idx.indexOf('id="sg-safety"')
+    && idx.indexOf('id="card-grace"') > idx.indexOf('id="card-vacation"') && idx.indexOf('id="card-grace"') < idx.indexOf('id="sg-connections"'), '');
   check('grace settings static: the offline dropdown offers 1/3/7/14/30 days',
     JSON.stringify(selectValues(idx, 'set-grace-offline')) === JSON.stringify(['1', '3', '7', '14', '30']),
     JSON.stringify(selectValues(idx, 'set-grace-offline')));
@@ -2742,7 +2850,7 @@ function check(name, cond, detail) {
     '');
   check('redesign static: the vacation card has the indefinite option ("Until I say I\'m back")',
     idx.indexOf('id="set-vacation-indefinite"') !== -1 && idx.indexOf("Until I say I'm back") !== -1, '');
-  const armIdx = idx.indexOf('<h2>Global Arm/Disarm</h2>');
+  const armIdx = idx.indexOf('<h2>All transactions</h2>');
   const armBlock = armIdx === -1 ? '' : idx.slice(armIdx, armIdx + 900);
   check('redesign static: the Global Arm/Disarm card exists with Arm all / Disarm all buttons',
     armIdx !== -1 && idx.indexOf('id="btn-arm-all"') !== -1 && idx.indexOf('id="btn-disarm-all"') !== -1,
@@ -2843,7 +2951,7 @@ function check(name, cond, detail) {
   // to"; it closes via Close and X.
   const HELP_KEYS = [
     { key: 'vacation', title: 'Vacation mode', bodyPhrase: 'Freezes the check-in countdown', appliesPhrase: 'Check-in triggers only' },
-    { key: 'arm', title: 'Global Arm/Disarm', bodyPhrase: 'Arms or disarms every staged transaction', appliesPhrase: 'General' },
+    { key: 'arm', title: 'All transactions', bodyPhrase: 'Arms or disarms every staged transaction', appliesPhrase: 'General' },
     { key: 'nodes', title: 'Bitcoin nodes', bodyPhrase: 'The Bitcoin nodes Standby talks to', appliesPhrase: 'General' },
     { key: 'price-sources', title: 'Bitcoin price source', bodyPhrase: 'The two price sources Standby reads', appliesPhrase: 'BTC price triggers only' },
     { key: 'grace', title: 'Grace period', bodyPhrase: 'A pause for ALL triggers', appliesPhrase: 'Check-in, BTC price, UTXO, Block height, Set date, and Fee market triggers' },

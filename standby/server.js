@@ -13,6 +13,7 @@
 const http = require('http');
 const { PORT, BIND, VERSION, DATA_DIR, PUBLIC_DIR, CHECKIN_DIR, LOG_FILE, STARTUP_TICK_MS, DEPLOYMENT, PASSWORD, MEMPOOL_OVERRIDE, IGNORED_TEST_OVERRIDES, OPEN_BROWSER, STANDALONE, BACKGROUND } = require('./lib/config');
 require('./lib/logfile').install(LOG_FILE);
+require('./lib/applog').install();
 const instance = require('./lib/instance');
 const { requireWritable } = require('./lib/startup');
 const store = require('./lib/store');

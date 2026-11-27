@@ -1,7 +1,7 @@
 // Width check: Chromium (Playwright) at 390px against the app the DOM
 // launcher runs on :3478. Forms, notes, Settings cards, help buttons and
 // filter must fit; readiness rows stay one line; exchange and node pills
-// share a right edge; the tab bar sticks under the appbar.
+// share a right edge; on a phone the tabs are a bar along the bottom.
 // Exits 0 when every check passes; prints PASS/FAIL per check, then
 // FAILURES: N.
 'use strict';
@@ -25,7 +25,8 @@ function check(name, cond, detail) {
     const b = [...document.querySelectorAll('#tabs button')].find((x) => x.dataset.tab === 'bitcoin');
     if (b) b.click();
   });
-  await page.waitForSelector('.tx-card', { timeout: 10000 });
+  // The list shows first; each row opens its transaction's own screen.
+  await page.waitForSelector('.txv-row', { timeout: 10000 });
   await page.waitForTimeout(400);
 
   // No overflow inside the element and fully inside the 390px viewport.
@@ -72,63 +73,39 @@ function check(name, cond, detail) {
     check(name, sw <= 390, 'document scrollWidth ' + sw);
   }
 
-  // --- Trigger subcards: three stacked rows ---
-  // Each card's subcard fits at 390px and its rows (header, condition,
-  // state) each start below the previous.
-  const subcards = await page.evaluate(() => {
-    return [...document.querySelectorAll('.tx-card')].map((card) => {
-      // The first .tx-trigger is the blue tx subcard (.tx-item); the
-      // trigger box is the first plain one.
-      const box = card.querySelector('.tx-trigger:not(.tx-item)');
-      if (!box) return null;
-      const rows = [...box.children].filter((el) => !el.classList.contains('tx-details')).map((el) => {
-        const r = el.getBoundingClientRect();
-        return { top: Math.round(r.top * 10) / 10, bottom: Math.round(r.bottom * 10) / 10 };
-      });
-      const item = card.querySelector('.tx-trigger.tx-item');
-      const hasDetails = !!item && !!item.querySelector(':scope > .tx-details');
-      const br = box.getBoundingClientRect();
-      return { sw: box.scrollWidth, cw: box.clientWidth, right: Math.round(br.right * 10) / 10,
-        visible: br.width > 0, rows, hasDetails };
-    });
-  });
-  check('width subcards: every tx card has a subcard (at least the 4 seeded)',
-    subcards.length >= 4 && subcards.every(Boolean),
-    'subcards found: ' + subcards.filter(Boolean).length);
-  // One log line per subcard, so a failure survives check()'s 200-char
-  // truncation.
-  const fitsOk = subcards.length >= 4 && subcards.every((s) => s && s.visible && s.sw <= s.cw && s.right <= 390);
-  if (!fitsOk) {
-    subcards.forEach((s, i) => console.log('  width subcards fit: subcard ' + i + ': ' + JSON.stringify(s && { sw: s.sw, cw: s.cw, right: s.right, visible: s.visible })));
+  // --- The list cards and each transaction's screen ---
+  // Each trigger is one line in a list card; each card's screen (opened
+  // from the list, closed with the back link) fits at 390px.
+  const ruleLines = await page.evaluate(() => [...document.querySelectorAll('#txv-rows .txv-rl')].map((l) => Math.round(l.getBoundingClientRect().height)));
+  check('width list: every trigger in a list card takes one line',
+    ruleLines.length >= 4 && ruleLines.every((h) => h > 0 && h <= 30), JSON.stringify(ruleLines));
+  const screens = [];
+  const nRows = await page.locator('#txv-rows .txv-row').count();
+  for (let i = 0; i < nRows; i++) {
+    await page.locator('#txv-rows .txv-row .txv-name').nth(i).click();
+    await page.waitForTimeout(150);
+    screens.push(await page.evaluate(() => {
+      const p = document.getElementById('txv-panel');
+      const r = p.getBoundingClientRect();
+      return { visible: r.width > 0, sw: p.scrollWidth, cw: p.clientWidth, right: Math.round(r.right), pageSw: document.documentElement.scrollWidth,
+        rules: p.querySelectorAll('.txv-rl').length, txs: p.querySelectorAll('.txv-txb').length };
+    }));
+    await page.click('#txv-back');
+    await page.waitForTimeout(100);
   }
-  const fitsFailing = subcards.map((s, i) => (s && s.visible && s.sw <= s.cw && s.right <= 390) ? null : i).filter((i) => i !== null);
-  check('width subcards: every subcard fits at 390px',
-    fitsOk,
-    fitsFailing.length ? 'failing subcard(s): ' + fitsFailing.join(', ') : 'fewer than 4 subcards (' + subcards.length + ')');
-  // A 1px tolerance forgives rounding differences between Chromium builds;
-  // a real overlap is tens of pixels. The row count stays exact.
-  function rowsStacked(rows) {
-    return rows.length === 3
-      && rows[1].top >= rows[0].bottom - 1
-      && rows[2].top >= rows[1].bottom - 1;
-  }
-  const stackedOk = subcards.length >= 4 && subcards.every((s) => s && rowsStacked(s.rows));
-  if (!stackedOk) {
-    subcards.forEach((s, i) => console.log('  width subcards rows: subcard ' + i + ': ' + JSON.stringify(s && s.rows)));
-  }
-  const stackedFailing = subcards.map((s, i) => (s && rowsStacked(s.rows)) ? null : i).filter((i) => i !== null);
-  check('width subcards: every subcard has 3 rows stacked on separate lines',
-    stackedOk,
-    stackedFailing.length ? 'failing subcard(s): ' + stackedFailing.join(', ') : 'fewer than 4 subcards (' + subcards.length + ')');
-  check('width subcards: every tx subcard holds its Details inside it (0.8.7 fix, round 3)',
-    subcards.length >= 4 && subcards.every((s) => s && s.hasDetails),
-    JSON.stringify(subcards.map((s) => s && s.hasDetails)));
-  // The Staged Transactions card (0.8.0): its summary is the
-  // card header and the collapse toggle — it fits at 390px.
-  await checkEl('width bitcoin: Staged Transactions summary fits', '#btc-card > summary');
-
-  // The "+ Add Tx" pill in the Staged Transactions header fits.
-  await checkEl('width bitcoin: "+ Add Tx" pill in the Staged header fits', '#btn-btc-add-pill');
+  check('width list: each transaction screen opens and fits at 390px (no overflow)',
+    screens.length >= 4 && screens.every((x) => x.visible && x.sw <= x.cw && x.right <= 390 && x.pageSw <= 390), JSON.stringify(screens));
+  check('width list: each screen lists its triggers and transactions',
+    screens.length >= 4 && screens.every((x) => x.rules >= 1 && x.txs >= 1), JSON.stringify(screens.map((x) => [x.rules, x.txs])));
+  // The list: search and Add, the Active / Pending / Archived switch and
+  // every row fit at 390px, and the back link returned to it.
+  await checkEl('width list: search and "+ Add" fit', '.txv-tools');
+  await checkEl('width list: the Active / Pending / Archived switch fits', '.txv-seg');
+  const rowFit = await page.evaluate(() => [...document.querySelectorAll('#txv-rows .txv-row')].map((r) => {
+    const b = r.getBoundingClientRect();
+    return b.width > 0 && r.scrollWidth <= r.clientWidth && b.right <= 390;
+  }));
+  check('width list: every row fits', rowFit.length >= 4 && rowFit.every(Boolean), JSON.stringify(rowFit));
 
   // --- Add form: every trigger type and the fallback row ---
   // Open the #add-modal popup before measuring.
@@ -263,6 +240,31 @@ function check(name, cond, detail) {
     if (b) b.click();
   });
   await page.waitForTimeout(400);
+  // Popups opened above for measuring are closed first.
+  await page.evaluate(() => document.querySelectorAll('.modal-overlay.open').forEach((m) => m.classList.remove('open')));
+  // The Settings list (groups and sections) fits; a section opens its
+  // group's screen with a link back.
+  await checkEl('width settings: the section list fits', '#setnav');
+  await page.locator('.setnav-item').filter({ hasText: 'Check cadence' }).first().click();
+  await page.waitForTimeout(200);
+  check('width settings: a section opens its group, with the list hidden',
+    await page.evaluate(() => getComputedStyle(document.getElementById('setnav')).display === 'none'
+      && getComputedStyle(document.getElementById('sg-checks')).display !== 'none'), '');
+  // One Save bar for changed sections: it appears on an edit and fits.
+  await page.fill('#set-check-cadence', '75');
+  await page.waitForTimeout(150);
+  await checkEl('width settings: the Save bar fits', '#savebar');
+  await page.click('#savebar-discard');
+  await page.waitForTimeout(150);
+  check('width settings: Discard puts the value back and hides the bar',
+    await page.evaluate(() => document.getElementById('set-check-cadence').value !== '75'
+      && getComputedStyle(document.getElementById('savebar')).display === 'none'), '');
+  // The rest measures every section at once: show them all.
+  await page.evaluate(() => {
+    document.querySelectorAll('.set-group').forEach((g) => g.classList.add('on'));
+    document.querySelectorAll('.set-group > .card').forEach((c) => c.classList.add('setv-on'));
+  });
+  await page.waitForTimeout(150);
   await checkPage('width settings: document has no horizontal overflow');
   await checkInput('width settings: price Source 1 select fits', '#set-price-source1');
   await checkInput('width settings: price Source 2 select fits', '#set-price-source2');
@@ -272,7 +274,6 @@ function check(name, cond, detail) {
   await checkEl('width settings: Source 1 status pill fits', '#price-source1-status');
   await checkEl('width settings: Source 2 status pill fits', '#price-source2-status');
   // One Test connection button, right of Save; results land on the rows.
-  await checkEl('width settings: Save price sources button fits', '#btn-save-price-sources');
   await checkEl('width settings: Test connection button fits', '#btn-test-price-sources');
   // Rows read name, price and pill; fill row 1 with the longest provider
   // label and a price, then check both fit.
@@ -292,16 +293,13 @@ function check(name, cond, detail) {
   await checkPage('width settings: document has no horizontal overflow (user controls)');
   await checkInput('width settings: price agreement input fits', '#set-price-agreement');
   await checkEl('width settings: price agreement row (input + % unit) fits', '#set-price-agreement-row');
-  await checkEl('width settings: Save price agreement button fits', '#btn-save-price-agreement');
   await checkInput('width settings: check cadence input fits', '#set-check-cadence');
   await checkEl('width settings: check cadence row (input + seconds unit) fits', '#set-check-cadence-row');
-  await checkEl('width settings: Save check cadence button fits', '#btn-save-check-cadence');
   await checkInput('width settings: fee Low input fits', '#set-fee-low');
   await checkInput('width settings: fee Medium input fits', '#set-fee-medium');
   await checkEl('width settings: fee Low row (input + x peak tx fee unit) fits', '#set-fee-low-row');
   await checkEl('width settings: fee Medium row (input + x peak tx fee unit) fits', '#set-fee-medium-row');
   await checkEl('width settings: fee zone bar fits', '#zone-bar');
-  await checkEl('width settings: Save fee verdict button fits', '#btn-save-fee-verdict');
   // Fill the msg lines with an error (the longest case) before measuring.
   await page.evaluate(() => {
     for (const [id, text] of [
@@ -336,9 +334,8 @@ function check(name, cond, detail) {
     check(name, f.ok, f.why);
   }
   await checkCard('width settings: Vacation mode card fits', 'Vacation mode');
-  await checkCard('width settings: Global Arm/Disarm card fits', 'Global Arm/Disarm');
+  await checkCard('width settings: All transactions card fits', 'All transactions');
   await checkInput('width settings: vacation until date input fits', '#set-vacation-until');
-  await checkEl('width settings: Save vacation button fits', '#btn-save-vacation');
   await checkEl('width settings: Arm all button fits', '#btn-arm-all');
   await checkEl('width settings: Disarm all button fits', '#btn-disarm-all');
   // The msg lines are empty until a Save is run, so give them
@@ -357,8 +354,11 @@ function check(name, cond, detail) {
   await checkPage('width settings: document has no horizontal overflow (vacation + arm/disarm)');
 
   // --- Tab bar ---
-  // The tabs sit right under the appbar and stick at 60px when scrolled.
-  // Scroll to the top first.
+  // At phone width the tabs are a bar fixed along the bottom of the
+  // screen (icons over labels), above the content, with an opaque
+  // background; the page leaves room at the bottom so its last lines are
+  // not hidden behind it. The top bar scrolls away with the page (the
+  // tabs are at the bottom).
   await page.evaluate(() => window.scrollTo(0, 0));
   await page.waitForTimeout(300);
   const tabBar = await page.evaluate(() => {
@@ -370,73 +370,55 @@ function check(name, cond, detail) {
     const csTabs = getComputedStyle(tabs);
     const csBar = getComputedStyle(appbar);
     const tr = tabs.getBoundingClientRect();
-    const br = appbar.getBoundingClientRect();
     return {
-      mainPadTop: csMain.paddingTop, mainPadSide: csMain.paddingLeft, mainPadBottom: csMain.paddingBottom,
-      tabsPosition: csTabs.position, tabsTop: csTabs.top, tabsZ: csTabs.zIndex, tabsBg: csTabs.backgroundColor,
-      tabsTopEdge: Math.round(tr.top * 10) / 10, appbarBottom: Math.round(br.bottom * 10) / 10,
-      appbarPosition: csBar.position, appbarTop: csBar.top, appbarZ: csBar.zIndex,
+      mainPadBottom: parseFloat(csMain.paddingBottom),
+      tabsPosition: csTabs.position, tabsZ: Number(csTabs.zIndex), tabsBg: csTabs.backgroundColor,
+      tabsBottom: Math.round(tr.bottom * 10) / 10, tabsHeight: Math.round(tr.height), tabsLeft: Math.round(tr.left), tabsWidth: Math.round(tr.width),
+      viewH: window.innerHeight, viewW: window.innerWidth,
+      appbarPosition: csBar.position, appbarTop: csBar.top, appbarZ: Number(csBar.zIndex),
+      iconsShown: [...tabs.querySelectorAll('button svg')].filter((x) => getComputedStyle(x).display !== 'none').length,
     };
   });
-  check('width tabs: main top padding is 0 (no gap above the tabs — the default matches the scrolled height)',
-    !!tabBar && tabBar.mainPadTop === '0px', tabBar ? 'paddingTop=' + tabBar.mainPadTop : 'no main/tabs/appbar');
-  check('width tabs: main side/bottom padding unchanged (20px)',
-    !!tabBar && tabBar.mainPadSide === '20px' && tabBar.mainPadBottom === '20px',
-    tabBar ? 'side=' + tabBar.mainPadSide + ' bottom=' + tabBar.mainPadBottom : 'no main');
-  check('width tabs: nav.tabs is sticky with top 60px and z-index 40',
-    !!tabBar && tabBar.tabsPosition === 'sticky' && tabBar.tabsTop === '60px' && tabBar.tabsZ === '40',
-    tabBar ? 'position=' + tabBar.tabsPosition + ' top=' + tabBar.tabsTop + ' z=' + tabBar.tabsZ : 'no tabs');
-  check('width tabs: nav.tabs has an opaque background (scrolling content is occluded behind it)',
-    !!tabBar && tabBar.tabsBg === 'rgb(15, 17, 21)',
-    tabBar ? 'background=' + tabBar.tabsBg : 'no tabs');
-  check('width tabs: the appbar is still sticky at top 0 with z-index 50 (unchanged)',
-    !!tabBar && tabBar.appbarPosition === 'sticky' && tabBar.appbarTop === '0px' && tabBar.appbarZ === '50',
-    tabBar ? 'position=' + tabBar.appbarPosition + ' top=' + tabBar.appbarTop + ' z=' + tabBar.appbarZ : 'no appbar');
-  check('width tabs: at the top of the page the tabs sit directly below the appbar (~1px gap, matching the scrolled state)',
-    !!tabBar && (tabBar.tabsTopEdge - tabBar.appbarBottom) >= 0 && (tabBar.tabsTopEdge - tabBar.appbarBottom) <= 2,
-    tabBar ? 'tabsTop=' + tabBar.tabsTopEdge + ' appbarBottom=' + tabBar.appbarBottom + ' gap=' + Math.round((tabBar.tabsTopEdge - tabBar.appbarBottom) * 10) / 10 : 'no tabs/appbar');
-  // All four tabs fit on one centered row (~46px tall, not ~96px).
+  check('width tabs: at 390px nav.tabs is fixed along the bottom of the screen, full width',
+    !!tabBar && tabBar.tabsPosition === 'fixed' && Math.abs(tabBar.tabsBottom - tabBar.viewH) <= 1 && tabBar.tabsLeft === 0 && tabBar.tabsWidth === tabBar.viewW,
+    tabBar ? 'position=' + tabBar.tabsPosition + ' bottom=' + tabBar.tabsBottom + '/' + tabBar.viewH + ' left=' + tabBar.tabsLeft + ' width=' + tabBar.tabsWidth : 'no main/tabs/appbar');
+  check('width tabs: the bottom bar has an opaque background and sits above the content (z-index > 0)',
+    !!tabBar && /^rgb\(/.test(tabBar.tabsBg) && tabBar.tabsZ > 0,
+    tabBar ? 'background=' + tabBar.tabsBg + ' z=' + tabBar.tabsZ : 'no tabs');
+  check('width tabs: the page leaves room at the bottom for the bar (main bottom padding >= bar height)',
+    !!tabBar && tabBar.mainPadBottom >= tabBar.tabsHeight,
+    tabBar ? 'padding=' + tabBar.mainPadBottom + ' bar=' + tabBar.tabsHeight : 'no main');
+  check('width tabs: every tab shows its icon on a phone',
+    !!tabBar && tabBar.iconsShown === 4, tabBar ? 'icons=' + tabBar.iconsShown : 'no tabs');
+  check('width tabs: at 390px the top bar scrolls away with the page (not sticky)',
+    !!tabBar && tabBar.appbarPosition === 'static',
+    tabBar ? 'position=' + tabBar.appbarPosition : 'no appbar');
+  // All four tabs on one row, equal widths.
   const tabRows = await page.evaluate(() => {
     const btns = [...document.querySelectorAll('nav.tabs button')];
     if (btns.length !== 4) return null;
     const tops = btns.map((b) => Math.round(b.getBoundingClientRect().top));
-    const bar = document.querySelector('nav.tabs').getBoundingClientRect();
-    const first = btns[0].getBoundingClientRect();
-    const last = btns[btns.length - 1].getBoundingClientRect();
-    return {
-      tops, rows: new Set(tops).size, barHeight: Math.round(bar.height),
-      leftGap: Math.round(first.left - bar.left),
-      rightGap: Math.round(bar.right - last.right),
-    };
+    const widths = btns.map((b) => Math.round(b.getBoundingClientRect().width));
+    return { tops, rows: new Set(tops).size, widths, spread: Math.max(...widths) - Math.min(...widths) };
   });
-  check('width tabs: all four tabs fit on one row at 390px (no wrap to a second row)',
-    !!tabRows && tabRows.rows === 1 && tabRows.barHeight <= 50,
-    tabRows ? 'tops=' + JSON.stringify(tabRows.tops) + ' barHeight=' + tabRows.barHeight : 'no tabs');
-  check('width tabs: the button group is centered (equal gaps on both sides of the bar)',
-    !!tabRows && Math.abs(tabRows.leftGap - tabRows.rightGap) <= 2,
-    tabRows ? 'leftGap=' + tabRows.leftGap + ' rightGap=' + tabRows.rightGap : 'no tabs');
-  // Scrolled down, the tabs stick at 60px under the appbar.
+  check('width tabs: all four tabs fit on one row at 390px, equal widths',
+    !!tabRows && tabRows.rows === 1 && tabRows.spread <= 1,
+    tabRows ? 'tops=' + JSON.stringify(tabRows.tops) + ' widths=' + JSON.stringify(tabRows.widths) : 'no tabs');
+  // Scrolled down, the bar stays put at the bottom.
   await page.evaluate(() => window.scrollTo(0, 800));
   await page.waitForTimeout(400);
   const tabBarScrolled = await page.evaluate(() => {
     const tabs = document.querySelector('nav.tabs');
-    const appbar = document.querySelector('header.appbar');
-    if (!tabs || !appbar) return null;
+    if (!tabs) return null;
     const tr = tabs.getBoundingClientRect();
-    const br = appbar.getBoundingClientRect();
-    return {
-      scrollY: Math.round(window.scrollY),
-      tabsTopEdge: Math.round(tr.top * 10) / 10, appbarBottom: Math.round(br.bottom * 10) / 10,
-    };
+    return { scrollY: Math.round(window.scrollY), tabsBottom: Math.round(tr.bottom * 10) / 10, viewH: window.innerHeight };
   });
   check('width tabs: scrolled 800px, the page actually scrolled',
-    !!tabBarScrolled && tabBarScrolled.scrollY >= 700, tabBarScrolled ? 'scrollY=' + tabBarScrolled.scrollY : 'no tabs/appbar');
-  check('width tabs: scrolled, the tabs stick at 60px directly below the appbar (no gap, no overlap)',
-    !!tabBarScrolled && tabBarScrolled.tabsTopEdge >= 59 && tabBarScrolled.tabsTopEdge <= 61
-    && tabBarScrolled.tabsTopEdge >= tabBarScrolled.appbarBottom
-    && tabBarScrolled.tabsTopEdge <= tabBarScrolled.appbarBottom + 2,
-    tabBarScrolled ? 'tabsTop=' + tabBarScrolled.tabsTopEdge + ' appbarBottom=' + tabBarScrolled.appbarBottom : 'no tabs/appbar');
-  await checkPage('width tabs: document has no horizontal overflow with the sticky tabs');
+    !!tabBarScrolled && tabBarScrolled.scrollY >= 700, tabBarScrolled ? 'scrollY=' + tabBarScrolled.scrollY : 'no tabs');
+  check('width tabs: scrolled, the tab bar stays along the bottom of the screen',
+    !!tabBarScrolled && Math.abs(tabBarScrolled.tabsBottom - tabBarScrolled.viewH) <= 1,
+    tabBarScrolled ? 'bottom=' + tabBarScrolled.tabsBottom + '/' + tabBarScrolled.viewH : 'no tabs');
+  await checkPage('width tabs: document has no horizontal overflow with the bottom tab bar');
   await page.evaluate(() => window.scrollTo(0, 0));
   await page.waitForTimeout(200);
 
@@ -467,35 +449,8 @@ function check(name, cond, detail) {
     helpLayout.length === 0, helpLayout.join('; ') || 'all ten OK');
   await checkPage('width help: document has no horizontal overflow with the "?" buttons');
 
-  // --- Settings filter ---
-  // One row at the top: fits without wrapping, overflowing or overlapping
-  // the first card.
-  await checkEl('width filter: the dropdown fits', '#filter-select');
-  await checkEl('width filter: the filter row fits', '#settings-filter');
-  const filterLayout = await page.evaluate(() => {
-    const row = document.getElementById('settings-filter');
-    if (!row) return null;
-    const rr = row.getBoundingClientRect();
-    const first = document.getElementById('card-vacation');
-    const fr = first ? first.getBoundingClientRect() : null;
-    const sel = document.getElementById('filter-select');
-    const sr = sel ? sel.getBoundingClientRect() : null;
-    return {
-      rowRight: Math.round(rr.right), rowBottom: Math.round(rr.bottom),
-      rowHeight: Math.round(rr.height),
-      firstCardTop: fr ? Math.round(fr.top) : null,
-      selectRight: sr ? Math.round(sr.right) : null,
-      selectBottom: sr ? Math.round(sr.bottom) : null,
-      viewportWidth: window.innerWidth,
-    };
-  });
-  check('width filter: the dropdown stays inside the 390px viewport on one row',
-    !!filterLayout && filterLayout.selectRight <= 390 && filterLayout.rowRight <= 390 && filterLayout.rowHeight <= 60,
-    JSON.stringify(filterLayout));
-  check('width filter: the row sits above the first card with a gap (no overlap)',
-    !!filterLayout && filterLayout.firstCardTop !== null && filterLayout.rowBottom < filterLayout.firstCardTop,
-    JSON.stringify(filterLayout));
-  await checkPage('width filter: document has no horizontal overflow with the filter row');
+  // (The old "Show:" filter row is gone from view: the Settings list's
+  // search replaces it; its fit is checked above.)
 
   // --- Dashboard tab: the Exchange Status section (0.8.0) ---
   // The launcher seeds a Dom Price tx, so the section is visible.

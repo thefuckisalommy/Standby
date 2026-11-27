@@ -221,7 +221,7 @@ async function broadcastArmed() {
   var pending = (S.bitcoin.txs || []).filter(function (t) { return !txStatus(t).settled && !txStatus(t).pending && !setOfTxId(t.id); });
   var armedSets = (S.bitcoin.sets || []).filter(function (s) { return s.enabled && !setStatus(s).settled && !setStatus(s).pending && setMembersOf(s).length; });
   if (!pending.length && !armedSets.length) {
-    setMsg($('btc-all-msg'),
+    setMsg($('arm-all-msg'),
       (S.bitcoin.txs || []).length
         ? 'Nothing to broadcast — every transaction is already archived or pending.'
         : 'Nothing to broadcast — no transactions stored.',
@@ -230,7 +230,7 @@ async function broadcastArmed() {
   }
   var armed = pending.filter(function (t) { return t.enabled; });
   if (!armed.length && !armedSets.length) {
-    setMsg($('btc-all-msg'), 'Nothing to broadcast — no armed transactions to broadcast.', true);
+    setMsg($('arm-all-msg'), 'Nothing to broadcast — no armed transactions to broadcast.', true);
     return;
   }
   var parts = [];
@@ -247,7 +247,7 @@ async function broadcastArmed() {
 async function runBroadcastAll(targets, armedOnly, label, setTargets) {
   setTargets = setTargets || [];
   if (!targets.length && !setTargets.length) {
-    setMsg($('btc-all-msg'), 'Nothing to broadcast — no armed transactions to broadcast.', true);
+    setMsg($('arm-all-msg'), 'Nothing to broadcast — no armed transactions to broadcast.', true);
     return;
   }
   // Standalone targets only; a label-less one reads its short txid.
@@ -276,7 +276,7 @@ async function runBroadcastAll(targets, armedOnly, label, setTargets) {
     var stale = allResults.filter(function (x) { return x.action === 'stale'; }).length;
     var failed = allResults.filter(function (x) { return x.action === 'failed'; }).length;
     var summary = label + ': ' + sent + ' broadcast' + (stale ? ', ' + stale + ' stale' : '') + (failed ? ', ' + failed + ' failed' : '') + '.';
-    setMsg($('btc-all-msg'), summary, failed === 0);
+    setMsg($('arm-all-msg'), summary, failed === 0);
     await load();
     await refreshConfirmations();
     if ($('confirm-modal').classList.contains('open')) {
@@ -291,7 +291,7 @@ async function runBroadcastAll(targets, armedOnly, label, setTargets) {
         }).join('') + '</ul>');
     }
   } catch (e) {
-    setMsg($('btc-all-msg'), e.message, false);
+    setMsg($('arm-all-msg'), e.message, false);
     if ($('confirm-modal').classList.contains('open')) showDetails(label + ' — failed', e.message, '');
   }
 }
@@ -476,6 +476,8 @@ function patchCheckinBars(status) {
     }
     var cap = block.children[2];
     if (cap) cap.textContent = daysSince + ' of ' + windowDays + ' days elapsed' + (frozen ? ' — disarmed, frozen' : b.state === 'grace' ? ' — held by grace' : '');
+    block.dataset.nextDue = b.nextDue || '';
+    fillCkLeft(block.children[3], daysSince, windowDays, b.nextDue, frozen, b.state === 'grace');
   });
 }
 // Patch the readiness rows in place (status and fee pills; set rows by
@@ -533,6 +535,7 @@ function patchTxCard(tx, overlapsByTx) {
   if (pillCls === 'ok' && overlapsByTx[tx.id] && overlapsByTx[tx.id].length) pillCls = 'warn';
   card.pill.textContent = txPillText(tx, st);
   card.pill.className = 'pill ' + pillCls;
+  if (card.row && card.row.dataset) card.row.dataset.armed = armedAttr(tx, st);
   var ruleSet = triggerSetOf(tx);
   var ruleStates = triggerStatesOf(tx);
   (card.rules || []).forEach(function (r, i) {
@@ -572,6 +575,7 @@ function patchSetCard(set) {
   var st = setStatus(set);
   card.pill.textContent = setPillText(set, st);
   card.pill.className = 'pill ' + st.cls;
+  if (card.row && card.row.dataset) card.row.dataset.armed = armedAttr(set, st);
   var ruleSet = triggerSetOf(set);
   var ruleStates = triggerStatesOf(set);
   (card.rules || []).forEach(function (r, i) {
@@ -617,6 +621,9 @@ function patchLive(status, checkins, blog) {
   var agreeSpan = $('price-sources-agreement');
   if (agreeSpan) agreeSpan.textContent = ((S.settings && typeof S.settings.priceAgreementPct === 'number') ? S.settings.priceAgreementPct : 5) + '%';
   updateFeeZoneBar();
+  renderTxIndex();
+  renderSetNav();
+  renderAlerts();
 }
 // Whole days since the effective last check-in (same math as the
 // server); null before any check-in.
@@ -654,6 +661,7 @@ function tickCheckinCountdownLocal() {
       }
       var cap = block.children[2];
       if (cap) cap.textContent = d + ' of ' + windowDays + ' days elapsed' + (frozen ? ' — disarmed, frozen' : '');
+      fillCkLeft(block.children[3], d, windowDays, block.dataset && block.dataset.nextDue, frozen, false);
     });
   }
   (S.bitcoin.txs || []).forEach(function (tx) {

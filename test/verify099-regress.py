@@ -94,11 +94,13 @@ def save_state_file(stj):
 
 def set_clock(days_back, online_days=0):
     """Backdate the check-in clock (with a 30 s margin so floored days land
-    exactly), keeping lastOnlineAt fresh so no grace sets.
+    exactly), keeping lastOnlineAt fresh so no grace sets. A backdated
+    lastOnlineAt gets the same margin: on Windows the app's clock can read
+    a few ms behind this one, and an exact N days would floor to N - 1.
     """
     stj = load_state_file()
     stj['checkin']['lastCheckinAt'] = (datetime.now(timezone.utc) - timedelta(days=days_back, seconds=30)).isoformat().replace('+00:00', 'Z')
-    stj['checkin']['lastOnlineAt'] = iso_ago(days=online_days)
+    stj['checkin']['lastOnlineAt'] = iso_ago(days=online_days, seconds=30) if online_days else iso_ago(days=0)
     save_state_file(stj)
 
 
@@ -195,7 +197,7 @@ def set_clock_margin(days_back, online_days=0, margin_s=30):
     """
     stj = load_state_file()
     stj['checkin']['lastCheckinAt'] = (datetime.now(timezone.utc) - timedelta(days=days_back, seconds=margin_s)).isoformat().replace('+00:00', 'Z')
-    stj['checkin']['lastOnlineAt'] = iso_ago(days=online_days)
+    stj['checkin']['lastOnlineAt'] = iso_ago(days=online_days, seconds=30) if online_days else iso_ago(days=0)
     save_state_file(stj)
 
 

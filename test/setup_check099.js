@@ -18,6 +18,8 @@ function check(name, cond, detail) {
   const errs = [];
   p.on('pageerror', (e) => errs.push(e.message));
   const vis = (sel) => p.isVisible(sel);
+  // Settings shows one group at a time: open the one holding a section.
+  const openSection = async (name) => { if (await vis('#set-back')) { await p.click('#set-back'); await p.waitForTimeout(100); } await p.locator('.setnav-item').filter({ hasText: name }).first().click(); await p.waitForTimeout(150); };
   try {
     // The download's "Start with this computer" page, before Done: this
     // run is not a download, so its answers are faked in the browser.
@@ -98,8 +100,10 @@ function check(name, cond, detail) {
 
     await p.goto(BASE + '#settings'); await p.waitForTimeout(800);
     check('the price choice was saved', (await p.inputValue('#set-price-source2')) === 'kraken');
+    await openSection('App login');
     check('App login: the no-password notice', await vis('#login-card-none'));
     check('This computer is not offered outside the downloads', !(await vis('#card-desktop')));
+    await openSection('Version');
     check('Check for new versions: offered on a plain run, off by default', await vis('#update-box') && !(await p.isChecked('#update-check')));
     await fetch('http://127.0.0.1:18255/__test__/release', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"tag":"v99.0.0"}' });
     await p.click('#update-box .slider'); await p.waitForTimeout(2200);
@@ -107,25 +111,49 @@ function check(name, cond, detail) {
       await p.textContent('#update-msg'));
     await p.goto(BASE); await p.waitForTimeout(1200);
     check('and on the dashboard', await vis('#update-banner') && (await p.textContent('#update-banner-version')) === '99.0.0');
+    check('header: no Umbrel button and no lock on a plain run without a password', !(await vis('#exit-app')) && !(await vis('#btn-lock')));
+    check('Alerts: the bell counts the new version', await vis('#alerts-count') && (await p.textContent('#alerts-count')) === '1',
+      await p.textContent('#alerts-count'));
+    await p.click('#btn-alerts'); await p.waitForTimeout(150);
+    check('Alerts: the panel lists it', await vis('#alerts-panel') && /Standby 99\.0\.0 is available/.test(await p.textContent('#alerts-list')),
+      await p.textContent('#alerts-list'));
+    await p.keyboard.press('Escape'); await p.waitForTimeout(100);
+    check('Alerts: Escape closes the panel', !(await vis('#alerts-panel')));
     await p.click('#update-banner-later'); await p.waitForTimeout(200);
     await p.reload(); await p.waitForTimeout(1200);
     check('"Not now" hides it for that version', !(await vis('#update-banner')));
+    check('Alerts: and takes it off the bell (nothing else to show)', !(await vis('#alerts-count')));
+    await p.click('#btn-alerts'); await p.waitForTimeout(150);
+    check('Alerts: an empty panel says nothing needs attention', /Nothing needs your attention/.test(await p.textContent('#alerts-list')));
+    await p.mouse.click(5, 300); await p.waitForTimeout(100);
+    check('Alerts: a tap outside closes the panel', !(await vis('#alerts-panel')));
     await p.goto(BASE + '#settings'); await p.waitForTimeout(800);
+    await openSection('Check-ins from other devices');
     check('Check-in API keys: the "Accept check-ins from other devices" switch is offered, off',
       await vis('#remote-checkin') && !(await p.isChecked('#remote-checkin-on')) && !(await vis('#api-keys-receiver-line')));
+    await openSection('App login');
     await p.fill('#login-new1', 'correct horse battery'); await p.fill('#login-new2', 'correct horse battery');
     await p.click('#btn-login-set'); await p.waitForTimeout(400);
     check('a password set in Settings', await vis('#login-card-app') && !/requires/.test(await p.textContent('#login-card-app')));
     await p.reload(); await p.waitForTimeout(1000);
     check('this browser stays logged in', !(await vis('#login-modal .modal')));
-    await p.evaluate(() => localStorage.clear()); await p.reload(); await p.waitForTimeout(1000);
-    check('the login screen without a session', await vis('#login-modal .modal'));
+    check('header: the lock shows once a password is set', await vis('#btn-lock'));
+    await p.click('#btn-lock'); await p.waitForTimeout(200);
+    check('the lock asks first', await vis('#confirm-modal .modal') && /Lock Standby\?/.test(await p.textContent('#confirm-title')));
+    await p.click('#confirm-cancel'); await p.waitForTimeout(200);
+    check('Cancel keeps this browser logged in', !(await vis('#confirm-modal .modal')) && !(await vis('#login-modal .modal'))
+      && (await p.evaluate(() => localStorage.getItem('standby.sessionToken'))) !== null);
+    await p.click('#btn-lock'); await p.waitForTimeout(200);
+    await p.click('#confirm-proceed'); await p.waitForTimeout(1200);
+    check('the lock logs this browser out: the login screen', await vis('#login-modal .modal'));
+    check('the lock removed the stored session', (await p.evaluate(() => localStorage.getItem('standby.sessionToken'))) === null);
     await p.click('#login-forgot summary'); await p.waitForTimeout(100);
     check('"Forgot password?" shows the on-machine reset', /--reset-password/.test(await p.textContent('#login-forgot-body')));
     await p.fill('#login-password', 'correct horse battery'); await p.click('#btn-login'); await p.waitForTimeout(1200);
     check('logged in', !(await vis('#login-modal .modal')));
 
     await p.goto(BASE + '#settings'); await p.waitForTimeout(800);
+    await openSection('App login');
     await p.fill('#login-cur', 'wrong password here'); await p.fill('#login-chg1', 'another long password'); await p.fill('#login-chg2', 'another long password');
     await p.click('#btn-login-change'); await p.waitForTimeout(400);
     check('a wrong current password is refused', /current password is wrong/.test(await p.textContent('#logout-msg')));
@@ -134,6 +162,7 @@ function check(name, cond, detail) {
     check('the Start fresh card says the Standby password goes too',
       (await p.textContent('#fresh-login-note')) === 'Your Standby password is removed too, so setup asks for a new one.',
       await p.textContent('#fresh-login-note'));
+    await openSection('Start fresh');
     await p.click('#btn-fresh-delete'); await p.waitForTimeout(150);
     check('start fresh asks for the password', await vis('#fresh-password') && await vis('#fresh-backup-row'));
     await p.fill('#fresh-password', 'another long password'); await p.click('#btn-fresh-go'); await p.waitForTimeout(200);

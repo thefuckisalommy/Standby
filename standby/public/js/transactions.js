@@ -488,6 +488,8 @@ function appendTriggerBoxes(parent, holder) {
   ruleSet.rules.forEach(function (rule, ri) {
     var trigBox = document.createElement('div');
     trigBox.className = 'tx-trigger';
+    // Its trigger type, for the colour of its edge.
+    trigBox.dataset.type = rule.type;
     var trigK = document.createElement('span');
     trigK.className = ruleSet.rules.length > 1 ? 'tx-trigger-k rule-k' : 'tx-trigger-k';
     trigK.textContent = ruleSet.rules.length > 1 ? 'Rule ' + (ri + 1) + ' \u2014 ' + triggerLabel(rule) : 'TRIGGER - ' + triggerLabel(rule).toUpperCase();
@@ -803,6 +805,13 @@ function buildTxItem(tx, st, uiKey, includeHistory, idx, overlapsByTx) {
 
 // One set card: label, total and arm toggle in the header; the blue tx
 // subcards; the orange trigger subcards; the shared History (collapsed);
+// A card's armed state for its border: 'on' (armed, orange edge), 'off'
+// (disarmed, all grey), '' (pending or archived: neither).
+function armedAttr(holder, st) {
+  if (st.settled || st.pending) return '';
+  return holder.enabled === false ? 'off' : 'on';
+}
+
 // then the actions.
 function renderSetCard(set, overlapsByTx) {
   var members = setMembersOf(set);
@@ -811,6 +820,7 @@ function renderSetCard(set, overlapsByTx) {
   var pending = st.pending;
   var row = document.createElement('div');
   row.className = 'tx-card tx-sub';
+  row.dataset.armed = armedAttr(set, st);
   var head = document.createElement('div');
   head.className = 'tx-head';
   var title = document.createElement('b');
@@ -1007,6 +1017,7 @@ function renderBitcoin() {
     // A standalone tx renders as a set of one.
     row.className = 'tx-card tx-sub';
     var st = txStatus(tx);
+    row.dataset.armed = armedAttr(tx, st);
     var settled = st.settled;
     var pending = st.pending;
     // Element refs for the live tick to patch.
@@ -1160,6 +1171,7 @@ function renderBitcoin() {
     noneArchived.textContent = 'No archived transactions yet.';
     archivedList.appendChild(noneArchived);
   }
+  renderTxIndex();
 }
 
 async function toggleTx(id, enabled) {
