@@ -16,7 +16,7 @@ module.exports = async function broadcastRoutes(ctx) {
   let state = ctx.state;
 
   // POST /api/bitcoin/txs/arm-all { enabled }: toggle Active entries only.
-  // Re-sync freezes and reset check-in when arming inside the danger zone.
+  // Re-sync freezes; arming in the danger zone resets check-in.
   if (req.method === 'POST' && pathname === '/api/bitcoin/txs/arm-all') {
     const body = await readBody(req).catch(() => ({}));
     if (typeof body.enabled !== 'boolean') return sendError(res, 400, 'enabled must be true or false');
@@ -26,8 +26,7 @@ module.exports = async function broadcastRoutes(ctx) {
     let count = 0;
     const fresh = saveMutation((f) => {
       const txs = f.bitcoin.txs || [];
-      // Match the Active/Pending/Archived categories in transactions.js.
-      // A pending member makes the entire set pending, including unsent siblings.
+      // Same split as transactions.js; a pending member makes the whole set pending.
       const category = (t) => {
         if (t.broadcasted || (t.release && t.release.status === 'broadcast')) {
           const b = t.broadcasted;
