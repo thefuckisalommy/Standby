@@ -1,15 +1,15 @@
 'use strict';
-// Fault-focused regression checks. No Bitcoin/node requests leave this test.
+// Release controls, recovery, key revocation and backup safety. No external requests.
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const assert = require('assert/strict');
 const { Readable } = require('stream');
-const data = fs.mkdtempSync(path.join(os.tmpdir(), 'standby-audit-fixes-'));
+const data = fs.mkdtempSync(path.join(os.tmpdir(), 'standby-release-safety-'));
 process.env.DATA_DIR = data;
 process.env.CHECKIN_DIR = path.join(data, 'checkin');
 const mod = (p) => require(path.join(__dirname, '..', 'standby', 'lib', p));
-mod('net').requestText = async () => { throw new Error('Outbound network forbidden in audit regression'); };
+mod('net').requestText = async () => { throw new Error('Outbound network forbidden in release safety tests'); };
 const store = mod('store');
 const bitcoin = mod('bitcoin');
 const rules = mod('rules');
