@@ -572,8 +572,11 @@ function recoverStateFromBackup(dataDir, file, err) {
       + ' — the corrupt file was preserved as ' + path.basename(preserved);
     console.warn(msg);
     addStateWarning('state-recovered', msg);
-    // The state file is gone (renamed above), so this save skips
-    // rotation — there is no previous version left to rotate.
+    // Persist a recovery hold before returning; the missing file skips rotation.
+    const recoveredAt = new Date();
+    found.parsed.grace = { reason: 'recovery', recoveredFrom: found.file,
+      triggeredAt: recoveredAt.toISOString(), offlineGapDays: null,
+      graceUntil: new Date(recoveredAt.getTime() + 7 * 86400000).toISOString() };
     saveState(dataDir, found.parsed);
     return found.parsed;
   }
@@ -593,8 +596,11 @@ function recoverMissingState(dataDir) {
     const msg = 'Standby: state.json was missing; recovered from ' + found.file;
     console.warn(msg);
     addStateWarning('state-missing-recovered', msg);
-    // The state file is missing, so this save skips rotation —
-    // there is no previous version left to rotate.
+    // Persist a recovery hold before returning; the missing file skips rotation.
+    const recoveredAt = new Date();
+    found.parsed.grace = { reason: 'recovery', recoveredFrom: found.file,
+      triggeredAt: recoveredAt.toISOString(), offlineGapDays: null,
+      graceUntil: new Date(recoveredAt.getTime() + 7 * 86400000).toISOString() };
     saveState(dataDir, found.parsed);
     return found.parsed;
   }

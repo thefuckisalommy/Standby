@@ -15,21 +15,38 @@ module.exports = async function broadcastRoutes(ctx) {
   const { req, res, pathname, now } = ctx;
   let state = ctx.state;
 
-  // POST /api/bitcoin/txs/arm-all { enabled }: Global Arm/Disarm for every
-  // staged tx (arming includes ones disarmed individually). Check-in
-  // freezes are re-synced; arming a check-in tx inside its danger zone
-  // resets the check-in once, and the response says so. Manual broadcasts
-  // still work while disarmed.
+  // POST /api/bitcoin/txs/arm-all { enabled }: toggle Active entries only.
+  // Re-sync freezes and reset check-in when arming inside the danger zone.
   if (req.method === 'POST' && pathname === '/api/bitcoin/txs/arm-all') {
     const body = await readBody(req).catch(() => ({}));
     if (typeof body.enabled !== 'boolean') return sendError(res, 400, 'enabled must be true or false');
     // The toggle + freeze sync + reset
     // ride into FRESH state: the request body was awaited above.
     let checkinReset = false;
+    let count = 0;
     const fresh = saveMutation((f) => {
       const txs = f.bitcoin.txs || [];
+      // Match the Active/Pending/Archived categories in transactions.js.
+      // A pending member makes the entire set pending, including unsent siblings.
+      const category = (t) => {
+        if (t.broadcasted || (t.release && t.release.status === 'broadcast')) {
+          const b = t.broadcasted;
+          return !b || b.found === false || b.confirmations > 0 || b.blockHeight != null ? 'archived' : 'pending';
+        }
+        if (t.release && t.release.status === 'stale') return 'archived';
+        return t.release && t.release.status === 'submitted-slipstream' ? 'pending' : 'active';
+      };
+      const sets = f.bitcoin.sets || [];
+      const activeSets = sets.filter((s) => {
+        const members = txs.filter((t) => (s.txIds || []).includes(t.id));
+        return !members.length || (!members.some((t) => category(t) === 'pending')
+          && !members.every((t) => category(t) === 'archived'));
+      });
+      const inactiveMemberIds = new Set(sets.filter((s) => !activeSets.includes(s)).flatMap((s) => s.txIds || []));
       const newlyArmed = [];
       for (const t of txs) {
+        if (category(t) !== 'active' || inactiveMemberIds.has(t.id)) continue;
+        count++;
         const wasEnabled = t.enabled;
         t.enabled = body.enabled;
         // An arm/disarm flip logs on the tx it flipped —
@@ -48,9 +65,9 @@ module.exports = async function broadcastRoutes(ctx) {
           break;
         }
       }
-      // Arm or disarm every set too: a set's arm is its members' only arm.
+      // A set's arm is its members' only arm; only Active sets can change.
       const newlyArmedSets = [];
-      for (const s of (f.bitcoin.sets || [])) {
+      for (const s of activeSets) {
         const wasEnabled = s.enabled;
         s.enabled = body.enabled;
         if (wasEnabled !== body.enabled) pushHistory(s, body.enabled ? 'armed' : 'disarmed', '');
@@ -70,7 +87,7 @@ module.exports = async function broadcastRoutes(ctx) {
       }
     });
     const freshTxs = fresh.bitcoin.txs || [];
-    return sendJson(res, 200, { ok: true, enabled: body.enabled, count: freshTxs.length, checkinReset, txs: serveTxs(freshTxs), sets: serveSets(fresh.bitcoin.sets || []) });
+    return sendJson(res, 200, { ok: true, enabled: body.enabled, count, checkinReset, txs: serveTxs(freshTxs), sets: serveSets(fresh.bitcoin.sets || []) });
   }
 
   // POST /api/bitcoin/txs/:id/broadcast: manual broadcast now, through the
@@ -112,7 +129,12 @@ module.exports = async function broadcastRoutes(ctx) {
   // Each goes through the normal path; one failing does not stop the rest.
   // { armedOnly: true } skips disarmed ids.
   if (req.method === 'POST' && pathname === '/api/broadcast/all') {
-    const body = await readBody(req).catch(() => ({}));
+    const body = await readBody(req);
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return sendError(res, 400, 'body must be an object');
+    if (body.ids !== undefined && (!Array.isArray(body.ids) || body.ids.some((id) => typeof id !== 'string' || !id))) {
+      return sendError(res, 400, 'ids must be an array of transaction IDs');
+    }
+    if (body.armedOnly !== undefined && typeof body.armedOnly !== 'boolean') return sendError(res, 400, 'armedOnly must be true or false');
     const armedOnly = !!(body && body.armedOnly);
     const txs = state.bitcoin.txs || [];
     if (!txs.length) return sendError(res, 400, 'no transactions stored — paste a signed transaction hex first');

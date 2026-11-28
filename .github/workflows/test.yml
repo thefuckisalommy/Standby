@@ -88,6 +88,8 @@ jobs:
         run: node test/page_names_check.js
       - name: The page's copies of server rules agree with the server
         run: node test/mirror_check.js
+      - name: Recovery, revocation, bulk controls and backup fault checks
+        run: node test/audit_fixes_check.js
 
   api:
     runs-on: ubuntu-latest

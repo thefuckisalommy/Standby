@@ -46,12 +46,18 @@ function writeReceiverKeys(state) {
   try {
     fs.mkdirSync(CHECKIN_DIR, { recursive: true });
     const doc = {
+      revision: crypto.randomBytes(16).toString('hex'),
       keys: (state.checkinKeys || []).map((k) => ({ id: k.id, label: k.label, hash: k.hash })),
     };
     const file = path.join(CHECKIN_DIR, 'keys.json');
+    try {
+      const current = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (current.revision && JSON.stringify(current.keys) === JSON.stringify(doc.keys)) return true;
+    } catch { /* Publish a complete replacement below. */ }
     // Durable write: a lost keys.json write could revive a revoked key or
     // lose a new one.
     store.writeFileDurable(file, JSON.stringify(doc, null, 2) + '\n');
+    return true;
   } catch (e) {
     // No shared directory (bare run, no receiver): the keys are inert. If
     // it exists, a failed write would leave a revoked key valid, so say so
@@ -61,6 +67,7 @@ function writeReceiverKeys(state) {
         + ' — a key created or revoked just now is NOT in effect at the receiver until this is fixed.');
     }
   }
+  return false;
 }
 
 // Read the receiver's keys.json: 'missing', 'ok' or 'error' (like
@@ -81,11 +88,31 @@ function readReceiverKeys() {
     }
     return {
       status: 'ok',
+      revision: typeof doc.revision === 'string' ? doc.revision : null,
       keys: doc.keys.filter((k) => k && typeof k.id === 'string' && typeof k.hash === 'string'),
     };
   } catch (e) {
     return { status: 'error', error: e.message, keys: [] };
   }
+}
+
+// Confirm the published revision; local revocation takes effect immediately.
+function receiverKeysConfirmed(state) {
+  const current = readReceiverKeys();
+  const desired = (state.checkinKeys || []).map((k) => ({ id: k.id, label: k.label, hash: k.hash }));
+  if (current.status !== 'ok' || !current.revision || JSON.stringify(current.keys) !== JSON.stringify(desired)) return false;
+  try {
+    const ack = JSON.parse(fs.readFileSync(path.join(CHECKIN_DIR, 'keys-ack.json'), 'utf8'));
+    return ack.revision === current.revision;
+  } catch { return false; }
+}
+
+async function waitForReceiverKeys(state) {
+  for (let i = 0; i < 15; i++) {
+    if (receiverKeysConfirmed(state)) return true;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return receiverKeysConfirmed(state);
 }
 
 // Startup warnings from the key-store check, kept for this process, served
@@ -100,8 +127,8 @@ function addStartupWarning(code, message) {
 // keys.json):
 // - state has keys, receiver missing or different: rewrite the receiver
 //   file from state and log it
-// - state empty, receiver has keys: warn only (they may be the only
-//   copies; restoring is the owner's call)
+// - state empty, receiver has keys: publish the authoritative empty list
+//   and warn; restoring lost keys from backups remains the owner's call
 // - state empty, a backup has keys: warn, naming the backup
 // If both sides lost the keys, the daily backups are the recovery.
 function verifyCheckinKeyStore() {
@@ -116,7 +143,10 @@ function verifyCheckinKeyStore() {
     };
     if (stateKeys.length > 0) {
       if (recv.status !== 'ok' || !sameKeys(stateKeys, recv.keys)) {
-        writeReceiverKeys(state);
+        if (!writeReceiverKeys(state)) {
+          addStartupWarning('receiver-keys-write-failed', 'Receiver key synchronization failed. Revoked keys cannot reset Standby’s clock; receiver confirmation is pending.');
+          return;
+        }
         const why = recv.status === 'missing' ? 'missing'
           : recv.status === 'error' ? 'unreadable (' + recv.error + ')' : 'out of sync with state';
         const msg = 'Standby: receiver keys.json was ' + why + '; rewrote it from state (' + stateKeys.length + ' key(s))';
@@ -128,7 +158,8 @@ function verifyCheckinKeyStore() {
     // State has no keys.
     if (recv.status === 'ok' && recv.keys.length > 0) {
       const msg = 'Standby: state has no check-in keys but the receiver still lists ' + recv.keys.length
-        + ' key(s); receiver left untouched — restore the keys from a backup if they were lost';
+        + ' key(s); publishing the empty active key list. Restore a backup manually if the keys were lost';
+      writeReceiverKeys(state);
       console.warn(msg);
       addStartupWarning('receiver-keys-orphaned', msg);
     }
@@ -185,6 +216,8 @@ function mergeExternalCheckin(state, now) {
   const ext = readExternalCheckin();
   if (ext.status === 'error') return 'error';
   if (ext.status === 'missing') return false;
+  // State is authoritative even if publication to the receiver failed.
+  if (!ext.keyId || !(state.checkinKeys || []).some((k) => k.id === ext.keyId)) return false;
   if (ext.at.getTime() > now.getTime() + 5 * 60 * 1000) return false;
   const last = state.checkin.lastCheckinAt ? new Date(state.checkin.lastCheckinAt) : null;
   if (last && ext.at.getTime() <= last.getTime()) return false;
@@ -227,12 +260,13 @@ function graceIsEnabled(settings) {
 function graceStatus(state, now) {
   const g = (state && state.grace && typeof state.grace === 'object') ? state.grace : null;
   if (!g || !g.triggeredAt) return null;
-  // Grace off reads as no grace everywhere, even for a record set earlier;
-  // the record stays and resumes if re-enabled before it expires.
-  if (!graceIsEnabled(state.settings)) return null;
+  // Disabling offline grace does not cancel a recovery hold.
+  if (g.reason !== 'recovery' && !graceIsEnabled(state.settings)) return null;
   if (g.graceUntil && now.getTime() > new Date(g.graceUntil).getTime()) return null;
   return {
     active: true,
+    reason: g.reason || 'offline',
+    recoveredFrom: g.reason === 'recovery' ? g.recoveredFrom || null : null,
     indefinite: !g.graceUntil,
     graceUntil: g.graceUntil || null,
     triggeredAt: g.triggeredAt,
@@ -477,4 +511,4 @@ function checkinStatus(state, now) {
   return { ...base, state: 'on-track', label: 'On track' };
 }
 
-module.exports = { sanitizeState, hashCheckinKey, newCheckinKeyId, publicCheckinKey, writeReceiverKeys, readReceiverKeys, startupWarnings, addStartupWarning, verifyCheckinKeyStore, readExternalCheckin, mergeExternalCheckin, graceStatus, isGraceActive, applyGrace, inDangerZone, resetCheckin, checkinLiveOffsetMs, syncCheckinFreeze, vacationEndMs, expireVacation, checkinClock, txSettledOrPending, checkinStatus };
+module.exports = { sanitizeState, hashCheckinKey, newCheckinKeyId, publicCheckinKey, writeReceiverKeys, readReceiverKeys, receiverKeysConfirmed, waitForReceiverKeys, startupWarnings, addStartupWarning, verifyCheckinKeyStore, readExternalCheckin, mergeExternalCheckin, graceStatus, isGraceActive, applyGrace, inDangerZone, resetCheckin, checkinLiveOffsetMs, syncCheckinFreeze, vacationEndMs, expireVacation, checkinClock, txSettledOrPending, checkinStatus };

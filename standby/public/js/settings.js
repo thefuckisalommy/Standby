@@ -324,7 +324,7 @@ var SETTINGS_HELP = {
   },
   arm: {
     title: 'All transactions',
-    body: 'Arms or disarms every staged transaction at once \u2014 check-in, BTC price, UTXO, block height, set date, fee market, and manual.\n\nDisarming stops automatic firing for all triggers \u2014 nothing broadcasts on its own. A manual broadcast still works while disarmed.\n\nDisarmed check-in transactions freeze their countdown and resume from the same spot when re-armed.\n\n\u2018Arm all\u2019 arms everything, including transactions you had individually disarmed before.\n\n\u2018Broadcast armed\u2019 sends every armed transaction now, after a confirm naming how many.',
+    body: 'Arms or disarms sets in the Active category at once \u2014 check-in, BTC price, UTXO, block height, set date, fee market, and manual.\n\nDisarming stops new automatic releases for Active sets. Pending and Archived sets are unchanged; scheduled public fallback for a pending Slipstream transaction continues. A manual broadcast still works while disarmed.\n\nDisarmed check-in transactions freeze their countdown and resume from the same spot when re-armed.\n\n\u2018Arm all active\u2019 includes Active sets you had individually disarmed before.\n\n\u2018Broadcast armed\u2019 sends every armed transaction now, after a confirm naming how many.',
     triggers: ['general'],
   },
   nodes: {
@@ -446,7 +446,7 @@ $('set-vacation-indefinite').addEventListener('change', function () {
 async function armAll(enabled) {
   try {
     await api('POST', '/api/bitcoin/txs/arm-all', { enabled: enabled });
-    setMsg($('arm-all-msg'), enabled ? 'All transactions armed.' : 'All transactions disarmed.', true);
+    setMsg($('arm-all-msg'), enabled ? 'Active sets armed.' : 'Active sets disarmed.', true);
     await load();
   } catch (e) { setMsg($('arm-all-msg'), e.message, false); }
 }
@@ -493,10 +493,10 @@ function revokeApiKey(id, label) {
     'This revokes the key labelled "' + (label || 'Untitled key') + '". The service using it will no longer be able to check in. Other keys are unaffected.',
     async function () {
       try {
-        await api('DELETE', '/api/checkin-keys/' + encodeURIComponent(id));
+        var result = await api('DELETE', '/api/checkin-keys/' + encodeURIComponent(id));
         apiKeys = apiKeys.filter(function (k) { return k.id !== id; });
         renderApiKeys();
-        setMsg($('api-keys-msg'), 'Key revoked.', true);
+        setMsg($('api-keys-msg'), result.warning || 'Key revoked; receiver confirmed.', !result.warning);
       } catch (e) { setMsg($('api-keys-msg'), e.message, false); }
     },
     'Revoke');

@@ -24,13 +24,13 @@ function clientError(status, message) {
   return e;
 }
 
-function readBody(req) {
+function readBody(req, maxBytes = MAX_BODY) {
   return new Promise((resolve, reject) => {
     let size = 0;
     const chunks = [];
     req.on('data', (c) => {
       size += c.length;
-      if (size > MAX_BODY) { reject(clientError(413, 'body too large')); req.destroy(); return; }
+      if (size > maxBytes) { chunks.length = 0; reject(clientError(413, 'body too large')); return; }
       chunks.push(c);
     });
     req.on('end', () => {

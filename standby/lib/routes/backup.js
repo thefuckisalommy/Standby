@@ -13,6 +13,10 @@ const { serveSets, serveTxs } = require('../triggers');
 const { CHECK_CADENCE_SECONDS_DEFAULT, CHECK_CADENCE_SECONDS_MAX, CHECK_CADENCE_SECONDS_MIN, FEE_LOW_MULT_DEFAULT, FEE_LOW_MULT_MAX, FEE_LOW_MULT_MIN, FEE_MED_MULT_DEFAULT, FEE_MED_MULT_MAX, FEE_MED_MULT_MIN, GRACE_DURATION_DAYS, GRACE_OFFLINE_DAYS, PRICE_AGREEMENT_PCT_DEFAULT, PRICE_AGREEMENT_PCT_MAX, PRICE_AGREEMENT_PCT_MIN, asStr, clampInt, readBody, sendError, sendJson, validBroadcastVia, validPublicFallbackDays } = require('../util');
 const { NEXT } = require('./shared');
 
+// Export leaves room for the password added by the restore UI (up to 1024 characters).
+const IMPORT_MAX_BYTES = 16 * 1024 * 1024;
+const EXPORT_MAX_BYTES = IMPORT_MAX_BYTES - 8192;
+
 const RELEASE_STATUSES = new Set(['stale', 'failed', 'broadcast', 'conflict', 'submitted-slipstream']);
 // Release record kinds: 'release' (automatic), 'broadcast' (manual),
 // 'dryrun' (a dry-run verdict).
@@ -47,10 +51,22 @@ module.exports = async function backupRoutes(ctx) {
   if (req.method === 'POST' && pathname === '/api/backup') {
     const body = await readBody(req);
     const password = body && body.password;
-    if (password === undefined || password === null || password === '') return sendJson(res, 200, buildBackup());
-    const problem = backupcrypto.passwordProblem(password);
-    if (problem) return sendError(res, 400, problem);
-    return sendJson(res, 200, await backupcrypto.encryptBackup(buildBackup(), password));
+    const encrypted = password !== undefined && password !== null && password !== '';
+    if (encrypted) {
+      const problem = backupcrypto.passwordProblem(password);
+      if (problem) return sendError(res, 400, problem);
+    }
+    const backup = buildBackup();
+    // Check plaintext too: compression must not produce an export that the
+    // bounded decryptor cannot restore. Never silently drop transactions.
+    if (Buffer.byteLength(JSON.stringify(backup, null, 2)) > EXPORT_MAX_BYTES) {
+      return sendError(res, 413, 'Backup exceeds the 16 MiB restore limit; no partial backup was exported.');
+    }
+    const output = encrypted ? await backupcrypto.encryptBackup(backup, password) : backup;
+    if (Buffer.byteLength(JSON.stringify(output, null, 2)) > EXPORT_MAX_BYTES) {
+      return sendError(res, 413, 'Backup exceeds the 16 MiB restore limit; no partial backup was exported.');
+    }
+    return sendJson(res, 200, output);
   }
 
   // POST /api/restore: validate everything before touching anything
@@ -58,7 +74,7 @@ module.exports = async function backupRoutes(ctx) {
   // recomputed), then replace the state wholesale (and the logs, if
   // carried).
   if (req.method === 'POST' && pathname === '/api/restore') {
-    let body = await readBody(req);
+    let body = await readBody(req, IMPORT_MAX_BYTES);
     // An encrypted backup (the file's JSON plus `password`) is decrypted
     // first, then validated like a plain one.
     if (backupcrypto.isEncryptedBackup(body)) {
@@ -79,7 +95,12 @@ module.exports = async function backupRoutes(ctx) {
       return sendError(res, 400, 'backup is missing the state (settings + transactions)');
     }
     const bsSettings = bs.settings;
+    const localSettings = { ...store.defaultState().settings, ...(state && state.settings || {}) };
     const settings = {
+      // Device preferences belong to this installation, not the backup.
+      acceptRemoteCheckins: localSettings.acceptRemoteCheckins,
+      startAtLogin: localSettings.startAtLogin,
+      updateCheck: localSettings.updateCheck,
       primaryApiUrl: bitcoin.DEFAULT_PUBLIC_API_URL,
       secondaryApiUrl: '',
       // paused is ignored; vacationUntil is a 'YYYY-MM-DD' date or null (a
@@ -440,7 +461,7 @@ module.exports = async function backupRoutes(ctx) {
     delete servedRestored.feeHistory;
     servedRestored.bitcoin.txs = serveTxs(servedRestored.bitcoin.txs || []);
     servedRestored.bitcoin.sets = serveSets(servedRestored.bitcoin.sets || []);
-    return sendJson(res, 200, { ok: true, restoredTxs: txs.length, restoredSets: restoredSets.length, recheck, state: servedRestored });
+    return sendJson(res, 200, { ok: true, restoredTxs: txs.length, restoredSets: restoredSets.length, recheck, settingsNotice: { restored: 'Transaction sets, triggers, node connections, check-in keys, grace and vacation settings', kept: 'This computer’s remote check-ins, start-at-login and update-check preferences, and login credentials' }, state: servedRestored });
   }
   return NEXT;
 };

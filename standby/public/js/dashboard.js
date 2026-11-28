@@ -105,6 +105,10 @@ function showRestoreProgress() {
 function restoreSummary(r) {
   var n = r.restoredTxs || 0;
   var items = [{ text: n + (n === 1 ? ' transaction restored' : ' transactions restored') }];
+  if (r.settingsNotice) {
+    items.push({ text: 'Restored: ' + r.settingsNotice.restored + '.' });
+    items.push({ text: 'Not imported: ' + r.settingsNotice.kept + ' were kept.', warn: true });
+  }
   var c = r.recheck;
   if (!c || !n) return items;
   var found = [];
@@ -343,9 +347,13 @@ function renderGraceCard() {
   var ts = function (t) { var s = document.createElement('span'); s.textContent = t; return s; };
   var gt = $('grace-text');
   gt.innerHTML = '';
-  gt.appendChild(ts('Grace period has been activated because the device was offline for '));
-  var b1 = document.createElement('b'); b1.textContent = gapText; gt.appendChild(b1);
-  gt.appendChild(ts('.'));
+  if (g.reason === 'recovery') {
+    gt.appendChild(ts('Standby recovered its saved data from a backup. Automatic releases are held during this recovery grace period. Review your sets and settings before resuming.'));
+  } else {
+    gt.appendChild(ts('Grace period has been activated because the device was offline for '));
+    var b1 = document.createElement('b'); b1.textContent = gapText; gt.appendChild(b1);
+    gt.appendChild(ts('.'));
+  }
   var gh = $('grace-held');
   gh.innerHTML = '';
   var b2 = document.createElement('b');
