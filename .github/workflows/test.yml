@@ -168,6 +168,12 @@ jobs:
           else
             python test/verify099.py --only ${{ matrix.suite }}
           fi
+      - name: The page's copies of server rules agree with the server
+        if: matrix.suite == 'core'
+        run: node test/mirror_check.js
+      - name: Recovery, revocation, bulk controls and backup fault checks
+        if: matrix.suite == 'core'
+        run: node test/audit_fixes_check.js
 
   regression:
     runs-on: ubuntu-latest
