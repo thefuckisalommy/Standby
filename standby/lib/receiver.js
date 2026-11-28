@@ -38,8 +38,7 @@ function readKeys(checkinDir) {
     if (!doc || !Array.isArray(doc.keys)) return [];
     const keys = doc.keys.filter((k) => k && typeof k.id === 'string' && typeof k.hash === 'string'
       && /^[0-9a-f]{64}$/.test(k.hash));
-    // Only acknowledge a fully valid key list. A new publication has a new
-    // random revision, so a stale acknowledgement cannot confirm deletion.
+    // Only a fully valid list with a new revision earns an acknowledgement.
     if (keys.length === doc.keys.length && typeof doc.revision === 'string' && /^[0-9a-f]{32}$/.test(doc.revision)) {
       const ackFile = path.join(checkinDir, 'keys-ack.json');
       try {
