@@ -91,6 +91,51 @@ let receiver;
   assert.ok(fresh.bitcoin.sets.slice(1).every((t) => !t.enabled));
   console.log('PASS global arm/disarm changes Active only, including whole pending sets');
 
+  // Pending and archived sets are label-only on the server: trigger, arm
+  // and member changes are rejected, label edits and identical-value
+  // resends pass, and a pending tx's own arm flip is rejected too.
+  const setsRoute = mod('routes/sets');
+  const txsRoute = mod('routes/txs');
+  const checkinTrig = { op: 'OR', rules: [{ type: 'checkin', params: { thresholdDays: 35 } }] };
+  s = seed();
+  s.bitcoin.txs = [
+    { ...tx, id: 'pending', release: { status: 'submitted-slipstream' } },
+    { ...tx, id: 'pending-sibling' },
+    { ...tx, id: 'confirmed', broadcasted: { confirmations: 1 } },
+  ];
+  s.bitcoin.sets = [
+    { id: 'pending-set', enabled: true, txIds: ['pending', 'pending-sibling'], trigger: manual },
+    { id: 'archived-set', enabled: true, txIds: ['confirmed'], trigger: manual },
+  ];
+  store.saveState(data, s);
+  let r = await call(setsRoute, '/api/bitcoin/sets/pending-set', JSON.stringify({ trigger: checkinTrig }), s, 'PUT');
+  assert.equal(r.status, 400);
+  assert.match(r.body.error, /trigger cannot be changed/);
+  r = await call(setsRoute, '/api/bitcoin/sets/pending-set', '{"enabled":false}', s, 'PUT');
+  assert.equal(r.status, 400);
+  assert.match(r.body.error, /arm cannot be changed/);
+  r = await call(setsRoute, '/api/bitcoin/sets/pending-set', '{"txIds":["pending"]}', s, 'PUT');
+  assert.equal(r.status, 400);
+  assert.match(r.body.error, /cannot be added to or removed/);
+  r = await call(setsRoute, '/api/bitcoin/sets/archived-set', JSON.stringify({ trigger: checkinTrig }), s, 'PUT');
+  assert.equal(r.status, 400);
+  r = await call(setsRoute, '/api/bitcoin/sets/archived-set', '{"enabled":false}', s, 'PUT');
+  assert.equal(r.status, 400);
+  assert.equal((await call(setsRoute, '/api/bitcoin/sets/pending-set', '{"label":"Renamed"}', s, 'PUT')).status, 200);
+  assert.equal((await call(setsRoute, '/api/bitcoin/sets/pending-set', JSON.stringify({ trigger: manual, enabled: true, txIds: ['pending', 'pending-sibling'] }), s, 'PUT')).status, 200);
+  r = await call(txsRoute, '/api/bitcoin/txs/pending', '{"enabled":false}', s, 'PUT');
+  assert.equal(r.status, 400);
+  assert.match(r.body.error, /arm cannot be changed/);
+  assert.equal((await call(txsRoute, '/api/bitcoin/txs/pending', '{"label":"Tx renamed"}', s, 'PUT')).status, 200);
+  fresh = store.loadState(data);
+  assert.equal(fresh.bitcoin.sets.find((x) => x.id === 'pending-set').label, 'Renamed');
+  assert.equal(fresh.bitcoin.sets.find((x) => x.id === 'pending-set').enabled, true);
+  assert.equal(JSON.stringify(fresh.bitcoin.sets.find((x) => x.id === 'pending-set').trigger), JSON.stringify(manual));
+  assert.equal(fresh.bitcoin.sets.find((x) => x.id === 'pending-set').txIds.length, 2);
+  assert.equal(fresh.bitcoin.txs.find((x) => x.id === 'pending').enabled, true);
+  assert.equal(fresh.bitcoin.txs.find((x) => x.id === 'pending').label, 'Tx renamed');
+  console.log('PASS pending and archived sets are label-only on the server');
+
   for (const missing of [false, true]) {
     s = seed(); s.settings.graceEnabled = false;
     store.saveState(data, s); store.saveState(data, s);

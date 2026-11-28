@@ -8,6 +8,8 @@ var editingSetId = null;
 // The set popup's working member list; removals are applied on save and
 // discarded on cancel.
 var setEditMembers = [];
+// A pending or archived set is label-only while its editor is open.
+var setEditLocked = false;
 
 // The set popup's arm switch; its text follows the switch.
 function syncSetEnabledText() {
@@ -29,6 +31,19 @@ function startEditSet(set) {
   var newList = $('set-new-txs-list');
   if (newList) newList.innerHTML = '';
   resetRuleList('set', triggerSetOf(set));
+  // A pending or archived set is label-only: once a member is out the
+  // door its trigger, arm and members cannot change, so the editor shows
+  // only the label — the arm switch and the transactions and triggers
+  // sections are hidden, not just disabled.
+  var st = setStatus(set);
+  setEditLocked = st.settled || st.pending;
+  $('set-enabled-wrap').style.display = setEditLocked ? 'none' : '';
+  $('set-new-txs-section').style.display = setEditLocked ? 'none' : '';
+  $('set-triggers-section').style.display = setEditLocked ? 'none' : '';
+  $('set-enabled').disabled = setEditLocked;
+  setRuleListLocked('set', setEditLocked);
+  if (btnSetAddTx) btnSetAddTx.disabled = setEditLocked;
+  syncSetRemoveButtons();
   $('set-msg').textContent = '';
   $('set-modal').classList.add('open');
   $('set-label').focus();
@@ -111,7 +126,7 @@ function syncSetRemoveButtons() {
     Array.prototype.forEach.call(membersEl.children || [], function (line) {
       Array.prototype.forEach.call(line.children || [], function (c) {
         if ((c.className || '').split(' ').indexOf('set-member-remove') !== -1) {
-          c.disabled = setEditMembers.length <= 1 && filled === 0;
+          c.disabled = setEditLocked || (setEditMembers.length <= 1 && filled === 0);
         }
       });
     });
@@ -119,21 +134,28 @@ function syncSetRemoveButtons() {
   var remaining = setEditMembers.length + filled;
   setNewTxEntrySets().forEach(function (s) {
     var isFilled = !!(s.fields.hex && s.fields.hex.value.trim());
-    if (s.removeBtn) s.removeBtn.disabled = isFilled && remaining <= 1;
+    if (s.removeBtn) s.removeBtn.disabled = setEditLocked || (isFilled && remaining <= 1);
   });
 }
 
 function cancelSet() {
   editingSetId = null;
   setEditMembers = [];
+  setEditLocked = false;
   $('set-label').value = '';
   $('set-enabled').checked = true;
+  $('set-enabled').disabled = false;
   syncSetEnabledText();
+  $('set-enabled-wrap').style.display = '';
+  $('set-new-txs-section').style.display = '';
+  $('set-triggers-section').style.display = '';
+  if (btnSetAddTx) btnSetAddTx.disabled = false;
   var membersEl = $('set-members-list');
   if (membersEl) membersEl.innerHTML = '';
   var newList = $('set-new-txs-list');
   if (newList) newList.innerHTML = '';
   resetRuleList('set');
+  setRuleListLocked('set', false);
   $('set-msg').textContent = '';
   $('set-modal').classList.remove('open');
 }
@@ -738,8 +760,10 @@ if (btnSetSave) btnSetSave.addEventListener('click', async function () {
           createdIds.push(cr.tx.id);
           if (cr.checkinReset) checkinReset = true;
         }
-        var body = { label: $('set-label').value, trigger: trig, enabled: $('set-enabled').checked };
-        // Kept plus new members; with no change txIds is omitted.
+        var body = setEditLocked ? { label: $('set-label').value }
+          : { label: $('set-label').value, trigger: trig, enabled: $('set-enabled').checked };
+        // Kept plus new members; with no change txIds is omitted. A locked
+        // set never has new or removed members, so txIds stays untouched.
         var keptIds = setEditMembers.map(function (t) { return t.id; });
         var removedCount = oldSet ? (oldSet.txIds || []).filter(function (id) { return keptIds.indexOf(id) === -1; }).length : 0;
         if (createdIds.length || removedCount) body.txIds = keptIds.concat(createdIds);

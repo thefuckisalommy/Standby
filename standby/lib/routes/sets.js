@@ -115,6 +115,28 @@ module.exports = async function setsRoutes(ctx) {
     }
     const body = await readBody(req);
     const orig = { ...set, txIds: [...(set.txIds || [])], trigger: set.trigger, history: set.history };
+    // Once a member is out the door (broadcast, waiting on MARA, stale),
+    // the set is label-only: its trigger, arm and members cannot change.
+    // The UI hides those controls; this is the server backstop.
+    const outTheDoor = (state.bitcoin.txs || []).some((t) => (set.txIds || []).includes(t.id)
+      && (t.broadcasted || (t.release && (t.release.status === 'broadcast' || t.release.status === 'submitted-slipstream' || t.release.status === 'stale'))));
+    if (outTheDoor) {
+      if (body.trigger !== undefined) {
+        const v = store.normalizeTrigger(body.trigger);
+        if (!v.trigger) return sendError(res, 400, 'invalid trigger: ' + v.error);
+        if (JSON.stringify(v.trigger) !== JSON.stringify(set.trigger)) {
+          return sendError(res, 400, 'the trigger cannot be changed once a transaction in the set has been broadcast');
+        }
+      }
+      if (typeof body.enabled === 'boolean' && body.enabled !== set.enabled) {
+        return sendError(res, 400, 'the arm cannot be changed once a transaction in the set has been broadcast');
+      }
+      if (body.txIds !== undefined) {
+        const sameIds = Array.isArray(body.txIds) && body.txIds.length === (set.txIds || []).length
+          && body.txIds.every((id) => (set.txIds || []).includes(id));
+        if (!sameIds) return sendError(res, 400, 'transactions cannot be added to or removed from a set once one of its transactions has been broadcast');
+      }
+    }
     if (typeof body.label === 'string') set.label = asStr(body.label, 80);
     if (body.txIds !== undefined) {
       if (!Array.isArray(body.txIds)) return sendError(res, 400, 'txIds must be a list of transaction ids');
