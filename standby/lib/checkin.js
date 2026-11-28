@@ -127,8 +127,8 @@ function addStartupWarning(code, message) {
 // keys.json):
 // - state has keys, receiver missing or different: rewrite the receiver
 //   file from state and log it
-// - state empty, receiver has keys: publish the authoritative empty list
-//   and warn; restoring lost keys from backups remains the owner's call
+// - state empty, receiver has keys: publish the empty list and warn;
+//   restoring lost keys is the owner's call
 // - state empty, a backup has keys: warn, naming the backup
 // If both sides lost the keys, the daily backups are the recovery.
 function verifyCheckinKeyStore() {
