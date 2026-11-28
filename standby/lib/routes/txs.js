@@ -259,6 +259,14 @@ module.exports = async function txsRoutes(ctx) {
       return sendJson(res, 200, { ok: true, removed: tx.id });
     }
     const body = await readBody(req);
+    // The arm is locked with the hex and trigger once the tx is out the
+    // door (the UI disables it; this is the server backstop). Checked
+    // before any field is applied, so a rejected edit changes nothing.
+    if (typeof body.enabled === 'boolean' && body.enabled !== tx.enabled) {
+      const armLocked = !!(tx.broadcasted || (tx.release
+        && (tx.release.status === 'submitted-slipstream' || tx.release.status === 'stale' || tx.release.status === 'broadcast')));
+      if (armLocked) return sendError(res, 400, 'the arm cannot be changed once the transaction has been broadcast');
+    }
     if (typeof body.txHex === 'string') {
       const hex = body.txHex.trim();
       if (!hex) return sendError(res, 400, 'empty transaction hex');

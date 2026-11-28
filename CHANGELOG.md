@@ -4,6 +4,10 @@ What changed in each Standby release, newest first. The newest few also appear i
 
 Code comments describe how the app works now; the history of why it changed lives here and in git.
 
+## 0.8.27
+
+Pending and archived trigger sets are now label-only: once a transaction in the set has been broadcast, its triggers, arm status and members can no longer be changed.
+
 ## 0.8.26
 
 Audit fixes and Active-only bulk controls: recovery holds automatic releases for review, key revocation waits for receiver confirmation, restore keeps this computer's preferences, backups are capped at 16 MiB, and Arm/Disarm all now changes Active sets only.
