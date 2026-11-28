@@ -57,8 +57,7 @@ module.exports = async function backupRoutes(ctx) {
       if (problem) return sendError(res, 400, problem);
     }
     const backup = buildBackup();
-    // Check plaintext too: compression must not produce an export that the
-    // bounded decryptor cannot restore. Never silently drop transactions.
+    // Check plaintext too; never export what the decryptor cannot restore.
     if (Buffer.byteLength(JSON.stringify(backup, null, 2)) > EXPORT_MAX_BYTES) {
       return sendError(res, 413, 'Backup exceeds the 16 MiB restore limit; no partial backup was exported.');
     }
