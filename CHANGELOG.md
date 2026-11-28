@@ -4,6 +4,10 @@ What changed in each Standby release, newest first. The newest few also appear i
 
 Code comments describe how the app works now; the history of why it changed lives here and in git.
 
+## 0.8.26
+
+Audit fixes and Active-only bulk controls: recovery holds automatic releases for review, key revocation waits for receiver confirmation, restore keeps this computer's preferences, backups are capped at 16 MiB, and Arm/Disarm all now changes Active sets only.
+
 ## 0.8.25
 
 Transactions tab polish. Active cards show a grey Disarmed pill immediately left of the arm switch, and disarmed cards stay in place instead of dropping into their own section. The fee risk pop-out shows one line per row with the values right-aligned. History in the transaction detail is now a › History button that expands on tap, collapsed by default.
