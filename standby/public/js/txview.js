@@ -174,12 +174,12 @@ function txvRuleLines(holder) {
   return box;
 }
 
-// Where a transaction pays: its one address, or the number of outputs.
-function txvPaysTo(t, head, tail) {
+// What to show next to Tx: the transaction's own id, or the number of
+// outputs when it pays several.
+function txvTxRef(t, head, tail) {
   var outs = (t.detail && Array.isArray(t.detail.outputs)) ? t.detail.outputs : [];
-  if (outs.length === 1 && outs[0].address) return '→ ' + txvShortOut(outs[0].address, head, tail);
   if (outs.length > 1) return '→ ' + outs.length + ' outputs';
-  return txvShortOut(t.txid, 8, 4);
+  return txvShortOut(t.txid, head, tail);
 }
 
 // A transaction's own state, when it is more than ready / armed.
@@ -239,7 +239,9 @@ function txvRow(it, overlaps) {
   it.members.forEach(function (t, i) {
     var line = txvEl('div', 'txv-tl');
     line.appendChild(txvEl('span', 'txv-tn', it.members.length > 1 ? 'Tx ' + (i + 1) : 'Tx'));
-    line.appendChild(txvEl('span', 'txv-to', txvPaysTo(t, 6, 4)));
+    var to = txvEl('span', 'txv-to', txvTxRef(t, 6, 4));
+    to.title = t.txid || '';
+    line.appendChild(to);
     var right = txvEl('span', 'txv-tr');
     var st = txvTxState(t, overlaps);
     if (st) right.appendChild(txvEl('span', 'pill ' + st.cls, st.text));
