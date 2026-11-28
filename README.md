@@ -103,6 +103,16 @@ curl -X POST http://<host>:3101/checkin -H "Authorization: Bearer <key>"
 
 The receiver is plain HTTP: keep port 3101 on your LAN or Tailscale.
 
+Revoking a key immediately prevents it from resetting Standby's check-in clock. The receiver acknowledges the updated key list through the shared check-in directory. If it is stopped, outdated, or cannot access that directory, Standby reports **receiver confirmation pending** and retries publication when the interface refreshes. Update both the app and the separate receiver together; desktop builds include both components.
+
+## Recovery and backups
+
+Automatic recovery of a missing or damaged state file starts a seven-day recovery grace period, even when offline grace is disabled. Standby displays a recovery notice and holds new automatic releases while you review the recovered sets and settings. Use the existing Resume control to end the hold sooner. Previously submitted Slipstream transactions retain their authorized public fallback.
+
+Restoring a backup keeps this computer's remote-check-in, start-at-login, update-check and login preferences; the completion popup lists what was restored and what was kept. Restore accepts up to 16 MiB. Export reserves space for an encryption password and refuses oversized backups with an explanation, rather than omitting data.
+
+**Arm all active / Disarm all active** changes only the Active category. Pending and Archived sets, including unsent siblings in a Pending set, are left unchanged.
+
 ## Nodes
 
 Settings → Bitcoin nodes holds a primary and an optional secondary, tried in that order. Each node is either:

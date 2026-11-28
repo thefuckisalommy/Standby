@@ -29,7 +29,7 @@ function check(name, cond, detail) {
 
 // The page's copies, by name, from the page files.
 const PAGE_DIR = path.join(APP, 'public', 'js');
-const pageSrc = fs.readdirSync(PAGE_DIR).filter((f) => f.endsWith('.js')).map((f) => fs.readFileSync(path.join(PAGE_DIR, f), 'utf8')).join('\n');
+const pageSrc = fs.readdirSync(PAGE_DIR).filter((f) => f.endsWith('.js')).map((f) => fs.readFileSync(path.join(PAGE_DIR, f), 'utf8')).join('\n').replace(/\r\n/g, '\n');
 function pageFunction(name) {
   const m = new RegExp('^function ' + name + '\\(.*\\n(?:.*\\n)*?\\}$', 'm').exec(pageSrc);
   if (!m) throw new Error('page function not found: ' + name);

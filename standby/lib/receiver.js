@@ -36,8 +36,20 @@ function readKeys(checkinDir) {
   try {
     const doc = JSON.parse(fs.readFileSync(path.join(checkinDir, 'keys.json'), 'utf8'));
     if (!doc || !Array.isArray(doc.keys)) return [];
-    return doc.keys.filter((k) => k && typeof k.id === 'string' && typeof k.hash === 'string'
+    const keys = doc.keys.filter((k) => k && typeof k.id === 'string' && typeof k.hash === 'string'
       && /^[0-9a-f]{64}$/.test(k.hash));
+    // Only a fully valid list with a new revision earns an acknowledgement.
+    if (keys.length === doc.keys.length && typeof doc.revision === 'string' && /^[0-9a-f]{32}$/.test(doc.revision)) {
+      const ackFile = path.join(checkinDir, 'keys-ack.json');
+      try {
+        let previous = null;
+        try { previous = JSON.parse(fs.readFileSync(ackFile, 'utf8')); } catch { /* first acknowledgement */ }
+        if (!previous || previous.revision !== doc.revision) {
+          writeFileDurable(ackFile, JSON.stringify({ revision: doc.revision, acknowledgedAt: new Date().toISOString() }) + '\n');
+        }
+      } catch { /* The app reports pending confirmation; authentication still uses the current keys. */ }
+    }
+    return keys;
   } catch (e) { return []; }
 }
 
@@ -74,7 +86,7 @@ function writeLastCheckin(checkinDir, keyId, label, sourceIp) {
 // The receiver as an HTTP server (not yet listening) for one check-in
 // folder.
 function createReceiverServer(checkinDir) {
-  return http.createServer((req, res) => {
+  const server = http.createServer((req, res) => {
     // Host allowlist first: this port faces the LAN with no proxy, so it is
     // the rebinding defence here. 421, logged with the Host.
     if (!hostAllowed(req.headers.host)) {
@@ -143,6 +155,14 @@ function createReceiverServer(checkinDir) {
 
     return sendJson(res, 404, { error: 'not found' });
   });
+  let keyPoll = null;
+  server.on('listening', () => {
+    readKeys(checkinDir);
+    keyPoll = setInterval(() => readKeys(checkinDir), 500);
+    keyPoll.unref();
+  });
+  server.on('close', () => { if (keyPoll) clearInterval(keyPoll); });
+  return server;
 }
 
 module.exports = { createReceiverServer };

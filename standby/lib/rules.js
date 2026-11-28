@@ -741,6 +741,11 @@ function preBroadcastCheck(tx, logKind, opts) {
   // publicly" escape hatch (forcePublic).
   if (ftx.release && ftx.release.status === 'submitted-slipstream' && !(opts && opts.forcePublic)) return { ok: false, reason: 'already submitted to Slipstream — waiting on MARA' };
   if (logKind === 'release') {
+    // Recovery holds queued first releases, but preserves pending fallback.
+    if (fresh.grace && fresh.grace.reason === 'recovery' && isGraceActive(fresh, new Date())
+        && !(opts && opts.forcePublic && ftx.release && ftx.release.status === 'submitted-slipstream')) {
+      return { ok: false, reason: 'recovery grace period' };
+    }
     // A set member broadcasts on the set's arm, not its own (opts.setId
     // names the set).
     if (opts && opts.setId) {

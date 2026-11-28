@@ -177,4 +177,4 @@ function saveMutation(mutator) {
   return fresh;
 }
 
-module.exports = { MIME, isStandalone: () => !!sea, serveStatic, hostOf, hostnameOf, hostAllowed, describeAllowedHosts, startupSecurityNotes, MIN_PASSWORD_LENGTH, isLoopback, fetchSiteAllowed, csrfAllowed, saveMutation, setSecurityHeaders, CSP };
+module.exports = { MIME, isStandalone: () => !!sea, serveStatic, sendError, hostOf, hostnameOf, hostAllowed, describeAllowedHosts, startupSecurityNotes, MIN_PASSWORD_LENGTH, isLoopback, fetchSiteAllowed, csrfAllowed, saveMutation, setSecurityHeaders, CSP };

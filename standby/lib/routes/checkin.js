@@ -1,7 +1,7 @@
 'use strict';
 const store = require('../store');
 const crypto = require('crypto');
-const { checkinStatus, graceStatus, hashCheckinKey, mergeExternalCheckin, newCheckinKeyId, publicCheckinKey, syncCheckinFreeze, writeReceiverKeys } = require('../checkin');
+const { checkinStatus, graceStatus, hashCheckinKey, mergeExternalCheckin, newCheckinKeyId, publicCheckinKey, syncCheckinFreeze, writeReceiverKeys, waitForReceiverKeys } = require('../checkin');
 const { DATA_DIR } = require('../config');
 const { saveMutation } = require('../http');
 const { asStr, readBody, sendError, sendJson } = require('../util');
@@ -86,10 +86,11 @@ module.exports = async function checkinRoutes(ctx) {
       keys.splice(idx, 1);
     });
     if (!fresh) return sendError(res, 404, 'no such key');
-    writeReceiverKeys(fresh);
+    const published = writeReceiverKeys(fresh);
+    const receiverConfirmed = published && await waitForReceiverKeys(fresh);
     // Key revokes are logged too — same reason as creates.
     console.log('Standby: check-in key revoked: ' + keyMatch[1]);
-    return sendJson(res, 200, { ok: true, removed: keyMatch[1] });
+    return sendJson(res, receiverConfirmed ? 200 : 202, { ok: true, removed: keyMatch[1], receiverConfirmed, warning: receiverConfirmed ? null : 'Key revoked in Standby. Receiver confirmation is pending; check-ins using this key cannot reset the clock.' });
   }
   return NEXT;
 };

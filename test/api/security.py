@@ -19,6 +19,17 @@ def run():
           s == 400 and body == b'Bad request URL', (s, body))
     check('32 crash: receiver still answers after the malformed request',
           wait_up(RBASE, path='/health'))
+    # Exercise the server's error handler, not just route rejection.
+    for label, path, payload, expected_status, expected_error in (
+            ('invalid JSON', '/api/broadcast/all', b'{"ids":', 400, 'invalid JSON'),
+            ('oversized restore', '/api/restore', b' ' * (16 * 1024 * 1024 + 1), 413, 'body too large')):
+        s, body = raw_req('POST', path, BASE, host=urllib.parse.urlparse(BASE).netloc,
+                          headers={'Content-Type': 'application/json'}, body=payload)
+        check('32 crash: ' + label + ' returns its JSON error',
+              s == expected_status and json.loads(body) == {'error': expected_error}, (s, body))
+        s, r = req('GET', '/api/health')
+        check('32 crash: app still answers after ' + label,
+              s == 200 and r.get('version') == VERSION, (s, r))
     s, hdrs = resp_headers('GET', '/', BASE)
     check('32 headers: / carries X-Frame-Options DENY',
           hdrs.get('x-frame-options') == 'DENY', hdrs)

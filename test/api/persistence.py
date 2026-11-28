@@ -166,16 +166,15 @@ def run():
           [k.get('id') for k in recv_keys.get('keys', [])] == [sync_id], recv_keys)
     check('20 keys: warnings carry receiver-keys-rewritten',
           'receiver-keys-rewritten' in warning_codes(), warning_codes())
-    # (c) State empty + receiver has keys -> warning, receiver
-    # untouched; the previous version (.bak) also has the key.
+    # (c) State empty + receiver has keys -> warning, receiver cleared;
+    # the previous version (.bak) still has the key for manual recovery.
     stop_app()
     st = load_state_file()
     st['checkinKeys'] = []
     save_state_file(st)
-    recv_before = open(os.path.join(CHECKIN_DIR, 'keys.json'), 'rb').read()
     check('20 keys: app restarts with state keys emptied', restart())
-    check('20 keys: receiver file untouched',
-          open(os.path.join(CHECKIN_DIR, 'keys.json'), 'rb').read() == recv_before)
+    check('20 keys: receiver matches the authoritative empty active key list',
+          json.load(open(os.path.join(CHECKIN_DIR, 'keys.json'))).get('keys') == [])
     check('20 keys: warnings carry receiver-keys-orphaned',
           'receiver-keys-orphaned' in warning_codes(), warning_codes())
     check('20 keys: warnings name the .bak holding the key',

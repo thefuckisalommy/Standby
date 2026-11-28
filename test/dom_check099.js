@@ -2923,7 +2923,7 @@ function check(name, cond, detail) {
     && (stDisAll.bitcoin.txs || []).every((t) => t.enabled === false),
     (stDisAll.bitcoin.txs || []).map((t) => t.label + '=' + t.enabled).join(', '));
   check('redesign arm-all UI: the msg line confirms the disarm',
-    els['arm-all-msg'] && els['arm-all-msg'].textContent === 'All transactions disarmed.',
+    els['arm-all-msg'] && els['arm-all-msg'].textContent === 'Active sets disarmed.',
     els['arm-all-msg'] && els['arm-all-msg'].textContent);
   await rerender(appJs);
   check('redesign arm-all UI: while globally disarmed the check-in bars are frozen, not gone',
@@ -2938,7 +2938,7 @@ function check(name, cond, detail) {
     && (stArmAll.bitcoin.txs || []).every((t) => t.enabled === true),
     (stArmAll.bitcoin.txs || []).map((t) => t.label + '=' + t.enabled).join(', '));
   check('redesign arm-all UI: the msg line confirms the arm',
-    els['arm-all-msg'] && els['arm-all-msg'].textContent === 'All transactions armed.',
+    els['arm-all-msg'] && els['arm-all-msg'].textContent === 'Active sets armed.',
     els['arm-all-msg'] && els['arm-all-msg'].textContent);
   await rerender(appJs);
   check('redesign arm-all UI: after Arm all the check-in bars are live again (no frozen class)',
@@ -2951,7 +2951,7 @@ function check(name, cond, detail) {
   // to"; it closes via Close and X.
   const HELP_KEYS = [
     { key: 'vacation', title: 'Vacation mode', bodyPhrase: 'Freezes the check-in countdown', appliesPhrase: 'Check-in triggers only' },
-    { key: 'arm', title: 'All transactions', bodyPhrase: 'Arms or disarms every staged transaction', appliesPhrase: 'General' },
+    { key: 'arm', title: 'All transactions', bodyPhrase: 'Arms or disarms sets in the Active category', appliesPhrase: 'General' },
     { key: 'nodes', title: 'Bitcoin nodes', bodyPhrase: 'The Bitcoin nodes Standby talks to', appliesPhrase: 'General' },
     { key: 'price-sources', title: 'Bitcoin price source', bodyPhrase: 'The two price sources Standby reads', appliesPhrase: 'BTC price triggers only' },
     { key: 'grace', title: 'Grace period', bodyPhrase: 'A pause for ALL triggers', appliesPhrase: 'Check-in, BTC price, UTXO, Block height, Set date, and Fee market triggers' },

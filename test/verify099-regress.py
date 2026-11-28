@@ -83,7 +83,17 @@ def load_state_file():
 
 
 def save_state_file(stj):
-    json.dump(stj, open(os.path.join(DATA, 'state.json'), 'w'), indent=2)
+    # Atomic: the app reloads state.json from disk on every request and on
+    # its timers, so a truncate-then-write here can be read mid-write as an
+    # empty/corrupt file. On 0.8.26 that read recovers from backup and sets
+    # a 7-day recovery grace, which then holds every release evaluation
+    # (CI run 46147004820: sections 4, 5d, 6a all 'grace period active').
+    # Write a temp file and rename over it, so a reader sees the old or
+    # the new state, never a partial one.
+    tmp = os.path.join(DATA, 'state.json.tmp')
+    with open(tmp, 'w') as f:
+        json.dump(stj, f, indent=2)
+    os.replace(tmp, os.path.join(DATA, 'state.json'))
     # The app merges its heartbeat file over a seeded state's
     # lastOnlineAt, so drop it whenever state is seeded.
     try:

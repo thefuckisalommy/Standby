@@ -1,11 +1,11 @@
 'use strict';
 const store = require('../store');
 const bitcoin = require('../bitcoin');
-const { applyGrace, checkinLiveOffsetMs, checkinStatus, graceStatus, mergeExternalCheckin, sanitizeState, startupWarnings } = require('../checkin');
+const { applyGrace, checkinLiveOffsetMs, checkinStatus, graceStatus, mergeExternalCheckin, sanitizeState, startupWarnings, writeReceiverKeys, receiverKeysConfirmed } = require('../checkin');
 const fs = require('fs');
 const path = require('path');
 const applog = require('../applog');
-const { DATA_DIR, LOG_FILE } = require('../config');
+const { CHECKIN_DIR, DATA_DIR, LOG_FILE } = require('../config');
 const { exchangeStatusFor, priceAgreementPctOf, priceCacheForState, priceSourcesOf } = require('../prices');
 const { currentFeesForState, evaluateRelease, feePeakForState, refreshMaraWaiting, refreshPublicFallbacks } = require('../release');
 const { checkTriggerNow, triggerStatusFor } = require('../rules');
@@ -38,6 +38,11 @@ module.exports = async function stateRoutes(ctx) {
     served.bitcoin.nodeBases = bitcoin.nodeBases(state.settings);
     // Persistence and startup warnings (empty on a healthy run).
     served.warnings = startupWarnings.concat(store.getStateWarnings());
+    if ((state.checkinKeys || []).length || fs.existsSync(path.join(CHECKIN_DIR, 'keys.json'))) {
+      writeReceiverKeys(state); // Retry publication, including removal of the last key.
+      if (!receiverKeysConfirmed(state)) served.warnings.push({ code: 'receiver-keys-pending',
+        message: 'Receiver key confirmation is pending. Standby rejects check-ins from revoked keys. Start or update the receiver and check its shared-folder access.' });
+    }
     served.grace = graceStatus(state, now); // the grace: null when none is active, else { active, indefinite, graceUntil, triggeredAt, offlineGapDays }
     served.bitcoin.overlaps = bitcoin.findSharedInputs(state.bitcoin.txs || []);
     // The fee peak, derived from the stored readings on every read (never
